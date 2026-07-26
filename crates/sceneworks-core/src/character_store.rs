@@ -321,6 +321,7 @@ impl<'a> CharacterStore<'a> {
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
+            project_id,
             &self.project_path,
             character_id,
             &reference,
@@ -401,6 +402,7 @@ impl<'a> CharacterStore<'a> {
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
+            project_id,
             &self.project_path,
             character_id,
             reference,
@@ -437,6 +439,7 @@ impl<'a> CharacterStore<'a> {
         let transaction = connection.transaction()?;
         update_asset_character_link(
             &transaction,
+            project_id,
             &self.project_path,
             character_id,
             reference,
@@ -1239,6 +1242,7 @@ fn character_asset_summary(
 
 fn update_asset_character_link(
     connection: &Connection,
+    project_id: &str,
     project_path: &Path,
     character_id: &str,
     reference: &Value,
@@ -1297,7 +1301,13 @@ fn update_asset_character_link(
     }
     metadata.insert("characterReferences".to_owned(), Value::Array(links));
     write_json(&sidecar_path, &asset)?;
-    index_asset_on_connection(connection, project_path, &asset, Some(&sidecar_path))
+    index_asset_on_connection(
+        connection,
+        project_id,
+        project_path,
+        &asset,
+        Some(&sidecar_path),
+    )
 }
 
 fn remove_asset_references_from_character(

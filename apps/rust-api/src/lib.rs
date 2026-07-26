@@ -100,7 +100,7 @@ mod projects;
 use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
 mod assets;
 use assets::{
-    delete_asset, get_asset, import_asset, list_assets, move_asset_to_character,
+    delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
@@ -1081,6 +1081,10 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
             get(get_asset).delete(delete_asset),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/poster/:poster_sha256",
+            get(get_asset_poster),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/purge",

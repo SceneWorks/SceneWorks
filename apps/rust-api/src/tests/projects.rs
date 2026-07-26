@@ -1,6 +1,98 @@
 //! rust-api projects tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode(&rgb, 1, 1, image::ExtendedColorType::Rgb8)
+        .expect("test JPEG encodes");
+    bytes
+}
+
+#[tokio::test]
+async fn advertised_asset_poster_route_serves_the_indexed_blob() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let store =
+        sceneworks_core::project_store::ProjectStore::new(&settings.data_dir, "test-version");
+    let project = store.create_project("Poster endpoint").unwrap();
+    let other_project = store.create_project("Other poster endpoint").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+    let media = project_path.join("assets/videos/set/video.mp4");
+    let poster_bytes = jpeg_fixture([21, 43, 65]);
+    std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+    std::fs::write(&media, b"video").unwrap();
+    std::fs::write(media.with_extension("poster.jpg"), &poster_bytes).unwrap();
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job",
+            "set",
+            &json!({
+                "assetId": "video",
+                "mediaPath": "assets/videos/set/video.mp4",
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": "Video",
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            }),
+        )
+        .unwrap();
+
+    let app = create_app(settings).expect("app creates");
+    let (status, listed) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{}/assets?includeRejected=true&includeTrashed=true",
+            project.id
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let poster_url = listed[0]["posterUrl"].as_str().unwrap();
+    let (status, headers, bytes) =
+        request_raw(app.clone(), "GET", poster_url, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/jpeg");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(bytes, poster_bytes);
+
+    let wrong_url = poster_url
+        .rsplit_once('/')
+        .map(|(prefix, _)| format!("{prefix}/{}", "0".repeat(64)))
+        .unwrap();
+    assert_eq!(
+        request_raw(app.clone(), "GET", &wrong_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a valid-shaped digest cannot select bytes from a different indexed version"
+    );
+
+    let wrong_project_url = poster_url.replacen(&project.id, &other_project.id, 1);
+    assert_eq!(
+        request_raw(app.clone(), "GET", &wrong_project_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a digest is scoped to the authoritative project"
+    );
+    let wrong_asset_url = poster_url.replacen("/assets/video/", "/assets/another-video/", 1);
+    assert_eq!(
+        request_raw(app, "GET", &wrong_asset_url, Body::empty(), &[])
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "a digest is scoped to the authoritative asset row"
+    );
+}
+
 #[tokio::test]
 async fn project_and_asset_routes_persist_contract_state() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

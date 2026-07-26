@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -16,6 +15,7 @@ use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use subtle::ConstantTimeEq;
 
 use crate::asset_index::{
     asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection,
@@ -214,6 +214,12 @@ pub struct AssetMutationResult {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetPoster {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
+
 /// Which assets a listing should include (sc-2024). `All` is the historical
 /// behaviour used by Image/Video studios, the Editor, and the per-character
 /// gallery. `Library` is the Asset Library view, which excludes Character Studio
@@ -244,6 +250,7 @@ pub struct AssetListFilesystemOperations {
     pub timeline_reads: u64,
     pub character_reads: u64,
     pub poster_stats: u64,
+    pub poster_reads: u64,
     pub index_marker_reads: u64,
     pub index_marker_writes: u64,
     pub index_marker_removes: u64,
@@ -263,6 +270,7 @@ impl AssetListFilesystemOperations {
             + self.timeline_reads
             + self.character_reads
             + self.poster_stats
+            + self.poster_reads
             + self.index_marker_reads
             + self.index_marker_writes
             + self.index_marker_removes
@@ -283,6 +291,7 @@ pub(crate) enum AssetListFilesystemOperation {
     TimelineRead,
     CharacterRead,
     PosterStat,
+    PosterRead,
     IndexMarkerRead,
     IndexMarkerWrite,
     IndexMarkerRemove,
@@ -318,6 +327,7 @@ pub(crate) fn record_asset_list_filesystem_operation(operation: AssetListFilesys
             AssetListFilesystemOperation::TimelineRead => operations.timeline_reads += 1,
             AssetListFilesystemOperation::CharacterRead => operations.character_reads += 1,
             AssetListFilesystemOperation::PosterStat => operations.poster_stats += 1,
+            AssetListFilesystemOperation::PosterRead => operations.poster_reads += 1,
             AssetListFilesystemOperation::IndexMarkerRead => operations.index_marker_reads += 1,
             AssetListFilesystemOperation::IndexMarkerWrite => operations.index_marker_writes += 1,
             AssetListFilesystemOperation::IndexMarkerRemove => {
@@ -1055,7 +1065,7 @@ impl ProjectStore {
 
     pub fn reindex_project(&self, project_id: &str) -> ProjectStoreResult<ReindexResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
-        let counts = reindex_project_path(&project_path, true)?;
+        let counts = reindex_project_path(project_id, &project_path, true)?;
         Ok(ReindexResult {
             project_id: project_id.to_owned(),
             assets: counts.assets,
@@ -1308,13 +1318,16 @@ impl ProjectStore {
     /// List assets and return the complete request-scoped filesystem-operation
     /// inventory used by performance tests, benchmarks, and API observability.
     ///
-    /// The indexed `asset_json` envelope is authoritative on this clean path.
+    /// The indexed `asset_json` envelope is authoritative on this clean path,
+    /// including its embedded generation set and DB-backed poster URL.
     /// SceneWorks-owned mutations update the sidecar and index before returning.
-    /// Tools that edit sidecars out of band must call
+    /// Tools that edit
+    /// sidecars or generation-set JSON out of band must call
     /// [`Self::reindex_project`] (the REST equivalent is
     /// `POST /api/v1/projects/:project_id/reindex`) before expecting those edits
-    /// in listings. This explicit contract includes same-size rewrites and edits
-    /// that preserve timestamps; list requests do not inspect or hash sidecars.
+    /// in listings. This explicit contract includes deletion, same-size rewrites,
+    /// and edits that preserve timestamps. Advertised posters are served from
+    /// the same indexed DB row, so list requests do no poster filesystem work.
     pub fn list_assets_with_filesystem_operations(
         &self,
         project_id: &str,
@@ -1341,13 +1354,10 @@ impl ProjectStore {
         #[cfg(test)]
         run_ensure_ready_before_lock_hook(&project_path);
         let _project_guard = lock_project_files(&project_path);
-        ensure_project_db_ready(&project_path)?;
-        let total = {
-            let connection = connect_project_db(&project_path)?;
-            connection.query_row("select count(*) from assets", [], |row| {
-                row.get::<_, i64>(0)
-            })?
-        };
+        let mut connection = connect_project_db_ready_locked(&project_path)?;
+        let total = connection.query_row("select count(*) from assets", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
         // Pre-migration projects (created before the `sidecar_path` column /
         // asset index existed) surface as EMPTY libraries even though their
         // assets are still on disk as `.sceneworks.json` sidecars (V-4). The
@@ -1358,10 +1368,10 @@ impl ProjectStore {
         // the listing — fail open and return whatever the table currently
         // holds (possibly empty), which is strictly better than an error.
         if total == 0 && project_has_sidecars(&project_path) {
-            let _ = reindex_project_path(&project_path, false);
+            let _ = reindex_project_path(project_id, &project_path, false);
+            connection = connect_project_db(&project_path)?;
         }
 
-        let connection = connect_project_db(&project_path)?;
         // The Library view hides Character Studio test outputs (sc-2024). Rows
         // with a null origin (should not occur after the schema-bump reindex)
         // fail open and stay visible.
@@ -1926,7 +1936,7 @@ impl ProjectStore {
         }
         let sidecar_path = media_path.with_extension("sceneworks.json");
         write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
@@ -1982,7 +1992,7 @@ impl ProjectStore {
             &recipes_dir.join(format!("{asset_id}.recipe.json")),
             &asset["recipe"],
         )?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         Ok(asset)
     }
@@ -2145,7 +2155,12 @@ impl ProjectStore {
         });
         let sidecar_path = media_path.with_extension("sceneworks.json");
         write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(
+            GLOBAL_POSES_PROJECT_ID,
+            &project_path,
+            &asset,
+            Some(&sidecar_path),
+        )?;
         index_mutation.commit();
         normalize_asset(GLOBAL_POSES_PROJECT_ID, &project_path, &sidecar_path)
     }
@@ -2294,7 +2309,12 @@ impl ProjectStore {
         });
         let sidecar_path = media_path.with_extension("sceneworks.json");
         write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(
+            GLOBAL_KEYPOINTS_PROJECT_ID,
+            &project_path,
+            &asset,
+            Some(&sidecar_path),
+        )?;
         index_mutation.commit();
         normalize_asset(GLOBAL_KEYPOINTS_PROJECT_ID, &project_path, &sidecar_path)
     }
@@ -2612,9 +2632,56 @@ impl ProjectStore {
                 object.insert("recipe".to_owned(), recipe);
             }
         }
+        let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let dir = project_path.join("generation-sets");
         fs::create_dir_all(&dir)?;
         write_json(&dir.join(format!("{id}.json")), &record)?;
+        maybe_fail_asset_index_db_mutation()?;
+        let mut connection = connect_project_db(&project_path)?;
+        let transaction = connection.transaction()?;
+        apply_project_migrations(&transaction)?;
+        transaction.execute(
+            "
+            insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
+            values (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                id,
+                optional_str(&record, "mode").unwrap_or("unknown"),
+                optional_str(&record, "model").unwrap_or("unknown"),
+                optional_str(&record, "prompt").unwrap_or(""),
+                optional_str(&record, "createdAt").unwrap_or(""),
+                optional_str(&record, "jobId"),
+            ],
+        )?;
+        let indexed_assets = {
+            let mut statement = transaction
+                .prepare("select id, asset_json from assets where generation_set_id = ?1")?;
+            let rows = statement
+                .query_map(params![id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (asset_id, asset_json) in indexed_assets {
+            let Some(asset_json) = asset_json else {
+                continue;
+            };
+            let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) else {
+                continue;
+            };
+            let Some(object) = asset.as_object_mut() else {
+                continue;
+            };
+            object.insert("generationSet".to_owned(), record.clone());
+            transaction.execute(
+                "update assets set asset_json = ?1 where id = ?2",
+                params![serde_json::to_string(&asset)?, asset_id],
+            )?;
+        }
+        transaction.commit()?;
+        index_mutation.commit();
         Ok(())
     }
 
@@ -2656,7 +2723,7 @@ impl ProjectStore {
         }
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
@@ -2680,7 +2747,7 @@ impl ProjectStore {
         );
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
@@ -2738,7 +2805,7 @@ impl ProjectStore {
                 }
             }
             write_json(&sidecar_path, &asset)?;
-            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
             // Drop the asset from every character's references[] (character sidecars + index).
             character_store.remove_asset_references(&member_id)?;
             moved.push(normalize_asset(project_id, &project_path, &sidecar_path)?);
@@ -2819,7 +2886,7 @@ impl ProjectStore {
                 );
             }
             write_json(&sidecar_path, &asset)?;
-            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
             // Leave no curated membership behind: the move detaches the asset from every
             // character's references[] (including the target's — the Approved set is
             // hand-curated and a bulk move must not populate it).
@@ -2836,6 +2903,59 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    pub fn get_asset_poster(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        poster_sha256: &str,
+    ) -> ProjectStoreResult<AssetPoster> {
+        if !is_safe_id(asset_id)
+            || poster_sha256.len() != 64
+            || !poster_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid indexed poster id".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let _project_guard = lock_project_files(&project_path);
+        let connection = connect_project_db_ready_locked(&project_path)?;
+        let poster = connection
+            .query_row(
+                "
+                select poster_bytes, poster_sha256
+                  from assets
+                 where id = ?1
+                   and poster_bytes is not null
+                ",
+                params![asset_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| ProjectStoreError::NotFound("Poster not found".to_owned()))?;
+        let (bytes, Some(stored_sha256)) = poster else {
+            return Err(ProjectStoreError::NotFound("Poster not found".to_owned()));
+        };
+        let recomputed_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let stored_matches_bytes: bool = stored_sha256
+            .as_bytes()
+            .ct_eq(recomputed_sha256.as_bytes())
+            .into();
+        let request_matches_bytes: bool = poster_sha256
+            .as_bytes()
+            .ct_eq(recomputed_sha256.as_bytes())
+            .into();
+        if !stored_matches_bytes || !request_matches_bytes {
+            return Err(ProjectStoreError::NotFound("Poster not found".to_owned()));
+        }
+        Ok(AssetPoster {
+            bytes,
+            sha256: stored_sha256,
+        })
+    }
+
     pub fn index_asset_sidecar(
         &self,
         project_id: &str,
@@ -2844,7 +2964,7 @@ impl ProjectStore {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let asset = read_json(sidecar_path)?;
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
-        index_asset(&project_path, &asset, Some(sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(sidecar_path))?;
         index_mutation.commit();
         Ok(())
     }
@@ -2886,7 +3006,7 @@ impl ProjectStore {
                 .join(format!("{asset_id}.recipe.json")),
             recipe,
         )?;
-        index_asset(&project_path, asset, Some(sidecar_path))?;
+        index_asset(project_id, &project_path, asset, Some(sidecar_path))?;
         index_mutation.commit();
         Ok(())
     }
@@ -2925,6 +3045,7 @@ impl ProjectStore {
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let trash_dir = project_path.join("trash").join(asset_id);
         fs::create_dir_all(&trash_dir)?;
+        remove_sibling_poster_no_symlinks(&project_path, &media_rel)?;
         if media_path.exists() && media_path.is_file() {
             let trashed_media_path = trash_dir.join(media_path.file_name().ok_or_else(|| {
                 ProjectStoreError::BadRequest("Invalid asset media path".to_owned())
@@ -2944,7 +3065,12 @@ impl ProjectStore {
         if sidecar_path != trashed_sidecar_path {
             fs::remove_file(&sidecar_path).ok();
         }
-        index_asset(&project_path, &asset, Some(&trashed_sidecar_path))?;
+        index_asset(
+            project_id,
+            &project_path,
+            &asset,
+            Some(&trashed_sidecar_path),
+        )?;
         index_mutation.commit();
         Ok(AssetMutationResult {
             id: asset_id.to_owned(),
@@ -2965,12 +3091,11 @@ impl ProjectStore {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
         let asset = read_json(&sidecar_path)?;
-        let media_path = project_path.join(
-            asset
-                .pointer("/file/path")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
+        let media_rel = asset
+            .pointer("/file/path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let media_path = project_path.join(media_rel);
         let trash_dir = project_path.join("trash");
         let asset_trash_dir = sidecar_path
             .parent()
@@ -2996,6 +3121,7 @@ impl ProjectStore {
                 targets
             };
             let index_mutation = AssetIndexMutation::begin(&project_path)?;
+            remove_sibling_poster_no_symlinks(&project_path, media_rel)?;
             if !targets.is_empty() && trash::delete_all(&targets).is_err() {
                 // The trash API does not guarantee an atomic multi-target operation.
                 // Keep the marker so the next read repairs any partial deletion before
@@ -3015,6 +3141,7 @@ impl ProjectStore {
             });
         }
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
+        remove_sibling_poster_no_symlinks(&project_path, media_rel)?;
         CharacterStore::new(&self.data_dir, project_path.clone())
             .remove_asset_references(asset_id)?;
         if media_path.exists() && media_path.is_file() {
@@ -3194,7 +3321,16 @@ struct ReindexCounts {
 /// registry). The bump lets existing DBs pick up the new table through the gated
 /// migration; the table is DB-authoritative (no sidecar), so the reindex the bump
 /// triggers — which only clears the sidecar-rebuilt tables — leaves it intact.
-const PROJECT_SCHEMA_VERSION: i64 = 6;
+///
+/// v6: sc-14787 — rebuilt indexed asset envelopes for the authoritative clean
+/// path and its durable dirty-marker repair contract.
+///
+/// v7: sc-14799 — materializes generation-set and poster hydration in each
+/// indexed asset envelope, removing per-row filesystem reads from clean lists.
+///
+/// v8: sc-14799 review convergence stores poster bytes and their digest in
+/// `project.db`, so advertised posters need no clean-list filesystem scan.
+const PROJECT_SCHEMA_VERSION: i64 = 8;
 const ASSET_INDEX_VERSION_KEY: &str = "assetIndexVersion";
 const ASSET_INDEX_DIRTY_MARKER: &str = ".asset-index-dirty";
 
@@ -3443,6 +3579,8 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     ensure_column(connection, "assets", "sidecar_size", "integer")?;
     ensure_column(connection, "assets", "sidecar_modified_ns", "text")?;
     ensure_column(connection, "assets", "sidecar_sha256", "text")?;
+    ensure_column(connection, "assets", "poster_bytes", "blob")?;
+    ensure_column(connection, "assets", "poster_sha256", "text")?;
     connection.execute_batch(
         "
         create index if not exists idx_assets_source_asset
@@ -3466,6 +3604,16 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     // serialized project operation. Mutation guards use the same reentrant lock,
     // so a list cannot repair and clear the marker owned by an in-flight write.
     let _project_guard = lock_project_files(project_path);
+    connect_project_db_ready_locked(project_path).map(drop)
+}
+
+/// Return one ready connection while the caller holds the project lock.
+///
+/// The clean path keeps and reuses the connection opened for migrations/index
+/// readiness, so an asset list performs one `project.db` open. A version bump or
+/// dirty-marker repair rebuilds transactionally and then opens the rebuilt DB;
+/// repair is intentionally outside the clean-path operation-count contract.
+fn connect_project_db_ready_locked(project_path: &Path) -> ProjectStoreResult<Connection> {
     let connection = connect_project_db(project_path)?;
     apply_project_migrations(&connection)?;
     let indexed_version = connection
@@ -3475,7 +3623,6 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    drop(connection);
     // The schema stamp and the derived-data rebuild are separate operations.
     // Record completion only in the rebuild transaction so a failed reindex is
     // retried even though PRAGMA user_version already reached this version.
@@ -3483,13 +3630,16 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
         && !current_thread_owns_asset_index_mutation(project_path);
     if indexed_version.as_deref() != Some(&PROJECT_SCHEMA_VERSION.to_string()) || asset_index_dirty
     {
+        drop(connection);
         // Legacy/version-bump rebuilds continue to recover sidecars even when
         // their media is temporarily unavailable. Only dirty-mutation repair
         // prunes missing-media rows before clearing the marker, closing the
         // partial-purge resurrection window.
-        reindex_project_path(project_path, asset_index_dirty)?;
+        let project_id = read_project_summary(project_path)?.id;
+        reindex_project_path(&project_id, project_path, asset_index_dirty)?;
+        return connect_project_db(project_path);
     }
-    Ok(())
+    Ok(connection)
 }
 
 /// sc-10117: heal upscale-variant lineage on inline-upscaled asset sidecars.
@@ -3653,6 +3803,7 @@ fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
 }
 
 fn reindex_project_path(
+    project_id: &str,
     project_path: &Path,
     prune_orphans: bool,
 ) -> ProjectStoreResult<ReindexCounts> {
@@ -3679,7 +3830,13 @@ fn reindex_project_path(
         if asset.get("id").is_none() || asset.pointer("/file/path").is_none() {
             continue;
         }
-        index_asset_on_connection(&transaction, project_path, &asset, Some(&sidecar_path))?;
+        index_asset_on_connection(
+            &transaction,
+            project_id,
+            project_path,
+            &asset,
+            Some(&sidecar_path),
+        )?;
         counts.assets += 1;
     }
 
@@ -4940,6 +5097,7 @@ fn write_user_collections(project_path: &Path, collections: &[Value]) -> Project
 }
 
 fn index_asset(
+    project_id: &str,
     project_path: &Path,
     asset: &Value,
     sidecar_path: Option<&Path>,
@@ -4959,7 +5117,13 @@ fn index_asset(
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
-    index_asset_on_connection(&transaction, project_path, asset, Some(&sidecar_path))?;
+    index_asset_on_connection(
+        &transaction,
+        project_id,
+        project_path,
+        asset,
+        Some(&sidecar_path),
+    )?;
     transaction.commit()?;
     Ok(())
 }
@@ -4986,6 +5150,56 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     Ok(())
 }
 
+/// Remove a source sibling poster without ever traversing a symlinked parent.
+///
+/// Poster bytes are already durable in `project.db`; this lifecycle cleanup
+/// prevents a purged/orphaned id reused at the same media path from inheriting
+/// its predecessor's source poster.
+fn remove_sibling_poster_no_symlinks(
+    project_path: &Path,
+    media_rel: &str,
+) -> ProjectStoreResult<()> {
+    if !is_safe_relative_path(media_rel) {
+        return Ok(());
+    }
+    let poster_rel = Path::new(media_rel).with_extension("poster.jpg");
+    let root = fs::canonicalize(project_path)?;
+    let mut target = root.clone();
+    let components = poster_rel.components().collect::<Vec<_>>();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        let std::path::Component::Normal(component) = component else {
+            return Ok(());
+        };
+        target.push(component);
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            return Ok(());
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+    }
+    let Some(std::path::Component::Normal(file_name)) = components.last() else {
+        return Ok(());
+    };
+    target.push(file_name);
+    let Ok(metadata) = fs::symlink_metadata(&target) else {
+        return Ok(());
+    };
+    if metadata.is_dir() {
+        return Ok(());
+    }
+    if !metadata.file_type().is_symlink() {
+        let Ok(canonical_target) = fs::canonicalize(&target) else {
+            return Ok(());
+        };
+        if !canonical_target.starts_with(&root) {
+            return Ok(());
+        }
+    }
+    fs::remove_file(target)?;
+    Ok(())
+}
+
 /// Sidecars of pruned "purged-but-referenced" assets are moved here, out of the
 /// folders `asset_sidecars` scans, so a rebuild can't resurrect them. A dotdir so
 /// it reads as internal state, not user content.
@@ -5001,8 +5215,8 @@ fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
-    // (asset id, orphaned sidecar to quarantine) for every row whose media is gone.
-    let orphans: Vec<(String, Option<PathBuf>)> = {
+    // (asset id, media path, orphaned sidecar to quarantine) for every row whose media is gone.
+    let orphans: Vec<(String, String, Option<PathBuf>)> = {
         let mut statement =
             transaction.prepare("select id, file_path, sidecar_path from assets")?;
         let rows = statement.query_map([], |row| {
@@ -5036,11 +5250,11 @@ fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
                         .with_extension("sceneworks.json");
                     derived.exists().then_some(derived)
                 });
-            orphans.push((asset_id, sidecar));
+            orphans.push((asset_id, file_rel, sidecar));
         }
         orphans
     };
-    for (asset_id, _) in &orphans {
+    for (asset_id, _, _) in &orphans {
         transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     }
     transaction.commit()?;
@@ -5052,8 +5266,11 @@ fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
     // deleted) so the recipe metadata stays recoverable. Report a move failure after
     // attempting every orphan so dirty repair keeps its marker and retries instead
     // of clearing it while a resurrectable sidecar remains in the scanned tree.
-    let mut quarantine_error = None;
-    for (asset_id, sidecar) in &orphans {
+    let mut cleanup_error = None;
+    for (asset_id, media_rel, sidecar) in &orphans {
+        if let Err(error) = remove_sibling_poster_no_symlinks(project_path, media_rel) {
+            cleanup_error.get_or_insert(error);
+        }
         let Some(sidecar) = sidecar else {
             continue;
         };
@@ -5065,11 +5282,11 @@ fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
                 error = %error,
                 "could not move orphaned sidecar out of the asset tree; repair remains pending"
             );
-            quarantine_error.get_or_insert(error);
+            cleanup_error.get_or_insert(ProjectStoreError::Io(error));
         }
     }
-    if let Some(error) = quarantine_error {
-        return Err(ProjectStoreError::Io(error));
+    if let Some(error) = cleanup_error {
+        return Err(error);
     }
     Ok(orphans.len())
 }
@@ -5426,6 +5643,34 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+            .encode(&rgb, 1, 1, image::ExtendedColorType::Rgb8)
+            .expect("test JPEG encodes");
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(source, destination)
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(source, destination)
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(source, destination)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(source, destination)
+    }
+
     #[test]
     fn recent_project_registry_cache_reuses_reads_and_invalidates_on_external_change() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -5781,8 +6026,8 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=6\n",
-        "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0, asset_json TEXT notnull=0 default=NULL pk=0, source_asset_id TEXT notnull=0 default=NULL pk=0, upscaled_from_asset_id TEXT notnull=0 default=NULL pk=0, sidecar_size INTEGER notnull=0 default=NULL pk=0, sidecar_modified_ns TEXT notnull=0 default=NULL pk=0, sidecar_sha256 TEXT notnull=0 default=NULL pk=0\n",
+        "user_version=8\n",
+        "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0, asset_json TEXT notnull=0 default=NULL pk=0, source_asset_id TEXT notnull=0 default=NULL pk=0, upscaled_from_asset_id TEXT notnull=0 default=NULL pk=0, sidecar_size INTEGER notnull=0 default=NULL pk=0, sidecar_modified_ns TEXT notnull=0 default=NULL pk=0, sidecar_sha256 TEXT notnull=0 default=NULL pk=0, poster_bytes BLOB notnull=0 default=NULL pk=0, poster_sha256 TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_references: character_id TEXT notnull=1 default=NULL pk=1, asset_id TEXT notnull=1 default=NULL pk=2, approved INTEGER notnull=1 default=0 pk=0, role TEXT notnull=1 default='reference' pk=0, notes TEXT notnull=1 default='' pk=0, added_at TEXT notnull=1 default=NULL pk=0, approved_at TEXT notnull=0 default=NULL pk=0\n",
@@ -6928,28 +7173,237 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_many_clean_rows_reads_no_sidecar_content() {
+    fn reindex_uses_authoritative_project_id_for_asset_urls() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Imported sidecar").unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "set",
+                &json!({
+                    "assetId": "asset_imported",
+                    "mediaPath": "assets/images/set/asset_imported.png",
+                    "mimeType": "image/png",
+                    "displayName": "Imported",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "adapter": "benchmark",
+                    "prompt": "imported",
+                }),
+            )
+            .unwrap();
+
+        let project_path = store.find_project_path(&project.id).unwrap();
+        std::fs::write(
+            project_path.join("assets/images/set/asset_imported.png"),
+            b"png",
+        )
+        .unwrap();
+        let sidecar = project_path.join("assets/images/set/asset_imported.sceneworks.json");
+        let mut asset = read_json(&sidecar).unwrap();
+        asset["projectId"] = json!("project_from_another_machine");
+        write_json(&sidecar, &asset).unwrap();
+
+        store.reindex_project(&project.id).unwrap();
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(
+            listed[0]["url"],
+            json!(format!(
+                "/api/v1/projects/{}/files/assets/images/set/asset_imported.png",
+                project.id
+            )),
+            "mutable imported sidecar metadata must not select the URL project"
+        );
+        assert_eq!(
+            listed[0]["projectId"],
+            json!(project.id),
+            "the indexed envelope also reports its authoritative current project"
+        );
+    }
+
+    #[test]
+    fn list_assets_external_generation_set_edit_requires_explicit_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Indexed generation set").unwrap();
+        store
+            .write_generation_set(
+                &project.id,
+                "job-1",
+                &json!({
+                    "id": "set",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "prompt": "Before",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                }),
+                None,
+            )
+            .unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "set",
+                &json!({
+                    "assetId": "asset_cached",
+                    "mediaPath": "assets/images/set/asset_cached.png",
+                    "mimeType": "image/png",
+                    "displayName": "Cached",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "adapter": "benchmark",
+                    "prompt": "Before",
+                }),
+            )
+            .unwrap();
+
+        let project_path = store.find_project_path(&project.id).unwrap();
+        std::fs::write(
+            project_path.join("assets/images/set/asset_cached.png"),
+            b"png",
+        )
+        .unwrap();
+        let generation_set_path = project_path.join("generation-sets/set.json");
+        let mut generation_set = read_json(&generation_set_path).unwrap();
+        generation_set["prompt"] = json!("After!");
+        write_json(&generation_set_path, &generation_set).unwrap();
+
+        let (listed, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed[0]["generationSet"]["prompt"], json!("Before"));
+        assert_eq!(
+            operations.generation_set_reads, 0,
+            "clean listing serves the indexed generation set"
+        );
+
+        store.reindex_project(&project.id).unwrap();
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(
+            listed[0]["generationSet"]["prompt"],
+            json!("After!"),
+            "explicit reindex refreshes externally edited generation-set JSON"
+        );
+    }
+
+    #[test]
+    fn write_generation_set_refreshes_indexed_assets_before_returning() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Generation set mutation").unwrap();
+        let generation_set = |prompt: &str| {
+            json!({
+                "id": "set",
+                "mode": "text_to_image",
+                "model": "benchmark",
+                "prompt": prompt,
+                "createdAt": "2026-05-25T00:00:00Z",
+            })
+        };
+        store
+            .write_generation_set(&project.id, "job-1", &generation_set("Before"), None)
+            .unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "set",
+                &json!({
+                    "assetId": "asset_cached",
+                    "mediaPath": "assets/images/set/asset_cached.png",
+                    "mimeType": "image/png",
+                    "displayName": "Cached",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "adapter": "benchmark",
+                    "prompt": "Before",
+                }),
+            )
+            .unwrap();
+
+        store
+            .write_generation_set(&project.id, "job-1", &generation_set("After!"), None)
+            .unwrap();
+        let (listed, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed[0]["generationSet"]["prompt"], json!("After!"));
+        assert_eq!(operations.generation_set_reads, 0);
+    }
+
+    #[test]
+    fn list_assets_many_clean_rows_has_constant_filesystem_operations() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("Many indexed assets").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let mut one_row_operations = None;
         for index in 0..128 {
             let asset_id = format!("asset_{index:03}");
+            let generation_set_id = format!("set_{index:03}");
+            store
+                .write_generation_set(
+                    &project.id,
+                    "job-1",
+                    &json!({
+                        "id": generation_set_id,
+                        "mode": "image_to_video",
+                        "model": "benchmark",
+                        "prompt": "indexed",
+                        "createdAt": "2026-05-25T00:00:00Z",
+                    }),
+                    None,
+                )
+                .unwrap();
+            let media_rel = format!("assets/videos/{generation_set_id}/{asset_id}.mp4");
+            let poster_path = project_path.join(&media_rel).with_extension("poster.jpg");
+            std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &poster_path,
+                jpeg_fixture([index as u8, (index * 2) as u8, (index * 3) as u8]),
+            )
+            .unwrap();
             let fact = json!({
                 "assetId": asset_id,
-                "mediaPath": format!("assets/images/shared/{asset_id}.png"),
-                "mimeType": "image/png",
+                "mediaPath": media_rel,
+                "mimeType": "video/mp4",
+                "type": "video",
                 "displayName": format!("Asset {index:03}"),
                 "createdAt": format!("2026-05-25T00:{:02}:{:02}Z", index / 60, index % 60),
-                "mode": "text_to_image",
-                "model": "z_image_turbo",
-                "adapter": "z_image_diffusers",
+                "mode": "image_to_video",
+                "model": "benchmark",
+                "adapter": "benchmark",
                 "prompt": "indexed",
             });
             store
-                .persist_generated_asset(&project.id, "job-1", "shared", &fact)
+                .persist_generated_asset(&project.id, "job-1", &generation_set_id, &fact)
                 .unwrap();
+            if index == 0 {
+                one_row_operations = Some(
+                    store
+                        .list_assets_with_filesystem_operations(
+                            &project.id,
+                            false,
+                            false,
+                            AssetScope::All,
+                        )
+                        .unwrap()
+                        .1,
+                );
+            }
         }
 
+        let one_row_operations = one_row_operations.unwrap();
         let (assets, operations) = store
             .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
             .unwrap();
@@ -6958,15 +7412,10 @@ mod tests {
             operations.sidecar_reads, 0,
             "clean indexed listing must not read or hash one sidecar per row"
         );
-        assert_eq!(
-            operations.generation_set_reads, 1,
-            "the shared generation set remains deduplicated within the request"
-        );
-        assert_eq!(operations.poster_stats, 0, "images do not probe posters");
-        assert!(
-            operations.db_opens > 0,
-            "DB opens stay visible in the total"
-        );
+        assert_eq!(operations.generation_set_reads, 0);
+        assert_eq!(operations.poster_stats, 0);
+        assert_eq!(operations.poster_reads, 0);
+        assert_eq!(operations.db_opens, 1);
         assert_eq!(operations.registry_opens, 1);
         assert_eq!(operations.registry_metadata_reads, 1);
         assert!(operations.path_stats >= 1);
@@ -6974,7 +7423,22 @@ mod tests {
         assert_eq!(operations.index_marker_reads, 1);
         assert_eq!(operations.index_marker_writes, 0);
         assert_eq!(operations.index_marker_removes, 0);
-        assert!(operations.total() >= 10);
+        assert_eq!(
+            operations.total(),
+            one_row_operations.total(),
+            "clean-list filesystem work must be independent of returned row count"
+        );
+        let list_source = include_str!("project_store.rs")
+            .split_once("fn list_assets_filtered(")
+            .unwrap()
+            .1
+            .split_once("pub fn list_saved_voices(")
+            .unwrap()
+            .0;
+        assert!(
+            !list_source.contains("read_dir") && !list_source.contains("file_type"),
+            "the clean-list implementation must not hide poster enumeration behind one counter"
+        );
     }
 
     #[test]
@@ -7634,40 +8098,576 @@ mod tests {
                 "prompt": "x",
             })
         };
+        // The worker writes the media and best-effort poster before reporting the
+        // completed asset fact. Only `withposter` has that sibling when indexed.
+        let poster_path = project_path.join("assets/videos/genset/withposter.poster.jpg");
+        let poster_bytes = jpeg_fixture([12, 34, 56]);
+        std::fs::create_dir_all(poster_path.parent().unwrap()).expect("video dir");
+        std::fs::write(&poster_path, &poster_bytes).expect("write poster");
+        std::fs::write(
+            project_path.join("assets/videos/genset/withposter.mp4"),
+            b"video",
+        )
+        .expect("write video");
+        std::fs::write(
+            project_path.join("assets/videos/genset/noposter.mp4"),
+            b"video",
+        )
+        .expect("write video");
         store
             .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("withposter"))
             .expect("withposter persists");
         store
             .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("noposter"))
             .expect("noposter persists");
-        // Only `withposter` has its `<name>.poster.jpg` sibling on disk.
-        std::fs::write(
-            project_path.join("assets/videos/genset/withposter.poster.jpg"),
-            b"jpg-bytes",
-        )
-        .expect("write poster");
 
-        let assets = store
-            .list_assets(&project.id, true, true, AssetScope::All)
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, true, true, AssetScope::All)
             .expect("list");
+        assert_eq!(
+            operations.poster_stats, 0,
+            "poster presence is served from the indexed envelope"
+        );
         let by_id = |id: &str| {
             assets
                 .iter()
                 .find(|asset| asset["id"] == id)
                 .unwrap_or_else(|| panic!("asset {id} present"))
         };
+        let poster_url = by_id("withposter")["posterUrl"]
+            .as_str()
+            .expect("poster URL");
+        let poster_sha256 = poster_url.rsplit('/').next().expect("poster digest");
+        assert_eq!(poster_sha256.len(), 64);
         assert_eq!(
-            by_id("withposter")["posterUrl"],
-            json!(format!(
-                "/api/v1/projects/{}/files/assets/videos/genset/withposter.poster.jpg",
-                project.id
-            )),
-            "posterUrl is advertised when the poster file exists"
+            store
+                .get_asset_poster(&project.id, "withposter", poster_sha256)
+                .expect("advertised poster resolves")
+                .bytes,
+            poster_bytes
         );
         assert!(
             by_id("noposter").get("posterUrl").is_none(),
             "no posterUrl is advertised when the poster file is absent"
         );
+
+        std::fs::remove_file(&poster_path).expect("external source poster removal");
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, true, true, AssetScope::All)
+            .expect("ordinary list after removal");
+        assert_eq!(operations.poster_stats, 0);
+        assert_eq!(operations.poster_reads, 0);
+        assert_eq!(operations.directory_scans, 0);
+        assert_eq!(
+            assets
+                .iter()
+                .find(|asset| asset["id"] == "withposter")
+                .and_then(|asset| asset.get("posterUrl"))
+                .and_then(Value::as_str),
+            Some(poster_url),
+            "source deletion cannot invalidate the DB-backed advertised URL"
+        );
+        assert_eq!(
+            store
+                .get_asset_poster(&project.id, "withposter", poster_sha256)
+                .expect("DB-backed poster survives source deletion")
+                .bytes,
+            poster_bytes
+        );
+
+        store
+            .reindex_project(&project.id)
+            .expect("explicit reindex");
+        let assets = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list after reindex");
+        assert!(
+            assets
+                .iter()
+                .find(|asset| asset["id"] == "withposter")
+                .and_then(|asset| asset.get("posterUrl"))
+                .is_none(),
+            "reindex atomically clears the URL and blob when its source is gone"
+        );
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "withposter", poster_sha256),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn indexed_poster_rejects_malformed_and_oversized_jpeg_payloads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster validation").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let fact = |id: &str| {
+            json!({
+                "assetId": id,
+                "mediaPath": format!("assets/videos/set/{id}.mp4"),
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            })
+        };
+
+        for id in ["malformed", "oversized"] {
+            let media = project_path.join(format!("assets/videos/set/{id}.mp4"));
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"video").unwrap();
+            let payload = if id == "malformed" {
+                vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F']
+            } else {
+                vec![0u8; 16 * 1024 * 1024 + 1]
+            };
+            std::fs::write(media.with_extension("poster.jpg"), payload).unwrap();
+            store
+                .persist_generated_asset(&project.id, "job", "set", &fact(id))
+                .unwrap();
+        }
+
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(
+            listed.iter().all(|asset| asset.get("posterUrl").is_none()),
+            "neither JPEG-looking malformed bytes nor an oversized file may be advertised"
+        );
+    }
+
+    #[test]
+    fn get_asset_poster_fails_closed_when_indexed_blob_or_digest_is_tampered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster integrity").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let media = project_path.join("assets/videos/set/integrity.mp4");
+        let original = jpeg_fixture([1, 2, 3]);
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"video").unwrap();
+        std::fs::write(media.with_extension("poster.jpg"), &original).unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job",
+                "set",
+                &json!({
+                    "assetId": "integrity",
+                    "mediaPath": "assets/videos/set/integrity.mp4",
+                    "mimeType": "video/mp4",
+                    "type": "video",
+                    "displayName": "Integrity",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "image_to_video",
+                    "model": "wan",
+                    "adapter": "wan",
+                    "prompt": "x",
+                }),
+            )
+            .unwrap();
+        let advertised_sha = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap()[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        let connection = Connection::open(project_path.join("project.db")).unwrap();
+
+        connection
+            .execute(
+                "update assets set poster_bytes = ?1 where id = 'integrity'",
+                params![jpeg_fixture([9, 8, 7])],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "integrity", &advertised_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+
+        connection
+            .execute(
+                "update assets set poster_bytes = ?1, poster_sha256 = ?2 where id = 'integrity'",
+                params![original, "0".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "integrity", &advertised_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn indexed_poster_rejects_symlink_sources_and_never_writes_a_poster_destination() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster symlinks").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let video_dir = project_path.join("assets/videos/set");
+        std::fs::create_dir_all(&video_dir).unwrap();
+        std::fs::write(video_dir.join("linked.mp4"), b"video").unwrap();
+        let outside_poster = temp_dir.path().join("outside-secret.jpg");
+        let outside_bytes = jpeg_fixture([11, 22, 33]);
+        std::fs::write(&outside_poster, &outside_bytes).unwrap();
+        let linked_poster = video_dir.join("linked.poster.jpg");
+        if let Err(error) = create_file_symlink(&outside_poster, &linked_poster) {
+            eprintln!("symlink privilege unavailable; skipping symlink fixture: {error}");
+            return;
+        }
+        let fact = |id: &str| {
+            json!({
+                "assetId": id,
+                "mediaPath": format!("assets/videos/set/{id}.mp4"),
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            })
+        };
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact("linked"))
+            .unwrap();
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        assert!(listed[0].get("posterUrl").is_none());
+        assert_eq!(std::fs::read(&outside_poster).unwrap(), outside_bytes);
+
+        let outside_destination = temp_dir.path().join("outside-destination");
+        std::fs::create_dir_all(&outside_destination).unwrap();
+        let destination_link = project_path.join("assets/posters");
+        if let Err(error) = create_dir_symlink(&outside_destination, &destination_link) {
+            eprintln!(
+                "directory symlink privilege unavailable; skipping destination fixture: {error}"
+            );
+            return;
+        }
+        std::fs::write(video_dir.join("contained.mp4"), b"video").unwrap();
+        let contained_bytes = jpeg_fixture([44, 55, 66]);
+        std::fs::write(video_dir.join("contained.poster.jpg"), &contained_bytes).unwrap();
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact("contained"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(&outside_destination).unwrap().count(),
+            0,
+            "DB-backed indexing performs no poster destination filesystem writes"
+        );
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        let contained = listed
+            .iter()
+            .find(|asset| asset["id"] == "contained")
+            .unwrap();
+        let sha = contained["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_eq!(
+            store
+                .get_asset_poster(&project.id, "contained", sha)
+                .unwrap()
+                .bytes,
+            contained_bytes
+        );
+    }
+
+    #[test]
+    fn same_id_overwrite_atomically_clears_and_replaces_poster_blob() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster overwrite").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let media = project_path.join("assets/videos/set/reused.mp4");
+        let poster = media.with_extension("poster.jpg");
+        let poster_a = jpeg_fixture([10, 20, 30]);
+        let poster_b = jpeg_fixture([40, 50, 60]);
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"video-a").unwrap();
+        std::fs::write(&poster, &poster_a).unwrap();
+        let fact = json!({
+            "assetId": "reused",
+            "mediaPath": "assets/videos/set/reused.mp4",
+            "mimeType": "video/mp4",
+            "type": "video",
+            "displayName": "Reused",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "image_to_video",
+            "model": "wan",
+            "adapter": "wan",
+            "prompt": "x",
+        });
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact)
+            .unwrap();
+        let old_url = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap()[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let old_sha = old_url.rsplit('/').next().unwrap().to_owned();
+
+        std::fs::remove_file(&poster).unwrap();
+        std::fs::write(&media, b"video-b").unwrap();
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact)
+            .unwrap();
+        assert!(store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap()[0]
+            .get("posterUrl")
+            .is_none());
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "reused", &old_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+
+        std::fs::write(&poster, &poster_b).unwrap();
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact)
+            .unwrap();
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        let new_sha = listed[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_ne!(new_sha, old_sha);
+        assert_eq!(
+            store
+                .get_asset_poster(&project.id, "reused", new_sha)
+                .unwrap()
+                .bytes,
+            poster_b
+        );
+    }
+
+    #[test]
+    fn purge_and_orphan_cleanup_prevent_poster_inheritance_on_id_reuse() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let fact = |id: &str| {
+            json!({
+                "assetId": id,
+                "mediaPath": format!("assets/videos/set/{id}.mp4"),
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            })
+        };
+
+        for lifecycle in ["purge", "orphan"] {
+            let project = store.create_project(lifecycle).unwrap();
+            let project_path = store.find_project_path(&project.id).unwrap();
+            let media = project_path.join(format!("assets/videos/set/{lifecycle}.mp4"));
+            let poster = media.with_extension("poster.jpg");
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"old-video").unwrap();
+            std::fs::write(&poster, jpeg_fixture([70, 80, 90])).unwrap();
+            store
+                .persist_generated_asset(&project.id, "job", "set", &fact(lifecycle))
+                .unwrap();
+            let old_sha = store
+                .list_assets(&project.id, true, true, AssetScope::All)
+                .unwrap()[0]["posterUrl"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned();
+
+            if lifecycle == "purge" {
+                store.purge_asset(&project.id, lifecycle, true).unwrap();
+            } else {
+                std::fs::remove_file(&media).unwrap();
+                assert_eq!(store.prune_orphaned_assets(&project.id).unwrap(), 1);
+            }
+            assert!(
+                !poster.exists(),
+                "{lifecycle} removes the old source poster"
+            );
+            assert!(matches!(
+                store.get_asset_poster(&project.id, lifecycle, &old_sha),
+                Err(ProjectStoreError::NotFound(_))
+            ));
+
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"new-video-without-poster").unwrap();
+            store
+                .persist_generated_asset(&project.id, "job", "set", &fact(lifecycle))
+                .unwrap();
+            assert!(
+                store
+                    .list_assets(&project.id, true, true, AssetScope::All)
+                    .unwrap()[0]
+                    .get("posterUrl")
+                    .is_none(),
+                "{lifecycle} id reuse cannot inherit the predecessor poster"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_sidecar_ids_keep_envelope_and_poster_blob_from_one_winner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Duplicate ids").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        for (folder, file, poster_rgb) in [
+            ("a", "first", [101, 102, 103]),
+            ("b", "second", [201, 202, 203]),
+        ] {
+            let media_rel = format!("assets/videos/{folder}/{file}.mp4");
+            let media = project_path.join(&media_rel);
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"video").unwrap();
+            std::fs::write(media.with_extension("poster.jpg"), jpeg_fixture(poster_rgb)).unwrap();
+            let asset = build_generated_asset_sidecar(
+                &project.id,
+                "job",
+                "set",
+                &json!({
+                    "assetId": "duplicate",
+                    "mediaPath": media_rel,
+                    "mimeType": "video/mp4",
+                    "type": "video",
+                    "displayName": file,
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "image_to_video",
+                    "model": "wan",
+                    "adapter": "wan",
+                    "prompt": "x",
+                }),
+            );
+            write_json(&media.with_extension("sceneworks.json"), &asset).unwrap();
+        }
+
+        store.reindex_project(&project.id).unwrap();
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let media_path = listed[0]["file"]["path"].as_str().unwrap();
+        let expected = if media_path.contains("/a/") {
+            jpeg_fixture([101, 102, 103])
+        } else {
+            jpeg_fixture([201, 202, 203])
+        };
+        let sha = listed[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_eq!(
+            store
+                .get_asset_poster(&project.id, "duplicate", sha)
+                .unwrap()
+                .bytes,
+            expected,
+            "the URL, envelope file path, and blob are replaced in one row transaction"
+        );
+    }
+
+    #[test]
+    fn dirty_marker_repair_reconciles_poster_blob_after_db_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster repair").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let media = project_path.join("assets/videos/set/repaired.mp4");
+        let poster = media.with_extension("poster.jpg");
+        let before = jpeg_fixture([3, 4, 5]);
+        let after = jpeg_fixture([6, 7, 8]);
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"video").unwrap();
+        std::fs::write(&poster, &before).unwrap();
+        let fact = json!({
+            "assetId": "repaired",
+            "mediaPath": "assets/videos/set/repaired.mp4",
+            "mimeType": "video/mp4",
+            "type": "video",
+            "displayName": "Repaired",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "image_to_video",
+            "model": "wan",
+            "adapter": "wan",
+            "prompt": "x",
+        });
+        store
+            .persist_generated_asset(&project.id, "job", "set", &fact)
+            .unwrap();
+        let old_sha = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap()[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        std::fs::write(&poster, &after).unwrap();
+        fail_next_asset_index_db_mutation();
+        assert!(store
+            .update_asset_status(
+                &project.id,
+                "repaired",
+                AssetStatusPatch {
+                    favorite: Some(true),
+                    ..AssetStatusPatch::default()
+                },
+            )
+            .is_err());
+        assert!(project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed[0]["status"]["favorite"], true);
+        let new_sha = listed[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_ne!(new_sha, old_sha);
+        assert_eq!(
+            store
+                .get_asset_poster(&project.id, "repaired", new_sha)
+                .unwrap()
+                .bytes,
+            after
+        );
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "repaired", &old_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+        assert!(!project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
     }
 
     #[test]

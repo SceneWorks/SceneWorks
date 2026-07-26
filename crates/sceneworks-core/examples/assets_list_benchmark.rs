@@ -4,6 +4,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sceneworks_core::project_store::{AssetListFilesystemOperations, AssetScope, ProjectStore};
 use serde_json::json;
 
+fn jpeg_fixture() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode(&[32, 64, 96], 1, 1, image::ExtendedColorType::Rgb8)
+        .expect("benchmark JPEG encodes");
+    bytes
+}
+
 fn list_once(
     store: &ProjectStore,
     project_id: &str,
@@ -25,7 +33,7 @@ fn report(
         "{label}: assets={assets} elapsed_ms={:.3} fs_total={} registry_opens={} \
          registry_metadata_reads={} registry_content_reads={} path_stats={} directory_scans={} \
          sidecar_reads={} generation_set_reads={} timeline_reads={} character_reads={} \
-         poster_stats={} index_marker_reads={} index_marker_writes={} index_marker_removes={} \
+         poster_stats={} poster_reads={} index_marker_reads={} index_marker_writes={} index_marker_removes={} \
          directory_create_calls={} db_opens={}",
         elapsed.as_secs_f64() * 1_000.0,
         operations.total(),
@@ -39,6 +47,7 @@ fn report(
         operations.timeline_reads,
         operations.character_reads,
         operations.poster_stats,
+        operations.poster_reads,
         operations.index_marker_reads,
         operations.index_marker_writes,
         operations.index_marker_removes,
@@ -69,6 +78,7 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
         warm_operations.timeline_reads += operations.timeline_reads;
         warm_operations.character_reads += operations.character_reads;
         warm_operations.poster_stats += operations.poster_stats;
+        warm_operations.poster_reads += operations.poster_reads;
         warm_operations.index_marker_reads += operations.index_marker_reads;
         warm_operations.index_marker_writes += operations.index_marker_writes;
         warm_operations.index_marker_removes += operations.index_marker_removes;
@@ -91,6 +101,7 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
             timeline_reads: warm_operations.timeline_reads / iterations as u64,
             character_reads: warm_operations.character_reads / iterations as u64,
             poster_stats: warm_operations.poster_stats / iterations as u64,
+            poster_reads: warm_operations.poster_reads / iterations as u64,
             index_marker_reads: warm_operations.index_marker_reads / iterations as u64,
             index_marker_writes: warm_operations.index_marker_writes / iterations as u64,
             index_marker_removes: warm_operations.index_marker_removes / iterations as u64,
@@ -110,20 +121,42 @@ fn synthetic(asset_count: usize, iterations: usize) {
     let project = store
         .create_project("Synthetic asset-list benchmark")
         .expect("synthetic project creates");
+    let project_path = PathBuf::from(&project.path);
     for index in 0..asset_count {
         let asset_id = format!("asset_{index:08}");
+        let generation_set_id = format!("set_{index:08}");
+        store
+            .write_generation_set(
+                &project.id,
+                "benchmark-job",
+                &json!({
+                    "id": generation_set_id,
+                    "mode": "image_to_video",
+                    "model": "benchmark",
+                    "prompt": "benchmark",
+                    "createdAt": "2026-07-25T00:00:00Z",
+                }),
+                None,
+            )
+            .expect("synthetic generation set persists");
+        let media_path = format!("assets/videos/{generation_set_id}/{asset_id}.mp4");
+        let poster_path = project_path.join(&media_path).with_extension("poster.jpg");
+        std::fs::create_dir_all(poster_path.parent().expect("poster parent"))
+            .expect("poster directory creates");
+        std::fs::write(&poster_path, jpeg_fixture()).expect("poster writes");
         store
             .persist_generated_asset(
                 &project.id,
                 "benchmark-job",
-                "shared-set",
+                &generation_set_id,
                 &json!({
                     "assetId": asset_id,
-                    "mediaPath": format!("assets/images/shared-set/{asset_id}.png"),
-                    "mimeType": "image/png",
+                    "mediaPath": media_path,
+                    "mimeType": "video/mp4",
+                    "type": "video",
                     "displayName": format!("Asset {index}"),
                     "createdAt": format!("2026-07-25T00:00:00Z-{index:08}"),
-                    "mode": "text_to_image",
+                    "mode": "image_to_video",
                     "model": "benchmark",
                     "adapter": "benchmark",
                     "prompt": "benchmark",
@@ -131,7 +164,10 @@ fn synthetic(asset_count: usize, iterations: usize) {
             )
             .expect("synthetic asset persists");
     }
-    println!("storage=synthetic-local path={}", data_dir.display());
+    println!(
+        "storage=synthetic-local-distinct-video-sets path={}",
+        data_dir.display()
+    );
     // Seed through one store, then report the first call through a genuinely
     // fresh registry cache. This still does not evict the operating-system cache.
     run(

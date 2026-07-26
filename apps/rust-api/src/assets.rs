@@ -32,6 +32,7 @@ pub(crate) async fn list_assets(
         timeline_reads = filesystem_operations.timeline_reads,
         character_reads = filesystem_operations.character_reads,
         poster_stats = filesystem_operations.poster_stats,
+        poster_reads = filesystem_operations.poster_reads,
         index_marker_reads = filesystem_operations.index_marker_reads,
         index_marker_writes = filesystem_operations.index_marker_writes,
         index_marker_removes = filesystem_operations.index_marker_removes,
@@ -83,6 +84,34 @@ pub(crate) async fn get_asset(
     Ok(Json(
         project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?,
     ))
+}
+
+pub(crate) async fn get_asset_poster(
+    State(state): State<AppState>,
+    Path((project_id, asset_id, poster_sha256)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let poster = project_call(state, move |store| {
+        store.get_asset_poster(&project_id, &asset_id, &poster_sha256)
+    })
+    .await?;
+    let length = poster.bytes.len().to_string();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg".to_owned()),
+            (header::CONTENT_LENGTH, length),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable".to_owned(),
+            ),
+            (header::ETAG, format!("\"{}\"", poster.sha256)),
+            (
+                HeaderName::from_static("x-content-type-options"),
+                "nosniff".to_owned(),
+            ),
+        ],
+        poster.bytes,
+    )
+        .into_response())
 }
 
 pub(crate) async fn import_asset(
