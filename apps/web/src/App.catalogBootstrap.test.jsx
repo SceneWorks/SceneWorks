@@ -116,7 +116,7 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
     await settle();
   }
 
-  it("renders the active project and populated Assets view while models and presets remain unresolved", async () => {
+  it("renders Library assets before its deferred detail catalogs settle", async () => {
     const models = deferred();
     const presets = deferred();
     installFetch({
@@ -151,6 +151,8 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
 
     const paths = global.fetch.mock.calls.map(([url]) => new URL(url).pathname);
     expect(paths).toContain("/api/v1/projects/project-a/assets");
+    expect(paths).toContain("/api/v1/models");
+    expect(paths).not.toContain("/api/v1/recipe-presets");
     expect(paths.indexOf("/api/v1/projects")).toBeLessThan(
       paths.indexOf("/api/v1/projects/project-a/assets"),
     );
@@ -171,26 +173,20 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
     expect(container.textContent).not.toContain("Global Preset");
   });
 
-  it("keeps an empty Assets view usable when models and presets fail", async () => {
-    const models = deferred();
-    const presets = deferred();
-    installFetch({ models: models.promise, presets: presets.promise });
+  it("keeps an empty Library isolated from unrelated inactive catalogs", async () => {
+    installFetch();
 
     await renderApp();
     expect(container.textContent).toContain("No assets in this view");
 
-    await act(async () => {
-      models.reject(new Error("model catalog failed"));
-      presets.reject(new Error("preset catalog failed"));
-    });
-    await settle();
-
     expect(container.querySelector(".project-pill")?.textContent).toContain("Project A");
     expect(container.textContent).toContain("No assets in this view");
-    // Models preserve their non-optional aggregate startup error. Recipe
-    // presets remain optional, matching the prior refreshData contract.
-    expect(container.textContent).toContain("Models: model catalog failed");
-    expect(container.textContent).not.toContain("Presets: preset catalog failed");
+    const paths = global.fetch.mock.calls.map(([url]) => new URL(url).pathname);
+    expect(paths).not.toContain("/api/v1/models");
+    expect(paths).not.toContain("/api/v1/recipe-presets");
+    expect(paths).not.toContain("/api/v1/training/targets");
+    expect(paths).not.toContain("/api/v1/training/presets");
+    expect(paths).not.toContain("/api/v1/prompt-batches");
   });
 
   it("shows loading and error states before unrelated catalogs settle", async () => {

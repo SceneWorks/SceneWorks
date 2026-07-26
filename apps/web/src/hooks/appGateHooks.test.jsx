@@ -250,8 +250,8 @@ describe("useJobEvents (sc-9750)", () => {
       dismissNoticeKind: () => {},
       generatedAssetRefreshesRef: { current: new Map() },
       refreshAssetsRef: { current: () => {} },
-      refreshDataRef: { current: () => {} },
-      refreshDataWithLoraOverlayRef: { current: () => {} },
+      refreshModelsRef: { current: () => {} },
+      refreshModelAndLorasRef: { current: () => {} },
       refreshPersonTracksRef: { current: () => {} },
       activeProjectRef: { current: null },
       enqueueTimelineGenerationApply: () => {},
@@ -575,7 +575,8 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshDataRef: { current: refreshData },
+      refreshModelsRef: { current: refreshData },
+      refreshModelAndLorasRef: { current: () => {} },
       refreshAssetsRef: { current: refreshAssets },
       enqueueTimelineGenerationApply: applyTimeline,
       pushNotice,
