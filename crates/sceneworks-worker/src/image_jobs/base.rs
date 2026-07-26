@@ -531,7 +531,9 @@ impl CandleImageRoute {
                 flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
             }
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
-            CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
+            CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
+                candle_adapter_label(&request.model)
+            }
         }
     }
 }
@@ -5961,6 +5963,11 @@ mod candle_label_tests {
         assert_eq!(
             mage_edit_reference_ids(&request),
             ["primary", "second", "third"]
+        );
+        assert_eq!(
+            CandleImageRoute::MageEdit.adapter_label(&request),
+            "candle_mage",
+            "Mage edit assets and generation sets must retain the Candle family label"
         );
 
         let missing_primary = ImageRequest::from_payload(
