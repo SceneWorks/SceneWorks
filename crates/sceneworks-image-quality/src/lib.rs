@@ -73,8 +73,11 @@ pub fn aesthetic_predictor() -> &'static AestheticPredictor {
     })
 }
 
-/// Decode an image, transcoding a valid-but-unsupported format (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to a
-/// temp PNG first (sc-6143). `decode` runs directly on `path` on the fast path; only when that fails
+/// Decode an image, transcoding a valid-but-unsupported format to a temp PNG first (sc-6143).
+/// Always AVIF/HEIC/HEIF (`image` has no decoder for them at any feature level), plus TIFF/BMP/GIF in
+/// a build whose `image` feature union lacks them — note that union is workspace-wide, so a crate's
+/// own `features = [...]` does not decide what it can decode. `decode` runs directly on `path` on the
+/// fast path; only when that fails
 /// *and* the bytes sniff as a recognized format the pure-Rust `image` build can't decode do we shell
 /// out to the shared [`sceneworks_core::media_convert`] transcoder and re-run `decode` on the PNG.
 ///
