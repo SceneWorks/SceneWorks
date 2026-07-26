@@ -601,6 +601,15 @@ where
         updated_at: utc_now(),
     };
     let semaphore = Arc::new(Semaphore::new(options.max_in_flight_bytes));
+    // Every candidate pessimistically holds `max_file_bytes` permits until
+    // its encoded response has been validated and persisted. `join_all`
+    // retains completed outcomes while later futures are still pending, so
+    // admitting more futures than the byte budget can fund would deadlock:
+    // completed downloads hold every permit while their siblings wait for
+    // one. Bound the deterministic batch itself to permit-backed capacity.
+    let permit_backed_concurrency = options
+        .concurrency
+        .min(options.max_in_flight_bytes / options.max_file_bytes);
     let mut cursor = None;
     let mut target_reached = false;
 
@@ -613,7 +622,8 @@ where
         let mut candidate_index = 0;
         while candidate_index < page.records.len() {
             let mut pending = Vec::new();
-            while candidate_index < page.records.len() && pending.len() < options.concurrency {
+            while candidate_index < page.records.len() && pending.len() < permit_backed_concurrency
+            {
                 let mut record = page.records[candidate_index].clone();
                 candidate_index += 1;
                 checkpoint.counts.candidates = checkpoint.counts.candidates.saturating_add(1);
@@ -2888,6 +2898,43 @@ mod tests {
         .expect("state");
         assert_eq!(record.metadata["analysis"]["tag"], "kept");
         assert_eq!(record.metadata["acquisition"]["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn single_file_byte_budget_does_not_deadlock_concurrent_candidates() {
+        let (_root, registry, id) = catalog_with_urls(&[
+            "https://example.com/permit-a",
+            "https://example.com/permit-b",
+        ]);
+        let bytes = png(12, 10);
+        let calls = Arc::new(Mutex::new(0_u64));
+        let options = CatalogImageFetchOptions {
+            accepted_target: 2,
+            concurrency: 2,
+            max_file_bytes: bytes.len(),
+            max_in_flight_bytes: bytes.len(),
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        let report = tokio::time::timeout(
+            Duration::from_secs(2),
+            fetch_attached_catalog_images_with(&registry, &id, &options, {
+                let calls = Arc::clone(&calls);
+                move |_url, _options| {
+                    let calls = Arc::clone(&calls);
+                    let bytes = bytes.clone();
+                    async move {
+                        *calls.lock().expect("calls") += 1;
+                        Ok(bytes)
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("permit-backed batching must make prompt progress")
+        .expect("fetch");
+        assert_eq!(report.checkpoint.counts.accepted, 2);
+        assert_eq!(*calls.lock().expect("calls"), 2);
     }
 
     #[tokio::test]
