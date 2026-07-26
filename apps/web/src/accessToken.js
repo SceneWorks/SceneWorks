@@ -58,3 +58,79 @@ export function clearAccessToken() {
     // Treat an unavailable store as already empty.
   }
 }
+
+// CROSS-TAB SYNC (sc-15165). Storage is shared across every tab on the origin but the
+// access gate's React `token` state is not, so before this the two could diverge: tab A
+// hits "forget", storage empties, and tab B's gate keeps holding a live token. Tab B then
+// stays fully unlocked while every `readAccessToken()` caller in it (`serverToken()`,
+// `uiPreferences.js`) sends "" — those writes 401 and, correctly, do not raise the gate
+// (sc-15105), so they silently no-op. The mirror case is the same shape: tab A unlocks and
+// tab B keeps showing the password prompt.
+//
+// The fix is to make this module the one live source rather than a seed the gate copies
+// once. The browser's `storage` event fires only in the OTHER tabs on the origin, which is
+// exactly the gap: a tab that mutates the token already updates its own state in the same
+// call (`saveToken` / `lockRemote`), so there is deliberately NO local notify here.
+//
+// That is not just an optimization — a local notify would be actively wrong today.
+// `saveToken` calls `storeAccessToken(candidate)` BEFORE `setToken(candidate)`, and the
+// gate's `tokenRef` only re-syncs after commit, so a synchronous notify would compare the
+// new token against the stale ref, fail the "unchanged" guard, and demote a just-accepted
+// token back to "pending" — an extra verify POST and a shell that re-blocks for a beat.
+//
+// PRECONDITION: this holds only while `useAccessGate` is the sole subscriber, because it
+// is the thing performing those local writes. A second subscriber (a preferences cache, a
+// second React root) would silently miss every local write; adding one means making
+// `storeAccessToken`/`clearAccessToken` notify, which requires inverting the
+// write-before-setState ordering in `saveToken` first.
+const subscribers = new Set();
+let listening = false;
+
+function handleStorageEvent(event) {
+  // `key === null` is a whole-store `clear()`, which affects our key too.
+  if (event.key !== null && event.key !== ACCESS_TOKEN_KEY) {
+    return;
+  }
+  // Ignore a same-origin frame writing this key to sessionStorage. A synthetic event with
+  // no `storageArea` is let through (real browsers always set it), and so is one that
+  // arrives while our own store is unreachable — there is nothing to compare it against.
+  const area = storage();
+  if (area && event.storageArea && event.storageArea !== area) {
+    return;
+  }
+  // Read through the helper rather than trusting `event.newValue`: subscribers must be
+  // handed exactly what every other reader in the tab will see at this moment.
+  const next = readAccessToken();
+  // Snapshot, then re-check membership per call. A subscriber added during delivery does
+  // NOT see the in-flight event (it wasn't listening when it happened) and one removed
+  // during delivery does NOT get called (an unmounting hook must go quiet immediately) —
+  // neither of which plain `for...of` over the live Set gives you.
+  for (const listener of [...subscribers]) {
+    if (!subscribers.has(listener)) {
+      continue;
+    }
+    try {
+      listener(next);
+    } catch {
+      // One bad subscriber must not strand the others (or the listener itself).
+    }
+  }
+}
+
+// Observe token changes made in OTHER tabs. Returns an unsubscribe. The window listener is
+// attached on the first subscriber and detached with the last, so a non-browser or
+// fully-unmounted context holds nothing.
+export function subscribeAccessToken(listener) {
+  subscribers.add(listener);
+  if (!listening && typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorageEvent);
+    listening = true;
+  }
+  return () => {
+    subscribers.delete(listener);
+    if (listening && subscribers.size === 0 && typeof window !== "undefined") {
+      window.removeEventListener("storage", handleStorageEvent);
+      listening = false;
+    }
+  };
+}

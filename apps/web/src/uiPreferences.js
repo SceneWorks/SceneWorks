@@ -33,12 +33,18 @@ import { readAccessToken } from "./accessToken.js";
 // cached one would leave every write in that session unauthenticated. (`credentials.js`'s
 // `serverToken()` is the same value under a different name — one source, in `accessToken.js`.)
 //
-// Caveat, pre-existing and shared with `serverToken()` (sc-15165): stored-token and the access
-// gate's in-memory `token` state can diverge in the CLEAR direction. If a second tab hits
-// "forget", this tab's gate still holds a live token while storage is empty, so a write here
-// goes out credential-less and its 401 is (correctly) not routed to the gate. Reading storage
-// is still the right call — it is strictly fresher on promotion, which is the case that decides
-// whether a session's writes are authenticated at all.
+// Reading storage is the right call rather than a bug to route around: it is strictly
+// fresher than the gate's state on promotion, which is the case that decides whether a
+// session's writes are authenticated at all.
+//
+// The CROSS-TAB divergence that used to qualify that is closed (sc-15165): the gate now
+// subscribes to `storage` events via `subscribeAccessToken`, so a "forget" in a second tab
+// locks this one instead of leaving it live while writes here go out credential-less to a
+// 401 that (correctly) never raises the gate. One case survives, deliberately: a same-tab
+// `storeAccessToken` that the browser REJECTS (private-mode / quota — swallowed by design,
+// see the degradation note in `accessToken.js`) leaves the gate accepted with storage
+// empty, and writes here go out credential-less again. No `storage` event can fix that one;
+// it needs the gate to stop treating an unverifiable write as a successful one.
 //
 // On the desktop shell it is "" and the request still succeeds: `SCENEWORKS_TRUST_LOOPBACK`
 // bypasses the token check for loopback peers before any comparison, so local use stays
