@@ -437,20 +437,6 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
     TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
-            mage_flow_lora_target(
-                "mage_flow_base_lora",
-                "Mage-Flow Base LoRA",
-                "mage_flow_base",
-                "SceneWorks/Mage-Flow-Base",
-                "Train an image LoRA against the undistilled Mage-Flow Base model.",
-            ),
-            mage_flow_lora_target(
-                "mage_flow_edit_base_lora",
-                "Mage-Flow Edit-Base LoRA",
-                "mage_flow_edit_base",
-                "SceneWorks/Mage-Flow-Edit-Base",
-                "Train an image-editing LoRA against the undistilled Mage-Flow Edit-Base model.",
-            ),
             z_image_turbo_lora_target(),
             sdxl_lora_target(),
             illustrious_xl_v1_lora_target(),
@@ -466,6 +452,22 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
             wan_i2v_14b_lora_target(),
+            // Keep not-yet-routed foundation contracts after the executable targets so the stable
+            // first-target default remains Z-Image until sc-14055 advertises the Mage kernel.
+            mage_flow_lora_target(
+                "mage_flow_base_lora",
+                "Mage-Flow Base LoRA",
+                "mage_flow_base",
+                "SceneWorks/Mage-Flow-Base",
+                "Train an image LoRA against the undistilled Mage-Flow Base model.",
+            ),
+            mage_flow_lora_target(
+                "mage_flow_edit_base_lora",
+                "Mage-Flow Edit-Base LoRA",
+                "mage_flow_edit_base",
+                "SceneWorks/Mage-Flow-Edit-Base",
+                "Train an image-editing LoRA against the undistilled Mage-Flow Edit-Base model.",
+            ),
         ],
         extra: ExtraFields::new(),
     }
