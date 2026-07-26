@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use sceneworks_core::catalog_store::CatalogError;
 use sceneworks_core::jobs_store::JobsStoreError;
 use sceneworks_core::project_store::ProjectStoreError;
 
@@ -144,6 +145,43 @@ impl From<ProjectStoreError> for ApiError {
                 code: None,
             },
             other => Self::internal(other.to_string()),
+        }
+    }
+}
+
+impl From<CatalogError> for ApiError {
+    fn from(error: CatalogError) -> Self {
+        match error {
+            CatalogError::InvalidCatalog(_) => Self {
+                status: StatusCode::BAD_REQUEST,
+                detail: "Invalid catalog request".to_owned(),
+                code: Some("catalog_invalid"),
+            },
+            CatalogError::NotFound(_) => Self {
+                status: StatusCode::NOT_FOUND,
+                detail: "Attached catalog not found".to_owned(),
+                code: Some("catalog_not_found"),
+            },
+            CatalogError::AlreadyExists(_) => Self {
+                status: StatusCode::CONFLICT,
+                detail: "Catalog location is not empty or is already in use".to_owned(),
+                code: Some("catalog_already_exists"),
+            },
+            CatalogError::Incompatible { .. } => Self {
+                status: StatusCode::CONFLICT,
+                detail: "Catalog format is newer than this SceneWorks version supports".to_owned(),
+                code: Some("catalog_incompatible"),
+            },
+            CatalogError::Corrupt { .. } => Self {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                detail: "Catalog files are invalid or corrupt".to_owned(),
+                code: Some("catalog_corrupt"),
+            },
+            CatalogError::Io(_) | CatalogError::Sqlite(_) | CatalogError::Json(_) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                detail: "Catalog operation failed".to_owned(),
+                code: Some("catalog_operation_failed"),
+            },
         }
     }
 }
