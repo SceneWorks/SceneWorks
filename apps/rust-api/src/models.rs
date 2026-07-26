@@ -823,12 +823,30 @@ pub(crate) async fn delete_model(
         state.settings.data_dir.join("models"),
         huggingface_hub_cache_dir(&state.settings.data_dir),
     ];
-    let removal = remove_owned_artifacts(
+    let removal = match remove_owned_artifacts(
         model_artifact_paths(cleanup_source, &state.settings.data_dir),
         &allowed_roots,
         permanent,
     )
-    .await?;
+    .await
+    {
+        Ok(removal) => {
+            if !removal.removed_paths.is_empty() {
+                // Invalidate immediately after the filesystem mutation. Later
+                // trash-failure and manifest/error returns must not leave the
+                // warm install-state snapshot describing paths already moved.
+                state.model_catalog_cache.invalidate();
+            }
+            removal
+        }
+        Err(error) => {
+            // Artifact removal is intentionally incremental. An inspection or
+            // unlink error may follow successful earlier removals whose result
+            // cannot be recovered from the error, so conservatively refresh.
+            state.model_catalog_cache.invalidate();
+            return Err(error);
+        }
+    };
     // Some owned files could not reach the OS trash and nothing was permanently
     // deleted. Leave the registry entry in place and ask the client to confirm.
     if !permanent && !removal.trash_failed_paths.is_empty() {
@@ -901,7 +919,7 @@ pub(crate) async fn delete_model_variant(
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
-    let removal = if let Some(download) = model_download_for_variant(&model, &variant) {
+    let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
         let repo = download
             .get("repo")
             .and_then(Value::as_str)
@@ -946,7 +964,7 @@ pub(crate) async fn delete_model_variant(
             &allowed_roots,
             true,
         )
-        .await?
+        .await
     } else if model_has_convert_tier(&model, &variant) {
         // Convert-at-install: the tier is a real dir under the converted MLX tree. Prefer the
         // catalog's resolved `mlxConvertedPath`; fall back to the canonical convert output dir.
@@ -956,12 +974,25 @@ pub(crate) async fn delete_model_variant(
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("models").join("mlx").join(&model_id));
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
-        remove_converted_tier(converted.join(&variant), &allowed_roots, true).await?
+        remove_converted_tier(converted.join(&variant), &allowed_roots, true).await
     } else {
         return Err(ApiError::bad_request(format!(
             "Model does not advertise a '{variant}' quant tier"
         )));
     };
+    let removal = match removal_result {
+        Ok(removal) => removal,
+        Err(error) => {
+            // Tier removal is also incremental (snapshot links, blobs, then
+            // managed paths). Refresh conservatively if any later step errors.
+            state.model_catalog_cache.invalidate();
+            return Err(error);
+        }
+    };
+    // Invalidate before every post-removal early return. A successful removal
+    // may have changed installState/variantStates even when the route later
+    // decides there was no independently reclaimable logical tier.
+    state.model_catalog_cache.invalidate();
     let shared_logical_tier = removal.removed_paths.is_empty()
         && !removal.retained_paths.is_empty()
         && model_download_for_variant(&model, &variant).is_some();
@@ -970,9 +1001,6 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
-    // Tier deletion changes installState/variantStates without touching a
-    // manifest, so it must explicitly advance the shared snapshot generation.
-    state.model_catalog_cache.invalidate();
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,

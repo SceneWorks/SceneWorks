@@ -3616,6 +3616,109 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     assert_eq!(loras.as_array().expect("loras array").len(), 0);
 }
 
+#[tokio::test]
+async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+            "schemaVersion": 1,
+            "models": [{
+                "id": "partial_model",
+                "name": "Partial Model",
+                "type": "image",
+                "family": "test",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "partial/model",
+                    "variant": "q4",
+                    "default": true,
+                    "files": ["q4/*"]
+                }],
+                "source": {
+                    "provider": "local",
+                    "path": "models/partial_trash_failure"
+                }
+            }]
+        }"#,
+    )
+    .expect("user models writes");
+    for (name, field) in [
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            config_dir.join(name),
+            format!(r#"{{ "schemaVersion": 1, "{field}": [] }}"#),
+        )
+        .expect("sibling manifest writes");
+    }
+
+    let managed_dir = temp_dir.path().join("data/models/partial__model");
+    std::fs::create_dir_all(managed_dir.join("q4")).expect("managed q4 creates");
+    std::fs::write(
+        managed_dir.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "partial/model" }"#,
+    )
+    .expect("managed completion marker writes");
+    std::fs::write(managed_dir.join("q4/model.safetensors"), "weights")
+        .expect("managed tier writes");
+    let failing_dir = temp_dir.path().join("data/models/partial_trash_failure");
+    std::fs::create_dir_all(&failing_dir).expect("failing source creates");
+    std::fs::write(failing_dir.join("weights.safetensors"), "weights")
+        .expect("failing source writes");
+
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(warm[0]["installState"], "installed");
+    assert_eq!(warm[0]["variants"][0]["variant"], "q4");
+    assert_eq!(warm[0]["variants"][0]["installState"], "installed");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    // The owned managed tier moves successfully, then the later source path
+    // fails to move. The route returns the recoverable confirmation response
+    // after a real mutation, rather than reaching manifest deletion.
+    let _trash =
+        crate::test_trash_outcomes([(managed_dir.clone(), true), (failing_dir.clone(), false)]);
+    let (status, partial) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/partial_model",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(partial["trashUnavailable"], true);
+    assert_eq!(partial["removedManifestEntry"], false);
+    assert_eq!(partial["removedLocalArtifacts"], true);
+    assert!(!managed_dir.exists(), "the first artifact was removed");
+    assert!(failing_dir.exists(), "the failed artifact remains");
+
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "missing");
+    assert_eq!(refreshed[0]["variants"][0]["variant"], "q4");
+    assert_eq!(refreshed[0]["variants"][0]["installState"], "missing");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "the partial-error early return must invalidate the warm snapshot"
+    );
+}
+
 #[test]
 fn model_download_size_helpers_match_contract_shapes() {
     let siblings = json!([

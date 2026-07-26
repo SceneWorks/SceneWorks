@@ -2793,10 +2793,76 @@ struct ArtifactRemoval {
     trash_failed_paths: Vec<String>,
 }
 
+#[cfg(test)]
+static TEST_TRASH_OUTCOMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, bool>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct TestTrashOutcomesGuard {
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for TestTrashOutcomesGuard {
+    fn drop(&mut self) {
+        let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
+        for path in &self.paths {
+            outcomes.remove(path);
+        }
+    }
+}
+
+/// Install one-shot deterministic OS-trash outcomes for route tests. A `true`
+/// outcome removes the path as if the trash move succeeded; `false` leaves it
+/// in place and reports the same recoverable failure as `trash::delete`.
+#[cfg(test)]
+pub(crate) fn test_trash_outcomes(
+    entries: impl IntoIterator<Item = (PathBuf, bool)>,
+) -> TestTrashOutcomesGuard {
+    let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
+    let mut paths = Vec::new();
+    for (path, succeeds) in entries {
+        assert!(
+            outcomes.insert(path.clone(), succeeds).is_none(),
+            "test trash outcome already registered for {}",
+            path.display()
+        );
+        paths.push(path);
+    }
+    TestTrashOutcomesGuard { paths }
+}
+
 /// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
 /// Trash / Linux XDG trash). `trash::delete` is blocking, so it runs on the blocking
 /// pool to avoid stalling the async runtime.
 async fn move_path_to_os_trash(path: PathBuf) -> Result<(), String> {
+    #[cfg(test)]
+    let test_outcome = {
+        TEST_TRASH_OUTCOMES
+            .get_or_init(Default::default)
+            .lock()
+            .remove(&path)
+    };
+    #[cfg(test)]
+    if let Some(succeeds) = test_outcome {
+        if !succeeds {
+            return Err("injected OS-trash failure".to_owned());
+        }
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|error| format!("injected trash could not inspect path: {error}"))?;
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|error| format!("injected trash could not remove directory: {error}"))?;
+        } else {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| format!("injected trash could not remove file: {error}"))?;
+        }
+        return Ok(());
+    }
+
     tokio::task::spawn_blocking(move || trash::delete(&path))
         .await
         .map_err(|error| format!("trash task failed: {error}"))?
