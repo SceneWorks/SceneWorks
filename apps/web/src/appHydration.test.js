@@ -31,13 +31,21 @@ describe("route-owned hydration contract (sc-14783)", () => {
     ["Models", ["models", "loras"]],
     ["Editor", ["assets", "characters", "models", "loras", "presets", "timelines"]],
     ["ImageEditor", ["assets", "characters", "models", "loras"]],
-    ["Queue", []],
+    ["Queue", ["assets"]],
     ["Stats", []],
     ["Logs", []],
     ["Settings", []],
     ["Licenses", []],
   ])("declares every required domain for %s", (route, domains) => {
     expect(hydrationDomainsForRoute(route)).toEqual(domains);
+  });
+
+  it("defers Library detail catalogs until its asset catalog settles", () => {
+    expect(hydrationDomainsForRoute("Library")).toEqual(["assets"]);
+    expect(hydrationDomainsForRoute("Library", { deferred: true })).toEqual([
+      "characters",
+      "models",
+    ]);
   });
 
   it.each([

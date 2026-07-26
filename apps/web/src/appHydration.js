@@ -24,7 +24,7 @@ export const PROJECT_HYDRATION_DOMAINS = Object.freeze(
 
 const ADVANCED_ROUTE_DOMAINS = Object.freeze({
   Library: ["assets"],
-  Queue: [],
+  Queue: ["assets"],
   Models: ["models", "loras"],
   Settings: [],
   Stats: [],
@@ -59,6 +59,13 @@ const ADVANCED_ROUTE_DOMAINS = Object.freeze({
   Setup: ["models"],
 });
 
+// Default Library startup remains assets-first so its first useful paint is not
+// blocked by secondary catalogs. Once assets settle, the selected detail panel
+// needs these domains for character linking, image VQA, and audio model labels.
+const DEFERRED_ROUTE_DOMAINS = Object.freeze({
+  Library: ["characters", "models"],
+});
+
 const SIMPLE_ROUTE_DOMAINS = Object.freeze({
   image: ["assets", "models", "loras"],
   video: ["assets", "models"],
@@ -70,7 +77,10 @@ const SIMPLE_ROUTE_DOMAINS = Object.freeze({
   licenses: [],
 });
 
-export function hydrationDomainsForRoute(route, { simple = false } = {}) {
+export function hydrationDomainsForRoute(route, { simple = false, deferred = false } = {}) {
+  if (deferred) {
+    return simple ? [] : DEFERRED_ROUTE_DOMAINS[route] ?? [];
+  }
   const source = simple ? SIMPLE_ROUTE_DOMAINS : ADVANCED_ROUTE_DOMAINS;
   return source[route] ?? [];
 }

@@ -116,7 +116,7 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
     await settle();
   }
 
-  it("renders Assets without requesting inactive model or preset catalogs", async () => {
+  it("renders Library assets before its deferred detail catalogs settle", async () => {
     const models = deferred();
     const presets = deferred();
     installFetch({
@@ -151,7 +151,7 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
 
     const paths = global.fetch.mock.calls.map(([url]) => new URL(url).pathname);
     expect(paths).toContain("/api/v1/projects/project-a/assets");
-    expect(paths).not.toContain("/api/v1/models");
+    expect(paths).toContain("/api/v1/models");
     expect(paths).not.toContain("/api/v1/recipe-presets");
     expect(paths.indexOf("/api/v1/projects")).toBeLessThan(
       paths.indexOf("/api/v1/projects/project-a/assets"),
@@ -173,7 +173,7 @@ describe("independent project and asset bootstrap (sc-14754)", () => {
     expect(container.textContent).not.toContain("Global Preset");
   });
 
-  it("keeps an empty Assets view isolated from inactive catalog failures", async () => {
+  it("keeps an empty Library isolated from unrelated inactive catalogs", async () => {
     installFetch();
 
     await renderApp();

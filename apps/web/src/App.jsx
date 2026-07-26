@@ -12,7 +12,7 @@ import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { fallbackModels, terminalStatuses } from "./constants.js";
+import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
 import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
@@ -461,6 +461,10 @@ export function App() {
     () => (loadedAssetsProjectId === activeProject?.id ? loadedAssets : []),
     [activeProject?.id, loadedAssets, loadedAssetsProjectId],
   );
+  const hasLibraryConsumerAsset = useMemo(
+    () => assets.some(isLibraryAsset),
+    [assets],
+  );
   const selectedAssetId =
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
   // A project switch renders before its passive refresh effect runs. Treat that
@@ -646,6 +650,7 @@ export function App() {
   const refreshAssetsRef = useRef(null);
   const healthRequestRef = useRef(null);
   const hydrationLedgerRef = useRef(new Map());
+  const committedHydrationRouteRef = useRef(null);
   const previousHydrationProjectIdRef = useRef(null);
   // Latest purgeAsset, held in a ref so the App-level scratch-op survivor (sc-8850) can
   // purge orphaned scratch/result assets from the SSE handler without re-subscribing.
@@ -1667,6 +1672,20 @@ export function App() {
   // handlers, and React runs all layout effects before any passive effect — preserving
   // the original ordering where consumers saw the fresh closure.
   useLayoutEffect(() => {
+    const setupRoute =
+      isDesktopShell && setupCompleted === false && authenticated;
+    const simpleRoute = !setupRoute && uiMode === SIMPLE_MODE;
+    const route = setupRoute
+      ? "Setup"
+      : simpleRoute
+        ? simpleActiveScreen
+        : activeView;
+    const committedRoute = {
+      route,
+      simple: simpleRoute,
+      projectId: activeProject?.id ?? null,
+    };
+    committedHydrationRouteRef.current = committedRoute;
     refreshShellDataRef.current = refreshShellData;
     refreshModelsRef.current = refreshModels;
     refreshModelAndLorasRef.current = refreshModelAndLoras;
@@ -1682,6 +1701,11 @@ export function App() {
     refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
     refreshPersonTracksRef.current = refreshPersonTracks;
     refreshTimelinesRef.current = refreshTimelines;
+    return () => {
+      if (committedHydrationRouteRef.current === committedRoute) {
+        committedHydrationRouteRef.current = null;
+      }
+    };
   });
 
   const hydrationRefresher = useCallback((domain) => {
@@ -1722,9 +1746,10 @@ export function App() {
     if (!refresh) {
       return Promise.resolve(refreshFailure("missing-refresher"));
     }
-    const entry = { status: "loading", promise: null };
+    const { abort: abortRequest = null, ...refreshOptions } = options;
+    const entry = { status: "loading", promise: null, abort: abortRequest };
     entry.promise = Promise.resolve()
-      .then(() => refresh(projectId, options))
+      .then(() => refresh(projectId, refreshOptions))
       .then((result) => {
         const normalized = result?.ok === true
           ? result
@@ -1770,7 +1795,7 @@ export function App() {
     const domains = hydrationDomainsForRoute(route, { simple: simpleRoute });
     const projectId = activeProject?.id ?? null;
     const controller = new AbortController();
-    const startedKeys = [];
+    const started = [];
     const hydrationLedger = hydrationLedgerRef.current;
 
     domains.forEach((domain) => {
@@ -1779,18 +1804,42 @@ export function App() {
       }
       const key = hydrationLedgerKey(domain, projectId);
       const current = hydrationLedger.get(key);
-      if (current?.status === "loading" || current?.status === "ready") {
+      if (current?.status === "loading") {
+        started.push({ domain, key });
         return;
       }
-      startedKeys.push(key);
-      ensureHydrationDomain(domain, projectId, { signal: controller.signal });
+      if (current?.status === "ready") {
+        return;
+      }
+      started.push({ domain, key });
+      ensureHydrationDomain(domain, projectId, {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+      });
     });
 
     return () => {
+      const next = committedHydrationRouteRef.current;
+      const nextDomains = next
+        ? new Set([
+            ...hydrationDomainsForRoute(next.route, { simple: next.simple }),
+            ...hydrationDomainsForRoute(next.route, {
+              simple: next.simple,
+              deferred: true,
+            }),
+          ])
+        : new Set();
+      if (
+        next?.projectId === projectId &&
+        started.every(({ domain }) => nextDomains.has(domain))
+      ) {
+        return;
+      }
       controller.abort();
-      startedKeys.forEach((key) => {
+      started.forEach(({ key }) => {
         const entry = hydrationLedger.get(key);
         if (entry?.status === "loading") {
+          entry.abort?.();
           hydrationLedger.delete(key);
         }
       });
@@ -1805,6 +1854,75 @@ export function App() {
     setupCompleted,
     simpleActiveScreen,
     token,
+    uiMode,
+  ]);
+
+  // The default Library route paints from its project asset request first. Only
+  // after that catalog settles do we hydrate the secondary detail-panel domains:
+  // characters power "Move to Character", while models power image VQA and audio
+  // model metadata. This keeps startup assets-first without leaving direct Library
+  // entry with permanently incomplete controls.
+  useEffect(() => {
+    if (
+      !ready ||
+      !projectsLoaded ||
+      uiMode === SIMPLE_MODE ||
+      activeView !== "Library" ||
+      !activeProject?.id ||
+      activeAssetLoadState.status !== "ready" ||
+      !hasLibraryConsumerAsset
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    const domains = hydrationDomainsForRoute("Library", { deferred: true });
+    const startedKeys = [];
+    const hydrationLedger = hydrationLedgerRef.current;
+    domains.forEach((domain) => {
+      const key = hydrationLedgerKey(domain, activeProject.id);
+      const current = hydrationLedger.get(key);
+      if (current?.status !== "ready") {
+        startedKeys.push(key);
+      }
+      ensureHydrationDomain(domain, activeProject.id, {
+        signal: controller.signal,
+        abort: () => controller.abort(),
+      });
+    });
+    return () => {
+      const next = committedHydrationRouteRef.current;
+      const nextDomains = next
+        ? new Set([
+            ...hydrationDomainsForRoute(next.route, { simple: next.simple }),
+            ...hydrationDomainsForRoute(next.route, {
+              simple: next.simple,
+              deferred: true,
+            }),
+          ])
+        : new Set();
+      if (
+        next?.projectId === activeProject.id &&
+        domains.every((domain) => nextDomains.has(domain))
+      ) {
+        return;
+      }
+      controller.abort();
+      startedKeys.forEach((key) => {
+        const entry = hydrationLedger.get(key);
+        if (entry?.status === "loading") {
+          entry.abort?.();
+          hydrationLedger.delete(key);
+        }
+      });
+    };
+  }, [
+    activeAssetLoadState.status,
+    activeProject?.id,
+    activeView,
+    ensureHydrationDomain,
+    hasLibraryConsumerAsset,
+    projectsLoaded,
+    ready,
     uiMode,
   ]);
 

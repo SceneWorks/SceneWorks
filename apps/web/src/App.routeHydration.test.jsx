@@ -175,9 +175,102 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(container.textContent).toContain("Mara portrait set");
   });
 
+  it("hydrates Library detail catalogs after assets settle so direct-entry controls are complete", async () => {
+    const assetRequest = deferred();
+    installFetch({
+      "/api/v1/projects/project-a/assets": () => assetRequest.promise,
+      "/api/v1/projects/project-a/characters": () =>
+        Promise.resolve(response([{ id: "character-a", name: "Mara", projectId: "project-a" }])),
+      "/api/v1/models": () =>
+        Promise.resolve(response([{
+          id: "vqa-model",
+          name: "Vision QA",
+          type: "image",
+          capabilities: ["vqa"],
+        }])),
+    });
+    await renderApp();
+
+    let counts = requestCounts();
+    expect(counts["/api/v1/projects/project-a/characters"]).toBeUndefined();
+    expect(counts["/api/v1/models"]).toBeUndefined();
+
+    await act(async () => {
+      assetRequest.resolve(response([{
+        id: "library-image",
+        projectId: "project-a",
+        type: "image",
+        displayName: "Library portrait",
+        file: { path: "portrait.png", mimeType: "image/png" },
+        status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      }]));
+    });
+    await settle();
+
+    counts = requestCounts();
+    expect(counts["/api/v1/projects/project-a/characters"]).toBe(1);
+    expect(counts["/api/v1/models"]).toBe(1);
+    expect(container.querySelector('select[aria-label="Target character"]')?.textContent).toContain("Mara");
+    expect(container.querySelector('textarea[aria-label="Ask about this image"]')).toBeTruthy();
+  });
+
+  it("retains Library's pending asset hydration when Queue becomes the active consumer", async () => {
+    const assetsRequest = deferred();
+    let assetSignal;
+    installFetch({
+      "/api/v1/projects/project-a/assets": (_url, options) => {
+        assetSignal = options.signal;
+        return assetsRequest.promise;
+      },
+      "/api/v1/jobs": () =>
+        Promise.resolve(response([{
+          id: "historical-job",
+          projectId: "project-a",
+          projectName: "Project A",
+          type: "image_generate",
+          status: "completed",
+          createdAt: "2026-07-26T01:00:00Z",
+          updatedAt: "2026-07-26T01:01:00Z",
+          payload: { prompt: "historical" },
+          result: { assetIds: ["historical-asset"] },
+        }])),
+    });
+    await renderApp();
+    expect(requestCounts()["/api/v1/projects/project-a/assets"]).toBe(1);
+    expect(assetSignal?.aborted).toBe(false);
+
+    await navigate("Queue");
+    expect(assetSignal?.aborted).toBe(false);
+    expect(requestCounts()["/api/v1/projects/project-a/assets"]).toBe(1);
+
+    await act(async () => {
+      assetsRequest.resolve(response([{
+        id: "historical-asset",
+        projectId: "project-a",
+        type: "image",
+        displayName: "Historical thumbnail",
+        file: { path: "historical.png", mimeType: "image/png" },
+        status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      }]));
+    });
+    await settle();
+
+    expect(
+      container.querySelector('button[aria-label="Historical thumbnail"]'),
+    ).toBeTruthy();
+  });
+
   it("retries a failed hydration domain when its route is revisited", async () => {
     let modelAttempts = 0;
     installFetch({
+      "/api/v1/projects/project-a/assets": () =>
+        Promise.resolve(response([{
+          id: "library-image",
+          projectId: "project-a",
+          type: "image",
+          displayName: "Library image",
+          status: {},
+        }])),
       "/api/v1/models": () => {
         modelAttempts += 1;
         return modelAttempts === 1
@@ -187,11 +280,8 @@ describe("route-owned App hydration (sc-14783)", () => {
     });
     await renderApp();
 
-    await navigate("Models");
     expect(container.textContent).toContain("model catalog unavailable");
     expect(modelAttempts).toBe(1);
-
-    await navigate("Assets");
     await navigate("Models");
     expect(modelAttempts).toBe(2);
     expect(container.textContent).not.toContain("model catalog unavailable");
