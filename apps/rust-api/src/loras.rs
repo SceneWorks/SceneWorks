@@ -988,19 +988,13 @@ pub(crate) async fn queue_lora_import_job(
     // What the adapter file itself declares (sc-14057): the network type the worker's
     // `classify_adapter` keys the engine adapter `kind` off, plus rank/alpha. Recorded so the
     // imported entry describes the file rather than losing facts the header already carried.
-    // Each field is written ONLY when the file declares it — an adapter that omits `alpha` (very
-    // common outside our own trainers) records no alpha instead of inheriting `rank`, so nothing
-    // downstream can mistake a fallback for a stated value.
+    //
+    // `adapter_metadata` is empty for a repo/URL import — there is no file on disk at queue time —
+    // so the worker fills the same fields in from the downloaded adapter through this same writer
+    // once the transfer lands. Shared deliberately: an adapter must be described identically
+    // whichever route ingested it.
     if let Some(object) = manifest_entry.as_object_mut() {
-        if let Some(network_type) = adapter_metadata.network_type.clone() {
-            object.insert("networkType".to_owned(), Value::String(network_type));
-        }
-        if let Some(rank) = adapter_metadata.rank {
-            object.insert("rank".to_owned(), json!(rank));
-        }
-        if let Some(alpha) = adapter_metadata.alpha {
-            object.insert("alpha".to_owned(), json!(alpha));
-        }
+        apply_adapter_metadata_to_manifest_entry(object, &adapter_metadata);
     }
     let trimmed_notes = payload.notes.trim();
     if !trimmed_notes.is_empty() {

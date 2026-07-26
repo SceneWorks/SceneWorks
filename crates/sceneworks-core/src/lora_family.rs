@@ -1612,6 +1612,23 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
     None
 }
 
+/// Whether `haystack` contains `needle` starting at a **token boundary** — at the very start of
+/// the string, or immediately after a non-alphanumeric byte.
+///
+/// Exists for the Mage arm in [`metadata_value_to_family`] (sc-14057): a plain `contains` there
+/// matches the tail of `image`, so `z-image-flow` / `qwen_image_flow` / `imageflow` would all read
+/// as Mage-Flow and be hard-rejected from their own models. Separators (`-`, `_`, `/`, `.`, space)
+/// and string start are boundaries; a letter or digit is not.
+///
+/// Byte indexing is safe for any input: `match_indices` yields char-boundary offsets, and a
+/// preceding UTF-8 continuation byte is not ASCII-alphanumeric, so a multi-byte neighbour is
+/// treated as a boundary rather than panicking.
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(position, _)| {
+        position == 0 || !haystack.as_bytes()[position - 1].is_ascii_alphanumeric()
+    })
+}
+
 fn metadata_value_to_family(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -1667,12 +1684,18 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // it from its own model. Matched on a token boundary instead — the same defence the `anima`
     // arm above needs against `animagine-xl` / `animatediff` — so only a genuine Mage id, repo
     // name, or file name resolves here.
+    //
+    // The boundary rule applies to the `*flow` spellings too, not just the bare token: `contains`
+    // there re-opens the identical hole one level down, since `z-image-flow`, `qwen_image_flow`
+    // and `imageflow` all end in `mage-flow` / `mage_flow` / `mageflow`. This arm runs *ahead* of
+    // the z-image and qwen-image arms below, so such a hit would be a confident mislabel — strictly
+    // worse than the `None` those names deserve.
     if normalized == "mage"
         || normalized.starts_with("mage-")
         || normalized.starts_with("mage_")
-        || normalized.contains("mage-flow")
-        || normalized.contains("mage_flow")
-        || normalized.contains("mageflow")
+        || contains_token(&normalized, "mage-flow")
+        || contains_token(&normalized, "mage_flow")
+        || contains_token(&normalized, "mageflow")
     {
         return Some("mage-flow".to_owned());
     }
@@ -1747,6 +1770,61 @@ pub struct AdapterFileMetadata {
 impl AdapterFileMetadata {
     pub fn is_empty(&self) -> bool {
         self.network_type.is_none() && self.rank.is_none() && self.alpha.is_none()
+    }
+}
+
+/// Locates the first `.safetensors` under `dir` and answers both questions its header can settle:
+/// the detected architecture family, and what the file declares about itself (sc-14057).
+///
+/// Returns an empty pair — `(None, AdapterFileMetadata::default())` — when the directory holds no
+/// safetensors at all, and the structured [`SafetensorsHeaderError`] when a file was found but its
+/// header is unreadable, malformed, or fronts a truncated file. Either half of a successful answer
+/// may still legitimately be absent: an unrecognized architecture is `None`, and a file with a bare
+/// `{"format": "pt"}` block yields an empty [`AdapterFileMetadata`] rather than invented defaults.
+///
+/// This is the *post-download* counterpart to the API's file-level inspector. The two import routes
+/// see the file at different times — a local/uploaded file exists when the job is queued, a
+/// repo/URL import only after the transfer lands — so both need the same one-read/two-answers
+/// primitive if an adapter is to be described identically whichever way it arrived.
+pub fn inspect_adapter_in_dir(
+    dir: &Path,
+) -> Result<(Option<String>, AdapterFileMetadata), SafetensorsHeaderError> {
+    let Some(safetensors_path) = first_safetensors_path(dir) else {
+        return Ok((None, AdapterFileMetadata::default()));
+    };
+    let header = read_safetensors_header(&safetensors_path)?;
+    Ok((detect_lora_family(&header), read_adapter_metadata(&header)))
+}
+
+/// The single writer for the adapter-declared fields on an imported LoRA's manifest entry
+/// (sc-14057): `networkType`, `rank`, `alpha`.
+///
+/// One function so the local-file route (which records these at queue time, from the source file)
+/// and the repo/URL route (which can only record them once the worker has downloaded the file)
+/// produce the *same shape* for the same adapter. Two identical adapters differing only in how they
+/// were ingested previously ended up with different manifest entries.
+///
+/// Semantics, deliberately:
+/// - **Only declared fields are written.** An adapter that states no `alpha` records none; it does
+///   not inherit `rank`. `alpha = rank` is the loader's last-resort scaling fallback, never a fact
+///   about the file, and recording it would let a fallback masquerade as a stated value.
+/// - **Existing values win** (`or_insert`, matching the family reconcile at the same call site). A
+///   value already on the entry came from the API pre-flight or an explicit caller, and a
+///   post-download re-read must not silently rewrite it.
+pub fn apply_adapter_metadata_to_manifest_entry(
+    entry: &mut Map<String, Value>,
+    metadata: &AdapterFileMetadata,
+) {
+    if let Some(network_type) = &metadata.network_type {
+        entry
+            .entry("networkType")
+            .or_insert_with(|| Value::String(network_type.clone()));
+    }
+    if let Some(rank) = metadata.rank {
+        entry.entry("rank").or_insert_with(|| json!(rank));
+    }
+    if let Some(alpha) = metadata.alpha {
+        entry.entry("alpha").or_insert_with(|| json!(alpha));
     }
 }
 
@@ -2759,6 +2837,13 @@ mod tests {
     /// "image"**. A `contains("mage")` test — the shape `flux` / `krea` / `ideogram` use — would
     /// swallow every Z-Image and Qwen-Image adapter and hard-reject it from its own model. Loosen
     /// the token-boundary match and this test goes red on the first case.
+    ///
+    /// The `*-flow` rows are the ones that discriminate the *arm's own* spellings: `contains`ing
+    /// the three flow forms (`mage-flow` / `mage_flow` / `mageflow`) reintroduces the exact hazard
+    /// the bare-token rows already defend, because `z-image-flow`, `qwen_image_flow` and
+    /// `imageflow` each end in one of them. They sit ahead of the z-image and qwen-image arms, so a
+    /// hit there is a confident *mislabel* — worse than an inconclusive result — and the adapter is
+    /// then hard-rejected from its own model.
     #[test]
     fn image_family_metadata_is_not_swallowed_by_the_mage_substring() {
         for (value, expected) in [
@@ -2768,11 +2853,25 @@ mod tests {
             ("qwen-image", "qwen-image"),
             ("Qwen-Image-Edit-2509", "qwen-image"),
             ("Qwen/Qwen_Image", "qwen-image"),
+            // …and the `*-flow` spellings, which a `contains("mage-flow")` test swallows whole.
+            ("z-image-flow", "z-image"),
+            ("Tongyi/Z-Image_Flow", "z-image"),
+            ("qwen_image_flow", "qwen-image"),
         ] {
             assert_eq!(
                 metadata_value_to_family(value).as_deref(),
                 Some(expected),
                 "{value:?} must stay {expected}, not be captured by the mage arm"
+            );
+        }
+        // An unaffiliated `*imageflow*` name belongs to no family we know. It must stay
+        // **inconclusive** rather than being claimed by Mage: `None` leaves the adapter usable
+        // wherever the user says it belongs, a wrong family hard-rejects it everywhere.
+        for value in ["imageflow", "ImageFlow-XL"] {
+            assert_eq!(
+                metadata_value_to_family(value),
+                None,
+                "{value:?} must stay inconclusive, not be captured by the mage arm"
             );
         }
         // And the same at the whole-header level, so ordering inside the arm chain is covered too.
@@ -2945,6 +3044,120 @@ mod tests {
 
         let meta = read_adapter_metadata(&header_with_metadata(json!({ "rank": "not-a-number" })));
         assert_eq!(meta.rank, None);
+    }
+
+    // ---- the post-download inspector + manifest writer (sc-14057) ------------------------------
+
+    /// Write a minimal valid safetensors file carrying `metadata` and `keys`.
+    fn write_adapter_file(path: &Path, metadata: &str, keys: &[&str]) {
+        let tensors: Vec<String> = keys
+            .iter()
+            .map(|key| format!(r#""{key}":{{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#))
+            .collect();
+        let header = format!(r#"{{"__metadata__":{metadata},{}}}"#, tensors.join(","));
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        fs::write(path, bytes).expect("write adapter");
+    }
+
+    /// 🔴 The ingest-route asymmetry this closes: the API records `networkType`/`rank`/`alpha` from
+    /// the *source file*, which a URL/repo import does not have when the job is queued. The worker
+    /// re-reads the landed download through this dir-level inspector, so the same adapter is
+    /// described identically whichever route brought it in.
+    #[test]
+    fn the_post_download_inspector_reads_family_and_declared_metadata_from_a_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_adapter_file(
+            &dir.path().join("adapter.safetensors"),
+            r#"{"family":"mage_flow","networkType":"lokr","rank":"16","alpha":"32"}"#,
+            &["transformer_blocks.0.attn.to_q.lokr_w1"],
+        );
+
+        let (family, meta) = inspect_adapter_in_dir(dir.path()).expect("inspect");
+        assert_eq!(family.as_deref(), Some("mage-flow"));
+        assert_eq!(meta.network_type.as_deref(), Some("lokr"));
+        assert_eq!(meta.rank, Some(16));
+        assert_eq!(meta.alpha, Some(32.0));
+
+        // A directory with no safetensors is not an error — it is simply no evidence.
+        let empty = tempfile::tempdir().expect("tempdir");
+        let (family, meta) = inspect_adapter_in_dir(empty.path()).expect("inspect");
+        assert_eq!(family, None);
+        assert!(meta.is_empty());
+    }
+
+    /// The URL/repo route end to end at the manifest seam: the entry the API queued carries no
+    /// declared metadata (no file existed yet), and the writer fills in exactly what the downloaded
+    /// adapter states — nothing more.
+    #[test]
+    fn a_url_route_manifest_entry_gains_the_downloaded_adapters_declared_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_adapter_file(
+            &dir.path().join("adapter.safetensors"),
+            r#"{"networkType":"lokr","rank":"16"}"#,
+            &["transformer_blocks.0.attn.to_q.lokr_w1"],
+        );
+
+        // Exactly the shape `queue_lora_import_job` emits for a `sourceUrl` import: no
+        // `networkType` / `rank` / `alpha`, because `read_adapter_metadata` had no file to read.
+        let mut entry = json!({
+            "id": "mage_flow_realism",
+            "name": "Realism",
+            "source": { "provider": "url", "url": "https://example.test/realism.safetensors" },
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        assert!(!entry.contains_key("networkType"));
+
+        let (_, meta) = inspect_adapter_in_dir(dir.path()).expect("inspect");
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &meta);
+
+        assert_eq!(
+            entry.get("networkType").and_then(Value::as_str),
+            Some("lokr")
+        );
+        assert_eq!(entry.get("rank").and_then(Value::as_u64), Some(16));
+        // 🔴 The file declares no alpha, so the entry records none — it does NOT inherit `rank`.
+        assert!(
+            !entry.contains_key("alpha"),
+            "alpha must stay absent, not inherit rank: {entry:?}"
+        );
+    }
+
+    /// The writer never rewrites a value the entry already carries — matching the `family`
+    /// reconcile it sits beside. A local-file import that already recorded these facts at queue
+    /// time keeps them when the worker re-reads the copied file.
+    #[test]
+    fn the_manifest_writer_does_not_overwrite_already_recorded_facts() {
+        let mut entry = json!({ "networkType": "lora", "rank": 8, "alpha": 4.0 })
+            .as_object()
+            .cloned()
+            .expect("object");
+        apply_adapter_metadata_to_manifest_entry(
+            &mut entry,
+            &AdapterFileMetadata {
+                network_type: Some("lokr".to_owned()),
+                rank: Some(64),
+                alpha: Some(128.0),
+            },
+        );
+        assert_eq!(
+            entry.get("networkType").and_then(Value::as_str),
+            Some("lora")
+        );
+        assert_eq!(entry.get("rank").and_then(Value::as_u64), Some(8));
+        assert_eq!(entry.get("alpha").and_then(Value::as_f64), Some(4.0));
+
+        // …and an adapter that declares nothing adds no keys at all.
+        let mut entry = json!({ "id": "x" }).as_object().cloned().expect("object");
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &AdapterFileMetadata::default());
+        assert_eq!(
+            entry.len(),
+            1,
+            "no declaration must write no keys: {entry:?}"
+        );
     }
 
     #[test]
@@ -3408,6 +3621,48 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    /// Mage's own row in the ComfyUI bare-prefix grammar (sc-14057). Same key shape and kohya
+    /// `lora_down`/`lora_up`/`alpha` factorization as the Qwen-Image Lightning files above — the
+    /// **only** thing separating the two families is the 12-block span, so this needs its own
+    /// assertion: `detects_comfyui_bare_prefix_qwen_image` pins the 60-block end and stays green
+    /// even if the Mage arm regresses to `None`.
+    ///
+    /// Two negatives are asserted in the same grammar so the test discriminates both halves of the
+    /// depth rule rather than just "some Mage-ish header resolves": a shorter 0..=10 span (relax
+    /// `max_block == 11` to "anything below Qwen" and it goes green) and a sparse span that merely
+    /// *reaches* 11 (drop the `blocks.len()` full-span check and it goes green).
+    #[test]
+    fn detects_comfyui_bare_prefix_mage_flow() {
+        let keys = comfyui_bare_prefix_mmdit_keys(MAGE_FLOW_BLOCK_COUNT);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("mage-flow"));
+
+        let short = comfyui_bare_prefix_mmdit_keys(MAGE_FLOW_BLOCK_COUNT - 1);
+        let header = header_from_keys(&short.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            detect_lora_family(&header),
+            None,
+            "an 11-block bare-prefix adapter must stay inconclusive, not be claimed as Mage"
+        );
+
+        // Reaches block 11 but skips most of the span — the shape a partially-trained community
+        // export has. Inconclusive, never a confident Mage.
+        let sparse: Vec<String> = comfyui_bare_prefix_mmdit_keys(MAGE_FLOW_BLOCK_COUNT)
+            .into_iter()
+            .filter(|key| {
+                ["blocks.0.", "blocks.1.", "blocks.11."]
+                    .iter()
+                    .any(|marker| key.contains(marker))
+            })
+            .collect();
+        let header = header_from_keys(&sparse.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            detect_lora_family(&header),
+            None,
+            "a sparse bare-prefix span that only reaches block 11 must stay inconclusive"
+        );
     }
 
     #[test]
