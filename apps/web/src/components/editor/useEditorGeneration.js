@@ -137,6 +137,21 @@ export function useEditorGeneration({ context }) {
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
   const showTierPicker = possibleTiers.length > 1 && availableTiers.length > 0;
+  // The tier the request actually carries. State when it is installed, else the same
+  // EDITOR_DEFAULT_TIER-first rule the reconciler below applies. This is a belt at the payload
+  // layer (mirroring the Image Studio's, sc-12090): no state — a catalog that settled after the
+  // model-change clamp ran, a persisted `editor-video` snapshot naming a tier since deleted — can
+  // leak a tier that is not on disk. Empty when nothing is installed, so `tierQuantize` returns
+  // null and the payload omits the field entirely rather than naming a tier the worker can't load.
+  const resolvedTier = useMemo(() => {
+    if (availableTiers.includes(quantTier)) {
+      return quantTier;
+    }
+    if (!availableTiers.length) {
+      return "";
+    }
+    return availableTiers.includes(EDITOR_DEFAULT_TIER) ? EDITOR_DEFAULT_TIER : availableTiers[0];
+  }, [availableTiers, quantTier]);
   const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(model);
   const lightningActive = showLightning && lightning;
 
@@ -162,11 +177,20 @@ export function useEditorGeneration({ context }) {
       setScheduler(schedulerDefaultFromModel(selectedModel));
       setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
     }
-    if (availableTiers.length && !availableTiers.includes(quantTier)) {
-      setQuantTier(availableTiers.includes(EDITOR_DEFAULT_TIER) ? EDITOR_DEFAULT_TIER : availableTiers[0]);
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
+
+  // Tier reconciliation is keyed on the INSTALLED SET, not on `selectedModel?.id` like the clamp
+  // above, because the two do not settle together: the editor mounts with the persisted snapshot's
+  // tier while the model catalog is still loading, so `availableTiers` fills in (or a later refresh
+  // reports a tier deleted/torn) with the model id unchanged — which the id-keyed effect never sees.
+  // Left there, the picker would highlight a tier the user does not have on disk.
+  useEffect(() => {
+    if (!availableTiers.length || availableTiers.includes(quantTier)) {
+      return;
+    }
+    setQuantTier(availableTiers.includes(EDITOR_DEFAULT_TIER) ? EDITOR_DEFAULT_TIER : availableTiers[0]);
+  }, [availableTiers, quantTier]);
 
   const [width, height] = String(resolution).split("x").map(Number);
   const motionPct = Math.round(((MOTIONS.indexOf(motion) + 1) / MOTIONS.length) * 100);
@@ -262,11 +286,17 @@ export function useEditorGeneration({ context }) {
   // per-action mode + source asset + advanced.timelineAction/timelineContext. Blank /
   // default / non-finite values are omitted so the engine re-derives its own defaults.
   function buildBasePayload() {
-    const mlxQuantize = tierQuantize(quantTier);
+    const mlxQuantize = tierQuantize(resolvedTier);
     const advanced = {
       resolution,
       motion,
-      ...(showTierPicker && mlxQuantize !== null ? { mlxQuantize } : {}),
+      // On-disk tier fidelity (sc-12090, #1516): send the RESOLVED tier's mlxQuantize whenever it
+      // maps to a known quant value — NOT only when the picker is shown. A model with a single
+      // possible tier hides the picker, but the tier the state resolved must still ride the payload,
+      // or the worker falls back to its own q8 default (`preferred_tier`, tier_resolver.rs) and
+      // budgets the VRAM gate against a tier the user never downloaded. `resolvedTier` is already
+      // clamped to the installed set, so this can only ever name a tier that is on disk.
+      ...(mlxQuantize !== null ? { mlxQuantize } : {}),
       ...(sampler && sampler !== "default" ? { sampler } : {}),
       ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
       ...(scheduler && scheduler !== "default" && Number.isFinite(Number(schedulerShift))
