@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { issue, summarize } from "./validation/issues.js";
 import {
   batchPromptBudgetOverages,
+  batchResolutionMessage,
   imageBatchValidation,
   imageGenerateValidation,
 } from "./imageStudioValidation.js";
@@ -225,8 +226,9 @@ describe("imageBatchValidation", () => {
     groupIssues: [],
     resolutionIssues: [],
     promptBudgetOverages: [],
-    minDimension: 256,
-    maxDimension: 4096,
+    // The global backend envelope — a non-native model (no declared stride). A native-resolution model
+    // (Mage-Flow) passes its own narrower { min: 512, max: 2048, step: 16 } here instead (sc-14058).
+    dimensionConstraints: { min: 256, max: 4096, step: 1 },
   };
 
   it("passes a whole batch draft", () => {
@@ -250,6 +252,38 @@ describe("imageBatchValidation", () => {
   it("surfaces an out-of-range resolution with the offending size", () => {
     const summary = summarize(imageBatchValidation({ ...whole, resolutionIssues: [{ width: 5000, height: 300 }] }));
     expect(summary.surfaced[0].message).toBe("A prompt’s [5000×300] size is out of range — each side must be 256–4096.");
+  });
+
+  // sc-14058: a native-resolution model (Mage-Flow) passes its own { min, max, step } — the batch [WxH]
+  // directive must report THAT range + the required stride, never the global 256–4096 / no-stride text.
+  it("reports a native model's own range AND stride for an inline [WxH] batch directive", () => {
+    const summary = summarize(
+      imageBatchValidation({
+        ...whole,
+        resolutionIssues: [{ width: 1000, height: 1000 }],
+        dimensionConstraints: { min: 512, max: 2048, step: 16 },
+      }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0].kind).toBe("error");
+    expect(summary.surfaced[0].message).toBe(
+      "A prompt’s [1000×1000] size isn’t valid for this model — each side must be 512–2048 and a multiple of 16.",
+    );
+    // The tell that the fix is live: it never falls back to the global backend envelope.
+    expect(summary.surfaced[0].message).not.toContain("256");
+    expect(summary.surfaced[0].message).not.toContain("4096");
+  });
+
+  // batchResolutionMessage is the batch twin of dimensionConstraintMessage: a plain (no-stride) model
+  // keeps the historical "out of range — each side must be MIN–MAX" wording, so non-native models don't
+  // regress; a stride model gains the "multiple of N" clause.
+  it("batchResolutionMessage: no-stride keeps the legacy wording, a stride model adds the multiple clause", () => {
+    expect(batchResolutionMessage({ width: 5000, height: 300 }, { min: 256, max: 4096, step: 1 })).toBe(
+      "A prompt’s [5000×300] size is out of range — each side must be 256–4096.",
+    );
+    expect(batchResolutionMessage({ width: 600, height: 600 }, { min: 512, max: 2048, step: 16 })).toBe(
+      "A prompt’s [600×600] size isn’t valid for this model — each side must be 512–2048 and a multiple of 16.",
+    );
   });
 
   it("blocks at 4001 Unicode scalars, allows 4000, and identifies every offending resolved item", () => {

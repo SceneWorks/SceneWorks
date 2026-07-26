@@ -22,8 +22,6 @@ import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
 import { expandBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
-  MAX_IMAGE_DIMENSION,
-  MIN_IMAGE_DIMENSION,
   dimensionConstraintMessage,
   evaluateModelDimensions,
   modelDimensionConstraints,
@@ -2238,17 +2236,22 @@ export function ImageStudio() {
   }, [batchRun, jobs]);
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
-  // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
-  // range — block the run and name the offending size.
+  // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
+  // SAME per-model range + stride the single-generate gate enforces (sc-14058), not the raw backend
+  // envelope. For a native-resolution model (Mage-Flow) an off-range OR off-÷16-stride size blocks the
+  // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
+  // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
     .map((line) => parsePromptResolution(line).resolution)
     .filter(
       (res) =>
         res &&
-        (res.width < MIN_IMAGE_DIMENSION ||
-          res.width > MAX_IMAGE_DIMENSION ||
-          res.height < MIN_IMAGE_DIMENSION ||
-          res.height > MAX_IMAGE_DIMENSION),
+        evaluateModelDimensions({
+          model: selectedModel,
+          resolution: `${res.width}x${res.height}`,
+          widthOverride: "",
+          heightOverride: "",
+        }).invalid,
     );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
@@ -2277,8 +2280,10 @@ export function ImageStudio() {
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
       resolutionIssues: batchResolutionIssues,
-      minDimension: MIN_IMAGE_DIMENSION,
-      maxDimension: MAX_IMAGE_DIMENSION,
+      // Per-model range + stride for the inline [WxH] directive — the SAME constraints the free
+      // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
+      // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
+      dimensionConstraints,
     }),
     [
       activeProject,
@@ -2287,6 +2292,7 @@ export function ImageStudio() {
       batchMissingKeys,
       batchGroupIssues,
       batchResolutionIssues,
+      dimensionConstraints,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and

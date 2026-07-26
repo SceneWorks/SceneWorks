@@ -250,6 +250,48 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
     expect(generateButton().disabled).toBe(false);
   });
 
+  // sc-14058 (batch path): the inline [WxH] batch directive must be gated by the SAME per-model range +
+  // ÷16 stride as the single-generate free override — not the global 256–4096 envelope. Both offending
+  // sizes below sit INSIDE 256–4096, so a global-envelope check (the pre-fix behavior) would wave them
+  // through and only fail at job time. Also proves the message names the native range/stride, not 256–4096.
+  it("enforces the native range + ÷16 stride on inline [WxH] batch directives and surfaces the native error", async () => {
+    await render(baseContext({ imageModels: [MAGE_RL] }));
+    await click(container.querySelector(".batch-toggle"));
+    await act(async () => {});
+    const batchInput = container.querySelector('textarea[aria-label="Batch prompts"]');
+    expect(batchInput).toBeTruthy();
+    const warning = () => container.querySelector(".batch-warning");
+    const runBtn = () => [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Run batch"));
+
+    // [1000x1000] is off the ÷16 stride; [600x600] is below the 512 native floor. Both are within 256–4096.
+    await act(async () => setTextarea(batchInput, "[1000x1000] a red boat\n[600x600] a blue car"));
+    expect(warning()).toBeTruthy();
+    expect(warning().textContent).toContain("multiple of 16");
+    expect(warning().textContent).toContain("512");
+    expect(warning().textContent).toContain("2048");
+    // The discriminator: the batch never falls back to the global backend envelope.
+    expect(warning().textContent).not.toContain("256");
+    expect(warning().textContent).not.toContain("4096");
+    expect(runBtn().disabled).toBe(true);
+
+    // A native, ÷16-clean [1536x1536] clears the block and re-enables the Run.
+    await act(async () => setTextarea(batchInput, "[1536x1536] a red boat"));
+    expect(warning()).toBeFalsy();
+    expect(runBtn().disabled).toBe(false);
+  });
+
+  it("leaves a non-native model's inline [WxH] batch directive on the global 256–4096 / no-stride envelope", async () => {
+    await render(baseContext({ imageModels: [PLAIN] }));
+    await click(container.querySelector(".batch-toggle"));
+    await act(async () => {});
+    const batchInput = container.querySelector('textarea[aria-label="Batch prompts"]');
+    // 1000 is not ÷16 but perfectly valid for a plain model — no batch warning, Run stays enabled.
+    await act(async () => setTextarea(batchInput, "[1000x1000] a red boat"));
+    expect(container.querySelector(".batch-warning")).toBeFalsy();
+    const runBtn = [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Run batch"));
+    expect(runBtn.disabled).toBe(false);
+  });
+
   it("wires Turbo's 4-step / CFG-off defaults and seeds the native default resolution", async () => {
     await render(baseContext({ imageModels: [MAGE_TURBO] }));
     await openAdvanced();
