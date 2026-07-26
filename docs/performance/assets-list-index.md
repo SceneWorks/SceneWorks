@@ -2,9 +2,10 @@
 
 `ProjectStore::list_assets` serves the normalized `asset_json` envelope stored
 in each project's `project.db`. That envelope includes filesystem-derived
-generation-set hydration and video-poster presence, so a clean list does not
-read or stat a per-row file. SceneWorks-owned asset mutations write the sidecar
-and update the indexed envelope before returning, so the next list sees them
+generation-set hydration. Indexed video posters are copied to the flat managed
+`assets/posters` directory, which a clean list snapshots once; no per-row file
+is read or statted. SceneWorks-owned asset mutations write the sidecar and
+update the indexed envelope before returning, so the next list sees them
 immediately. A durable `.asset-index-dirty` marker spans the filesystem write
 and separate SQLite transaction. If either fails or the process exits between
 them, the next indexed read rebuilds from disk before serving data. Marker
@@ -15,9 +16,9 @@ and index through the same guarded core operation.
 
 ## Out-of-band filesystem edits
 
-Direct edits to `*.sceneworks.json`, `generation-sets/*.json`, media, or sibling
-`*.poster.jpg` files are supported through explicit reconciliation. After
-editing those files, call:
+Direct edits to `*.sceneworks.json`, `generation-sets/*.json`, media, or source
+sibling `*.poster.jpg` files are supported through explicit reconciliation.
+After editing those files, call:
 
 ```text
 POST /api/v1/projects/<project-id>/reindex
@@ -25,13 +26,22 @@ POST /api/v1/projects/<project-id>/reindex
 
 or use `ProjectStore::reindex_project`. Until reindex completes, list responses
 continue to use the last indexed envelope, including its embedded generation
-set and poster-presence decision. Reindex reads the current files, so this
-contract also covers deletions, same-size rewrites, and edits made by tools that
-preserve file timestamps. A corrupt sidecar is skipped during reindex; a corrupt
-indexed envelope is skipped during listing without preventing healthy assets
-from loading. Here "corrupt sidecar" means unreadable or invalid JSON; a
-parseable sidecar that violates the asset schema can make reindex fail so the
-dirty marker remains and the prior DB transaction stays intact for retry.
+set. Reindex reads the current source files, so this contract also covers
+deletions, same-size rewrites, and edits made by tools that preserve file
+timestamps.
+
+Poster presence has a narrower freshness contract. Indexing copies an existing
+source sibling poster to `assets/posters/<asset-id>.poster.jpg` and advertises
+that managed path. Deleting the advertised managed file is visible on the next
+ordinary list: its URL is suppressed without a reindex. Adding, replacing, or
+deleting only the source sibling still requires reindexing to refresh the
+managed copy.
+
+A corrupt sidecar is skipped during reindex; a corrupt indexed envelope is
+skipped during listing without preventing healthy assets from loading. Here
+"corrupt sidecar" means unreadable or invalid JSON; a parseable sidecar that
+violates the asset schema can make reindex fail so the dirty marker remains and
+the prior DB transaction stays intact for retry.
 
 ## SQLite connection and journal policy
 
@@ -56,7 +66,10 @@ character JSON reads, poster stats, dirty-marker reads/writes/removes,
 directory-create calls, and DB opens. `fs_total` is the sum of those categories.
 Counts are logical calls made by the SceneWorks asset-list/reconciliation code;
 they do not claim to expose hidden syscalls inside SQLite, the standard library,
-or the operating system.
+or the operating system. In particular, the managed-poster snapshot is one
+logical directory scan per list, but its enumeration bytes and CPU grow with
+the number of managed posters. Benchmark wall time therefore remains necessary
+alongside the constant logical-operation count, especially on network volumes.
 
 ```shell
 cargo run --release -p sceneworks-core --example assets_list_benchmark -- synthetic 1000 10
@@ -105,8 +118,8 @@ evicted cold-cache measurement:
 
 ```text
 storage=synthetic-local-distinct-video-sets path=<temporary local directory>
-first-call: assets=500 elapsed_ms=8.305 fs_total=10 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
-steady-state-average(10): assets=500 elapsed_ms=7.994 fs_total=7 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+first-call: assets=500 elapsed_ms=9.384 fs_total=11 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=1 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+steady-state-average(10): assets=500 elapsed_ms=8.418 fs_total=8 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=1 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
 ```
 
 The implementation environment had no mounted network volume or RunPod access,
