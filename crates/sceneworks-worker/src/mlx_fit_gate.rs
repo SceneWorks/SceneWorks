@@ -1434,7 +1434,10 @@ mod tests {
             .with_component("text_encoder", WeightsSource::Dir(te))
             .with_component("vae", WeightsSource::Dir(vae));
         let (total, te_bytes, _) = spec_component_bytes("mage_flow_edit", &staged);
-        let _ = te_bytes; // used only by the macOS assertion below
+        println!(
+            "mage_flow_edit split tier: bare total={} staged total={total} staged te={te_bytes}",
+            spec_component_bytes("mage_flow_edit", &bare).0
+        );
         assert_eq!(
             total, 9_000,
             "the staged text encoder and VAE are weights this tier holds resident"
@@ -1487,6 +1490,13 @@ mod tests {
         const VAE: u64 = 345_053_168;
         let total = DIT + TE + VAE;
         let budget = |gb: f64| Some(MemoryBudget { total_gb: gb });
+        for gb in [6.0, 7.0] {
+            println!(
+                "q4 @ {gb} GB cap: fixed={:?}  pre-fix(DiT-only)={:?}",
+                decide_residency(total, TE, budget(gb), true),
+                decide_residency(DIT, 0, budget(gb), true),
+            );
+        }
 
         // 6 GB: below the 7.868 GB measured q4 peak ⇒ must refuse.
         assert!(
