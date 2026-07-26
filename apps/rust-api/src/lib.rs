@@ -73,6 +73,10 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use tower_http::compression::{
+    predicate::{Predicate, SizeAbove},
+    CompressionLayer, CompressionLevel,
+};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -975,6 +979,46 @@ async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
     response
 }
 
+/// Response-local marker applied only to `/api` requests. The compression
+/// predicate reads this extension after the handler returns, so embedded web
+/// assets retain SC-14785's precompressed representation/ETag policy instead of
+/// being passed through a second, dynamic compressor.
+#[derive(Clone, Copy, Debug)]
+struct ApiResponseCompressionCandidate;
+
+async fn mark_api_response_for_compression(request: AxumRequest, next: Next) -> Response {
+    let is_api = request.uri().path() == "/api" || request.uri().path().starts_with("/api/");
+    let mut response = next.run(request).await;
+    if is_api {
+        response
+            .extensions_mut()
+            .insert(ApiResponseCompressionCandidate);
+    }
+    response
+}
+
+const API_COMPRESSION_MIN_BYTES: u16 = 1024;
+
+fn is_json_api_response(
+    _status: StatusCode,
+    _version: axum::http::Version,
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> bool {
+    extensions
+        .get::<ApiResponseCompressionCandidate>()
+        .is_some()
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+            })
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -1598,6 +1642,22 @@ fn create_app_with_state_mode(
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors)
+        // Marking is inside CompressionLayer on the response path. This keeps
+        // dynamic compression API-only even when `embed-web` serves a JSON
+        // file through the same router.
+        .layer(middleware::from_fn(mark_api_response_for_compression))
+        .layer(
+            CompressionLayer::new()
+                // Only the broadly supported encodings required by SC-14798.
+                // Dynamic Brotli defaults to level 4 and gzip to its library
+                // default; see docs/api-response-compression.md.
+                .br(true)
+                .gzip(true)
+                .no_deflate()
+                .no_zstd()
+                .quality(CompressionLevel::Default)
+                .compress_when(SizeAbove::new(API_COMPRESSION_MIN_BYTES).and(is_json_api_response)),
+        )
         // Outermost so auth failures, CORS responses, and handler responses are
         // all timed. Non-API frontend traffic is ignored by the middleware.
         .layer(middleware::from_fn(api_request_timing));

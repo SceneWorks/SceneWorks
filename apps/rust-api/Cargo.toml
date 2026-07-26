@@ -35,7 +35,7 @@ tracing = { workspace = true }
 # Move deleted LoRA/model artifacts to the OS trash (recoverable) rather than unlinking them.
 trash = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors"] }
 tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1.11", features = ["v4"] }
 

@@ -3,6 +3,7 @@
 
 mod auth;
 mod catalog;
+mod compression;
 #[cfg(feature = "embed-web")]
 mod embedded_web;
 mod jobs;
