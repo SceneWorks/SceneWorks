@@ -96,7 +96,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     let catalog_root = temporary.path().join("external-catalog");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 0);
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
 
     let (status, created) = request(
         app.clone(),
@@ -136,6 +136,17 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     assert!(initial_scan_completed, "empty fixture scan completes");
+    for _ in 0..100 {
+        if state.catalog_scan_supervisor.tracked_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        state.catalog_scan_supervisor.tracked_count().await,
+        0,
+        "completed fixture scan is fully reaped before direct contract setup"
+    );
 
     let registry = CatalogRegistry::new(&config_dir);
     let mut catalog = registry.open_attached(&catalog_id).unwrap();
@@ -152,7 +163,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         BTreeMap::from([("person_detector".to_owned(), "model@sha256:abc".to_owned())]);
     contract.checkpoints = BTreeMap::from([("scan".to_owned(), json!({"shard": 4, "row": 80}))]);
     contract.processing = CatalogProcessingProgress {
-        state: CatalogProcessingState::Paused,
+        state: CatalogProcessingState::Running,
         candidate_count: 12,
         processed_count: 4,
         accepted_count: 3,
@@ -162,6 +173,16 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         updated_at: "2026-07-26T00:00:00Z".to_owned(),
     };
     catalog.set_contract_state(&contract).unwrap();
+    catalog
+        .request_processing_control(
+            0,
+            sceneworks_core::catalog_store::CatalogProcessingDesiredState::Paused,
+        )
+        .expect("fixture pause intent persists");
+    contract.processing.state = CatalogProcessingState::Paused;
+    catalog
+        .set_processing_progress(&contract.processing)
+        .expect("fixture paused progress persists");
     catalog.close();
 
     let (status, detail) = request(
