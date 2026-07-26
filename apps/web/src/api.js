@@ -17,6 +17,73 @@ export function isAbortError(err) {
   return err?.name === "AbortError";
 }
 
+// ---- Failure shape (sc-15105) ---------------------------------------------------
+// `apiFetch` used to throw a bare `new Error(message)`, discarding `response.status`.
+// Nothing downstream could tell a 401 from any other failure, so a token that went
+// stale WHILE a remote tab was open had no seam to re-prompt on: every request 401'd,
+// the message piled up in the notice bands, and the media-ticket / SSE-ticket loops
+// retried forever behind an app that looked broken rather than locked.
+//
+// `message` is deliberately byte-identical to what the bare Error carried, so the ~85
+// existing `setError(err.message)` call sites are untouched; the status just rides
+// along for the few places that want it.
+export class ApiError extends Error {
+  constructor(message, { status, detail, authRequired, code } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.code = code;
+    // The API tags its auth rejection (`apps/rust-api/src/auth.rs`); other 4xx bodies
+    // don't carry the key, so this is a plain boolean rather than a tri-state.
+    this.authRequired = authRequired === true;
+    // Set on a 401 when the registered handler claims the session (the access gate is
+    // re-verifying and will either re-prompt or resume). The retry loops read this to
+    // decide between "surrender, the gate has it" and "treat it as an ordinary failure".
+    this.reauthenticating = false;
+  }
+}
+
+// True for the API's "you are not authenticated" rejection. Sibling of `isAbortError`.
+export function isUnauthorized(err) {
+  return err?.status === 401;
+}
+
+// True for the API's per-IP attempt throttle (`apps/rust-api/src/auth.rs`), which answers
+// 429 once a peer exceeds its failed-token budget — including on the otherwise public
+// /api/v1/auth/verify. A throttled host is refusing, not unreachable, and the two need
+// different copy: the lockout clears itself in about a minute.
+export function isThrottled(err) {
+  return err?.status === 429;
+}
+
+// True for a 401 the access gate has claimed: it is re-verifying the token and will
+// either re-prompt or resume the session. The retry loops (the media-ticket mint, the
+// SSE-ticket connect) check this and surrender rather than backing off forever against
+// a token that can only 401. A 401 that arrives with no gate registered — or one the
+// gate declined — is false, and stays each caller's ordinary error to handle.
+export function isReauthenticating(err) {
+  return isUnauthorized(err) && err.reauthenticating === true;
+}
+
+// The one place that reacts to a 401, registered by `useAccessGate`. Module-level
+// (not React state, same pattern as `setMediaTicket` below) so EVERY `apiFetch` caller
+// participates without touching a single call site. Unset outside the gate's lifetime
+// and on the desktop/loopback shell, where a 401 is not a thing that happens.
+let unauthorizedHandler = null;
+
+// Returns its own unregister function, which clears the slot only if this handler is
+// still the registered one — so a late cleanup can never evict a newer registration.
+export function setUnauthorizedHandler(handler) {
+  const next = typeof handler === "function" ? handler : null;
+  unauthorizedHandler = next;
+  return () => {
+    if (unauthorizedHandler === next) {
+      unauthorizedHandler = null;
+    }
+  };
+}
+
 // `options` is forwarded to fetch, so callers can pass an AbortController
 // `signal` to cancel a request (e.g. a stale project-scoped load).
 export async function apiFetch(path, token, options = {}) {
@@ -40,9 +107,27 @@ export async function apiFetch(path, token, options = {}) {
         : detail === undefined || detail === null
           ? `Request failed with ${response.status}`
           : JSON.stringify(detail);
-    const error = new Error(message);
-    error.status = response.status;
-    error.code = payload?.code;
+    const error = new ApiError(message, {
+      status: response.status,
+      detail,
+      authRequired: payload?.authRequired,
+      code: payload?.code,
+    });
+    // `token` matters: a 401 on a request that deliberately presented NO credential says
+    // nothing about the session token, so it must not drag the gate up. Several callers
+    // do exactly that — e.g. the `PUT /api/v1/ui-preferences` writes pass "" — and before
+    // sc-15105 their 401s were simply swallowed by a `.catch(() => {})`. Without this
+    // check a remote browser would slam into the full-page blocker on a theme toggle.
+    if (response.status === 401 && token) {
+      // Notify before throwing so the gate reacts even for the callers that swallow
+      // their own errors, and record whether it claimed the session. A throwing handler
+      // must not mask the real API failure, nor be able to swallow the throw.
+      try {
+        error.reauthenticating = unauthorizedHandler?.(error) === true;
+      } catch {
+        // Deliberately ignored: the handler is UI bookkeeping, the ApiError is the truth.
+      }
+    }
     throw error;
   }
   return payload;
