@@ -659,11 +659,28 @@ impl Catalog {
             .connection
             .unchecked_transaction()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
+        match &normalized.source_config {
+            Some(source_config) => {
+                transaction
+                    .execute(
+                        "insert or replace into catalog_metadata(key, value) values (?1, ?2)",
+                        params![
+                            SOURCE_CONFIG_METADATA_KEY,
+                            serde_json::to_string(source_config)?
+                        ],
+                    )
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+            None => {
+                transaction
+                    .execute(
+                        "delete from catalog_metadata where key = ?1",
+                        [SOURCE_CONFIG_METADATA_KEY],
+                    )
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
         for (key, value) in [
-            (
-                SOURCE_CONFIG_METADATA_KEY,
-                serde_json::to_string(&normalized.source_config)?,
-            ),
             (
                 ANALYZER_VERSIONS_METADATA_KEY,
                 serde_json::to_string(&normalized.analyzer_versions)?,

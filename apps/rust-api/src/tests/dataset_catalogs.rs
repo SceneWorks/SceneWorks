@@ -3,8 +3,7 @@
 use std::collections::BTreeMap;
 
 use sceneworks_core::catalog_store::{
-    CatalogContractState, CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry,
-    NewCatalogRecord,
+    CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry, NewCatalogRecord,
 };
 
 use super::support::*;

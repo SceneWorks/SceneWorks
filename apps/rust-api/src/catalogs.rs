@@ -19,7 +19,7 @@ use sceneworks_core::catalog_store::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ApiError, AppState};
+use crate::{ApiError, ApiJson, AppState};
 
 const CATALOG_API_CONTRACT_VERSION: u32 = 1;
 const DEFAULT_QUERY_LIMIT: u32 = 50;
@@ -147,7 +147,7 @@ pub(crate) async fn list_catalogs(
 
 pub(crate) async fn create_catalog(
     State(state): State<AppState>,
-    Json(request): Json<CreateCatalogRequest>,
+    ApiJson(request): ApiJson<CreateCatalogRequest>,
 ) -> Result<(StatusCode, Json<CatalogResponse>), ApiError> {
     require_absolute_catalog_path(&request.path)?;
     let config_dir = state.settings.config_dir.clone();
@@ -171,7 +171,7 @@ pub(crate) async fn create_catalog(
 
 pub(crate) async fn attach_catalog(
     State(state): State<AppState>,
-    Json(request): Json<AttachCatalogRequest>,
+    ApiJson(request): ApiJson<AttachCatalogRequest>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
     require_absolute_catalog_path(&request.path)?;
     let config_dir = state.settings.config_dir.clone();
@@ -202,7 +202,7 @@ pub(crate) async fn get_catalog_status(
 pub(crate) async fn query_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
-    Json(request): Json<CatalogQueryRequest>,
+    ApiJson(request): ApiJson<CatalogQueryRequest>,
 ) -> Result<Json<CatalogQueryResponse>, ApiError> {
     if request.limit == 0 || request.limit > MAX_QUERY_LIMIT {
         return Err(ApiError::bad_request(format!(
@@ -228,7 +228,7 @@ pub(crate) async fn query_catalog(
 pub(crate) async fn catalog_facets(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
-    Json(request): Json<CatalogFacetsRequest>,
+    ApiJson(request): ApiJson<CatalogFacetsRequest>,
 ) -> Result<Json<CatalogFacetsResponse>, ApiError> {
     if request.limit_per_facet == 0 || request.limit_per_facet > MAX_FACET_LIMIT {
         return Err(ApiError::bad_request(format!(
