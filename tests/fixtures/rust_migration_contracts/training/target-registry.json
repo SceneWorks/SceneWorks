@@ -1483,7 +1483,9 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora"
+          "lora",
+          "lokr",
+          "full"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1574,7 +1576,9 @@
           "cosine"
         ],
         "networkTypes": [
-          "lora"
+          "lora",
+          "lokr",
+          "full"
         ],
         "optimizers": [
           "adamw8bit",

@@ -1201,3 +1201,269 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(payload.advanced.lightning).toBeUndefined();
   });
 });
+
+describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
+  let container;
+  let root;
+
+  const DEFAULT_ENCODER = {
+    id: "default",
+    label: "Shipped Gemma 3 12B (default)",
+    description: "Uses the Gemma text encoder installed with LTX.",
+    isDefault: true,
+  };
+  const AMORAL_ENCODER = {
+    id: "ltx_amoral_gemma_3_12b",
+    label: "Amoral Gemma 3 12B (operator staged)",
+    description: "Uses the complete alternate Gemma snapshot already staged by the operator.",
+    isDefault: false,
+  };
+  const LTX_WITH_ENCODERS = {
+    ...LTX,
+    adapter: "ltx_video",
+    textEncoderOptions: [DEFAULT_ENCODER, AMORAL_ENCODER],
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const encoderSelect = () => container.querySelector('select[aria-label="Text encoder model"]');
+  const enhanceCheckbox = () =>
+    [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Enhance prompt before generation"))
+      ?.querySelector('input[type="checkbox"]');
+
+  it("is model-driven and hides an alternate the runtime did not enumerate", async () => {
+    await render(
+      baseContext({
+        videoModels: [
+          {
+            ...LTX_WITH_ENCODERS,
+            textEncoderOptions: [DEFAULT_ENCODER],
+          },
+        ],
+      }),
+    );
+    await openAdvanced(container);
+
+    expect(enhanceCheckbox()).toBeTruthy();
+    expect(encoderSelect()).toBeTruthy();
+    expect([...encoderSelect().options].map((option) => option.value)).toEqual(["default"]);
+    expect(container.textContent).toContain(
+      "Complete operator-staged alternates appear here after Models is refreshed.",
+    );
+
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ videoModels: [{ ...LTX, adapter: "ltx_video" }] }));
+    await openAdvanced(container);
+    expect(encoderSelect()).toBeNull();
+  });
+
+  it("derives a future model's default from capability metadata instead of a hard-coded id", async () => {
+    const futureModel = {
+      ...LTX,
+      id: "future_video",
+      adapter: "future_video",
+      textEncoderOptions: [
+        {
+          id: "future_alternate",
+          label: "Future alternate",
+          description: "A staged future alternate.",
+          isDefault: false,
+        },
+        {
+          id: "future_bundled",
+          label: "Future bundled encoder",
+          description: "The future model's bundled encoder.",
+          isDefault: true,
+        },
+      ],
+    };
+    const context = baseContext({ videoModels: [futureModel] });
+    await render(context);
+    await openAdvanced(container);
+
+    expect(encoderSelect().value).toBe("future_bundled");
+    await click(enhanceCheckbox());
+    await act(async () => setSelect(encoderSelect(), "future_alternate"));
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
+      "future_alternate",
+    );
+  });
+
+  it("does not carry one model's encoder id into a model with a disjoint option namespace", async () => {
+    const futureModel = {
+      ...LTX,
+      id: "future_video",
+      name: "Future Video",
+      adapter: "future_video",
+      textEncoderOptions: [
+        {
+          id: "future_bundled",
+          label: "Future bundled encoder",
+          description: "The future model's bundled encoder.",
+          isDefault: true,
+        },
+      ],
+    };
+    await render(baseContext({ videoModels: [LTX_WITH_ENCODERS, futureModel] }));
+    await openAdvanced(container);
+    await click(enhanceCheckbox());
+    await act(async () => setSelect(encoderSelect(), AMORAL_ENCODER.id));
+
+    const modelSelect = container.querySelector(".settings-field-model select");
+    await act(async () => setSelect(modelSelect, futureModel.id));
+    expect(encoderSelect().value).toBe("future_bundled");
+    expect(container.textContent).not.toContain("Previously selected encoder (not staged)");
+  });
+
+  it("applies and clears a preset text-encoder default through functional setter updates", async () => {
+    await render(
+      baseContext({
+        videoModels: [LTX_WITH_ENCODERS],
+        presets: [
+          {
+            id: "amoral_prompt",
+            name: "Amoral prompt",
+            scope: "project",
+            workflow: "text_to_video",
+            model: "ltx_2_3",
+            modes: ["text_to_video"],
+            defaults: {
+              enhancePrompt: true,
+              textEncoderModel: AMORAL_ENCODER.id,
+            },
+          },
+        ],
+      }),
+    );
+
+    await click(buttonWithText(container, "Amoral prompt"));
+    await openAdvanced(container);
+    expect(enhanceCheckbox().checked).toBe(true);
+    expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
+
+    const presetAxis = container.querySelector(".style-axis-presets");
+    await click(buttonWithText(presetAxis, "None"));
+    expect(enhanceCheckbox().checked).toBe(false);
+    expect(encoderSelect().value).toBe(DEFAULT_ENCODER.id);
+  });
+
+  it("emits the exact non-default selector with prompt enhancement, never the legacy boolean", async () => {
+    const context = baseContext({ videoModels: [LTX_WITH_ENCODERS] });
+    await render(context);
+    await openAdvanced(container);
+
+    expect(encoderSelect().disabled).toBe(true);
+    await click(enhanceCheckbox());
+    expect(encoderSelect().disabled).toBe(false);
+    await act(async () => setSelect(encoderSelect(), AMORAL_ENCODER.id));
+    await act(async () => {});
+    expect(
+      JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")),
+    ).toMatchObject({
+      model: "ltx_2_3",
+      enhancePrompt: true,
+      textEncoderModel: AMORAL_ENCODER.id,
+    });
+    await click(buttonWithText(container, "Render clip"));
+
+    const advanced = context.createVideoJob.mock.calls[0][0].advanced;
+    expect(advanced).toMatchObject({
+      enhancePrompt: true,
+      textEncoderModel: "ltx_amoral_gemma_3_12b",
+    });
+    expect(advanced.useUncensoredEnhancer).toBeUndefined();
+  });
+
+  it("keeps the shipped encoder as the omission-based default", async () => {
+    const context = baseContext({ videoModels: [LTX_WITH_ENCODERS] });
+    await render(context);
+    await openAdvanced(container);
+    await click(enhanceCheckbox());
+    await click(buttonWithText(container, "Render clip"));
+
+    const advanced = context.createVideoJob.mock.calls[0][0].advanced;
+    expect(advanced.enhancePrompt).toBe(true);
+    expect(advanced.textEncoderModel).toBeUndefined();
+  });
+
+  it("round-trips the stable selector through a recorded recipe", async () => {
+    const context = baseContext({
+      videoModels: [LTX_WITH_ENCODERS],
+      studioLaunch: {
+        id: "replay-text-encoder",
+        view: "Video",
+        recipe: {
+          mode: "text_to_video",
+          model: "ltx_2_3",
+          prompt: "A camera glides through a forest",
+          normalizedSettings: {},
+          rawAdapterSettings: {
+            enhancePrompt: true,
+            textEncoderModel: AMORAL_ENCODER.id,
+          },
+        },
+      },
+    });
+    await render(context);
+    await openAdvanced(container);
+
+    expect(enhanceCheckbox().checked).toBe(true);
+    expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({
+      enhancePrompt: true,
+      textEncoderModel: AMORAL_ENCODER.id,
+    });
+  });
+
+  it("rehydrates a legacy boolean recipe into the stable selector", async () => {
+    const context = baseContext({
+      videoModels: [LTX_WITH_ENCODERS],
+      studioLaunch: {
+        id: "replay-legacy-text-encoder",
+        view: "Video",
+        recipe: {
+          mode: "text_to_video",
+          model: "ltx_2_3",
+          prompt: "A slow aerial reveal",
+          normalizedSettings: {},
+          rawAdapterSettings: {
+            enhancePrompt: true,
+            useUncensoredEnhancer: true,
+          },
+        },
+      },
+    });
+    await render(context);
+    await openAdvanced(container);
+
+    expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
+    await click(buttonWithText(container, "Render clip"));
+    const advanced = context.createVideoJob.mock.calls[0][0].advanced;
+    expect(advanced.textEncoderModel).toBe(AMORAL_ENCODER.id);
+    expect(advanced.useUncensoredEnhancer).toBeUndefined();
+  });
+});

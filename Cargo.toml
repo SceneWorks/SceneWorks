@@ -41,6 +41,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # the operating system's trash instead of an irreversible unlink. Pinned once here so
 # the api (sync helper) and core (project store purge) resolve the same version.
 trash = "5"
+# Image decode/encode, declared once for the whole workspace (sc-15052). Cargo unifies
+# features for a shared dependency across members, so a member's own feature list never
+# describes what it compiles with — every member builds against the union below. Unlike
+# a version skew this is SILENT: `image` features decide which formats decode, so a crate
+# quietly gains a capability it never declared and `cargo test -p <member>` exercises a
+# configuration that never ships. sc-15028 was that gap — two transcode tests asserted BMP
+# could not decode, green under `-p`, red in the workspace. Declaring it here makes the
+# declaration and the union the same object, so the two cannot drift apart.
+#
+# Keep `default-features = false`: the list below is meant to be exhaustive, and the
+# defaults would pull in codecs (and rayon) nobody asked for. Adding a format here adds it
+# for every member — that is the point. crates/sceneworks-worker/tests/image_workspace_dep_guard.rs
+# fails the build if a member goes back to declaring `image` on its own.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "jpeg",
+    "png",
+    "tiff",
+    "webp",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -62,4 +83,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6147a596be2739f6c4f76644fe901dc28a7e00c7" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "4d15b0fcc08c01d8429ce4857bd6d4cf633e5af8" }

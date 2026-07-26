@@ -417,6 +417,17 @@ fn normalize_train_dtype(value: &str) -> String {
 ))]
 fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
     let advanced = &config.advanced;
+    // sc-14056 — the FULL base fine-tune selector. `networkType` carries three values on the product
+    // surface (`lora` / `lokr` / `full`), but the engine models the third one as a separate boolean
+    // rather than a `NetworkType` variant (gen-core deliberately kept the enum closed). So `full` maps
+    // to `full_finetune: true` here, and `NetworkType::parse` — which maps every unknown string,
+    // including "full", to `Lora` — is left to describe the *adapter* parameterization it always did.
+    // Without this the flag never reaches the engine and a user asking for a full tune silently gets a
+    // LoRA (the F-055 class; gen-core's `validate_full_finetune_request` floor is the engine-side twin
+    // of this mapping).
+    let full_finetune = advanced_str(advanced, "networkType", "lora")
+        .trim()
+        .eq_ignore_ascii_case("full");
     let lora_target_modules = advanced
         .get("loraTargetModules")
         .and_then(Value::as_array)
@@ -463,7 +474,18 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // extra lever for smaller machines / higher resolution on top of the bf16 fix.
         // Previously dropped here, so the engine always ran at its `false` default. Absent
         // (legacy payloads) preserves that default.
-        gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
+        //
+        // ...EXCEPT on a full base fine-tune (sc-14056). No family has a full-tune activation
+        // checkpointing path yet (sc-14989), and the Mage engine trainer now HARD-ERRORS on
+        // `full_finetune + gradient_checkpointing` rather than silently ignoring the flag. The
+        // Mage-Flow training target's own defaults set `gradientCheckpointing: true`, so mapping it
+        // through verbatim would 400 every full run submitted from the app with the stock config —
+        // the capability would be unreachable by construction. Clear it for the full path instead.
+        // This is not "silently ignoring a user request": the Training Studio hides the checkbox
+        // whenever `networkType == "full"` and says why, so what the user sees is what runs.
+        gradient_checkpointing: !full_finetune
+            && advanced_bool(advanced, "gradientCheckpointing", false),
+        full_finetune,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
         // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
@@ -650,6 +672,22 @@ fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
 /// the self-contained macOS MLX SDXL trainer (descriptor `&[]`), so this never reads the manifest on
 /// macOS. All-or-nothing: a missing component fails the job with an actionable error BEFORE the trainer
 /// load (never a mid-train hub fetch).
+///
+/// **Training always resolves the DENSE `bf16` tier** (sc-14056 / sc-14980). A model whose mirror is
+/// split per tier declares one `coRequisite` row *per tier* for the same `componentId`, so the
+/// tier-agnostic [`crate::model_jobs::resolve_co_requisites`] has more than one candidate and
+/// deliberately REFUSES rather than guessing. `bf16` is the only right answer here, not a
+/// preference: `tiered_turnkey_train_dir` already pins the training base to `bf16/`, the
+/// `TrainingTierMissing` pre-flight keys off the same tier, and a gradient path needs dense
+/// projections — `quantize` is a no-op over already-packed weights, so a q4/q8 tier would train
+/// silently WRONG rather than fail.
+///
+/// [`crate::model_jobs::resolve_co_requisites_for_tier`] is what must be called, not merely a
+/// tier-filtered manifest: it also carries the glob-vs-literal guard (Mage declares
+/// `files: ["bf16/text_encoder/*"]`, and a single GLOB must take the directory arm — joined
+/// verbatim it is not a file and a correctly-installed component reports missing) and the `subdir`
+/// narrowing (the shared components mirror hosts every tier AND both components in ONE repo, so the
+/// provider must be handed `<snapshot>/bf16/text_encoder`, not the snapshot root).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -671,8 +709,22 @@ fn resolve_trainer_components(
              '{engine_id}' components from"
         ))
     })?;
-    crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_entry, settings)
+    crate::model_jobs::resolve_co_requisites_for_tier(
+        &descriptor,
+        &manifest_entry,
+        settings,
+        Some(TRAINING_COMPONENT_TIER),
+    )
 }
+
+/// The tier a training run resolves its base + shared components from. Dense by definition: the
+/// gradient path needs unpacked projections, and the app's `TrainingTierMissing` pre-flight plus the
+/// engine's own packed-weight refusal both key off this same tier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const TRAINING_COMPONENT_TIER: &str = "bf16";
 
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
 /// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
@@ -768,6 +820,15 @@ pub(crate) async fn run_training_execution(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
+    // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
+    // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
+    // onto a LoRA adapter and trained the WRONG thing. Both causes are fixed in this change (the pin
+    // advanced past the full-tune engine wiring, and the kernel joined `MLX_ROUTED_TRAINING_KERNELS`),
+    // and `map_training_config` now threads `full_finetune` through explicitly. A trainer that cannot
+    // serve a full request rejects it itself, typed, via gen-core's `validate_full_finetune_request`
+    // floor — so the guard is no longer this layer's job.
+    //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
     // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.
@@ -1617,9 +1678,17 @@ mod tests {
         let (tier, gemma) = (root.join("q4"), root.join("gemma"));
         std::fs::create_dir_all(&tier).unwrap();
         std::fs::create_dir_all(&gemma).unwrap();
-        std::fs::write(gemma.join("config.json"), b"{}").unwrap();
-        std::fs::write(gemma.join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(gemma.join("model.safetensors"), b"x").unwrap();
+        std::fs::write(
+            gemma.join("config.json"),
+            br#"{"model_type":"gemma3_text"}"#,
+        )
+        .unwrap();
+        std::fs::write(gemma.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(header);
+        weights.push(0);
+        std::fs::write(gemma.join("model.safetensors"), weights).unwrap();
 
         // Non-LTX engines never resolve an external TE (theirs lives inside the weights dir).
         assert!(training_text_encoder("kolors", &tier).is_none());
@@ -2270,6 +2339,191 @@ mod tests {
         assert_eq!(cfg.trigger_word, None);
     }
 
+    /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.
+    ///
+    /// `model_jobs` has its own coverage that `resolve_co_requisites_for_tier` honours `variant` and
+    /// `subdir`. What is untested there — and what broke when sc-14980 landed under this story — is
+    /// which tier *training* asks for. Three ways to get it wrong, all silent or misleading:
+    /// passing `None` (the resolver refuses with "refusing to guess"), passing whichever tier is
+    /// installed (a q4 tier would hand the gradient path PACKED weights, which `quantize` no-ops —
+    /// it trains WRONG and reports success), or keeping the old tier-agnostic call (which cannot
+    /// pick at all).
+    ///
+    /// So: stage ONLY q4 and require that training still fails, naming `bf16`. A resolver asking for
+    /// `None` produces the "refusing to guess" text instead; one asking for q4 would SUCCEED here,
+    /// which is the dangerous outcome this asserts against.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn training_components_demand_the_dense_tier_even_when_a_packed_tier_is_installed() {
+        // Pin the HF cache to the temp data dir so the staged components are the only ones visible.
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let manifest = builtin_model_manifest_entry("mage_flow_base")
+            .expect("mage_flow_base has a builtin catalog entry");
+        // Stage exactly one tier's shared components into a data dir.
+        let stage = |settings: &Settings, tier: &str| {
+            for download in manifest
+                .get("downloads")
+                .and_then(Value::as_array)
+                .expect("downloads")
+            {
+                if download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                    || download.get("variant").and_then(Value::as_str) != Some(tier)
+                {
+                    continue;
+                }
+                let repo = download["repo"].as_str().expect("repo");
+                let revision = download["revision"].as_str().expect("revision");
+                let subdir = download["subdir"].as_str().expect("subdir");
+                let dir =
+                    sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+                        .expect("repo cache path")
+                        .join("snapshots")
+                        .join(revision)
+                        .join(subdir);
+                std::fs::create_dir_all(&dir).expect("stage component dir");
+                std::fs::write(dir.join("model.safetensors"), b"stub")
+                    .expect("stage component file");
+            }
+        };
+
+        // POSITIVE: with the dense tier staged, training resolves each component to THAT tier's own
+        // component DIR, not the snapshot root. `subdir` is what makes this pass — a resolver
+        // ignoring it hands the engine a repo root holding q4/ q8/ bf16/ side by side.
+        let dense = tempfile::tempdir().expect("tempdir");
+        let dense_settings = test_settings(dense.path());
+        stage(&dense_settings, "bf16");
+        let components =
+            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings)
+                .expect("the bf16 shared components are staged");
+        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["text_encoder", "vae"]);
+        for component in ["text_encoder", "vae"] {
+            let WeightsSource::Dir(dir) = &components[component] else {
+                panic!("{component} must stage as a directory");
+            };
+            assert!(
+                dir.ends_with(format!("bf16/{component}")),
+                "{component} must resolve to the DENSE tier's component dir, got {}",
+                dir.display()
+            );
+            assert!(dir.is_dir(), "{component} dir must exist");
+        }
+
+        // NEGATIVE: with only a PACKED tier installed, training refuses rather than falling back.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(temp.path());
+        stage(&settings, "q4");
+
+        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings)
+            .expect_err(
+                "only the q4 shared components are installed, so a training run — which needs the \
+                 DENSE base — must be refused",
+            );
+        let message = error.to_string();
+        assert!(
+            message.contains("bf16"),
+            "training must ask for the bf16 tier BY NAME; asking for `None` yields the \
+             refusing-to-guess error instead. got: {message}"
+        );
+        assert!(
+            !message.contains("refusing to guess"),
+            "training resolves a concrete tier, so it must never hit the ambiguous-candidate \
+             branch: {message}"
+        );
+    }
+
+    /// sc-14056 — the full-base-fine-tune signal must actually REACH the engine, and the target's own
+    /// `gradientCheckpointing: true` default must not 400 the run.
+    ///
+    /// `map_training_config` builds the engine config field-by-field with no `..Default`, so a
+    /// dropped field is silent. And `NetworkType::parse("full")` returns `Lora` — it maps every
+    /// unknown string to Lora — so a `"full"` plan whose `full_finetune` is not threaded would train
+    /// a LoRA adapter AND REPORT SUCCESS. That is the F-055 class this test exists to catch.
+    ///
+    /// It discriminates in both directions: the LoRA plan must map to `full_finetune == false` with
+    /// the checkpointing flag honored, and the full plan — differing ONLY in `networkType` — must map
+    /// to `full_finetune == true` with checkpointing cleared.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_threads_the_full_finetune_flag_and_clears_checkpointing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mapped = |network_type: &str| {
+            let mut value = plan_json(
+                dir.path(),
+                "mage_flow_lora",
+                "mage_flow_base",
+                network_type,
+                &[&image.display().to_string()],
+            );
+            // The Mage training target ships this ON by default (sceneworks-core training.rs), which
+            // is exactly why the full path has to clear it: the engine HARD-ERRORS on
+            // `full_finetune + gradient_checkpointing` (no full-tune checkpointing yet, sc-14989),
+            // so passing the stock default through would 400 every full run submitted from the app.
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
+            map_training_config(&parse(value).config)
+        };
+
+        let lora = mapped("lora");
+        assert!(
+            !lora.full_finetune,
+            "an adapter plan must NOT set full_finetune"
+        );
+        assert!(
+            lora.gradient_checkpointing,
+            "the LoRA path still honors the checkbox — this change must not regress it"
+        );
+
+        let full = mapped("full");
+        assert!(
+            full.full_finetune,
+            "networkType \"full\" must reach the engine as full_finetune — NetworkType::parse maps \
+             it to Lora, so without this the run silently trains an adapter and reports success"
+        );
+        assert!(
+            !full.gradient_checkpointing,
+            "a full run must clear gradientCheckpointing or the engine rejects the target's own \
+             defaults"
+        );
+        // The adapter parameterization stays Lora — `full` is not a NetworkType variant (gen-core
+        // deliberately kept that enum closed), so the two signals are independent by design.
+        assert!(matches!(full.network_type, NetworkType::Lora));
+
+        // Case/whitespace tolerance, matching the rust-api submit predicate.
+        assert!(mapped("  FULL ").full_finetune);
+
+        // sc-14055 LoKr, offered from the picker in sc-14056. The failure mode that made `full`
+        // dangerous — `NetworkType::parse` mapping every unrecognized string to `Lora`, so the run
+        // trains the WRONG network and reports success — applies verbatim to `lokr` if the enum ever
+        // loses that arm. Assert the third value THREADS rather than falling back, and that it does
+        // not accidentally trip the full-tune flag.
+        let lokr = mapped("lokr");
+        assert!(
+            matches!(lokr.network_type, NetworkType::Lokr),
+            "networkType \"lokr\" must reach the engine as NetworkType::Lokr — a silent fallback to \
+             Lora would train a plain adapter and report success"
+        );
+        assert!(
+            !lokr.full_finetune,
+            "a LoKr adapter run is not a full base fine-tune"
+        );
+        assert!(
+            lokr.gradient_checkpointing,
+            "LoKr is an adapter path, so it keeps honoring the checkbox like LoRA"
+        );
+        assert!(matches!(mapped("  LoKr ").network_type, NetworkType::Lokr));
+        // …and the three values are genuinely distinct at the engine boundary: exactly one selects
+        // Lokr, exactly one selects the full path, and they are not the same one.
+        assert!(matches!(lora.network_type, NetworkType::Lora));
+    }
+
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -2770,6 +3024,8 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 512,
             save_every: 0,
@@ -2879,6 +3135,8 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 64,
             save_every: 0,
@@ -2991,6 +3249,8 @@ mod tests {
             gradient_accumulation: 1,
             // The fix under test: bf16 forward, checkpointing OFF — bf16 alone must suffice.
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 1024,
             save_every: 0,
@@ -3140,6 +3400,9 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing,
+            // sc-14056: candle-lane LoRA harness — there is no candle full-fine-tune trainer, and
+            // gen-core's `validate_full_finetune_request` floor would reject one.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution,
             save_every: 0,

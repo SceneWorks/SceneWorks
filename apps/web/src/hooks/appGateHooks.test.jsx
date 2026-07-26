@@ -132,6 +132,8 @@ describe("useAccessGate (sc-9750)", () => {
   it("holds ready until the media-ticket mint settles when auth is required", async () => {
     window.localStorage.setItem("sceneworks-token", "remote-token");
     apiResponders.set("/api/v1/access", { authRequired: true });
+    // sc-15102: a token restored from storage is re-verified before it authenticates.
+    apiResponders.set("/api/v1/auth/verify", { ok: true });
     apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
     const { get } = mount();
     await settle();
@@ -145,6 +147,7 @@ describe("useAccessGate (sc-9750)", () => {
   it("still reports ready (degraded) and pushes a notice when the mint fails", async () => {
     window.localStorage.setItem("sceneworks-token", "remote-token");
     apiResponders.set("/api/v1/access", { authRequired: true });
+    apiResponders.set("/api/v1/auth/verify", { ok: true });
     apiResponders.set("/api/v1/files/ticket", () => new Error("mint exploded"));
     const { get, notices } = mount();
     await settle();
@@ -200,6 +203,7 @@ describe("useAccessGate (sc-9750)", () => {
   it("lockRemote clears the stored token and re-shows the gate", async () => {
     window.localStorage.setItem("sceneworks-token", "remote-token");
     apiResponders.set("/api/v1/access", { authRequired: true });
+    apiResponders.set("/api/v1/auth/verify", { ok: true });
     apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
     const { get } = mount();
     await settle();
@@ -210,7 +214,105 @@ describe("useAccessGate (sc-9750)", () => {
 
     expect(get().api.token).toBe("");
     expect(get().api.authenticated).toBe(false);
+    expect(get().api.gateStatus).toBe("locked");
     expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+  });
+
+  // sc-15102: the stored token is a guess, not a credential. The host password can be
+  // changed or cleared between visits, and no client path re-prompts on a 401 — so a
+  // token that fails verification must be dropped back to the password prompt instead
+  // of authenticating and 401ing every request behind an app that looks merely broken.
+  describe("stored-token re-verification (sc-15102)", () => {
+    it("drops a stored token the host rejects and returns to the locked gate", async () => {
+      window.localStorage.setItem("sceneworks-token", "stale-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: false });
+      const { get } = mount();
+      await settle();
+
+      expect(get().api.token).toBe("");
+      expect(get().api.authenticated).toBe(false);
+      expect(get().api.gateStatus).toBe("locked");
+      expect(get().api.authError).toContain("no longer works");
+      expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    });
+
+    it("never authenticates on an unverified stored token: no mint, no data-load release", async () => {
+      window.localStorage.setItem("sceneworks-token", "stale-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: false });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get } = mount();
+      await settle();
+
+      // The mint (and therefore every protected load gated on `ready`) is downstream of
+      // `authenticated`, so a rejected token must leave both false.
+      expect(get().api.ready).toBe(false);
+      expect(setMediaTicketSpy).not.toHaveBeenCalledWith("media-1");
+    });
+
+    it("keeps the token and shows 'unlocking' while the host is unreachable", async () => {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", () => new Error("host down"));
+      const { get, notices } = mount();
+      await settle();
+
+      // Unreachable ≠ rejected: hold the token, block the shell, and retry with backoff.
+      expect(get().api.token).toBe("remote-token");
+      expect(get().api.gateStatus).toBe("unlocking");
+      expect(get().api.authenticated).toBe(false);
+      expect(notices.some((n) => n.kind === "access-verify")).toBe(true);
+      expect(window.localStorage.getItem("sceneworks-token")).toBe("remote-token");
+    });
+
+    it("saveToken does not re-verify the password it just proved", async () => {
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get } = mount();
+      await settle();
+
+      // apiFetch is a file-scoped mock that isn't reset between these tests, so count the
+      // verifies this unlock is responsible for rather than the mock's lifetime total.
+      const verifies = () => apiFetch.mock.calls.filter((call) => call[0] === "/api/v1/auth/verify").length;
+      const before = verifies();
+
+      act(() => get().api.setPasswordDraft("secret"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+
+      expect(get().api.gateStatus).toBe("open");
+      // Exactly one: saveToken's own check. The re-verify effect must recognize the token
+      // as already proved and not POST it again (which would re-block the shell).
+      expect(verifies() - before).toBe(1);
+    });
+  });
+
+  // sc-15102: `gateStatus` is the single blocking decision App branches on.
+  describe("gateStatus", () => {
+    it("stays open while the first access probe is in flight, then blocks once it fails", async () => {
+      apiResponders.set("/api/v1/access", () => new Error("probe exploded"));
+      const { get } = mount();
+
+      // Pre-settle: nothing has failed yet, so a healthy host never flashes a blocker.
+      expect(get().api.gateStatus).toBe("open");
+
+      await settle();
+      // A failed probe means the auth requirement is unknown — block rather than hand
+      // over a navigable, permanently empty shell.
+      expect(get().api.gateStatus).toBe("awaiting-host");
+    });
+
+    it("is open when the host requires no password", async () => {
+      apiResponders.set("/api/v1/access", { authRequired: false });
+      const { get } = mount();
+      await settle();
+
+      expect(get().api.gateStatus).toBe("open");
+    });
   });
 });
 
