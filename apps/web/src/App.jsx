@@ -84,6 +84,7 @@ import {
   isProjectHydrationDomain,
 } from "./appHydration.js";
 import { refreshFailure, refreshSuccess } from "./refreshResult.js";
+import { persistNavigationPreferences } from "./uiPreferences.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
@@ -1258,10 +1259,7 @@ export function App() {
 
   useEffect(() => {
     if (!navigationHydrated) return;
-    apiFetch("/api/v1/ui-preferences", token, {
-      method: "PUT",
-      body: JSON.stringify({ activeView }),
-    }).catch(() => {});
+    persistNavigationPreferences({ activeView }, token);
   }, [activeView, navigationHydrated, token]);
 
   // Record a keep-alive view the first time it becomes active so it stays mounted
@@ -2833,8 +2831,14 @@ export function App() {
   // Desktop first-run wizard (sc-1473): supersedes the project gate while the
   // completion marker is unset. `null` means we're still reading the marker on
   // desktop — hold the studio/gate back briefly to avoid a flash.
-  const setupGateLoading = isDesktopShell && setupCompleted === null;
-  const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
+  const catalogBypassesProjectSetup = activeView === "DatasetCatalogs";
+  const setupGateLoading =
+    isDesktopShell && setupCompleted === null && !catalogBypassesProjectSetup;
+  const showSetupWizard =
+    isDesktopShell &&
+    setupCompleted === false &&
+    authenticated &&
+    !catalogBypassesProjectSetup;
   // The Simple shell replaces the workspace only once the app is actually usable. The
   // first-run flows — the desktop setup wizard, the "create your first workspace" gate,
   // and the remote-browser password band — stay on the existing shell that owns them, so

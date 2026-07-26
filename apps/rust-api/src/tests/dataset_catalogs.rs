@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use sceneworks_core::catalog_store::{
-    CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry, NewCatalogRecord,
+    catalog_timestamp_now, CatalogProcessingLease, CatalogProcessingProgress,
+    CatalogProcessingState, CatalogRegistry, NewCatalogRecord,
 };
 
 use super::support::*;
@@ -287,6 +288,7 @@ async fn corrupt_attached_catalog_errors_are_typed_and_do_not_leak_paths() {
 async fn catalog_pause_and_resume_persist_desired_processing_state() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
     let app = create_app(settings).expect("app creates");
     let (status, created) = request(
         app.clone(),
@@ -301,26 +303,54 @@ async fn catalog_pause_and_resume_persist_desired_processing_state() {
     assert_eq!(status, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap();
 
+    let registry = CatalogRegistry::new(config_dir);
+    let catalog = registry.open_attached(id).unwrap();
+    catalog
+        .set_processing_progress(&CatalogProcessingProgress {
+            state: CatalogProcessingState::Running,
+            updated_at: catalog_timestamp_now(),
+            ..CatalogProcessingProgress::default()
+        })
+        .unwrap();
+    let lease = CatalogProcessingLease::try_acquire(&catalog).unwrap();
     let (status, paused) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/catalogs/{id}/pause"),
-        json!({}),
+        json!({ "expectedRevision": 0 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{paused}");
-    assert_eq!(paused["processing"]["state"], "paused");
-    assert_eq!(paused["processing"]["message"], "Paused by user");
+    assert_eq!(paused["processing"]["state"], "running");
+    assert_eq!(paused["processingControl"]["desiredState"], "paused");
+    assert_eq!(paused["processingControl"]["revision"], 1);
+    drop(lease);
+    let mut actual = catalog.contract_state().unwrap().processing;
+    actual.state = CatalogProcessingState::Paused;
+    actual.updated_at = catalog_timestamp_now();
+    catalog.set_processing_progress(&actual).unwrap();
 
     let (status, resumed) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/catalogs/{id}/resume"),
-        json!({}),
+        json!({ "expectedRevision": 1 }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
-    assert_eq!(resumed["processing"]["state"], "running");
+    assert_eq!(resumed["processing"]["state"], "paused");
+    assert_eq!(resumed["processingControl"]["desiredState"], "running");
+    assert_eq!(resumed["processingControl"]["revision"], 2);
+
+    let (invalid_status, invalid) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": 2 }),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::CONFLICT, "{invalid}");
+    assert_eq!(invalid["code"], "catalog_processing_conflict");
 
     let (_, persisted) = request(
         app,
@@ -329,5 +359,6 @@ async fn catalog_pause_and_resume_persist_desired_processing_state() {
         Value::Null,
     )
     .await;
-    assert_eq!(persisted["processing"]["state"], "running");
+    assert_eq!(persisted["processing"]["state"], "paused");
+    assert_eq!(persisted["processingControl"]["desiredState"], "running");
 }

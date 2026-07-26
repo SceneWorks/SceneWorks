@@ -13,8 +13,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use sceneworks_core::catalog_store::{
     AttachedCatalog, Catalog, CatalogContractState, CatalogError, CatalogFacet,
-    CatalogProcessingProgress, CatalogProcessingState, CatalogRecord, CatalogRecordFilter,
-    CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
+    CatalogProcessingControl, CatalogProcessingDesiredState, CatalogProcessingLease,
+    CatalogProcessingProgress, CatalogRecord, CatalogRecordFilter, CatalogRegistry,
+    CatalogSourceConfig, CatalogStorageAccounting,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,6 +64,12 @@ pub(crate) struct CatalogFacetsRequest {
     limit_per_facet: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CatalogControlRequest {
+    expected_revision: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CatalogCountsResponse {
@@ -100,6 +107,7 @@ pub(crate) struct CatalogResponse {
     counts: Option<CatalogCountsResponse>,
     storage: Option<CatalogStorageResponse>,
     processing: CatalogProcessingProgress,
+    processing_control: CatalogProcessingControl,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,39 +295,54 @@ pub(crate) async fn delete_catalog_on_disk(
 pub(crate) async fn pause_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogControlRequest>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    set_processing_state(state, catalog_id, CatalogProcessingState::Paused).await
+    request_processing_state(
+        state,
+        catalog_id,
+        request.expected_revision,
+        CatalogProcessingDesiredState::Paused,
+        true,
+    )
+    .await
 }
 
 pub(crate) async fn resume_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogControlRequest>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    set_processing_state(state, catalog_id, CatalogProcessingState::Running).await
+    request_processing_state(
+        state,
+        catalog_id,
+        request.expected_revision,
+        CatalogProcessingDesiredState::Running,
+        false,
+    )
+    .await
 }
 
-async fn set_processing_state(
+async fn request_processing_state(
     state: AppState,
     catalog_id: String,
-    processing_state: CatalogProcessingState,
+    expected_revision: u64,
+    desired_state: CatalogProcessingDesiredState,
+    require_active_processor: bool,
 ) -> Result<Json<CatalogResponse>, ApiError> {
     let config_dir = state.settings.config_dir.clone();
     let response = catalog_call(move || {
         let registry = CatalogRegistry::new(config_dir);
         let attached = registry.get(&catalog_id)?;
         let catalog = registry.open_attached(&catalog_id)?;
-        let mut contract = catalog.contract_state()?;
-        contract.processing.state = processing_state;
-        contract.processing.message = Some(
-            match processing_state {
-                CatalogProcessingState::Paused => "Paused by user",
-                CatalogProcessingState::Running => "Processing requested by user",
-                _ => unreachable!("pause/resume only set explicit desired states"),
-            }
-            .to_owned(),
-        );
-        contract.processing.updated_at = chrono::Utc::now().to_rfc3339();
-        catalog.set_contract_state(&contract)?;
+        let active = CatalogProcessingLease::is_active(&catalog)?;
+        if active != require_active_processor {
+            return Err(CatalogError::Conflict(if require_active_processor {
+                "Catalog has no active processor to pause".to_owned()
+            } else {
+                "Catalog processor has not stopped yet".to_owned()
+            }));
+        }
+        catalog.request_processing_control(expected_revision, desired_state)?;
         catalog_response(&attached, &catalog)
     })
     .await?;
@@ -364,6 +387,7 @@ fn catalog_response(
         )),
         storage: Some(storage_response(storage)),
         processing: contract_state.processing,
+        processing_control: catalog.processing_control()?,
     })
 }
 
@@ -387,6 +411,7 @@ fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {
         counts: None,
         storage: None,
         processing,
+        processing_control: CatalogProcessingControl::default(),
     }
 }
 

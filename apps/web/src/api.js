@@ -40,7 +40,10 @@ export async function apiFetch(path, token, options = {}) {
         : detail === undefined || detail === null
           ? `Request failed with ${response.status}`
           : JSON.stringify(detail);
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    error.code = payload?.code;
+    throw error;
   }
   return payload;
 }

@@ -1318,10 +1318,8 @@ checksum = "7e36cc9d416881d2e24f9a963be5fb1cd90966419ac844274161d10488b3e825"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-targets 0.52.6",
 ]
 
@@ -6294,6 +6292,7 @@ name = "sceneworks-core"
 version = "0.8.0"
 dependencies = [
  "directories",
+ "fs2",
  "getrandom 0.3.4",
  "image",
  "imagesize",
@@ -6382,7 +6381,6 @@ name = "sceneworks-rust-api"
 version = "0.8.0"
 dependencies = [
  "axum",
- "chrono",
  "fs2",
  "futures-util",
  "glob",

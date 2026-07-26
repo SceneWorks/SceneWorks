@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { useAppStatic } from "../context/AppContext.js";
 import { formatBytes } from "../formatting.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
+import { persistNavigationPreferences } from "../uiPreferences.js";
 
 const EMPTY_CREATE = {
   name: "",
@@ -68,6 +69,7 @@ function CatalogListItem({ catalog, selected, onSelect }) {
 
 function Progress({ catalog }) {
   const processing = catalog.processing ?? {};
+  const desiredState = catalog.processingControl?.desiredState ?? "running";
   const candidates = Number(processing.candidateCount ?? 0);
   const processed = Number(processing.processedCount ?? 0);
   const percent = candidates > 0 ? Math.min(100, Math.round((processed / candidates) * 100)) : 0;
@@ -101,6 +103,12 @@ function Progress({ catalog }) {
           {processing.message}
         </p>
       ) : null}
+      {processing.state === "running" && desiredState === "paused" ? (
+        <p className="muted">Pause requested. The active processor will stop after its current bounded batch.</p>
+      ) : null}
+      {processing.state === "paused" && desiredState === "running" ? (
+        <p className="muted">Resume requested. Actual processing remains paused until a processor picks it up.</p>
+      ) : null}
       <p className="field-hint">
         Updated {processing.updatedAt ? new Date(processing.updatedAt).toLocaleString() : "—"}
       </p>
@@ -114,23 +122,29 @@ export function DatasetCatalogsScreen() {
   const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
+  const [pollEpoch, setPollEpoch] = useState(0);
   const [error, setError] = useState("");
   const [createDraft, setCreateDraft] = useState(EMPTY_CREATE);
   const [attachPath, setAttachPath] = useState("");
+  const generationRef = useRef(0);
+  const pollAbortRef = useRef(null);
+  const mutationAbortRef = useRef(null);
   const selected = catalogs.find((catalog) => catalog.id === selectedId) ?? null;
 
   const persistSelection = useCallback((id) => {
+    generationRef.current += 1;
+    pollAbortRef.current?.abort();
+    mutationAbortRef.current?.abort();
+    setBusy("");
     setSelectedId(id);
-    apiFetch("/api/v1/ui-preferences", token, {
-      method: "PUT",
-      body: JSON.stringify({ selectedCatalogId: id }),
-    }).catch(() => {});
+    persistNavigationPreferences({ selectedCatalogId: id }, token);
   }, [token]);
 
-  const refresh = useCallback(async ({ quiet = false, signal } = {}) => {
+  const refresh = useCallback(async ({ quiet = false, signal, generation = generationRef.current } = {}) => {
     if (!quiet) setLoading(true);
     try {
       const next = await apiFetch("/api/v1/catalogs", token, { signal });
+      if (signal?.aborted || generation !== generationRef.current) return next;
       setCatalogs(Array.isArray(next) ? next : []);
       setSelectedId((current) => {
         if (next.some((catalog) => catalog.id === current)) return current;
@@ -139,38 +153,74 @@ export function DatasetCatalogsScreen() {
       setError("");
       return next;
     } catch (err) {
-      if (!isAbortError(err)) setError(safeCatalogError(err, "load catalogs"));
+      if (!isAbortError(err) && generation === generationRef.current) {
+        setError(safeCatalogError(err, "load catalogs"));
+      }
       return [];
     } finally {
-      if (!quiet && !signal?.aborted) setLoading(false);
+      if (!quiet && !signal?.aborted && generation === generationRef.current) setLoading(false);
     }
   }, [token]);
 
   useEffect(() => {
+    const generation = ++generationRef.current;
     const controller = new AbortController();
     Promise.all([
       apiFetch("/api/v1/ui-preferences", token, { signal: controller.signal }).catch(() => ({})),
-      refresh({ signal: controller.signal }),
+      refresh({ signal: controller.signal, generation }),
     ]).then(([preferences, next]) => {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || generation !== generationRef.current) return;
       const preferred = preferences?.selectedCatalogId;
       if (preferred && next.some((catalog) => catalog.id === preferred)) setSelectedId(preferred);
     });
-    return () => controller.abort();
+    return () => {
+      generationRef.current += 1;
+      controller.abort();
+      pollAbortRef.current?.abort();
+      mutationAbortRef.current?.abort();
+    };
   }, [refresh, token]);
 
   useEffect(() => {
     if (!selectedId) return undefined;
-    const interval = window.setInterval(async () => {
+    const generation = ++generationRef.current;
+    let timer = null;
+    let stopped = false;
+    const poll = async () => {
+      const controller = new AbortController();
+      pollAbortRef.current?.abort();
+      pollAbortRef.current = controller;
       try {
-        const updated = await apiFetch(`/api/v1/catalogs/${encodeURIComponent(selectedId)}/status`, token);
+        const updated = await apiFetch(
+          `/api/v1/catalogs/${encodeURIComponent(selectedId)}/status`,
+          token,
+          { signal: controller.signal },
+        );
+        if (stopped || controller.signal.aborted || generation !== generationRef.current) return;
         setCatalogs((current) => current.map((catalog) => (catalog.id === updated.id ? updated : catalog)));
-      } catch {
-        // A background refresh is advisory. Explicit actions and manual reload surface errors.
+        setError("");
+      } catch (err) {
+        if (isAbortError(err) || stopped || generation !== generationRef.current) return;
+        if (err.status === 404) {
+          setError("That catalog is no longer attached. The catalog list was refreshed.");
+          await refresh({ quiet: true, generation });
+        } else {
+          setError(safeCatalogError(err, "refresh catalog status"));
+        }
+      } finally {
+        if (!stopped && generation === generationRef.current) {
+          timer = window.setTimeout(poll, 3000);
+        }
       }
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [selectedId, token]);
+    };
+    timer = window.setTimeout(poll, 3000);
+    return () => {
+      stopped = true;
+      generationRef.current += 1;
+      if (timer !== null) window.clearTimeout(timer);
+      pollAbortRef.current?.abort();
+    };
+  }, [pollEpoch, refresh, selectedId, token]);
 
   async function chooseFolder(setter) {
     if (!isDesktop) return;
@@ -183,16 +233,28 @@ export function DatasetCatalogsScreen() {
   }
 
   async function mutate(action, request, success) {
+    const generation = ++generationRef.current;
+    pollAbortRef.current?.abort();
+    mutationAbortRef.current?.abort();
+    const controller = new AbortController();
+    mutationAbortRef.current = controller;
     setBusy(action);
     setError("");
     try {
-      const result = await request();
-      const next = await refresh({ quiet: true });
+      const result = await request(controller.signal);
+      if (controller.signal.aborted || generation !== generationRef.current) return;
+      const next = await refresh({ quiet: true, signal: controller.signal, generation });
+      if (controller.signal.aborted || generation !== generationRef.current) return;
       success?.(result, next);
     } catch (err) {
-      setError(safeCatalogError(err, action));
+      if (!isAbortError(err) && generation === generationRef.current) {
+        setError(safeCatalogError(err, action));
+      }
     } finally {
-      setBusy("");
+      if (generation === generationRef.current) {
+        setBusy("");
+        setPollEpoch((current) => current + 1);
+      }
     }
   }
 
@@ -211,7 +273,11 @@ export function DatasetCatalogsScreen() {
     }
     await mutate(
       "create the catalog",
-      () => apiFetch("/api/v1/catalogs", token, { method: "POST", body: JSON.stringify(body) }),
+      (signal) => apiFetch("/api/v1/catalogs", token, {
+        method: "POST",
+        body: JSON.stringify(body),
+        signal,
+      }),
       (created) => {
         setCreateDraft(EMPTY_CREATE);
         persistSelection(created.id);
@@ -223,9 +289,10 @@ export function DatasetCatalogsScreen() {
     event.preventDefault();
     await mutate(
       "attach the catalog",
-      () => apiFetch("/api/v1/catalogs/attach", token, {
+      (signal) => apiFetch("/api/v1/catalogs/attach", token, {
         method: "POST",
         body: JSON.stringify({ path: attachPath.trim() }),
+        signal,
       }),
       (attached) => {
         setAttachPath("");
@@ -238,9 +305,12 @@ export function DatasetCatalogsScreen() {
     if (!selected) return;
     await mutate(
       `${action} processing`,
-      () => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/${action}`, token, {
+      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/${action}`, token, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          expectedRevision: selected.processingControl?.revision ?? 0,
+        }),
+        signal,
       }),
       (updated) => setCatalogs((current) => current.map((item) => item.id === updated.id ? updated : item)),
     );
@@ -254,7 +324,10 @@ export function DatasetCatalogsScreen() {
     }))) return;
     await mutate(
       "detach the catalog",
-      () => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}`, token, { method: "DELETE" }),
+      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}`, token, {
+        method: "DELETE",
+        signal,
+      }),
       (_detached, next) => persistSelection(next[0]?.id ?? ""),
     );
   }
@@ -268,7 +341,10 @@ export function DatasetCatalogsScreen() {
     }))) return;
     await mutate(
       "delete the catalog files",
-      () => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/on-disk`, token, { method: "DELETE" }),
+      (signal) => apiFetch(`/api/v1/catalogs/${encodeURIComponent(selected.id)}/on-disk`, token, {
+        method: "DELETE",
+        signal,
+      }),
       (_deleted, next) => persistSelection(next[0]?.id ?? ""),
     );
   }
@@ -417,14 +493,24 @@ export function DatasetCatalogsScreen() {
                 </div>
                 <div className="catalog-detail-actions">
                   {selected.processing?.state === "running" ? (
-                    <button className="secondary-action" disabled={Boolean(busy)} onClick={() => changeProcessing("pause")} type="button">
-                      <Icon.Pause /> Pause
+                    <button
+                      className="secondary-action"
+                      disabled={Boolean(busy) || selected.processingControl?.desiredState === "paused"}
+                      onClick={() => changeProcessing("pause")}
+                      type="button"
+                    >
+                      <Icon.Pause /> {selected.processingControl?.desiredState === "paused" ? "Pause requested" : "Pause"}
                     </button>
-                  ) : (
-                    <button className="primary-action" disabled={Boolean(busy) || selected.availability !== "available"} onClick={() => changeProcessing("resume")} type="button">
-                      <Icon.Play /> Resume
+                  ) : selected.processing?.state === "paused" ? (
+                    <button
+                      className="primary-action"
+                      disabled={Boolean(busy) || selected.availability !== "available" || selected.processingControl?.desiredState === "running"}
+                      onClick={() => changeProcessing("resume")}
+                      type="button"
+                    >
+                      <Icon.Play /> {selected.processingControl?.desiredState === "running" ? "Resume requested" : "Resume"}
                     </button>
-                  )}
+                  ) : null}
                 </div>
               </header>
 

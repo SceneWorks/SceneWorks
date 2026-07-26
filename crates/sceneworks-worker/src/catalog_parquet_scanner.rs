@@ -6,12 +6,16 @@
 
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::{Field, Row};
-use sceneworks_core::catalog_store::{Catalog, CatalogError, CatalogRegistry, NewCatalogRecord};
+use sceneworks_core::catalog_store::{
+    catalog_timestamp_now, Catalog, CatalogError, CatalogProcessingDesiredState,
+    CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry,
+    NewCatalogRecord,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -20,7 +24,6 @@ const DEFAULT_BATCH_SIZE: usize = 1_000;
 const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_CAPTION_CHARS: usize = 2_048;
 const MAX_IMAGE_EDGE: u32 = 16_384;
-const SCAN_LOCK_FILE: &str = ".parquet-scan.lock";
 
 #[derive(Debug)]
 pub enum CatalogParquetScanError {
@@ -147,6 +150,7 @@ pub struct CatalogParquetCheckpoint {
 pub struct CatalogParquetScanReport {
     pub checkpoint: CatalogParquetCheckpoint,
     pub source_shards: Vec<PathBuf>,
+    pub paused: bool,
 }
 
 #[derive(Serialize)]
@@ -163,48 +167,6 @@ struct SemanticOptions<'a> {
     require_people: bool,
     max_unsafe_score: Option<f64>,
     min_aesthetic_score: Option<f64>,
-}
-
-/// Cross-process lease for the single mutable Parquet checkpoint in a catalog.
-///
-/// Utility workers are separate processes, so an in-process mutex is
-/// insufficient. The advisory OS lock is released automatically when the file
-/// handle drops, including after an unwinding failure or process exit.
-struct CatalogScanLease {
-    _file: File,
-}
-
-impl CatalogScanLease {
-    fn acquire(catalog: &Catalog) -> CatalogParquetScanResult<Self> {
-        use fs2::FileExt as _;
-
-        let lock_path = catalog.root().join(SCAN_LOCK_FILE);
-        if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogParquetScanError::InvalidSource(format!(
-                    "Catalog scan lock must be a regular file: {}",
-                    lock_path.display()
-                )));
-            }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        let contended = fs2::lock_contended_error().raw_os_error();
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(error) if error.raw_os_error() == contended => {
-                Err(CatalogParquetScanError::Busy(format!(
-                    "Catalog {} already has an active Parquet scan.",
-                    catalog.descriptor().id
-                )))
-            }
-            Err(error) => Err(CatalogParquetScanError::Io(error)),
-        }
-    }
 }
 
 /// Indexes a bounded pass of Parquet rows into `catalog`.
@@ -227,18 +189,68 @@ fn scan_parquet_catalog(
     source: &Path,
     options: &CatalogParquetScanOptions,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
-    let _lease = CatalogScanLease::acquire(catalog)?;
+    let _lease = CatalogProcessingLease::try_acquire(catalog).map_err(|error| match error {
+        CatalogError::Conflict(_) => CatalogParquetScanError::Busy(format!(
+            "Catalog {} already has active processing.",
+            catalog.descriptor().id
+        )),
+        error => CatalogParquetScanError::Catalog(error),
+    })?;
+    let result = scan_parquet_catalog_under_lease(catalog, source, options);
+    if result.is_err() {
+        if let Ok(mut progress) = catalog.contract_state().map(|state| state.processing) {
+            progress.state = CatalogProcessingState::Failed;
+            progress.message =
+                Some("Parquet scan failed; inspect the worker logs for details".to_owned());
+            progress.updated_at = catalog_timestamp_now();
+            let _ = catalog.set_processing_progress(&progress);
+        }
+    }
+    result
+}
+
+fn scan_parquet_catalog_under_lease(
+    catalog: &mut Catalog,
+    source: &Path,
+    options: &CatalogParquetScanOptions,
+) -> CatalogParquetScanResult<CatalogParquetScanReport> {
     validate_options(options)?;
     let shards = parquet_shards(source)?;
     let source_signature = source_signature(&shards)?;
     let options_signature = options_signature(options)?;
     let mut checkpoint = load_checkpoint(catalog, &source_signature, &options_signature)?;
     if checkpoint.complete {
+        publish_progress(
+            catalog,
+            &checkpoint,
+            CatalogProcessingState::Completed,
+            Some("Parquet scan complete"),
+        )?;
         return Ok(CatalogParquetScanReport {
             checkpoint,
             source_shards: shards,
+            paused: false,
         });
     }
+    if catalog.processing_control()?.desired_state == CatalogProcessingDesiredState::Paused {
+        publish_progress(
+            catalog,
+            &checkpoint,
+            CatalogProcessingState::Paused,
+            Some("Paused by user"),
+        )?;
+        return Ok(CatalogParquetScanReport {
+            checkpoint,
+            source_shards: shards,
+            paused: true,
+        });
+    }
+    publish_progress(
+        catalog,
+        &checkpoint,
+        CatalogProcessingState::Running,
+        Some("Scanning Parquet metadata"),
+    )?;
 
     let batch_size = options.batch_size.clamp(1, MAX_BATCH_SIZE);
     let row_budget = options.max_rows.unwrap_or(u64::MAX);
@@ -264,10 +276,19 @@ fn scan_parquet_catalog(
             let rows = row_group.get_row_iter(None)?;
             for (row_index, row) in rows.enumerate().skip(row_start as usize) {
                 if rows_this_pass >= row_budget {
-                    flush_batch(catalog, &mut pending, &checkpoint)?;
+                    let paused = flush_batch(catalog, &mut pending, &checkpoint)?;
+                    if !paused {
+                        publish_progress(
+                            catalog,
+                            &checkpoint,
+                            CatalogProcessingState::Idle,
+                            Some("Parquet scan yielded after its bounded pass"),
+                        )?;
+                    }
                     return Ok(CatalogParquetScanReport {
                         checkpoint,
                         source_shards: shards,
+                        paused,
                     });
                 }
                 rows_this_pass = rows_this_pass.saturating_add(1);
@@ -309,27 +330,52 @@ fn scan_parquet_catalog(
 
                 if pending.len() >= batch_size || checkpoint.counts.scanned % batch_size as u64 == 0
                 {
-                    flush_batch(catalog, &mut pending, &checkpoint)?;
+                    if flush_batch(catalog, &mut pending, &checkpoint)? {
+                        return Ok(CatalogParquetScanReport {
+                            checkpoint,
+                            source_shards: shards,
+                            paused: true,
+                        });
+                    }
                     pending_ids.clear();
                 }
             }
             checkpoint.row_group = row_group_index + 1;
             checkpoint.row = 0;
-            flush_batch(catalog, &mut pending, &checkpoint)?;
+            if flush_batch(catalog, &mut pending, &checkpoint)? {
+                return Ok(CatalogParquetScanReport {
+                    checkpoint,
+                    source_shards: shards,
+                    paused: true,
+                });
+            }
             pending_ids.clear();
         }
         checkpoint.shard = shard_index + 1;
         checkpoint.row_group = 0;
         checkpoint.row = 0;
-        flush_batch(catalog, &mut pending, &checkpoint)?;
+        if flush_batch(catalog, &mut pending, &checkpoint)? {
+            return Ok(CatalogParquetScanReport {
+                checkpoint,
+                source_shards: shards,
+                paused: true,
+            });
+        }
         pending_ids.clear();
     }
 
     checkpoint.complete = true;
     flush_batch(catalog, &mut pending, &checkpoint)?;
+    publish_progress(
+        catalog,
+        &checkpoint,
+        CatalogProcessingState::Completed,
+        Some("Parquet scan complete"),
+    )?;
     Ok(CatalogParquetScanReport {
         checkpoint,
         source_shards: shards,
+        paused: false,
     })
 }
 
@@ -455,10 +501,49 @@ fn flush_batch(
     catalog: &mut Catalog,
     pending: &mut Vec<NewCatalogRecord>,
     checkpoint: &CatalogParquetCheckpoint,
-) -> CatalogParquetScanResult<()> {
+) -> CatalogParquetScanResult<bool> {
     let payload = serde_json::to_string(checkpoint)?;
     catalog.append_records_and_metadata(pending, &[(CHECKPOINT_KEY, payload.as_str())])?;
     pending.clear();
+    let paused =
+        catalog.processing_control()?.desired_state == CatalogProcessingDesiredState::Paused;
+    publish_progress(
+        catalog,
+        checkpoint,
+        if paused {
+            CatalogProcessingState::Paused
+        } else {
+            CatalogProcessingState::Running
+        },
+        Some(if paused {
+            "Paused by user"
+        } else {
+            "Scanning Parquet metadata"
+        }),
+    )?;
+    Ok(paused)
+}
+
+fn publish_progress(
+    catalog: &Catalog,
+    checkpoint: &CatalogParquetCheckpoint,
+    state: CatalogProcessingState,
+    message: Option<&str>,
+) -> CatalogParquetScanResult<()> {
+    let previous = catalog.contract_state()?.processing;
+    catalog.set_processing_progress(&CatalogProcessingProgress {
+        state,
+        candidate_count: previous.candidate_count.max(checkpoint.counts.scanned),
+        processed_count: checkpoint.counts.scanned,
+        accepted_count: checkpoint.counts.accepted,
+        rejected_count: checkpoint
+            .counts
+            .rejected
+            .saturating_add(checkpoint.counts.duplicate),
+        error_count: checkpoint.counts.malformed,
+        message: message.map(str::to_owned),
+        updated_at: catalog_timestamp_now(),
+    })?;
     Ok(())
 }
 
@@ -1110,7 +1195,8 @@ mod tests {
             .create_catalog(temporary.path().join("catalog"), "Lease")
             .expect("catalog creates");
         let catalog_id = first_catalog.descriptor().id.clone();
-        let lease = CatalogScanLease::acquire(&first_catalog).expect("first lease acquires");
+        let lease =
+            CatalogProcessingLease::try_acquire(&first_catalog).expect("first lease acquires");
         first_catalog.close();
 
         for options in [
@@ -1152,6 +1238,96 @@ mod tests {
         .expect("lease releases on drop");
         assert!(report.checkpoint.complete);
         assert_eq!(report.checkpoint.counts.accepted, 1);
+    }
+
+    #[test]
+    fn scanner_cooperatively_pauses_at_a_batch_boundary_and_resumes_without_claiming_early() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        write_rows(
+            &source,
+            &[vec![
+                row("https://example.com/one.jpg", "one"),
+                row("https://example.com/two.jpg", "two"),
+            ]],
+        );
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Controlled")
+            .expect("catalog creates");
+        let catalog_id = catalog.descriptor().id.clone();
+        let lease = CatalogProcessingLease::try_acquire(&catalog).expect("processor lease");
+        catalog
+            .set_processing_progress(&CatalogProcessingProgress {
+                state: CatalogProcessingState::Running,
+                message: Some("scanner active".to_owned()),
+                updated_at: catalog_timestamp_now(),
+                ..CatalogProcessingProgress::default()
+            })
+            .expect("actual running publishes");
+        let pause = catalog
+            .request_processing_control(0, CatalogProcessingDesiredState::Paused)
+            .expect("pause intent persists narrowly");
+        assert_eq!(pause.revision, 1);
+        assert_eq!(
+            catalog.contract_state().unwrap().processing.state,
+            CatalogProcessingState::Running,
+            "requesting pause does not pretend the processor has acknowledged it"
+        );
+        drop(lease);
+        catalog.close();
+
+        let paused = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions {
+                batch_size: 1,
+                ..CatalogParquetScanOptions::default()
+            },
+        )
+        .expect("scanner consumes pause");
+        assert!(paused.paused);
+        assert!(!paused.checkpoint.complete);
+        let catalog = registry.open_attached(&catalog_id).unwrap();
+        assert_eq!(
+            catalog.contract_state().unwrap().processing.state,
+            CatalogProcessingState::Paused
+        );
+        let resume = catalog
+            .request_processing_control(1, CatalogProcessingDesiredState::Running)
+            .expect("resume intent persists");
+        assert_eq!(resume.revision, 2);
+        assert_eq!(
+            catalog.contract_state().unwrap().processing.state,
+            CatalogProcessingState::Paused,
+            "resume remains desired-only until a processor actually starts"
+        );
+        catalog.close();
+
+        let resumed = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions {
+                batch_size: 1,
+                ..CatalogParquetScanOptions::default()
+            },
+        )
+        .expect("scanner resumes");
+        assert!(!resumed.paused);
+        assert!(resumed.checkpoint.complete);
+        assert_eq!(resumed.checkpoint.counts.accepted, 2);
+        assert_eq!(
+            registry
+                .open_attached(&catalog_id)
+                .unwrap()
+                .contract_state()
+                .unwrap()
+                .processing
+                .state,
+            CatalogProcessingState::Completed
+        );
     }
 
     #[test]

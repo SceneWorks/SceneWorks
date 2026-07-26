@@ -167,6 +167,11 @@ impl From<CatalogError> for ApiError {
                 detail: "Catalog location is not empty or is already in use".to_owned(),
                 code: Some("catalog_already_exists"),
             },
+            CatalogError::Conflict(_) => Self {
+                status: StatusCode::CONFLICT,
+                detail: "Catalog processing state changed or is active".to_owned(),
+                code: Some("catalog_processing_conflict"),
+            },
             CatalogError::Incompatible { .. } => Self {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog format is newer than this SceneWorks version supports".to_owned(),

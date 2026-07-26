@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfirmHost } from "../appConfirm.jsx";
 import { AppContext } from "../context/AppContext.js";
+import { resetNavigationPreferenceQueueForTests } from "../uiPreferences.js";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("../runtime.js", () => ({
@@ -19,6 +20,14 @@ function response(payload, status = 200) {
     status,
     json: () => Promise.resolve(payload),
   });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 function catalog(overrides = {}) {
@@ -56,6 +65,11 @@ function catalog(overrides = {}) {
       rejectedCount: 50,
       errorCount: 2,
       message: "Analyzing shard 7",
+      updatedAt: "2026-07-26T12:00:00Z",
+    },
+    processingControl: {
+      desiredState: "running",
+      revision: 0,
       updatedAt: "2026-07-26T12:00:00Z",
     },
     ...overrides,
@@ -107,10 +121,26 @@ describe("DatasetCatalogsScreen", () => {
       }
       if (path.endsWith("/status")) return response(catalogs[0]);
       if (path.endsWith("/pause")) {
-        catalogs[0] = catalog({ processing: { ...catalog().processing, state: "paused", message: "Paused by user" } });
+        catalogs[0] = catalog({
+          processingControl: {
+            desiredState: "paused",
+            revision: 1,
+            updatedAt: "2026-07-26T12:01:00Z",
+          },
+        });
         return response(catalogs[0]);
       }
-      if (path.endsWith("/resume")) return response(catalog());
+      if (path.endsWith("/resume")) {
+        catalogs[0] = catalog({
+          processing: { ...catalog().processing, state: "paused", message: "Paused by user" },
+          processingControl: {
+            desiredState: "running",
+            revision: 2,
+            updatedAt: "2026-07-26T12:02:00Z",
+          },
+        });
+        return response(catalogs[0]);
+      }
       if (options.method === "DELETE") {
         catalogs = [];
         return response({ detached: true, deletedOnDisk: path.endsWith("/on-disk") });
@@ -129,10 +159,27 @@ describe("DatasetCatalogsScreen", () => {
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
+    await act(async () => root?.unmount());
+    await resetNavigationPreferenceQueueForTests();
     container.remove();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
+
+  async function remountWithFakeTimers() {
+    await act(async () => root.unmount());
+    vi.useFakeTimers();
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ token: "token" }}>
+          <DatasetCatalogsScreen />
+          <ConfirmHost />
+        </AppContext.Provider>,
+      );
+    });
+    await flush();
+  }
 
   it("loads persisted selection and presents real list, source, analyzer, progress, errors, and storage data", () => {
     expect(container.textContent).toContain("Photos");
@@ -193,10 +240,27 @@ describe("DatasetCatalogsScreen", () => {
     await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause")).click());
     await flush();
     expect(requests.some((item) => item.path === "/api/v1/catalogs/cat-1/pause")).toBe(true);
-    expect(container.textContent).toContain("Paused by user");
+    expect(requests.find((item) => item.path === "/api/v1/catalogs/cat-1/pause").body).toEqual({
+      expectedRevision: 0,
+    });
+    expect(container.textContent).toContain("Pause requested");
+    catalogs[0] = catalog({
+      processing: { ...catalog().processing, state: "paused", message: "Paused by user" },
+      processingControl: {
+        desiredState: "paused",
+        revision: 1,
+        updatedAt: "2026-07-26T12:02:00Z",
+      },
+    });
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
     await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Resume")).click());
     await flush();
     expect(requests.some((item) => item.path === "/api/v1/catalogs/cat-1/resume")).toBe(true);
+    expect(requests.find((item) => item.path === "/api/v1/catalogs/cat-1/resume").body).toEqual({
+      expectedRevision: 1,
+    });
+    expect(container.textContent).toContain("Resume requested");
   });
 
   it("keeps detach and permanent on-disk deletion as distinct desktop-safe confirmations", async () => {
@@ -218,5 +282,72 @@ describe("DatasetCatalogsScreen", () => {
     await flush();
     expect(container.querySelector("[role='alert']").textContent).toContain("invalid or damaged");
     expect(container.textContent).not.toContain("C:\\private\\secret");
+  });
+
+  it("aborts and ignores a delayed pre-pause status response", async () => {
+    await remountWithFakeTimers();
+    const stale = deferred();
+    const original = fetch.getMockImplementation();
+    let pollSignal;
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/status")) {
+        pollSignal = options.signal;
+        return stale.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => vi.advanceTimersByTime(3000));
+    expect(pollSignal?.aborted).toBe(false);
+
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause")).click());
+    await flush();
+    expect(pollSignal.aborted).toBe(true);
+    expect(container.textContent).toContain("Pause requested");
+    stale.resolve(response(catalog()));
+    await flush();
+    expect(container.textContent).toContain("Pause requested");
+  });
+
+  it("generation-guards a delayed status response after selection changes", async () => {
+    catalogs = [
+      catalog(),
+      catalog({ id: "cat-2", name: "Illustrations", path: "C:\\data\\illustrations.catalog" }),
+    ];
+    await remountWithFakeTimers();
+    const stale = deferred();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path === "/api/v1/catalogs/cat-1/status") return stale.promise;
+      return original(url, options);
+    });
+    await act(async () => vi.advanceTimersByTime(3000));
+    await act(async () => [...container.querySelectorAll(".catalog-list-item")].find((button) => button.textContent.includes("Illustrations")).click());
+    stale.resolve(response(catalog({ name: "Stale Photos" })));
+    await flush();
+    expect(container.querySelector(".catalog-detail h2").textContent).toBe("Illustrations");
+    expect(container.textContent).not.toContain("Stale Photos");
+  });
+
+  it("aborts delayed polling on unmount without committing its response", async () => {
+    await remountWithFakeTimers();
+    const delayed = deferred();
+    const original = fetch.getMockImplementation();
+    let signal;
+    fetch.mockImplementation((url, options = {}) => {
+      if (new URL(url).pathname.endsWith("/status")) {
+        signal = options.signal;
+        return delayed.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => vi.advanceTimersByTime(3000));
+    await act(async () => root.unmount());
+    root = null;
+    expect(signal.aborted).toBe(true);
+    delayed.resolve(response(catalog({ name: "Too late" })));
+    await flush();
+    expect(container.textContent).not.toContain("Too late");
   });
 });
