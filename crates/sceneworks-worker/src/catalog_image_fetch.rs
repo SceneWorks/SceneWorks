@@ -297,8 +297,9 @@ where
     };
     let semaphore = Arc::new(Semaphore::new(options.max_in_flight_bytes));
     let mut cursor = None;
+    let mut target_reached = false;
 
-    'pages: loop {
+    loop {
         let page = catalog.page_records_after(cursor, options.page_size)?;
         if page.records.is_empty() {
             break;
@@ -311,6 +312,37 @@ where
                 let mut record = page.records[candidate_index].clone();
                 candidate_index += 1;
                 checkpoint.counts.candidates = checkpoint.counts.candidates.saturating_add(1);
+
+                if target_reached {
+                    // Fetch-target stopping never skips retention reconciliation.
+                    // Rejected records need no network or decode work, even when
+                    // their cached file was concurrently removed as the last
+                    // shared reference. Accepted/pending candidates remain for a
+                    // later request once the requested target has been met.
+                    if !record_is_accepted(&record) {
+                        if let Some(marker) = recover_completion_marker(&catalog, &record)? {
+                            let prior = acquisition_state(&record);
+                            apply_available(
+                                &mut catalog,
+                                &mut record,
+                                &marker,
+                                prior.attempts,
+                                prior.retries,
+                                &mut checkpoint,
+                            )?;
+                        }
+                        checkpoint.counts.rejected = checkpoint.counts.rejected.saturating_add(1);
+                        if options.discard_rejected_originals {
+                            discard_rejected_original(&mut catalog, &mut record, &mut checkpoint)?;
+                        }
+                    } else if matches!(
+                        acquisition_state(&record).status.as_str(),
+                        "available" | "rejected"
+                    ) {
+                        remove_completion_marker(&catalog, &record.id)?;
+                    }
+                    continue;
+                }
 
                 if let Some(marker) = recover_completion_marker(&catalog, &record)? {
                     let prior = acquisition_state(&record);
@@ -325,7 +357,7 @@ where
                     account_completed_record(&mut catalog, &mut record, options, &mut checkpoint)?;
                     if checkpoint.counts.accepted >= options.accepted_target {
                         checkpoint.exhausted = false;
-                        break 'pages;
+                        target_reached = true;
                     }
                     continue;
                 }
@@ -342,7 +374,7 @@ where
                         )?;
                         if checkpoint.counts.accepted >= options.accepted_target {
                             checkpoint.exhausted = false;
-                            break 'pages;
+                            target_reached = true;
                         }
                     }
                     CompletedValidation::Tampered => {
@@ -419,7 +451,7 @@ where
                 }
                 if checkpoint.counts.accepted >= options.accepted_target {
                     checkpoint.exhausted = false;
-                    break 'pages;
+                    target_reached = true;
                 }
             }
         }
@@ -626,7 +658,7 @@ fn persist_fetched(
         width: fetched.width,
         height: fetched.height,
     };
-    persist_completion_marker(catalog, &base_marker)?;
+    persist_completion_marker(catalog, &base_marker, options.max_cache_bytes)?;
 
     let thumbnail_path = if let Some(max_edge) = options.thumbnail_max_edge {
         let relative = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
@@ -657,7 +689,7 @@ fn persist_fetched(
         width: fetched.width,
         height: fetched.height,
     };
-    persist_completion_marker(catalog, &marker)?;
+    persist_completion_marker(catalog, &marker, options.max_cache_bytes)?;
     Ok(marker)
 }
 
@@ -690,7 +722,8 @@ fn apply_available(
     set_acquisition_state(record, &state)?;
     record.image_path = marker.cache_path.clone();
     record.thumbnail_path.clone_from(&marker.thumbnail_path);
-    persist_record_and_checkpoint(catalog, record, checkpoint)
+    persist_record_and_checkpoint(catalog, record, checkpoint)?;
+    remove_completion_marker(catalog, &record.id)
 }
 
 fn apply_failure(
@@ -726,7 +759,7 @@ fn account_completed_record(
             discard_rejected_original(catalog, record, checkpoint)?;
         }
     }
-    Ok(())
+    remove_completion_marker(catalog, &record.id)
 }
 
 fn discard_rejected_original(
@@ -1072,6 +1105,22 @@ fn safe_relative_join(root: &Path, relative: &str) -> CatalogImageFetchResult<Pa
 }
 
 fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
+    atomic_write_with_hook(path, bytes, false, || Ok(()))
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
+    atomic_write_with_hook(path, bytes, true, || Ok(()))
+}
+
+fn atomic_write_with_hook<F>(
+    path: &Path,
+    bytes: &[u8],
+    replace: bool,
+    before_rename: F,
+) -> CatalogImageFetchResult<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
     let parent = path.parent().ok_or_else(|| {
         CatalogImageFetchError::InvalidOptions("cache path has no parent".to_owned())
     })?;
@@ -1100,17 +1149,37 @@ fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
             .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        sync_parent_directory(&temp);
+        before_rename()?;
+        if !replace && path.exists() {
+            return Err(CatalogImageFetchError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("cache destination already exists: {}", path.display()),
+            )));
+        }
         match std::fs::rename(&temp, path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                sync_parent_directory(path);
+                Ok(())
+            }
             Err(error) if path.exists() => {
-                std::fs::remove_file(&temp)?;
-                Err(CatalogImageFetchError::Io(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "cache destination appeared during atomic write: {} ({error})",
-                        path.display()
-                    ),
-                )))
+                if replace {
+                    Err(CatalogImageFetchError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "atomic cache replacement failed while preserving {}: {error}",
+                            path.display()
+                        ),
+                    )))
+                } else {
+                    Err(CatalogImageFetchError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "cache destination appeared during atomic write: {} ({error})",
+                            path.display()
+                        ),
+                    )))
+                }
             }
             Err(error) => Err(error.into()),
         }
@@ -1119,6 +1188,14 @@ fn atomic_create(path: &Path, bytes: &[u8]) -> CatalogImageFetchResult<()> {
         let _ = std::fs::remove_file(temp);
     }
     result
+}
+
+fn sync_parent_directory(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
 }
 
 fn completion_marker_path(catalog: &Catalog, record_id: &str) -> CatalogImageFetchResult<PathBuf> {
@@ -1130,18 +1207,41 @@ fn completion_marker_path(catalog: &Catalog, record_id: &str) -> CatalogImageFet
     )
 }
 
+fn remove_completion_marker(catalog: &Catalog, record_id: &str) -> CatalogImageFetchResult<()> {
+    let path = completion_marker_path(catalog, record_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+        sync_parent_directory(&path);
+    }
+    Ok(())
+}
+
 fn persist_completion_marker(
     catalog: &Catalog,
     marker: &CompletionMarker,
+    max_cache_bytes: u64,
 ) -> CatalogImageFetchResult<()> {
     let path = completion_marker_path(catalog, &marker.record_id)?;
     let payload = serde_json::to_vec(marker)?;
+    let existing_bytes = std::fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let projected = catalog
+        .storage_accounting()?
+        .artifact_bytes
+        .saturating_sub(existing_bytes)
+        .saturating_add(payload.len() as u64);
+    if projected > max_cache_bytes {
+        return Err(CatalogImageFetchError::InvalidOptions(format!(
+            "catalog completion metadata would exceed its {max_cache_bytes} byte artifact limit"
+        )));
+    }
     if path.exists() {
         let existing: CompletionMarker = serde_json::from_slice(&std::fs::read(&path)?)?;
         if existing == *marker {
             return Ok(());
         }
-        std::fs::remove_file(&path)?;
+        return atomic_replace(&path, &payload);
     }
     atomic_create(&path, &payload)
 }
@@ -1333,7 +1433,7 @@ mod tests {
             width: 8,
             height: 8,
         };
-        persist_completion_marker(&catalog, &marker).expect("base marker");
+        persist_completion_marker(&catalog, &marker, u64::MAX).expect("base marker");
         let thumbnail_relative = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
         let thumbnail = safe_catalog_file(&catalog, &thumbnail_relative, true).expect("thumbnail");
         atomic_create(&thumbnail, b"bounded thumbnail").expect("write thumbnail");
@@ -1343,7 +1443,7 @@ mod tests {
         };
         // Simulates the crash window after the thumbnail is written but before
         // SQLite is updated: the richer marker must replace the base marker.
-        persist_completion_marker(&catalog, &marker).expect("updated marker");
+        persist_completion_marker(&catalog, &marker, u64::MAX).expect("updated marker");
         assert_eq!(
             recover_completion_marker(&catalog, &record)
                 .expect("recover")
@@ -1351,6 +1451,70 @@ mod tests {
                 .thumbnail_path,
             marker.thumbnail_path
         );
+    }
+
+    #[tokio::test]
+    async fn interrupted_marker_replacement_preserves_old_resume_marker() {
+        let (_root, registry, id) = catalog_fixture();
+        let catalog = registry.open_attached(&id).expect("open");
+        prepare_cache_directories(&catalog).expect("prepare");
+        let record = catalog.page_records(0, 1).expect("page").remove(0);
+        let bytes = png(8, 8);
+        let hash = hex_digest(&bytes);
+        let relative = format!("images/sha256/{}/{}.png", &hash[..2], hash);
+        let cache = safe_catalog_file(&catalog, &relative, true).expect("cache path");
+        atomic_create(&cache, &bytes).expect("cache");
+        let old = CompletionMarker {
+            record_id: record.id.clone(),
+            content_hash: hash,
+            cache_path: relative,
+            thumbnail_path: None,
+            bytes: bytes.len() as u64,
+            width: 8,
+            height: 8,
+        };
+        persist_completion_marker(&catalog, &old, u64::MAX).expect("old marker");
+        let replacement = CompletionMarker {
+            thumbnail_path: Some("thumbnails/sha256/new.jpg".to_owned()),
+            ..old.clone()
+        };
+        let marker_path = completion_marker_path(&catalog, &record.id).expect("marker path");
+        let error = atomic_write_with_hook(
+            &marker_path,
+            &serde_json::to_vec(&replacement).expect("serialize"),
+            true,
+            || Err(std::io::Error::other("injected interruption")),
+        )
+        .expect_err("replacement interrupted");
+        assert!(error.to_string().contains("injected interruption"));
+        let durable: CompletionMarker =
+            serde_json::from_slice(&std::fs::read(&marker_path).expect("old marker survives"))
+                .expect("old marker valid");
+        assert_eq!(durable, old);
+        drop(catalog);
+
+        let network_calls = Arc::new(Mutex::new(0_u64));
+        let options = CatalogImageFetchOptions {
+            accepted_target: 1,
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        let report = fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let network_calls = Arc::clone(&network_calls);
+            move |_url, _options| {
+                let network_calls = Arc::clone(&network_calls);
+                async move {
+                    *network_calls.lock().expect("calls") += 1;
+                    Err(WorkerError::InvalidPayload(
+                        "durable marker must avoid redownload".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect("resume");
+        assert_eq!(report.checkpoint.counts.accepted, 1);
+        assert_eq!(*network_calls.lock().expect("calls"), 0);
     }
 
     #[test]
@@ -1547,6 +1711,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn low_quota_duplicate_catalog_compacts_completion_markers() {
+        let urls = (0..24)
+            .map(|index| format!("https://example.com/duplicate-{index}"))
+            .collect::<Vec<_>>();
+        let url_refs = urls.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_root, registry, id) = catalog_with_urls(&url_refs);
+        let acceptance = (0..urls.len())
+            .map(|index| index % 2 == 1)
+            .collect::<Vec<_>>();
+        set_analysis_acceptance(&registry, &id, &acceptance);
+        let bytes = png(9, 7);
+        let options = CatalogImageFetchOptions {
+            accepted_target: acceptance.iter().filter(|accepted| **accepted).count() as u64,
+            concurrency: 1,
+            thumbnail_max_edge: None,
+            max_cache_bytes: bytes.len() as u64 + 1_024,
+            ..CatalogImageFetchOptions::default()
+        };
+        let report =
+            fetch_attached_catalog_images_with(&registry, &id, &options, move |_url, _options| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            })
+            .await
+            .expect("bounded duplicates");
+        assert_eq!(report.checkpoint.counts.accepted, 12);
+        assert_eq!(report.checkpoint.counts.rejected, 12);
+        let catalog = registry.open_attached(&id).expect("open");
+        assert_eq!(
+            walk_regular_files(&catalog.root().join("artifacts/fetch-completions")),
+            0,
+            "completion markers are crash journals, not permanent per-record artifacts"
+        );
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= options.max_cache_bytes
+        );
+        assert_eq!(walk_regular_files(&catalog.root().join("images/sha256")), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_cache_hit_cannot_bypass_completion_marker_quota() {
+        let (_root, registry, id) = catalog_with_urls(&["https://example.com/existing-duplicate"]);
+        let bytes = png(9, 7);
+        {
+            let catalog = registry.open_attached(&id).expect("open");
+            prepare_cache_directories(&catalog).expect("prepare");
+            let hash = hex_digest(&bytes);
+            let relative = format!("images/sha256/{}/{}.png", &hash[..2], hash);
+            let path = safe_catalog_file(&catalog, &relative, true).expect("cache path");
+            atomic_create(&path, &bytes).expect("preexisting content");
+        }
+        let options = CatalogImageFetchOptions {
+            accepted_target: 1,
+            thumbnail_max_edge: None,
+            max_cache_bytes: bytes.len() as u64,
+            ..CatalogImageFetchOptions::default()
+        };
+        let error =
+            fetch_attached_catalog_images_with(&registry, &id, &options, move |_url, _options| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            })
+            .await
+            .expect_err("marker must respect quota");
+        assert!(error.to_string().contains("completion metadata"));
+        let catalog = registry.open_attached(&id).expect("reopen");
+        assert_eq!(
+            walk_regular_files(&catalog.root().join("artifacts/fetch-completions")),
+            0
+        );
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= options.max_cache_bytes
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_record_discards_original_but_keeps_thumbnail_and_analysis() {
         let (_root, registry, id) = catalog_with_urls(&["https://example.com/rejected-image"]);
         {
@@ -1721,6 +1969,78 @@ mod tests {
         for record in catalog.page_records(0, 2).expect("page") {
             assert_eq!(acquisition_state(&record).availability, "discarded");
         }
+    }
+
+    #[tokio::test]
+    async fn accepted_target_between_rejected_duplicates_does_not_strand_cleanup() {
+        let (_root, registry, id) = catalog_with_urls(&[
+            "https://example.com/rejected-a",
+            "https://example.com/accepted-target",
+            "https://example.com/rejected-b",
+        ]);
+        let duplicate = png(12, 12);
+        let accepted = png(13, 12);
+        let options = CatalogImageFetchOptions {
+            accepted_target: 3,
+            concurrency: 1,
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let duplicate = duplicate.clone();
+            let accepted = accepted.clone();
+            move |url, _options| {
+                let bytes = if url.ends_with("accepted-target") {
+                    accepted.clone()
+                } else {
+                    duplicate.clone()
+                };
+                async move { Ok(bytes) }
+            }
+        })
+        .await
+        .expect("initial fetch");
+        set_analysis_acceptance(&registry, &id, &[false, true, false]);
+        let (duplicate_path, accepted_path) = {
+            let catalog = registry.open_attached(&id).expect("open");
+            let records = catalog.page_records(0, 3).expect("page");
+            (
+                catalog.root().join(
+                    acquisition_state(&records[0])
+                        .cache_path
+                        .expect("duplicate path"),
+                ),
+                catalog.root().join(
+                    acquisition_state(&records[1])
+                        .cache_path
+                        .expect("accepted path"),
+                ),
+            )
+        };
+        let one_target = CatalogImageFetchOptions {
+            accepted_target: 1,
+            ..options
+        };
+        let report = fetch_attached_catalog_images_with(
+            &registry,
+            &id,
+            &one_target,
+            |_url, _options| async {
+                Err(WorkerError::InvalidPayload(
+                    "completed records must not fetch".to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("retention reconciliation");
+        assert_eq!(report.checkpoint.counts.accepted, 1);
+        assert_eq!(report.checkpoint.counts.rejected, 2);
+        assert!(!duplicate_path.exists());
+        assert!(accepted_path.is_file());
+        let catalog = registry.open_attached(&id).expect("reopen");
+        let records = catalog.page_records(0, 3).expect("page");
+        assert_eq!(acquisition_state(&records[0]).availability, "discarded");
+        assert_eq!(acquisition_state(&records[2]).availability, "discarded");
     }
 
     #[tokio::test]

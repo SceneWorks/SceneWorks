@@ -1,4 +1,5 @@
 use super::*;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -1492,7 +1493,7 @@ pub(crate) async fn fetch_public_source_url_bytes_with_options(
         ));
     }
     let mut current = parse_public_dataset_url(source_url)?;
-    let mut client = public_source_url_client(&current, options).await?;
+    let mut client = bounded_public_source_url_client(&current, options).await?;
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
         let response = client
             .get(current.clone())
@@ -1514,7 +1515,7 @@ pub(crate) async fn fetch_public_source_url_bytes_with_options(
                 WorkerError::InvalidPayload("dataset image redirect target was invalid".to_owned())
             })?;
             current = parse_public_dataset_url(next.as_str())?;
-            client = public_source_url_client(&current, options).await?;
+            client = bounded_public_source_url_client(&current, options).await?;
             continue;
         }
         let mut response = response
@@ -1589,10 +1590,44 @@ async fn read_bounded_public_source_response(
     Ok(bytes)
 }
 
-async fn public_source_url_client(
+async fn bounded_public_source_url_client(
     url: &reqwest::Url,
     options: &PublicSourceUrlFetchOptions,
 ) -> WorkerResult<reqwest::Client> {
+    bounded_public_source_url_client_with_resolver(url, options, |host, port| async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(|addresses| addresses.collect())
+    })
+    .await
+}
+
+async fn bounded_public_source_url_client_with_resolver<F, Fut>(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+    resolver: F,
+) -> WorkerResult<reqwest::Client>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    tokio::time::timeout(
+        options.connect_timeout,
+        public_source_url_client_with_resolver(url, options, resolver),
+    )
+    .await
+    .map_err(|_| WorkerError::InvalidPayload("dataset image DNS resolution timed out".to_owned()))?
+}
+
+async fn public_source_url_client_with_resolver<F, Fut>(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+    resolver: F,
+) -> WorkerResult<reqwest::Client>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
     let Some(host) = url.host_str() else {
         return Err(WorkerError::InvalidPayload(
             "dataset image URL host is not allowed".to_owned(),
@@ -1605,7 +1640,7 @@ async fn public_source_url_client(
         vec![SocketAddr::new(address, port)]
     } else {
         let mut resolved = Vec::new();
-        for address in tokio::net::lookup_host((host, port)).await? {
+        for address in resolver(host.to_owned(), port).await? {
             validate_public_ip(address.ip())
                 .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
             resolved.push(address);
@@ -1796,6 +1831,24 @@ mod public_source_url_tests {
             .expect("body");
         assert_eq!(body, "pinned");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn dataset_dns_resolution_is_bounded_by_connect_timeout() {
+        let url = reqwest::Url::parse("https://stalled-resolver.example/image").expect("URL");
+        let options = PublicSourceUrlFetchOptions {
+            connect_timeout: Duration::from_millis(10),
+            ..PublicSourceUrlFetchOptions::default()
+        };
+        let started = Instant::now();
+        let error =
+            bounded_public_source_url_client_with_resolver(&url, &options, |_host, _port| async {
+                std::future::pending::<std::io::Result<Vec<SocketAddr>>>().await
+            })
+            .await
+            .expect_err("resolver must time out");
+        assert!(error.to_string().contains("DNS resolution timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
 
