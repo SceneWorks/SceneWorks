@@ -25,7 +25,7 @@ fn report(
         "{label}: assets={assets} elapsed_ms={:.3} fs_total={} registry_opens={} \
          registry_metadata_reads={} registry_content_reads={} path_stats={} directory_scans={} \
          sidecar_reads={} generation_set_reads={} timeline_reads={} character_reads={} \
-         poster_stats={} index_marker_reads={} index_marker_writes={} index_marker_removes={} \
+         poster_stats={} poster_reads={} index_marker_reads={} index_marker_writes={} index_marker_removes={} \
          directory_create_calls={} db_opens={}",
         elapsed.as_secs_f64() * 1_000.0,
         operations.total(),
@@ -39,6 +39,7 @@ fn report(
         operations.timeline_reads,
         operations.character_reads,
         operations.poster_stats,
+        operations.poster_reads,
         operations.index_marker_reads,
         operations.index_marker_writes,
         operations.index_marker_removes,
@@ -69,6 +70,7 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
         warm_operations.timeline_reads += operations.timeline_reads;
         warm_operations.character_reads += operations.character_reads;
         warm_operations.poster_stats += operations.poster_stats;
+        warm_operations.poster_reads += operations.poster_reads;
         warm_operations.index_marker_reads += operations.index_marker_reads;
         warm_operations.index_marker_writes += operations.index_marker_writes;
         warm_operations.index_marker_removes += operations.index_marker_removes;
@@ -91,6 +93,7 @@ fn run(store: ProjectStore, project_id: &str, iterations: usize) {
             timeline_reads: warm_operations.timeline_reads / iterations as u64,
             character_reads: warm_operations.character_reads / iterations as u64,
             poster_stats: warm_operations.poster_stats / iterations as u64,
+            poster_reads: warm_operations.poster_reads / iterations as u64,
             index_marker_reads: warm_operations.index_marker_reads / iterations as u64,
             index_marker_writes: warm_operations.index_marker_writes / iterations as u64,
             index_marker_removes: warm_operations.index_marker_removes / iterations as u64,

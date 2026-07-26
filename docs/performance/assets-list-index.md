@@ -2,13 +2,15 @@
 
 `ProjectStore::list_assets` serves the normalized `asset_json` envelope stored
 in each project's `project.db`. That envelope includes filesystem-derived
-generation-set hydration. Indexed video posters are copied to the flat managed
-`assets/posters` directory, which a clean list snapshots once; no per-row file
-is read or statted. SceneWorks-owned asset mutations write the sidecar and
-update the indexed envelope before returning, so the next list sees them
-immediately. A durable `.asset-index-dirty` marker spans the filesystem write
-and separate SQLite transaction. If either fails or the process exits between
-them, the next indexed read rebuilds from disk before serving data. Marker
+generation-set hydration plus a content-addressed `posterUrl`. Poster bytes and
+their SHA-256 digest live in the same indexed asset row, and the dedicated
+poster endpoint serves that blob. A clean list therefore performs no poster
+filesystem read, stat, or directory enumeration. SceneWorks-owned asset
+mutations write the sidecar and update the indexed envelope before returning,
+so the next list sees them immediately. A durable `.asset-index-dirty` marker
+spans the filesystem write and separate SQLite transaction. If either fails or
+the process exits between them, the next indexed read rebuilds from disk before
+serving data. Marker
 inspection, repair, orphan pruning, and marker clear share the same reentrant
 per-project lock as the owning mutation, so a concurrent list cannot clear an
 in-flight writer's marker. Native frame/render workers persist sidecar, recipe,
@@ -30,12 +32,14 @@ set. Reindex reads the current source files, so this contract also covers
 deletions, same-size rewrites, and edits made by tools that preserve file
 timestamps.
 
-Poster presence has a narrower freshness contract. Indexing copies an existing
-source sibling poster to `assets/posters/<asset-id>.poster.jpg` and advertises
-that managed path. Deleting the advertised managed file is visible on the next
-ordinary list: its URL is suppressed without a reindex. Adding, replacing, or
-deleting only the source sibling still requires reindexing to refresh the
-managed copy.
+At indexing time, a source sibling poster is accepted only when its relative
+path is safe, every component is non-symlink, canonical resolution remains
+inside the project, the final open uses the platform no-follow flag, and the
+file is at most 16 MiB. Its bytes and digest are committed atomically with the
+envelope. Missing or rejected sources commit a null blob and no URL, clearing
+any previous value for the same asset id. Adding, replacing, or deleting only
+the source sibling requires reindexing; until then the advertised DB-backed URL
+continues to resolve independently of that source file.
 
 A corrupt sidecar is skipped during reindex; a corrupt indexed envelope is
 skipped during listing without preventing healthy assets from loading. Here
@@ -57,19 +61,28 @@ would also retain handles to removable or remounted project paths and complicate
 the existing project-file lock/repair lifecycle. One connection per request
 removes the redundant opens without narrowing the supported storage contract.
 
+Schema v8 stores one poster blob per video asset. This deliberately trades
+project DB size (and rollback-journal write volume during poster updates) for
+zero poster filesystem work on ordinary lists and an authoritative serving
+endpoint. Each blob is capped at 16 MiB. The list query selects `asset_json` but
+not `poster_bytes`, so SQLite does not materialize blob contents while listing;
+the poster endpoint reads one requested blob. The version-bump rebuild reads
+existing sibling posters once. Purge/orphan lifecycle cleanup removes safe
+source siblings so later reuse of an id/path cannot inherit old poster content.
+
 ## Benchmark harness
 
 The harness records asset count, elapsed time, and one per-request logical
 filesystem-call inventory. It covers registry opens/metadata/content reads,
 path stats, directory scans, asset-sidecar, generation-set, timeline, and
-character JSON reads, poster stats, dirty-marker reads/writes/removes,
+character JSON reads, poster stats/reads, dirty-marker reads/writes/removes,
 directory-create calls, and DB opens. `fs_total` is the sum of those categories.
 Counts are logical calls made by the SceneWorks asset-list/reconciliation code;
 they do not claim to expose hidden syscalls inside SQLite, the standard library,
-or the operating system. In particular, the managed-poster snapshot is one
-logical directory scan per list, but its enumeration bytes and CPU grow with
-the number of managed posters. Benchmark wall time therefore remains necessary
-alongside the constant logical-operation count, especially on network volumes.
+or the operating system. The SC-14799 regression additionally pins zero clean
+list directory scans and statically rejects `read_dir`/`file_type` calls in the
+list implementation, so entry enumeration cannot be collapsed into one
+false-green logical operation.
 
 ```shell
 cargo run --release -p sceneworks-core --example assets_list_benchmark -- synthetic 1000 10
@@ -118,8 +131,8 @@ evicted cold-cache measurement:
 
 ```text
 storage=synthetic-local-distinct-video-sets path=<temporary local directory>
-first-call: assets=500 elapsed_ms=9.384 fs_total=11 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=1 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
-steady-state-average(10): assets=500 elapsed_ms=8.418 fs_total=8 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=1 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+first-call: assets=500 elapsed_ms=7.552 fs_total=10 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+steady-state-average(10): assets=500 elapsed_ms=7.366 fs_total=7 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
 ```
 
 The implementation environment had no mounted network volume or RunPod access,

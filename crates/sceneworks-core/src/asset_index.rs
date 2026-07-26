@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -17,8 +18,7 @@ use crate::store_util::{
 };
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
-const INDEXED_POSTERS_DIR: &str = "assets/posters";
-const INDEXED_POSTER_SUFFIX: &str = ".poster.jpg";
+const MAX_INDEXED_POSTER_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) const ASSET_FOLDERS: &[&str] = &[
     "assets/images",
@@ -35,6 +35,11 @@ pub(crate) const ASSET_FOLDERS: &[&str] = &[
 pub(crate) struct AssetRecord {
     pub(crate) file_path: Option<String>,
     pub(crate) sidecar_path: Option<String>,
+}
+
+struct IndexedPoster {
+    bytes: Vec<u8>,
+    sha256: String,
 }
 
 pub(crate) fn sidecar_content_fingerprint(
@@ -112,13 +117,13 @@ pub(crate) fn index_asset_on_connection(
     sidecar_path: Option<&Path>,
 ) -> ProjectStoreResult<()> {
     let mut indexed_asset = asset.clone();
-    hydrate_asset(
+    let indexed_poster = hydrate_asset(
         project_id,
         project_path,
         &mut indexed_asset,
         &mut GenerationSetCache::default(),
+        true,
     )?;
-    materialize_indexed_poster(project_id, project_path, &mut indexed_asset)?;
     let sidecar_rel = match sidecar_path {
         Some(path) => Some(relative_string(project_path, path)?),
         None => None,
@@ -129,92 +134,8 @@ pub(crate) fn index_asset_on_connection(
         &indexed_asset,
         sidecar_rel.as_deref(),
         sidecar_fingerprint,
+        indexed_poster.as_ref(),
     )
-}
-
-/// Materialize an advertised video poster into one managed, flat directory.
-///
-/// Keeping indexed posters flat lets the clean list path verify every row's
-/// poster presence with one directory snapshot instead of one stat per video.
-/// The URL is always assembled from the authoritative route/store project id,
-/// never the mutable `projectId` carried by an imported sidecar.
-fn materialize_indexed_poster(
-    project_id: &str,
-    project_path: &Path,
-    asset: &mut Value,
-) -> ProjectStoreResult<()> {
-    let asset_id = asset
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| is_safe_id(id));
-    let source_poster = asset
-        .pointer("/file/path")
-        .and_then(Value::as_str)
-        .filter(|_| asset.get("type").and_then(Value::as_str) == Some("video"))
-        .filter(|path| is_safe_relative_path(path))
-        .map(|path| Path::new(&path.replace('\\', "/")).with_extension("poster.jpg"));
-
-    let Some((asset_id, source_poster)) = asset_id.zip(source_poster) else {
-        if let Some(object) = asset.as_object_mut() {
-            object.remove("posterUrl");
-        }
-        return Ok(());
-    };
-    let poster_rel =
-        Path::new(INDEXED_POSTERS_DIR).join(format!("{asset_id}{INDEXED_POSTER_SUFFIX}"));
-    let poster_path = project_path.join(&poster_rel);
-    let source_path = project_path.join(source_poster);
-    if source_path.is_file() {
-        if let Some(parent) = poster_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&source_path, &poster_path)?;
-    }
-
-    let poster_url = poster_path.is_file().then(|| {
-        format!(
-            "/api/v1/projects/{project_id}/files/{}",
-            poster_rel.to_string_lossy().replace('\\', "/")
-        )
-    });
-    if let Some(object) = asset.as_object_mut() {
-        object.remove("posterUrl");
-        if let Some(poster_url) = poster_url {
-            object.insert("posterUrl".to_owned(), Value::String(poster_url));
-        }
-    }
-    Ok(())
-}
-
-/// Snapshot the managed poster directory once for an ordinary asset list.
-///
-/// Directory enumeration (including entry type) is one shared logical
-/// operation. It deliberately replaces N per-video `stat` calls.
-pub(crate) fn indexed_poster_ids(project_path: &Path) -> ProjectStoreResult<HashSet<String>> {
-    record_asset_list_filesystem_operation(AssetListFilesystemOperation::DirectoryScan);
-    let entries = match fs::read_dir(project_path.join(INDEXED_POSTERS_DIR)) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut poster_ids = HashSet::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let Some(asset_id) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_suffix(INDEXED_POSTER_SUFFIX))
-            .filter(|id| is_safe_id(id))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        poster_ids.insert(asset_id);
-    }
-    Ok(poster_ids)
 }
 
 pub(crate) fn row_to_asset_record(row: &Row<'_>) -> rusqlite::Result<AssetRecord> {
@@ -315,12 +236,14 @@ pub(crate) fn normalize_asset(
     project_path: &Path,
     sidecar_path: &Path,
 ) -> ProjectStoreResult<Value> {
-    normalize_asset_cached(
+    let mut asset = normalize_asset_cached(
         project_id,
         project_path,
         sidecar_path,
         &mut GenerationSetCache::default(),
-    )
+    )?;
+    attach_indexed_poster_url(project_id, project_path, &mut asset)?;
+    Ok(asset)
 }
 
 /// Like [`normalize_asset`] but resolves the embedded `generationSet` through a
@@ -334,7 +257,7 @@ pub(crate) fn normalize_asset_cached(
 ) -> ProjectStoreResult<Value> {
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
     let mut asset = read_json(sidecar_path)?;
-    hydrate_asset(project_id, project_path, &mut asset, generation_sets)?;
+    hydrate_asset(project_id, project_path, &mut asset, generation_sets, false)?;
     let sidecar_rel = relative_string(project_path, sidecar_path)?;
     if let Some(object) = asset.as_object_mut() {
         object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
@@ -347,7 +270,8 @@ fn hydrate_asset(
     project_path: &Path,
     asset: &mut Value,
     generation_sets: &mut GenerationSetCache,
-) -> ProjectStoreResult<()> {
+    index_poster: bool,
+) -> ProjectStoreResult<Option<IndexedPoster>> {
     // Guarantee every API response carries an `origin`, even for legacy sidecars
     // written before the field existed (sc-2024).
     let origin = asset_origin(asset);
@@ -357,30 +281,13 @@ fn hydrate_asset(
             .entry("origin".to_owned())
             .or_insert_with(|| Value::String(origin));
     }
-    if let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) {
+    let indexed_poster = if let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) {
         let normalized_path = path.replace('\\', "/");
-        // A generated/rendered video carries a sibling `<name>.poster.jpg` (worker
-        // frame-0 extract) that the web UI shows in place of the <video>'s own first
-        // frame — WKWebView won't paint it. Advertise a `posterUrl` ONLY when that
-        // file actually exists on disk, so the client never requests a poster a video
-        // doesn't have — an imported clip, or a generation where ffmpeg was
-        // unavailable — which would otherwise 404 on every render (sc-10468).
-        // Indexing subsequently materializes this poster into the flat managed
-        // poster directory. Ordinary lists snapshot that directory once, so
-        // out-of-band deletion of an advertised poster is visible immediately
-        // without restoring N per-video stats (sc-14799).
-        let poster_url = (asset.get("type").and_then(Value::as_str) == Some("video"))
-            .then(|| Path::new(&normalized_path).with_extension("poster.jpg"))
-            .filter(|poster_rel| {
-                record_asset_list_filesystem_operation(AssetListFilesystemOperation::PosterStat);
-                project_path.join(poster_rel).is_file()
-            })
-            .map(|poster_rel| {
-                format!(
-                    "/api/v1/projects/{project_id}/files/{}",
-                    poster_rel.to_string_lossy().replace('\\', "/")
-                )
-            });
+        let indexed_poster = if index_poster {
+            read_indexed_poster(project_path, asset)?
+        } else {
+            None
+        };
         if let Some(object) = asset.as_object_mut() {
             object.insert(
                 "url".to_owned(),
@@ -389,11 +296,26 @@ fn hydrate_asset(
                 )),
             );
             object.remove("posterUrl");
-            if let Some(poster_url) = poster_url {
-                object.insert("posterUrl".to_owned(), Value::String(poster_url));
+            if let (Some(asset_id), Some(poster)) = (
+                object.get("id").and_then(Value::as_str),
+                indexed_poster.as_ref(),
+            ) {
+                object.insert(
+                    "posterUrl".to_owned(),
+                    Value::String(format!(
+                        "/api/v1/projects/{project_id}/assets/{asset_id}/poster/{}",
+                        poster.sha256
+                    )),
+                );
             }
         }
-    }
+        indexed_poster
+    } else {
+        if let Some(object) = asset.as_object_mut() {
+            object.remove("posterUrl");
+        }
+        None
+    };
     // The id comes from the on-disk sidecar and is joined into the
     // generation-sets read path below; skip anything that isn't a plain id so a
     // tampered sidecar can't pull JSON from outside the project into API
@@ -425,15 +347,168 @@ fn hydrate_asset(
     } else if let Some(object) = asset.as_object_mut() {
         object.remove("generationSet");
     }
+    Ok(indexed_poster)
+}
+
+fn attach_indexed_poster_url(
+    project_id: &str,
+    project_path: &Path,
+    asset: &mut Value,
+) -> ProjectStoreResult<()> {
+    let Some(asset_id) = asset
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_id(id))
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    let Ok(connection) = Connection::open(project_path.join("project.db")) else {
+        return Ok(());
+    };
+    let Ok(poster_sha256) = connection
+        .query_row(
+            "select poster_sha256 from assets where id = ?1 and poster_bytes is not null",
+            params![asset_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+    else {
+        return Ok(());
+    };
+    if let Some(object) = asset.as_object_mut() {
+        object.remove("posterUrl");
+        if let Some(poster_sha256) = poster_sha256.flatten() {
+            object.insert(
+                "posterUrl".to_owned(),
+                Value::String(format!(
+                    "/api/v1/projects/{project_id}/assets/{asset_id}/poster/{poster_sha256}"
+                )),
+            );
+        }
+    }
     Ok(())
+}
+
+/// Read a generated sibling poster for DB-backed serving.
+///
+/// Every path component is inspected without following links, the resolved
+/// source must remain below the canonical project root, and the final open uses
+/// the platform's no-follow flag. Unsafe, missing, unreadable, or oversized
+/// posters are treated as absent so indexing atomically clears any prior blob.
+fn read_indexed_poster(
+    project_path: &Path,
+    asset: &Value,
+) -> ProjectStoreResult<Option<IndexedPoster>> {
+    if asset.get("type").and_then(Value::as_str) != Some("video") {
+        return Ok(None);
+    }
+    let Some(asset_id) = asset
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_id(id))
+    else {
+        return Ok(None);
+    };
+    let Some(media_path) = asset
+        .pointer("/file/path")
+        .and_then(Value::as_str)
+        .filter(|path| is_safe_relative_path(path))
+    else {
+        return Ok(None);
+    };
+    let poster_rel = Path::new(media_path).with_extension("poster.jpg");
+    if !poster_rel
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Ok(None);
+    }
+
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PosterStat);
+    let Ok(root) = fs::canonicalize(project_path) else {
+        return Ok(None);
+    };
+    let mut target = root.clone();
+    for component in poster_rel.components() {
+        let Component::Normal(component) = component else {
+            return Ok(None);
+        };
+        target.push(component);
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            return Ok(None);
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+    }
+    let Ok(canonical_target) = fs::canonicalize(&target) else {
+        return Ok(None);
+    };
+    if !canonical_target.starts_with(&root) {
+        return Ok(None);
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: a raced symlink is opened as the link
+        // itself and rejected by the regular-file check below.
+        options.custom_flags(0x0020_0000);
+    }
+    let Ok(file) = options.open(&canonical_target) else {
+        return Ok(None);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Ok(None);
+    };
+    if !metadata.is_file() || metadata.len() > MAX_INDEXED_POSTER_BYTES {
+        return Ok(None);
+    }
+    // Revalidate the lexical source after the no-follow open. This catches a
+    // component swapped to a reparse point/symlink between the first walk and
+    // opening before any bytes are copied into SQLite.
+    let mut revalidated = root.clone();
+    for component in poster_rel.components() {
+        let Component::Normal(component) = component else {
+            return Ok(None);
+        };
+        revalidated.push(component);
+        let Ok(metadata) = fs::symlink_metadata(&revalidated) else {
+            return Ok(None);
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+    }
+    if fs::canonicalize(&revalidated).ok().as_ref() != Some(&canonical_target) {
+        return Ok(None);
+    }
+
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PosterRead);
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_INDEXED_POSTER_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INDEXED_POSTER_BYTES {
+        return Ok(None);
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    debug_assert!(is_safe_id(asset_id));
+    Ok(Some(IndexedPoster { bytes, sha256 }))
 }
 
 /// Return an already-hydrated asset envelope stored in project.db.
 ///
-/// Filesystem-derived fields (`generationSet` and `posterUrl`) are materialized
-/// when the row is indexed. Poster presence is separately reconciled from one
-/// shared managed-directory snapshot by the caller. SceneWorks-owned mutations
-/// update the index before returning, while out-of-band sidecar or
+/// Filesystem-derived fields (`generationSet` and DB-backed `posterUrl`) are
+/// materialized when the row is indexed. SceneWorks-owned mutations update the
+/// index before returning, while out-of-band sidecar, source-poster, or
 /// generation-set edits require an explicit project reindex.
 pub(crate) fn hydrate_indexed_asset_cached(
     _project_id: &str,
@@ -444,11 +519,12 @@ pub(crate) fn hydrate_indexed_asset_cached(
     Ok(asset)
 }
 
-pub(crate) fn upsert_asset_row(
+fn upsert_asset_row(
     connection: &Connection,
     asset: &Value,
     sidecar_rel: Option<&str>,
     sidecar_fingerprint: Option<(u64, Option<String>, String)>,
+    indexed_poster: Option<&IndexedPoster>,
 ) -> ProjectStoreResult<()> {
     let status = asset.get("status").unwrap_or(&Value::Null);
     connection.execute(
@@ -457,8 +533,9 @@ pub(crate) fn upsert_asset_row(
           id, type, display_name, file_path, generation_set_id, created_at,
           favorite, rating, rejected, trashed, sidecar_path, origin,
           asset_json, source_asset_id, upscaled_from_asset_id,
-          sidecar_size, sidecar_modified_ns, sidecar_sha256
-        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+          sidecar_size, sidecar_modified_ns, sidecar_sha256,
+          poster_bytes, poster_sha256
+        ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
         ",
         params![
             required_str(asset, "id")?,
@@ -502,6 +579,8 @@ pub(crate) fn upsert_asset_row(
                 .as_ref()
                 .and_then(|value| value.1.clone()),
             sidecar_fingerprint.map(|value| value.2),
+            indexed_poster.map(|poster| poster.bytes.as_slice()),
+            indexed_poster.map(|poster| poster.sha256.as_str()),
         ],
     )?;
     Ok(())
