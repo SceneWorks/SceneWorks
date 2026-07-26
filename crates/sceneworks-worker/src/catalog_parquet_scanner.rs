@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -20,6 +20,7 @@ const DEFAULT_BATCH_SIZE: usize = 1_000;
 const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_CAPTION_CHARS: usize = 2_048;
 const MAX_IMAGE_EDGE: u32 = 16_384;
+const SCAN_LOCK_FILE: &str = ".parquet-scan.lock";
 
 #[derive(Debug)]
 pub enum CatalogParquetScanError {
@@ -29,6 +30,7 @@ pub enum CatalogParquetScanError {
     Json(serde_json::Error),
     InvalidSource(String),
     CheckpointMismatch(String),
+    Busy(String),
 }
 
 impl std::fmt::Display for CatalogParquetScanError {
@@ -38,7 +40,7 @@ impl std::fmt::Display for CatalogParquetScanError {
             Self::Parquet(error) => write!(formatter, "{error}"),
             Self::Catalog(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
-            Self::InvalidSource(detail) | Self::CheckpointMismatch(detail) => {
+            Self::InvalidSource(detail) | Self::CheckpointMismatch(detail) | Self::Busy(detail) => {
                 formatter.write_str(detail)
             }
         }
@@ -163,6 +165,48 @@ struct SemanticOptions<'a> {
     min_aesthetic_score: Option<f64>,
 }
 
+/// Cross-process lease for the single mutable Parquet checkpoint in a catalog.
+///
+/// Utility workers are separate processes, so an in-process mutex is
+/// insufficient. The advisory OS lock is released automatically when the file
+/// handle drops, including after an unwinding failure or process exit.
+struct CatalogScanLease {
+    _file: File,
+}
+
+impl CatalogScanLease {
+    fn acquire(catalog: &Catalog) -> CatalogParquetScanResult<Self> {
+        use fs2::FileExt as _;
+
+        let lock_path = catalog.root().join(SCAN_LOCK_FILE);
+        if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(CatalogParquetScanError::InvalidSource(format!(
+                    "Catalog scan lock must be a regular file: {}",
+                    lock_path.display()
+                )));
+            }
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        let contended = fs2::lock_contended_error().raw_os_error();
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(error) if error.raw_os_error() == contended => {
+                Err(CatalogParquetScanError::Busy(format!(
+                    "Catalog {} already has an active Parquet scan.",
+                    catalog.descriptor().id
+                )))
+            }
+            Err(error) => Err(CatalogParquetScanError::Io(error)),
+        }
+    }
+}
+
 /// Indexes a bounded pass of Parquet rows into `catalog`.
 ///
 /// Calling this again with the same source and semantic options resumes at the
@@ -183,6 +227,7 @@ fn scan_parquet_catalog(
     source: &Path,
     options: &CatalogParquetScanOptions,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
+    let _lease = CatalogScanLease::acquire(catalog)?;
     validate_options(options)?;
     let shards = parquet_shards(source)?;
     let source_signature = source_signature(&shards)?;
@@ -352,6 +397,27 @@ fn validate_options(options: &CatalogParquetScanOptions) -> CatalogParquetScanRe
             )));
         }
     }
+    for (name, minimum, maximum) in [
+        ("width", options.min_width, options.max_width),
+        ("height", options.min_height, options.max_height),
+    ] {
+        if minimum
+            .zip(maximum)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(CatalogParquetScanError::InvalidSource(format!(
+                "Parquet catalog minimum {name} cannot exceed maximum {name}."
+            )));
+        }
+    }
+    if options
+        .max_unsafe_score
+        .is_some_and(|value| !(0.0..=1.0).contains(&value))
+    {
+        return Err(CatalogParquetScanError::InvalidSource(
+            "maxUnsafeScore must be between 0 and 1.".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -437,8 +503,24 @@ fn catalog_record_for_row(
         return RowOutcome::Reject("invalid_url");
     }
 
-    let width = row_u32_alias(row, &["width", "image_width", "original_width"]);
-    let height = row_u32_alias(row, &["height", "image_height", "original_height"]);
+    let width = match filtered_dimension(
+        row_u32_alias(row, &["width", "image_width", "original_width"]),
+        options.min_width.is_some() || options.max_width.is_some(),
+        "missing_width",
+        "invalid_width",
+    ) {
+        Ok(value) => value,
+        Err(reason) => return RowOutcome::Malformed(reason),
+    };
+    let height = match filtered_dimension(
+        row_u32_alias(row, &["height", "image_height", "original_height"]),
+        options.min_height.is_some() || options.max_height.is_some(),
+        "missing_height",
+        "invalid_height",
+    ) {
+        Ok(value) => value,
+        Err(reason) => return RowOutcome::Malformed(reason),
+    };
     if width.is_some_and(|value| {
         options.min_width.is_some_and(|minimum| value < minimum)
             || options.max_width.is_some_and(|maximum| value > maximum)
@@ -467,16 +549,24 @@ fn catalog_record_for_row(
         return RowOutcome::Reject("people");
     }
 
-    let unsafe_score = row_f64_alias(
-        row,
-        &[
-            "punsafe",
-            "unsafe_score",
-            "nsfw_score",
-            "nsfw",
-            "safety_score",
-        ],
-    );
+    let unsafe_score = match filtered_score(
+        row_probability_alias(
+            row,
+            &[
+                "punsafe",
+                "unsafe_score",
+                "nsfw_score",
+                "nsfw",
+                "safety_score",
+            ],
+        ),
+        options.max_unsafe_score.is_some(),
+        "missing_safety",
+        "invalid_safety",
+    ) {
+        Ok(value) => value,
+        Err(reason) => return RowOutcome::Malformed(reason),
+    };
     if options
         .max_unsafe_score
         .zip(unsafe_score)
@@ -484,10 +574,18 @@ fn catalog_record_for_row(
     {
         return RowOutcome::Reject("safety");
     }
-    let aesthetic_score = row_f64_alias(
-        row,
-        &["aesthetic", "aesthetic_score", "aesthetic_score_laion_v2"],
-    );
+    let aesthetic_score = match filtered_score(
+        row_f64_alias(
+            row,
+            &["aesthetic", "aesthetic_score", "aesthetic_score_laion_v2"],
+        ),
+        options.min_aesthetic_score.is_some(),
+        "missing_aesthetic",
+        "invalid_aesthetic",
+    ) {
+        Ok(value) => value,
+        Err(reason) => return RowOutcome::Malformed(reason),
+    };
     if options
         .min_aesthetic_score
         .zip(aesthetic_score)
@@ -566,8 +664,18 @@ fn row_string_alias(row: &Row, aliases: &[&str]) -> Option<String> {
     }
 }
 
-fn row_u32_alias(row: &Row, aliases: &[&str]) -> Option<u32> {
-    match find_field(row, aliases)? {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MetadataField<T> {
+    Missing,
+    Invalid,
+    Value(T),
+}
+
+fn row_u32_alias(row: &Row, aliases: &[&str]) -> MetadataField<u32> {
+    let Some(field) = find_field(row, aliases) else {
+        return MetadataField::Missing;
+    };
+    let value = match field {
         Field::Byte(value) => u32::try_from(*value).ok(),
         Field::Short(value) => u32::try_from(*value).ok(),
         Field::Int(value) => u32::try_from(*value).ok(),
@@ -576,14 +684,25 @@ fn row_u32_alias(row: &Row, aliases: &[&str]) -> Option<u32> {
         Field::UShort(value) => Some((*value).into()),
         Field::UInt(value) => Some(*value),
         Field::ULong(value) => u32::try_from(*value).ok(),
-        Field::Float(value) if value.is_finite() && *value >= 0.0 => Some(*value as u32),
-        Field::Double(value) if value.is_finite() && *value >= 0.0 => Some(*value as u32),
+        Field::Float(value) => exact_u32((*value).into()),
+        Field::Double(value) => exact_u32(*value),
+        Field::Str(value) => value.trim().parse().ok(),
+        Field::Bytes(value) => std::str::from_utf8(value.data())
+            .ok()
+            .and_then(|value| value.trim().parse().ok()),
         _ => None,
+    };
+    match value {
+        Some(value) => MetadataField::Value(value),
+        None => MetadataField::Invalid,
     }
 }
 
-fn row_f64_alias(row: &Row, aliases: &[&str]) -> Option<f64> {
-    match find_field(row, aliases)? {
+fn row_f64_alias(row: &Row, aliases: &[&str]) -> MetadataField<f64> {
+    let Some(field) = find_field(row, aliases) else {
+        return MetadataField::Missing;
+    };
+    let value = match field {
         Field::Byte(value) => Some((*value).into()),
         Field::Short(value) => Some((*value).into()),
         Field::Int(value) => Some((*value).into()),
@@ -599,13 +718,60 @@ fn row_f64_alias(row: &Row, aliases: &[&str]) -> Option<f64> {
             .ok()
             .and_then(parse_metadata_score),
         _ => None,
+    };
+    match value {
+        Some(value) if value.is_finite() => MetadataField::Value(value),
+        _ => MetadataField::Invalid,
+    }
+}
+
+fn row_probability_alias(row: &Row, aliases: &[&str]) -> MetadataField<f64> {
+    match row_f64_alias(row, aliases) {
+        MetadataField::Value(value) if (0.0..=1.0).contains(&value) => MetadataField::Value(value),
+        MetadataField::Value(_) => MetadataField::Invalid,
+        other => other,
+    }
+}
+
+fn exact_u32(value: f64) -> Option<u32> {
+    (value.is_finite() && value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
+        .then_some(value as u32)
+}
+
+fn filtered_dimension(
+    field: MetadataField<u32>,
+    required: bool,
+    missing_reason: &'static str,
+    invalid_reason: &'static str,
+) -> Result<Option<u32>, &'static str> {
+    match field {
+        MetadataField::Value(value) => Ok(Some(value)),
+        MetadataField::Missing if required => Err(missing_reason),
+        MetadataField::Invalid if required => Err(invalid_reason),
+        MetadataField::Missing | MetadataField::Invalid => Ok(None),
+    }
+}
+
+fn filtered_score(
+    field: MetadataField<f64>,
+    required: bool,
+    missing_reason: &'static str,
+    invalid_reason: &'static str,
+) -> Result<Option<f64>, &'static str> {
+    match field {
+        MetadataField::Value(value) => Ok(Some(value)),
+        MetadataField::Missing if required => Err(missing_reason),
+        MetadataField::Invalid if required => Err(invalid_reason),
+        MetadataField::Missing | MetadataField::Invalid => Ok(None),
     }
 }
 
 fn parse_metadata_score(value: &str) -> Option<f64> {
     let normalized = value.trim().to_ascii_lowercase();
     normalized.parse().ok().or(match normalized.as_str() {
-        "safe" | "false" | "unlikely" => Some(0.0),
+        "safe" | "sfw" | "false" => Some(0.0),
+        "unlikely" => Some(0.25),
+        "unsure" => Some(0.5),
         "unsafe" | "nsfw" | "true" | "porn" => Some(1.0),
         _ => None,
     })
@@ -840,6 +1006,70 @@ mod tests {
         writer.close().expect("writer closes");
     }
 
+    fn write_rows_without_scores(path: &Path, rows: &[TestRow<'_>], include_dimensions: bool) {
+        let schema = Arc::new(
+            parse_message_type(if include_dimensions {
+                "message laion {
+                    REQUIRED BINARY URL (UTF8);
+                    REQUIRED BINARY TEXT (UTF8);
+                    REQUIRED INT32 WIDTH;
+                    REQUIRED INT32 HEIGHT;
+                }"
+            } else {
+                "message laion {
+                    REQUIRED BINARY URL (UTF8);
+                    REQUIRED BINARY TEXT (UTF8);
+                }"
+            })
+            .expect("test schema"),
+        );
+        let mut writer = SerializedFileWriter::new(
+            File::create(path).expect("test parquet creates"),
+            schema,
+            Arc::new(WriterProperties::builder().build()),
+        )
+        .expect("writer creates");
+        let mut row_group = writer.next_row_group().expect("row group creates");
+        let mut column_index = 0;
+        while let Some(mut column) = row_group.next_column().expect("column advances") {
+            if column_index < 2 {
+                let values = rows
+                    .iter()
+                    .map(|row| {
+                        ByteArray::from(if column_index == 0 {
+                            row.url
+                        } else {
+                            row.caption
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                column
+                    .typed::<ByteArrayType>()
+                    .write_batch(&values, None, None)
+                    .expect("strings write");
+            } else {
+                let values = rows
+                    .iter()
+                    .map(|row| {
+                        if column_index == 2 {
+                            row.width
+                        } else {
+                            row.height
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                column
+                    .typed::<Int32Type>()
+                    .write_batch(&values, None, None)
+                    .expect("dimensions write");
+            }
+            column.close().expect("column closes");
+            column_index += 1;
+        }
+        row_group.close().expect("row group closes");
+        writer.close().expect("writer closes");
+    }
+
     fn row(url: &'static str, caption: &'static str) -> TestRow<'static> {
         TestRow {
             url,
@@ -865,6 +1095,63 @@ mod tests {
             "BMW model photographed in a studio"
         ));
         assert!(!caption_describes_people("Tasmania wilderness panorama"));
+    }
+
+    #[test]
+    fn catalog_scan_lease_is_exclusive_and_releases_for_same_or_changed_options() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        write_rows(
+            &source,
+            &[vec![row("https://example.com/one.jpg", "one person")]],
+        );
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let first_catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Lease")
+            .expect("catalog creates");
+        let catalog_id = first_catalog.descriptor().id.clone();
+        let lease = CatalogScanLease::acquire(&first_catalog).expect("first lease acquires");
+        first_catalog.close();
+
+        for options in [
+            CatalogParquetScanOptions::default(),
+            CatalogParquetScanOptions {
+                require_people: true,
+                ..CatalogParquetScanOptions::default()
+            },
+        ] {
+            let error = scan_attached_parquet_catalog(&registry, &catalog_id, &source, &options)
+                .expect_err("concurrent scan must not reach checkpoint or writes");
+            assert!(matches!(error, CatalogParquetScanError::Busy(_)));
+        }
+        let untouched = registry
+            .open_attached(&catalog_id)
+            .expect("catalog reopens while lease is held");
+        assert_eq!(
+            untouched.metadata(CHECKPOINT_KEY).expect("metadata reads"),
+            None,
+            "contended scans must not load or publish a checkpoint"
+        );
+        assert_eq!(
+            untouched
+                .storage_accounting()
+                .expect("accounting")
+                .record_count,
+            0,
+            "contended scans must not mix records"
+        );
+        untouched.close();
+
+        drop(lease);
+        let report = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions::default(),
+        )
+        .expect("lease releases on drop");
+        assert!(report.checkpoint.complete);
+        assert_eq!(report.checkpoint.counts.accepted, 1);
     }
 
     #[test]
@@ -962,6 +1249,12 @@ mod tests {
         unsafe_row.unsafe_score = 0.9;
         let mut ugly = row("https://example.com/ugly.jpg", "a person");
         ugly.aesthetic = 2.0;
+        let mut negative_width = row("https://example.com/negative.jpg", "a person");
+        negative_width.width = -1;
+        let mut invalid_safety = row("https://example.com/nan-safety.jpg", "a person");
+        invalid_safety.unsafe_score = f64::NAN;
+        let mut invalid_aesthetic = row("https://example.com/nan-aesthetic.jpg", "a person");
+        invalid_aesthetic.aesthetic = f64::NAN;
         write_rows(
             &source,
             &[vec![
@@ -978,6 +1271,9 @@ mod tests {
                 ),
                 row("", "a person"),
                 row("https://example.com/blank.jpg", ""),
+                negative_width,
+                invalid_safety,
+                invalid_aesthetic,
             ]],
         );
         let mut catalog =
@@ -999,11 +1295,11 @@ mod tests {
         )
         .expect("scan succeeds");
         let counts = report.checkpoint.counts;
-        assert_eq!(counts.scanned, 10);
+        assert_eq!(counts.scanned, 13);
         assert_eq!(counts.accepted, 1);
         assert_eq!(counts.duplicate, 1);
         assert_eq!(counts.rejected, 6);
-        assert_eq!(counts.malformed, 2);
+        assert_eq!(counts.malformed, 5);
         assert_eq!(counts.reasons["invalid_url"], 1);
         assert_eq!(counts.reasons["dimensions"], 1);
         assert_eq!(counts.reasons["safety"], 1);
@@ -1012,5 +1308,156 @@ mod tests {
         assert_eq!(counts.reasons["caption_exclude"], 1);
         assert_eq!(counts.reasons["blank_url"], 1);
         assert_eq!(counts.reasons["blank_caption"], 1);
+        assert_eq!(counts.reasons["invalid_width"], 1);
+        assert_eq!(counts.reasons["invalid_safety"], 1);
+        assert_eq!(counts.reasons["invalid_aesthetic"], 1);
+    }
+
+    #[test]
+    fn configured_filters_reject_missing_metadata_and_invalid_ranges() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let no_dimensions = temporary.path().join("no-dimensions.parquet");
+        let no_scores = temporary.path().join("no-scores.parquet");
+        let rows = [row("https://example.com/one.jpg", "one person")];
+        write_rows_without_scores(&no_dimensions, &rows, false);
+        write_rows_without_scores(&no_scores, &rows, true);
+
+        let scan = |name: &str,
+                    source: &Path,
+                    options: CatalogParquetScanOptions|
+         -> CatalogParquetScanCounts {
+            let registry = CatalogRegistry::new(temporary.path().join(format!("{name}-state")));
+            let catalog = registry
+                .create_catalog(temporary.path().join(format!("{name}-catalog")), name)
+                .expect("catalog creates");
+            let catalog_id = catalog.descriptor().id.clone();
+            catalog.close();
+            scan_attached_parquet_catalog(&registry, &catalog_id, source, &options)
+                .expect("scan reports malformed metadata")
+                .checkpoint
+                .counts
+        };
+
+        let missing_dimensions = scan(
+            "missing-dimensions",
+            &no_dimensions,
+            CatalogParquetScanOptions::default(),
+        );
+        assert_eq!(missing_dimensions.malformed, 1);
+        assert_eq!(missing_dimensions.reasons["missing_width"], 1);
+
+        let missing_safety = scan(
+            "missing-safety",
+            &no_scores,
+            CatalogParquetScanOptions {
+                max_unsafe_score: Some(0.5),
+                ..CatalogParquetScanOptions::default()
+            },
+        );
+        assert_eq!(missing_safety.malformed, 1);
+        assert_eq!(missing_safety.reasons["missing_safety"], 1);
+
+        let missing_aesthetic = scan(
+            "missing-aesthetic",
+            &no_scores,
+            CatalogParquetScanOptions {
+                min_aesthetic_score: Some(5.0),
+                ..CatalogParquetScanOptions::default()
+            },
+        );
+        assert_eq!(missing_aesthetic.malformed, 1);
+        assert_eq!(missing_aesthetic.reasons["missing_aesthetic"], 1);
+
+        for options in [
+            CatalogParquetScanOptions {
+                min_width: Some(100),
+                max_width: Some(99),
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                min_height: Some(100),
+                max_height: Some(99),
+                ..CatalogParquetScanOptions::default()
+            },
+            CatalogParquetScanOptions {
+                max_unsafe_score: Some(1.1),
+                ..CatalogParquetScanOptions::default()
+            },
+        ] {
+            assert!(matches!(
+                validate_options(&options),
+                Err(CatalogParquetScanError::InvalidSource(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn checkpoint_crosses_shards_and_source_mutation_is_rejected() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source creates");
+        write_rows(
+            &source.join("part-00000.parquet"),
+            &[vec![row("https://example.com/one.jpg", "one person")]],
+        );
+        write_rows(
+            &source.join("part-00001.parquet"),
+            &[vec![row("https://example.com/two.jpg", "two people")]],
+        );
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Shards")
+            .expect("catalog creates");
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let first = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions {
+                max_rows: Some(1),
+                ..CatalogParquetScanOptions::default()
+            },
+        )
+        .expect("first shard scans");
+        assert_eq!(
+            (
+                first.checkpoint.shard,
+                first.checkpoint.row_group,
+                first.checkpoint.row
+            ),
+            (1, 0, 0)
+        );
+        let resumed = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions::default(),
+        )
+        .expect("second shard resumes");
+        assert!(resumed.checkpoint.complete);
+        assert_eq!(resumed.checkpoint.counts.accepted, 2);
+        let catalog = registry
+            .open_attached(&catalog_id)
+            .expect("catalog reopens");
+        let page = catalog.page_records_after(None, 10).expect("records page");
+        assert_eq!(page.records[1].metadata["source"]["shardIndex"], 1);
+        catalog.close();
+
+        write_rows(
+            &source.join("part-00002.parquet"),
+            &[vec![row("https://example.com/three.jpg", "three women")]],
+        );
+        let error = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions::default(),
+        )
+        .expect_err("changed shard set cannot resume");
+        assert!(matches!(
+            error,
+            CatalogParquetScanError::CheckpointMismatch(_)
+        ));
     }
 }
