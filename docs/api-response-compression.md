@@ -51,15 +51,17 @@ measured:
 
 | Representation | Transferred bytes | End-to-end server/body time | Added time vs identity |
 | --- | ---: | ---: | ---: |
-| identity | 2,462,041 | 107.9 ms | — |
-| gzip | 16,984 | 144.8 ms | 36.8 ms |
-| Brotli | 4,710 | 314.3 ms | 206.3 ms |
+| identity | 2,364,225 | 112.7 ms | — |
+| gzip | 122,268 | 164.1 ms | 51.5 ms |
+| Brotli | 104,145 | 273.4 ms | 160.8 ms |
 
-The fixture deliberately reproduces the current generation-set amplification,
-so it is unusually compressible in the same way as the measured populated
-project. Both dynamic encoders remained far below the ten-second hard bound;
-gzip is the lower-CPU compatibility option and Brotli trades more server time
-for the smallest remote transfer.
+The fixture uses 80 varied generation sets with no more than eight assets in
+each set, plus distinct asset names, prompts, timestamps, recipes, settings,
+and catalog metadata. Its 19.3× gzip reduction approximates the measured live
+catalog instead of relying on one repeated prompt across the whole response.
+Both dynamic encoders remained far below the ten-second hard bound; gzip is the
+lower-CPU compatibility option and Brotli trades more server time for the
+smallest remote transfer.
 
 SC-14789 records browser-visible transferred bytes for `/assets` and `/models`
 on RunPod, because local one-shot tests are not remote-network evidence.

@@ -146,13 +146,17 @@ async fn media_and_ranges_are_never_recompressed() {
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
-    let media = b"already-compressed-video-payload";
+    // Keep this comfortably above the JSON compression threshold so the test
+    // fails if media-type exclusion is ever removed from the predicate.
+    let mut media = b"\0\0\0\x18ftypmp42\0\0\0\0mp42isom".to_vec();
+    media.extend((0..4_096 - media.len()).map(|index| ((index * 31 + index / 7 + 17) % 251) as u8));
+    assert!(media.len() > usize::from(crate::API_COMPRESSION_MIN_BYTES));
     let (upload_status, asset) = request_multipart_upload(
         app.clone(),
         &format!("/api/v1/projects/{project_id}/assets"),
         "clip.mp4",
         "video/mp4",
-        media,
+        &media,
     )
     .await;
     assert_eq!(upload_status, StatusCode::CREATED);
@@ -181,13 +185,13 @@ async fn media_and_ranges_are_never_recompressed() {
         "GET",
         url,
         Body::empty(),
-        &[("accept-encoding", "br, gzip"), ("range", "bytes=2-8")],
+        &[("accept-encoding", "br, gzip"), ("range", "bytes=257-1536")],
     )
     .await;
     assert_eq!(range_status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(range_body, &media[2..=8]);
+    assert_eq!(range_body, &media[257..=1536]);
     assert!(!range_headers.contains_key(CONTENT_ENCODING));
-    let expected_content_range = format!("bytes 2-8/{}", media.len());
+    let expected_content_range = format!("bytes 257-1536/{}", media.len());
     assert_eq!(
         range_headers
             .get(CONTENT_RANGE)
@@ -237,55 +241,129 @@ async fn sse_is_uncompressed_and_first_event_is_not_buffered() {
 #[tokio::test]
 #[ignore = "manual ~2 MB API compression timing"]
 async fn large_assets_response_compression_timing() {
+    use std::fmt::Write as _;
+
+    const ASSETS_PER_SET: usize = 8;
+    const SET_COUNT: usize = 80;
+    const ASSET_COUNT: usize = ASSETS_PER_SET * SET_COUNT;
+    const DESCRIPTORS: [&str; 8] = [
+        "cinematic",
+        "documentary",
+        "editorial",
+        "atmospheric",
+        "naturalistic",
+        "architectural",
+        "expressive",
+        "photoreal",
+    ];
+    const LOCATIONS: [&str; 8] = [
+        "studio",
+        "courtyard",
+        "workshop",
+        "coastline",
+        "city-night",
+        "forest-path",
+        "warehouse",
+        "train-car",
+    ];
+
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let store =
         sceneworks_core::project_store::ProjectStore::new(&settings.data_dir, "test-version");
     let project = store.create_project("Large compression timing").unwrap();
-    let generation_set_id = "compression_timing_set";
-    let repeated_prompt = "cinematic portrait with soft practical lighting ".repeat(90);
-    store
-        .write_generation_set(
-            &project.id,
-            "compression-timing-job",
-            &json!({
-                "id": generation_set_id,
-                "mode": "text_to_image",
-                "model": "z_image_turbo",
-                "prompt": repeated_prompt,
-                "negativePrompt": "",
-                "count": 420,
-                "createdAt": "2026-07-26T00:00:00Z",
-            }),
-            None,
-        )
-        .expect("generation set writes");
-    let media_dir = std::path::Path::new(&project.path)
-        .join("assets/images")
-        .join(generation_set_id);
-    std::fs::create_dir_all(&media_dir).expect("media directory creates");
-    for index in 0..420 {
-        let media_path = format!("assets/images/{generation_set_id}/{index:04}.png");
-        std::fs::write(media_dir.join(format!("{index:04}.png")), b"png")
-            .expect("representative media file writes");
-        store
-            .persist_generated_asset(
-                &project.id,
-                "compression-timing-job",
-                generation_set_id,
-                &json!({
-                    "assetId": format!("compression_asset_{index:04}"),
-                    "mediaPath": media_path,
-                    "mimeType": "image/png",
-                    "displayName": format!("Compression sample {index:04}"),
-                    "createdAt": "2026-07-26T00:00:00Z",
-                    "mode": "text_to_image",
-                    "model": "z_image_turbo",
-                    "adapter": "z_image_diffusers",
-                    "prompt": "cinematic portrait",
-                }),
+    for set_index in 0..SET_COUNT {
+        let generation_set_id = format!("compression_timing_set_{set_index:03}");
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ set_index as u64;
+        let mut generation_prompt = String::with_capacity(2_048);
+        for detail_index in 0..32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            write!(
+                generation_prompt,
+                "{} {} shot {detail_index:02}, trace {state:016x}; ",
+                DESCRIPTORS[(set_index + detail_index) % DESCRIPTORS.len()],
+                LOCATIONS[(set_index * 3 + detail_index) % LOCATIONS.len()],
             )
-            .expect("asset persists");
+            .expect("prompt writes");
+        }
+        store
+            .write_generation_set(
+                &project.id,
+                &format!("compression-timing-job-{set_index:03}"),
+                &json!({
+                    "id": generation_set_id,
+                    "mode": "text_to_image",
+                    "model": format!("catalog-model-{}", set_index % 5),
+                    "prompt": generation_prompt,
+                    "negativePrompt": format!(
+                        "set {set_index:03}: artifacts, duplicate subjects, signature-{state:016x}"
+                    ),
+                    "count": ASSETS_PER_SET,
+                    "createdAt": format!("2026-07-{:02}T{:02}:00:00Z", set_index % 28 + 1, set_index % 24),
+                }),
+                None,
+            )
+            .expect("generation set writes");
+        let media_dir = std::path::Path::new(&project.path)
+            .join("assets/images")
+            .join(&generation_set_id);
+        std::fs::create_dir_all(&media_dir).expect("media directory creates");
+
+        for asset_in_set in 0..ASSETS_PER_SET {
+            let index = set_index * ASSETS_PER_SET + asset_in_set;
+            state ^= state.rotate_left(23).wrapping_add(index as u64);
+            let media_path = format!("assets/images/{generation_set_id}/{asset_in_set:02}.png");
+            std::fs::write(media_dir.join(format!("{asset_in_set:02}.png")), b"png")
+                .expect("representative media file writes");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    &format!("compression-timing-job-{set_index:03}"),
+                    &generation_set_id,
+                    &json!({
+                        "assetId": format!("compression_asset_{index:04}_{state:016x}"),
+                        "mediaPath": media_path,
+                        "mimeType": "image/png",
+                        "displayName": format!(
+                            "{} {} variant {asset_in_set}: {state:016x}",
+                            DESCRIPTORS[(index * 5) % DESCRIPTORS.len()],
+                            LOCATIONS[(index * 7) % LOCATIONS.len()],
+                        ),
+                        "createdAt": format!(
+                            "2026-07-{:02}T{:02}:{:02}:{:02}Z",
+                            set_index % 28 + 1,
+                            index % 24,
+                            index % 60,
+                            (index * 7) % 60,
+                        ),
+                        "mode": "text_to_image",
+                        "model": format!("catalog-model-{}", set_index % 5),
+                        "adapter": format!("catalog-adapter-{}", index % 7),
+                        "prompt": format!(
+                            "variant {index:04} from set {set_index:03}, {} in {}; fingerprint {state:016x}",
+                            DESCRIPTORS[index % DESCRIPTORS.len()],
+                            LOCATIONS[(index * 3) % LOCATIONS.len()],
+                        ),
+                        "negativePrompt": format!("asset-{index:04}-exclude-{state:016x}"),
+                        "seed": state,
+                        "width": 768 + (index % 4) * 128,
+                        "height": 768 + (index % 3) * 128,
+                        "rawAdapterSettings": {
+                            "guidance": 3.5 + (index % 9) as f64 / 10.0,
+                            "steps": 8 + index % 17,
+                            "sampler": format!("sampler-{}", index % 6),
+                            "trace": format!("{state:016x}-{:016x}", state.rotate_left(11)),
+                        },
+                        "extra": {
+                            "catalogGroup": format!("group-{}", set_index % 13),
+                            "reviewNote": format!("review-{index:04}-{state:016x}"),
+                        },
+                    }),
+                )
+                .expect("asset persists");
+        }
     }
 
     let app = create_app(settings).expect("app creates");
@@ -303,6 +381,32 @@ async fn large_assets_response_compression_timing() {
         (1_500_000..=3_500_000).contains(&identity_body.len()),
         "fixture must stay representative of the measured ~2 MB assets response; got {} bytes",
         identity_body.len()
+    );
+    let assets =
+        serde_json::from_slice::<Vec<Value>>(&identity_body).expect("identity asset list is JSON");
+    assert_eq!(assets.len(), ASSET_COUNT);
+    let mut assets_by_set = std::collections::HashMap::<&str, usize>::new();
+    let mut asset_prompts = std::collections::HashSet::<&str>::new();
+    for asset in &assets {
+        let generation_set_id = asset["generationSetId"]
+            .as_str()
+            .expect("asset generation set id");
+        *assets_by_set.entry(generation_set_id).or_default() += 1;
+        asset_prompts.insert(
+            asset["recipe"]["prompt"]
+                .as_str()
+                .expect("asset recipe prompt"),
+        );
+    }
+    assert_eq!(assets_by_set.len(), SET_COUNT);
+    assert!(
+        assets_by_set.values().all(|count| *count <= ASSETS_PER_SET),
+        "benchmark generation sets must never amplify metadata across more than eight assets"
+    );
+    assert_eq!(
+        asset_prompts.len(),
+        ASSET_COUNT,
+        "asset-level prompt metadata must vary throughout the catalog"
     );
 
     let gzip_started = std::time::Instant::now();
@@ -322,6 +426,11 @@ async fn large_assets_response_compression_timing() {
     assert_eq!(gzip_status, StatusCode::OK);
     assert_eq!(gzip_headers[CONTENT_ENCODING], "gzip");
     assert!(gzip_body.len() < identity_body.len());
+    let gzip_ratio = identity_body.len() as f64 / gzip_body.len() as f64;
+    assert!(
+        (14.0..=24.0).contains(&gzip_ratio),
+        "fixture should approximate the measured catalog's ~18x gzip ratio, got {gzip_ratio:.1}x"
+    );
 
     let brotli_started = std::time::Instant::now();
     let (brotli_status, brotli_headers, brotli_body) = tokio::time::timeout(
@@ -342,7 +451,7 @@ async fn large_assets_response_compression_timing() {
     assert!(brotli_body.len() < gzip_body.len());
 
     eprintln!(
-        "SC-14798 ~2 MB /assets timing: identity={} bytes/{identity_elapsed:?}, gzip={} bytes/{gzip_elapsed:?}, br={} bytes/{brotli_elapsed:?}",
+        "SC-14798 ~2 MB /assets timing: identity={} bytes/{identity_elapsed:?}, gzip={} bytes/{gzip_elapsed:?} ({gzip_ratio:.1}x), br={} bytes/{brotli_elapsed:?}",
         identity_body.len(),
         gzip_body.len(),
         brotli_body.len(),
