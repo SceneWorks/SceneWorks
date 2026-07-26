@@ -63,4 +63,48 @@ describe("Dataset Catalogs global app navigation", () => {
         request.body?.activeView === "DatasetCatalogs",
     )).toBe(true);
   });
+
+  it("does not mount a persisted catalogs page until the access probe resolves", async () => {
+    let resolveAccess;
+    const accessResponse = new Promise((resolve) => {
+      resolveAccess = resolve;
+    });
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      requests.push({ path, options, body: options.body ? JSON.parse(options.body) : null });
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) return accessResponse;
+      if (path.endsWith("/ui-preferences") && (!options.method || options.method === "GET")) {
+        return Promise.resolve(response({ activeView: "DatasetCatalogs" }));
+      }
+      if (path.endsWith("/ui-preferences")) {
+        return Promise.resolve(response({ activeView: "DatasetCatalogs" }));
+      }
+      if (path.endsWith("/catalogs")) return Promise.resolve(response([]));
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+
+    expect(requests.some((request) => request.path === "/api/v1/ui-preferences")).toBe(true);
+    expect(requests.some((request) => request.path === "/api/v1/catalogs")).toBe(false);
+    expect(container.querySelector(".access-gate")).not.toBeNull();
+    expect(container.querySelector(".sidebar")).toBeNull();
+    expect(container.textContent).not.toContain("No catalogs attached");
+
+    await act(async () => {
+      resolveAccess(response({ authRequired: false }));
+    });
+    await settle();
+    await settle();
+
+    expect(requests.some((request) => request.path === "/api/v1/catalogs")).toBe(true);
+    expect(container.querySelector(".access-gate")).toBeNull();
+    expect(container.querySelector(".nav-item.active")?.textContent).toContain("Dataset Catalogs");
+    expect(container.textContent).toContain("No catalogs attached");
+  });
 });

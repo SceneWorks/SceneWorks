@@ -521,6 +521,18 @@ fn persisted_scan_recovery(catalog: &Catalog) -> Result<PersistedScanRecovery, C
     if contract.processing.state == CatalogProcessingState::Completed {
         return Ok(PersistedScanRecovery::None);
     }
+    if contract.processing.state == CatalogProcessingState::Failed
+        && !contract
+            .processing
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("interrupted"))
+    {
+        // A real scanner failure is terminal until the operator explicitly
+        // resumes it. Only durable interruption failures represent orphaned
+        // work that status discovery is allowed to restart automatically.
+        return Ok(PersistedScanRecovery::None);
+    }
     if contract.source_config.is_none()
         && !contract
             .checkpoints

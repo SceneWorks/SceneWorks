@@ -10,14 +10,13 @@ import { Logo } from "./Logo.jsx";
 // find nothing but empty screens, and the one-line password field at the top read
 // as an optional extra rather than the thing standing between it and the app.
 //
-// Three blocking states, chosen by App from the hook's `gateStatus`:
+// Four blocking states, chosen by App from the hook's `gateStatus`:
+//   probing       — the first /api/v1/access probe is still in flight.
 //   locked        — the host requires a password and we don't have a good one.
 //   unlocking     — a password restored from localStorage is being re-verified
 //                   against the host (it may have been changed or cleared since).
 //   awaiting-host — the /api/v1/access probe has failed, so we don't yet know
-//                   whether a password is required. Never shown for the first
-//                   in-flight probe, only once one has failed, so a healthy host
-//                   does not flash this on every load.
+//                   whether a password is required.
 //
 // `notices` renders here too: the gate owns the whole viewport, so the access-related
 // messages have nowhere else to surface while it is up. Only those kinds are shown —

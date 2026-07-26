@@ -3284,7 +3284,7 @@ export function App() {
         {activeView === "Library" ? <LibraryScreen /> : null}
         {activeView === "Queue" ? <QueueScreen /> : null}
         {activeView === "Models" ? <ModelManagerScreen /> : null}
-        {activeView === "DatasetCatalogs" ? <DatasetCatalogsScreen /> : null}
+        {authenticated && activeView === "DatasetCatalogs" ? <DatasetCatalogsScreen /> : null}
         {/* Accent + the Simple-mode default live in App state alongside the sidebar's mode
             switch (they are not on the app context), so Settings receives them as props —
             the same pair SimpleShell gets, writing through to the same ui-preferences store. */}

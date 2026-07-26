@@ -293,12 +293,12 @@ describe("useAccessGate (sc-9750)", () => {
 
   // sc-15102: `gateStatus` is the single blocking decision App branches on.
   describe("gateStatus", () => {
-    it("stays open while the first access probe is in flight, then blocks once it fails", async () => {
+    it("blocks while the first access probe is in flight and changes state once it fails", async () => {
       apiResponders.set("/api/v1/access", () => new Error("probe exploded"));
       const { get } = mount();
 
-      // Pre-settle: nothing has failed yet, so a healthy host never flashes a blocker.
-      expect(get().api.gateStatus).toBe("open");
+      // Pre-settle: the auth requirement is unknown, so protected screens stay unmounted.
+      expect(get().api.gateStatus).toBe("probing");
 
       await settle();
       // A failed probe means the auth requirement is unknown — block rather than hand

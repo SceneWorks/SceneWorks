@@ -1011,6 +1011,123 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
 }
 
 #[tokio::test]
+async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 30_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_stop_after_pass_once
+        .store(true, Ordering::SeqCst);
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Terminal runtime failure",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 100 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+
+    for _ in 0..1_000 {
+        if state.catalog_scan_supervisor.tracked_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+
+    let original = temporary.path().join("source-original.parquet");
+    std::fs::rename(&source, &original).expect("original source moves aside");
+    write_catalog_parquet(&source, 30_000);
+    let (_, recovery_started) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(recovery_started["processing"]["processedCount"], 25_000);
+    for _ in 0..1_000 {
+        if state.catalog_scan_supervisor.tracked_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+
+    let (_, failed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(failed["processing"]["state"], "failed", "{failed}");
+    assert!(failed["processing"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("inspect the worker logs")));
+    assert_eq!(
+        state.catalog_scan_supervisor.active_count().await,
+        0,
+        "status must not automatically retry a terminal runtime failure"
+    );
+    let (_, repeated) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(repeated["processing"], failed["processing"]);
+    assert_eq!(state.catalog_scan_supervisor.active_count().await, 0);
+
+    std::fs::remove_file(&source).expect("replacement source removes");
+    std::fs::rename(&original, &source).expect("original source restores");
+    let revision = failed["processingControl"]["revision"]
+        .as_u64()
+        .expect("processing revision");
+    let (resume_status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": revision }),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "completed" {
+            completed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        completed.expect("explicit resume completes")["counts"]["recordCount"],
+        30_000
+    );
+}
+
+#[tokio::test]
 async fn transient_prestart_read_lease_cannot_strand_scheduled_processing() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
