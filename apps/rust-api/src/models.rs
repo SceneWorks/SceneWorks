@@ -679,6 +679,19 @@ pub(crate) async fn create_model_convert_job(
     {
         job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
     }
+    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978): the
+    // FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed VAE/text-encoder/tokenizer
+    // live under `<tier>/`, not the snapshot root. Absent for root-layout diffusers bases.
+    if let Some(base_subdir) = mlx
+        .get("convertBaseSubdir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "baseSubdir".to_owned(),
+            Value::String(base_subdir.to_owned()),
+        );
+    }
     if quantize_only {
         job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
     }

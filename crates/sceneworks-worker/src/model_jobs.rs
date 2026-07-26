@@ -649,6 +649,35 @@ fn convert_flux2_klein_diffusers(
     )
 }
 
+/// The base directory a FLUX.2-klein convert borrows its VAE / text-encoder / tokenizer from (sc-14978).
+/// The SceneWorks re-host the base klein card installs (`SceneWorks/flux2-klein-9b-mlx`) keeps each quant
+/// tier in its own subdir, so the borrowed components live under `<tier>/`, not the snapshot root. The
+/// borrowed components are dense and identical across tiers (only the transformer is packed), so any
+/// installed tier serves: prefer `subdir` (the manifest's `convertBaseSubdir`), then fall back to the
+/// standard tiers. When `subdir` is `None` the base is a plain root-layout diffusers snapshot and the
+/// snapshot root itself is used. `None` when no candidate holds the borrowed subdirs — a torn base whose
+/// convert would fail deep with `No such file or directory`.
+fn resolve_flux2_klein_base_dir(snapshot: &Path, subdir: Option<&str>) -> Option<PathBuf> {
+    let holds_borrowed = |dir: &Path| {
+        dir.join("tokenizer").is_dir()
+            && dir.join("text_encoder").is_dir()
+            && dir.join("vae").is_dir()
+    };
+    let Some(subdir) = subdir else {
+        return holds_borrowed(snapshot).then(|| snapshot.to_path_buf());
+    };
+    let mut tiers = vec![subdir];
+    for fallback in ["bf16", "q8", "q4"] {
+        if !tiers.contains(&fallback) {
+            tiers.push(fallback);
+        }
+    }
+    tiers
+        .into_iter()
+        .map(|tier| snapshot.join(tier))
+        .find(|dir| holds_borrowed(dir))
+}
+
 /// Native Rust/MLX LTX-2.3 weight converter (mlx-gen-ltx, sc-3224 engine + sc-3240 cutover). The LTX
 /// path was never actually routed through the Rust job before — only `convert_wan` was ever shelled.
 /// Splits the single-file checkpoint (`source_file`, e.g. eros `10Eros_v1_bf16.safetensors`),
@@ -1106,12 +1135,29 @@ async fn resolve_convert_plan(
                     detail: format!("Expected {source_file_name} in {source_repo}."),
                 }));
             }
-            let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
+            let Some(base_snapshot) = huggingface_snapshot_dir(&settings.data_dir, &base_repo)
+            else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is not installed.",
                     detail: format!(
                         "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
                          and tokenizer are reused."
+                    ),
+                }));
+            };
+            // The re-host keeps each quant tier in its own subdir (bf16/, q8/, q4/); the borrowed
+            // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
+            // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
+            // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
+            let base_subdir = optional_payload_string(&job.payload, "baseSubdir")
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
+                return Ok(Err(ConvertPlanError {
+                    message: "Base FLUX.2-klein model is installed but incomplete.",
+                    detail: format!(
+                        "No base tier with a VAE, text encoder, and tokenizer was found under \
+                         {base_repo} for converting {model_id}; re-download the base model."
                     ),
                 }));
             };
@@ -3708,6 +3754,65 @@ mod hardlink_tests {
             b"tokenizer-bytes",
             "the blob itself must be untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod flux2_convert_tests {
+    use super::*;
+
+    fn seed_tier(root: &Path, tier: &str) {
+        for comp in ["tokenizer", "text_encoder", "vae"] {
+            std::fs::create_dir_all(root.join(tier).join(comp)).unwrap();
+        }
+    }
+
+    /// sc-14978: the FLUX.2-klein convert borrows VAE/text-encoder/tokenizer from a quant-tier subdir of
+    /// the installed re-host (they are dense and identical across tiers). The resolver prefers the
+    /// manifest tier, falls back to any present tier, and rejects a torn base — so pointing
+    /// `convertBaseRepo` at the ungated re-host (whose components live under `<tier>/`, not the snapshot
+    /// root) resolves instead of failing deep with `tokenizer: No such file or directory`.
+    #[test]
+    fn base_dir_prefers_named_tier_then_falls_back_then_rejects_torn() {
+        // Preferred tier present → used.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_tier(tmp.path(), "bf16");
+        assert_eq!(
+            resolve_flux2_klein_base_dir(tmp.path(), Some("bf16")),
+            Some(tmp.path().join("bf16")),
+        );
+
+        // Preferred tier absent but another tier present → fall back to it (borrow is tier-invariant).
+        let tmp2 = tempfile::tempdir().unwrap();
+        seed_tier(tmp2.path(), "q4");
+        assert_eq!(
+            resolve_flux2_klein_base_dir(tmp2.path(), Some("bf16")),
+            Some(tmp2.path().join("q4")),
+        );
+
+        // No tier holds the borrowed components → None (a torn base; the caller surfaces a re-download).
+        let tmp3 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp3.path().join("bf16").join("transformer")).unwrap();
+        assert_eq!(
+            resolve_flux2_klein_base_dir(tmp3.path(), Some("bf16")),
+            None
+        );
+    }
+
+    /// No `convertBaseSubdir` → a plain root-layout diffusers base borrows from the snapshot root itself.
+    #[test]
+    fn base_dir_without_subdir_uses_root_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        for comp in ["tokenizer", "text_encoder", "vae"] {
+            std::fs::create_dir_all(tmp.path().join(comp)).unwrap();
+        }
+        assert_eq!(
+            resolve_flux2_klein_base_dir(tmp.path(), None),
+            Some(tmp.path().to_path_buf()),
+        );
+        // Root missing the borrowed components → None.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_flux2_klein_base_dir(empty.path(), None), None);
     }
 }
 

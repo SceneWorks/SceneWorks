@@ -4273,13 +4273,22 @@
         // Install-time conversion: pull the bf16 single-file from convertSourceRepo,
         // run the FLUX.2-klein diffusers converter (sc-2235), and assemble a local
         // diffusers dir under <data>/models/mlx/flux2_klein_9b_true_v2 by borrowing
-        // components from the installed base klein-9B (convertBaseRepo). The base
+        // the VAE/text-encoder/tokenizer from the installed base klein-9B. The base
         // model must be installed first; the convert job fails clearly if it isn't.
+        // sc-14978: the base is the ungated SceneWorks re-host the base klein card
+        // actually installs (`SceneWorks/flux2-klein-9b-mlx`), NOT the gated upstream
+        // `black-forest-labs/FLUX.2-klein-9B` — no catalog card installs the latter, so
+        // pointing here made the convert base UNSATISFIABLE. The re-host keeps each quant
+        // tier in its own subdir, so convertBaseSubdir names the tier to borrow from; the
+        // borrowed VAE/TE/tokenizer are dense and identical across tiers (only the
+        // transformer is packed), so any installed tier serves — bf16 is the preference and
+        // the worker falls back to whichever tier is present.
         "requiresConversion": true,
         "converter": "flux2_klein_diffusers",
         "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
         "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors",
-        "convertBaseRepo": "black-forest-labs/FLUX.2-klein-9B"
+        "convertBaseRepo": "SceneWorks/flux2-klein-9b-mlx",
+        "convertBaseSubdir": "bf16"
       },
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {
