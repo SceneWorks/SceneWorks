@@ -207,8 +207,8 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         assert model["macOnly"] is False
         assert model["candle"] == {
             "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 15.0, "q8": 17.0, "bf16": 21.0},
-            "measured": False,
+            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+            "measured": True,
         }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
@@ -247,8 +247,8 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["macOnly"] is False
         assert model["candle"] == {
             "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 15.0, "q8": 17.0, "bf16": 21.0},
-            "measured": False,
+            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+            "measured": True,
         }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance

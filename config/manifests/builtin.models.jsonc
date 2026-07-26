@@ -100,13 +100,13 @@
       "mlx": {
         "quantize": 4
       },
-      // Shared provisional ceiling across all six Mage rows: byte-derived from the dense Qwen/VAE,
-      // tiered DiT, and render workspace. `measured:false` is deliberate until the sc-14053 CUDA lane
-      // records and asserts all three physical peaks; do not cite these rows as calibrated measurements.
+      // Shared across all six Mage rows. Physical CUDA run 30194676028 measured the per-process
+      // nvidia-smi high-water at q4 14.67 / q8 16.95 / bf16 20.41 GB for the registered 1024²,
+      // 20-step RL path; the admission gate adds its standard transient headroom separately.
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow Edit-Base",
@@ -214,8 +214,8 @@
       },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow Edit",
@@ -323,8 +323,8 @@
       },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
@@ -399,8 +399,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow Base",
@@ -469,8 +469,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow RL",
@@ -539,8 +539,8 @@
       "mlx": { "quantize": 4 },
       "candle": {
         "minMemoryGb": 17,
-        "vramGbByTier": { "q4": 15.0, "q8": 17.0, "bf16": 21.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
       },
       "ui": {
         "label": "Mage-Flow Turbo",

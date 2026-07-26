@@ -688,9 +688,9 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
     }
 }
 
-/// sc-14053: every Mage variant is now a Candle/CUDA model and carries the same dense-snapshot,
-/// load-time quant tier budget. Pin all six rows and prove the generic gate rejects an oversized tier
-/// while admitting the lower one on the same emulated card.
+/// sc-14053: every Mage variant is now a Candle/CUDA model and carries the same physically measured
+/// dense-snapshot, load-time quant tier peak. Pin all six rows and prove the generic gate rejects an
+/// oversized tier while admitting the lower one on the same emulated card.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
@@ -712,22 +712,30 @@ fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
         assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(false));
         let object = entry.as_object().expect("manifest model object");
         assert_eq!(
-            predicted_peak_gb(object, "q4"),
-            Some(17.0),
-            "{id}: q4 peak plus headroom"
+            entry
+                .get("candle")
+                .and_then(|candle| candle.get("measured"))
+                .and_then(Value::as_bool),
+            Some(true),
+            "{id}: published Mage peaks must be physical measurements"
+        );
+        let q4_peak = predicted_peak_gb(object, "q4").expect("q4 peak plus headroom");
+        assert!(
+            (q4_peak - 16.67).abs() < f64::EPSILON * 8.0,
+            "{id}: expected measured 14.67 GB q4 peak plus headroom, got {q4_peak}"
+        );
+        let bf16_peak = predicted_peak_gb(object, "bf16").expect("bf16 peak plus headroom");
+        assert!(
+            (bf16_peak - 22.41).abs() < f64::EPSILON * 8.0,
+            "{id}: expected measured 20.41 GB bf16 peak plus headroom, got {bf16_peak}"
         );
         assert_eq!(
-            predicted_peak_gb(object, "bf16"),
-            Some(23.0),
-            "{id}: bf16 peak plus headroom"
-        );
-        assert_eq!(
-            fit_decision(predicted_peak_gb(object, "q4"), budget),
+            fit_decision(Some(q4_peak), budget),
             FitDecision::Fits,
             "{id}: q4 must fit the emulated card"
         );
         assert!(matches!(
-            fit_decision(predicted_peak_gb(object, "bf16"), budget),
+            fit_decision(Some(bf16_peak), budget),
             FitDecision::TooBig { .. }
         ));
     }
