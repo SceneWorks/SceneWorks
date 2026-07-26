@@ -1,5 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { upsertJobNewest } from "../sorters.js";
 
@@ -55,6 +57,12 @@ export function useModelsAndLoras({
   // SSE-driven re-renders, letting appContextValue memoize.
   const refreshLoras = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
+      if (
+        projectId &&
+        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
+      ) {
+        return refreshFailure("stale");
+      }
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
@@ -63,14 +71,25 @@ export function useModelsAndLoras({
         // LoRA overlay with the old one's. Drop the stale response — mirrors
         // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
         // are guarded; a global refresh (projectId undefined) still commits.
-        if (projectId && activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
-          return;
+        if (
+          projectId &&
+          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
+        ) {
+          return refreshFailure("stale");
         }
         setLoras(items);
         setLoraError("");
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (
+          projectId &&
+          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
+        ) {
+          return refreshFailure("stale", err);
+        }
+        if (isAbortError(err)) return refreshFailure("aborted", err);
         setLoraError(err.message);
+        return refreshFailure("error", err);
       }
     },
     [token, activeProject, activeProjectRef, setLoraError],

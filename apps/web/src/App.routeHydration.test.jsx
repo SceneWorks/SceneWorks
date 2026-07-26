@@ -144,6 +144,103 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
+  it("hydrates and renders character training datasets on first Characters navigation", async () => {
+    installFetch({
+      "/api/v1/projects/project-a/characters": () =>
+        Promise.resolve(response([{ id: "character-a", name: "Mara", projectId: "project-a" }])),
+      "/api/v1/projects/project-a/training/datasets": () =>
+        Promise.resolve(response([{
+          id: "dataset-a",
+          name: "Mara portrait set",
+          characterId: "character-a",
+          itemCount: 4,
+          status: "draft",
+        }])),
+    });
+    await renderApp();
+
+    expect(requestCounts()["/api/v1/projects/project-a/training/datasets"]).toBeUndefined();
+    await navigate("Characters");
+    expect(requestCounts()["/api/v1/projects/project-a/training/datasets"]).toBe(1);
+
+    const assetsTab = [...container.querySelectorAll('[role="tab"]')].find(
+      (candidate) => candidate.textContent.trim() === "Assets",
+    );
+    expect(assetsTab).toBeTruthy();
+    await act(async () => {
+      assetsTab.click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Mara portrait set");
+  });
+
+  it("retries a failed hydration domain when its route is revisited", async () => {
+    let modelAttempts = 0;
+    installFetch({
+      "/api/v1/models": () => {
+        modelAttempts += 1;
+        return modelAttempts === 1
+          ? Promise.reject(new Error("model catalog unavailable"))
+          : Promise.resolve(response([{ id: "model-a", name: "Recovered Model", type: "image" }]));
+      },
+    });
+    await renderApp();
+
+    await navigate("Models");
+    expect(container.textContent).toContain("model catalog unavailable");
+    expect(modelAttempts).toBe(1);
+
+    await navigate("Assets");
+    await navigate("Models");
+    expect(modelAttempts).toBe(2);
+    expect(container.textContent).not.toContain("model catalog unavailable");
+    expect(container.textContent).toContain("Recovered Model");
+  });
+
+  it("does not apply a late recipe launch when required catalog hydration fails", async () => {
+    const asset = {
+      id: "asset-recipe",
+      projectId: "project-a",
+      type: "image",
+      displayName: "Recipe source",
+      file: { path: "source.png", mimeType: "image/png" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      generationSet: {
+        recipe: {
+          mode: "text_to_image",
+          model: "missing-model",
+          prompt: "must not be applied after failure",
+        },
+      },
+    };
+    installFetch({
+      "/api/v1/projects/project-a/assets": () => Promise.resolve(response([asset])),
+      "/api/v1/models": () => Promise.reject(new Error("model catalog unavailable")),
+    });
+    await renderApp();
+
+    const tile = container.querySelector(".asset-tile");
+    expect(tile).toBeTruthy();
+    await act(async () => {
+      tile.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    await settle();
+    const useRecipe = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Use this recipe",
+    );
+    expect(useRecipe).toBeTruthy();
+    await act(async () => {
+      useRecipe.click();
+    });
+    await settle();
+
+    expect(container.textContent).toContain("model catalog unavailable");
+    expect(container.querySelector('.image-studio textarea')?.value ?? "").not.toContain(
+      "must not be applied after failure",
+    );
+  });
+
   it("refreshes only model-dependent domains for completed model and LoRA jobs", async () => {
     installFetch();
     await renderApp();

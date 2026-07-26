@@ -33,7 +33,7 @@ const ADVANCED_ROUTE_DOMAINS = Object.freeze({
   Image: ["assets", "models", "loras", "presets", "promptBatches", "characters"],
   Video: ["assets", "models", "loras", "presets", "characters", "personTracks"],
   Audio: ["assets", "models", "savedVoices"],
-  Characters: ["assets", "characters", "models", "loras", "presets"],
+  Characters: ["assets", "characters", "models", "loras", "presets", "trainingDatasets"],
   Document: ["assets", "models"],
   Train: [
     "assets",

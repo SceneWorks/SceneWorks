@@ -100,6 +100,7 @@ import {
   hydrationLedgerKey,
   isProjectHydrationDomain,
 } from "./appHydration.js";
+import { refreshFailure, refreshSuccess } from "./refreshResult.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
@@ -1563,11 +1564,11 @@ export function App() {
       const items = await apiFetch("/api/v1/models", token, { signal });
       setModels(items);
       domainErrors.models("");
-      return items;
+      return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return [];
+      if (isAbortError(err)) return refreshFailure("aborted", err);
       domainErrors.models(err.message);
-      return [];
+      return refreshFailure("error", err);
     }
   }
 
@@ -1577,12 +1578,12 @@ export function App() {
       setTrainingTargets(catalog);
       setTrainingTargetsError("");
       domainErrors.trainingTargets("");
-      return catalog;
+      return refreshSuccess(catalog);
     } catch (err) {
-      if (isAbortError(err)) return null;
+      if (isAbortError(err)) return refreshFailure("aborted", err);
       setTrainingTargetsError(err.message);
       domainErrors.trainingTargets(err.message);
-      return null;
+      return refreshFailure("error", err);
     }
   }
 
@@ -1592,25 +1593,25 @@ export function App() {
       setTrainingPresets(catalog);
       setTrainingPresetsError("");
       domainErrors.trainingPresets("");
-      return catalog;
+      return refreshSuccess(catalog);
     } catch (err) {
-      if (isAbortError(err)) return null;
+      if (isAbortError(err)) return refreshFailure("aborted", err);
       setTrainingPresetsError(err.message);
       domainErrors.trainingPresets(err.message);
-      return null;
+      return refreshFailure("error", err);
     }
   }
 
   async function refreshAssets(projectId = activeProject?.id, { signal } = {}) {
     if (!projectId) {
-      return;
+      return refreshFailure("missing-project");
     }
     // SSE job events may describe a background project. Use this render's
     // project, not activeProjectRef: that ref advances in a passive effect while
     // this closure is published from a layout effect. During A→B, the published
     // B closure must reject an A refresh before the passive ref catches up.
     if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
-      return;
+      return refreshFailure("stale");
     }
     // Keep an already-settled grid usable during background/SSE refreshes.
     // Initial loads, retries, and project switches still expose "loading".
@@ -1627,20 +1628,22 @@ export function App() {
       // project's assets with the old one's. Drop the stale response — mirrors
       // refreshTimelines' guard (useTimelines.js).
       if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-        return;
+        return refreshFailure("stale");
       }
       setAssets(items);
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
       setAssetLoadState({ projectId, status: "ready", error: "" });
       domainErrors.assets("");
+      return refreshSuccess(items);
     } catch (err) {
-      if (isAbortError(err)) return;
       if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
-        return;
+        return refreshFailure("stale", err);
       }
+      if (isAbortError(err)) return refreshFailure("aborted", err);
       setAssetLoadState({ projectId, status: "error", error: err.message });
       domainErrors.assets(err.message);
+      return refreshFailure("error", err);
     } finally {
       settleAssetRequest(timingStartedAt);
     }
@@ -1681,6 +1684,74 @@ export function App() {
     refreshTimelinesRef.current = refreshTimelines;
   });
 
+  const hydrationRefresher = useCallback((domain) => {
+    const refreshers = {
+      assets: (id, options) => refreshAssetsRef.current?.(id, options),
+      characters: (id, options) => refreshCharactersRef.current?.(id, options),
+      savedVoices: (id, options) => refreshSavedVoicesRef.current?.(id, options),
+      loras: (id, options) => refreshLorasRef.current?.(id, options),
+      presets: (id, options) => refreshPresetsRef.current?.(id, options),
+      promptBatches: (id, options) => refreshPromptBatchesRef.current?.(id, options),
+      trainingDatasets: (id, options) =>
+        refreshTrainingDatasetsRef.current?.(id, options),
+      personTracks: (id, options) => refreshPersonTracksRef.current?.(id, options),
+      timelines: (id, options) => refreshTimelinesRef.current?.(id, options),
+      models: (_id, options) => refreshModelsRef.current?.(options),
+      trainingTargets: (_id, options) =>
+        refreshTrainingTargetsRef.current?.(options),
+      trainingPresets: (_id, options) =>
+        refreshTrainingPresetsRef.current?.(options),
+    };
+    return refreshers[domain];
+  }, []);
+
+  const ensureHydrationDomain = useCallback((domain, projectId, options = {}) => {
+    if (isProjectHydrationDomain(domain) && !projectId) {
+      return Promise.resolve(refreshFailure("missing-project"));
+    }
+    const ledger = hydrationLedgerRef.current;
+    const key = hydrationLedgerKey(domain, projectId);
+    const current = ledger.get(key);
+    if (current?.status === "ready") {
+      return Promise.resolve(refreshSuccess());
+    }
+    if (current?.status === "loading") {
+      return current.promise;
+    }
+    const refresh = hydrationRefresher(domain);
+    if (!refresh) {
+      return Promise.resolve(refreshFailure("missing-refresher"));
+    }
+    const entry = { status: "loading", promise: null };
+    entry.promise = Promise.resolve()
+      .then(() => refresh(projectId, options))
+      .then((result) => {
+        const normalized = result?.ok === true
+          ? result
+          : result?.ok === false
+            ? result
+            : refreshFailure("error", new Error(`${domain} refresh did not report success`));
+        if (ledger.get(key) === entry) {
+          ledger.set(
+            key,
+            normalized.ok
+              ? { status: "ready" }
+              : { status: "error", reason: normalized.reason, error: normalized.error },
+          );
+        }
+        return normalized;
+      })
+      .catch((error) => {
+        const result = refreshFailure("error", error);
+        if (ledger.get(key) === entry) {
+          ledger.set(key, { status: "error", reason: result.reason, error });
+        }
+        return result;
+      });
+    ledger.set(key, entry);
+    return entry.promise;
+  }, [hydrationRefresher]);
+
   // Hydrate only the active screen's domains. Each ledger entry is global or
   // project-keyed, so keep-alive navigation reuses settled catalogs while a
   // project switch loads fresh overlays without discarding global state.
@@ -1701,23 +1772,6 @@ export function App() {
     const controller = new AbortController();
     const startedKeys = [];
     const hydrationLedger = hydrationLedgerRef.current;
-    const refreshers = {
-      assets: (id, options) => refreshAssetsRef.current?.(id, options),
-      characters: (id, options) => refreshCharactersRef.current?.(id, options),
-      savedVoices: (id, options) => refreshSavedVoicesRef.current?.(id, options),
-      loras: (id, options) => refreshLorasRef.current?.(id, options),
-      presets: (id, options) => refreshPresetsRef.current?.(id, options),
-      promptBatches: (id, options) => refreshPromptBatchesRef.current?.(id, options),
-      trainingDatasets: (id, options) =>
-        refreshTrainingDatasetsRef.current?.(id, options),
-      personTracks: (id, options) => refreshPersonTracksRef.current?.(id, options),
-      timelines: (id, options) => refreshTimelinesRef.current?.(id, options),
-      models: (_id, options) => refreshModelsRef.current?.(options),
-      trainingTargets: (_id, options) =>
-        refreshTrainingTargetsRef.current?.(options),
-      trainingPresets: (_id, options) =>
-        refreshTrainingPresetsRef.current?.(options),
-    };
 
     domains.forEach((domain) => {
       if (isProjectHydrationDomain(domain) && !projectId) {
@@ -1725,30 +1779,18 @@ export function App() {
       }
       const key = hydrationLedgerKey(domain, projectId);
       const current = hydrationLedger.get(key);
-      if (current === "loading" || current === "ready") {
+      if (current?.status === "loading" || current?.status === "ready") {
         return;
       }
-      const refresh = refreshers[domain];
-      if (!refresh) {
-        return;
-      }
-      hydrationLedger.set(key, "loading");
       startedKeys.push(key);
-      Promise.resolve(
-        refresh(projectId, { signal: controller.signal }),
-      ).finally(() => {
-        if (controller.signal.aborted) {
-          hydrationLedger.delete(key);
-        } else {
-          hydrationLedger.set(key, "ready");
-        }
-      });
+      ensureHydrationDomain(domain, projectId, { signal: controller.signal });
     });
 
     return () => {
       controller.abort();
       startedKeys.forEach((key) => {
-        if (hydrationLedger.get(key) === "loading") {
+        const entry = hydrationLedger.get(key);
+        if (entry?.status === "loading") {
           hydrationLedger.delete(key);
         }
       });
@@ -1757,6 +1799,7 @@ export function App() {
     activeProject?.id,
     activeView,
     authenticated,
+    ensureHydrationDomain,
     projectsLoaded,
     ready,
     setupCompleted,
@@ -1767,32 +1810,13 @@ export function App() {
 
   async function hydrateLaunchDomains(view, projectId = activeProjectRef.current?.id) {
     const domains = hydrationDomainsForRoute(view);
-    const refreshers = {
-      assets: (id) => refreshAssetsRef.current?.(id),
-      characters: (id) => refreshCharactersRef.current?.(id),
-      savedVoices: (id) => refreshSavedVoicesRef.current?.(id),
-      loras: (id) => refreshLorasRef.current?.(id),
-      presets: (id) => refreshPresetsRef.current?.(id),
-      promptBatches: (id) => refreshPromptBatchesRef.current?.(id),
-      trainingDatasets: (id) => refreshTrainingDatasetsRef.current?.(id),
-      personTracks: (id) => refreshPersonTracksRef.current?.(id),
-      timelines: (id) => refreshTimelinesRef.current?.(id),
-      models: () => refreshModelsRef.current?.(),
-      trainingTargets: () => refreshTrainingTargetsRef.current?.(),
-      trainingPresets: () => refreshTrainingPresetsRef.current?.(),
-    };
-    await Promise.all(
-      domains.map(async (domain) => {
-        if (isProjectHydrationDomain(domain) && !projectId) return;
-        const key = hydrationLedgerKey(domain, projectId);
-        if (hydrationLedgerRef.current.get(key) === "ready") return;
-        const refresh = refreshers[domain];
-        if (!refresh) return;
-        hydrationLedgerRef.current.set(key, "loading");
-        await refresh(projectId);
-        hydrationLedgerRef.current.set(key, "ready");
-      }),
+    const results = await Promise.all(
+      domains.map((domain) => ensureHydrationDomain(domain, projectId)),
     );
+    const failed = results.filter((result) => result?.ok !== true);
+    return failed.length
+      ? { ok: false, failures: failed }
+      : refreshSuccess();
   }
 
   // saveToken / lockRemote (the remote-browser login + lock affordances, epic 4484
@@ -2137,8 +2161,8 @@ export function App() {
     setSelectedAssetId(asset.id);
     closePreview();
     setActiveView("Image");
-    await stableHydrateLaunchDomains("Image", projectId);
-    if (projectId && activeProjectRef.current?.id !== projectId) {
+    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
       return;
     }
     setStudioLaunch({
@@ -2165,8 +2189,8 @@ export function App() {
     setSelectedAssetId(asset.id);
     closePreview();
     setActiveView("Video");
-    await stableHydrateLaunchDomains("Video", projectId);
-    if (projectId && activeProjectRef.current?.id !== projectId) {
+    const hydration = await stableHydrateLaunchDomains("Video", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
       return;
     }
     setStudioLaunch({
@@ -2206,16 +2230,16 @@ export function App() {
     if (preset.kind === "general") {
       const projectId = activeProjectRef.current?.id;
       setActiveView("Image");
-      await stableHydrateLaunchDomains("Image", projectId);
-      if (projectId && activeProjectRef.current?.id !== projectId) return;
+      const hydration = await stableHydrateLaunchDomains("Image", projectId);
+      if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) return;
       setStudioLaunch({ id: crypto.randomUUID(), view: "Image", presetGeneralId: preset.id });
       return;
     }
     const view = workflowModelType(preset.workflow) === "video" ? "Video" : "Image";
     const projectId = activeProjectRef.current?.id;
     setActiveView(view);
-    await stableHydrateLaunchDomains(view, projectId);
-    if (projectId && activeProjectRef.current?.id !== projectId) return;
+    const hydration = await stableHydrateLaunchDomains(view, projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) return;
     setStudioLaunch({
       id: crypto.randomUUID(),
       view,

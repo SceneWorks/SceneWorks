@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Owns the project's Voice Clone "saved voices" roster + its create/delete mutations (sc-13517).
 // A saved voice is a named pointer to a library audio reference clip (plus its Chatterbox-VE speaker
@@ -21,7 +22,10 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
   const refreshSavedVoices = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
       if (!projectId) {
-        return;
+        return refreshFailure("missing-project");
+      }
+      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
+        return refreshFailure("stale");
       }
       try {
         const items = await apiFetch(
@@ -32,13 +36,16 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         // Drop a stale response for a project the user already switched away from
         // (mirrors refreshCharacters' guard).
         if (!isCurrentVoiceRequest(projectId)) {
-          return;
+          return refreshFailure("stale");
         }
         setSavedVoices(Array.isArray(items) ? items : []);
         setError("");
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err) || !isCurrentVoiceRequest(projectId)) return;
+        if (!isCurrentVoiceRequest(projectId)) return refreshFailure("stale", err);
+        if (isAbortError(err)) return refreshFailure("aborted", err);
         setError(err.message);
+        return refreshFailure("error", err);
       }
     },
     [token, activeProject, isCurrentVoiceRequest, setError],
