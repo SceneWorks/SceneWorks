@@ -35,6 +35,7 @@ import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
+import { putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import {
   dropUpscaledVariants,
@@ -672,15 +673,15 @@ export function App() {
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
   // http://127.0.0.1:<port> origin, where both localStorage and Tauri IPC are
   // unreliable across launches — so the durable copy lives server-side.
+  // `putUiPreferences` carries the access token (sc-15136): the PUT is gated even
+  // though the launch-time GET below is public, so a credential-less write 401s on
+  // every remote-auth deployment and the theme would never reach disk.
   // Stable across renders (sc-10244): it flows through the static app context to the
   // Image Editor top-bar theme toggle, so a fresh identity each render would bust the
   // static-context memo every tick.
   const changeTheme = useCallback((next) => {
     setTheme(next);
-    apiFetch("/api/v1/ui-preferences", "", {
-      method: "PUT",
-      body: JSON.stringify({ theme: next }),
-    }).catch(() => {});
+    putUiPreferences({ theme: next }).catch(() => {});
   }, []);
   const [accent, setAccent] = useState(readStoredAccent);
   // Same persistence contract as theme: instant localStorage cache + durable
@@ -688,10 +689,7 @@ export function App() {
   // MERGE partial updates (theme writes already rely on this).
   const changeAccent = useCallback((next) => {
     setAccent(next);
-    apiFetch("/api/v1/ui-preferences", "", {
-      method: "PUT",
-      body: JSON.stringify({ accent: next }),
-    }).catch(() => {});
+    putUiPreferences({ accent: next }).catch(() => {});
   }, []);
   // Simple UI (design handoff). `simpleUiDefault` is the persisted "Use Simple UI by
   // default" preference — same durable contract as theme/accent (server copy in
@@ -711,10 +709,7 @@ export function App() {
   const changeSimpleUiDefault = useCallback((next) => {
     setSimpleUiDefault(next);
     writeStoredSimpleDefault(next);
-    apiFetch("/api/v1/ui-preferences", "", {
-      method: "PUT",
-      body: JSON.stringify({ simpleUi: next }),
-    }).catch(() => {});
+    putUiPreferences({ simpleUi: next }).catch(() => {});
   }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
@@ -1303,6 +1298,11 @@ export function App() {
   // Seed the theme from the server on launch (the durable copy; localStorage is
   // only an instant-paint cache). Each toggle persists itself via changeTheme,
   // so there's no save effect to race with this read.
+  //
+  // This READ is the one credential-less ui-preferences call, deliberately: it runs before
+  // the access gate has a token, and the server keeps the GET public precisely so the theme
+  // can paint pre-auth without a flash. Only the disk-writing PUT is gated (sc-8869,
+  // F-067), which is why the writes go through `putUiPreferences` instead (sc-15136).
   useEffect(() => {
     let cancelled = false;
     apiFetch("/api/v1/ui-preferences", "")

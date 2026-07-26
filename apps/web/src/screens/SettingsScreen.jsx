@@ -7,6 +7,7 @@ import {
   serverToken,
 } from "../credentials.js";
 import { apiFetch } from "../api.js";
+import { putUiPreferences } from "../uiPreferences.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 import {
   GENERATION_QUALITY_OPTIONS,
@@ -218,7 +219,8 @@ export function SettingsScreen({
   // an instant read for the studio, and the PUT makes it durable across desktop relaunches (the shell's
   // 127.0.0.1:<port> origin changes each launch, wiping origin-keyed localStorage). Same contract as
   // theme/accent in App.jsx — the endpoint MERGES, so sending only this field can't disturb theme/accent.
-  // Token is "" because ui-preferences is a public route (like /health); mirrors App.jsx's PUT.
+  // `putUiPreferences` attaches the access token: only the ui-preferences GET is public, the disk-writing
+  // PUT is gated (sc-8869, F-067), so a credential-less write 401s on any remote-auth deployment (sc-15136).
   async function changeDefaultQuality(value) {
     const request = defaultQualityRequest.current + 1;
     defaultQualityRequest.current = request;
@@ -226,10 +228,7 @@ export function SettingsScreen({
     const next = writeDefaultGenerationQuality(value);
     setDefaultQuality(next);
     try {
-      await apiFetch("/api/v1/ui-preferences", "", {
-        method: "PUT",
-        body: JSON.stringify({ defaultGenerationQuality: next }),
-      });
+      await putUiPreferences({ defaultGenerationQuality: next });
       if (defaultQualityRequest.current === request) {
         setStatus(`Default generation quality set to ${generationQualityLabel(next)}.`);
       }
