@@ -1,0 +1,284 @@
+//! Dataset Catalog lifecycle, query-contract, and path-confinement route tests.
+
+use std::collections::BTreeMap;
+
+use sceneworks_core::catalog_store::{
+    CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry, NewCatalogRecord,
+};
+
+use super::support::*;
+
+fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord {
+    NewCatalogRecord {
+        id: id.to_owned(),
+        image_path: format!("images/{id}.jpg"),
+        thumbnail_path: Some(format!("thumbnails/{id}.jpg")),
+        embedding_path: None,
+        artifact_path: None,
+        metadata: json!({
+            "medium": medium,
+            "personCount": person_count,
+            "analysis": { "fullBody": person_count == 1 }
+        }),
+    }
+}
+
+#[tokio::test]
+async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_facets() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let catalog_root = temporary.path().join("external-catalog");
+    let source = temporary.path().join("source.parquet");
+    std::fs::write(&source, b"fixture").unwrap();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Large catalog",
+            "path": catalog_root.clone(),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source.clone()],
+                "options": { "captionColumn": "TEXT" }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["contractVersion"], 1);
+    assert_eq!(created["availability"], "available");
+    assert_eq!(created["sourceConfig"]["kind"], "parquet");
+    assert_eq!(created["counts"]["recordCount"], 0);
+    assert!(created["storage"]["totalBytes"].as_u64().unwrap() > 0);
+    let catalog_id = created["id"].as_str().unwrap().to_owned();
+
+    let registry = CatalogRegistry::new(&config_dir);
+    let mut catalog = registry.open_attached(&catalog_id).unwrap();
+    catalog
+        .append_records(&[
+            catalog_record("one", "photo", 1),
+            catalog_record("two", "photo", 1),
+            catalog_record("three", "photo", 2),
+            catalog_record("four", "illustration", 1),
+        ])
+        .unwrap();
+    let mut contract = catalog.contract_state().unwrap();
+    contract.analyzer_versions =
+        BTreeMap::from([("person_detector".to_owned(), "model@sha256:abc".to_owned())]);
+    contract.checkpoints = BTreeMap::from([("scan".to_owned(), json!({"shard": 4, "row": 80}))]);
+    contract.processing = CatalogProcessingProgress {
+        state: CatalogProcessingState::Paused,
+        candidate_count: 12,
+        processed_count: 4,
+        accepted_count: 3,
+        rejected_count: 1,
+        error_count: 1,
+        message: Some("paused by user".to_owned()),
+        updated_at: "2026-07-26T00:00:00Z".to_owned(),
+    };
+    catalog.set_contract_state(&contract).unwrap();
+    catalog.close();
+
+    let (status, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["schemaVersion"], 1);
+    assert_eq!(
+        detail["analyzerVersions"]["person_detector"],
+        "model@sha256:abc"
+    );
+    assert_eq!(detail["checkpoints"]["scan"]["row"], 80);
+    assert_eq!(detail["counts"]["recordCount"], 4);
+    assert_eq!(detail["counts"]["rejectedCount"], 1);
+    assert_eq!(detail["counts"]["errorCount"], 1);
+    assert_eq!(detail["processing"]["state"], "paused");
+
+    let query_uri = format!("/api/v1/catalogs/{catalog_id}/query");
+    let (status, first_page) = request(
+        app.clone(),
+        "POST",
+        &query_uri,
+        json!({
+            "limit": 2,
+            "filters": [{ "field": "medium", "values": ["photo"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first_page}");
+    assert_eq!(first_page["items"].as_array().unwrap().len(), 2);
+    let cursor = first_page["nextCursor"]
+        .as_str()
+        .expect("bounded next cursor");
+    let (status, second_page) = request(
+        app.clone(),
+        "POST",
+        &query_uri,
+        json!({
+            "cursor": cursor,
+            "limit": 2,
+            "filters": [{ "field": "medium", "values": ["photo"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+    assert!(second_page["nextCursor"].is_null());
+
+    let (status, facets) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/facets"),
+        json!({ "fields": ["medium", "analysis.fullBody"], "limitPerFacet": 1 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{facets}");
+    assert_eq!(facets["facets"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        facets["facets"][0]["values"].as_array().unwrap().len(),
+        1,
+        "facet response is bounded"
+    );
+    assert_eq!(facets["facets"][0]["values"][0]["value"], "photo");
+    assert_eq!(facets["facets"][0]["values"][0]["count"], 3);
+
+    for invalid_body in [
+        json!({"limit": 0}),
+        json!({"limit": 201}),
+        json!({"cursor": "not-a-cursor"}),
+        json!({"limit": 1, "path": catalog_root}),
+        json!({"filters": [{"field": "medium); drop table catalog_records; --", "values": ["photo"]}]}),
+    ] {
+        let (status, _) = request(app.clone(), "POST", &query_uri, invalid_body).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "invalid query contract must be rejected, got {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalog_id_routes_are_registry_scoped_and_detach_differs_from_delete_on_disk() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let catalog_root = temporary.path().join("selected-catalog");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, relative_error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({"name": "Relative", "path": "relative/catalog"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!relative_error
+        .to_string()
+        .contains(temporary.path().to_string_lossy().as_ref()));
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({"name": "Lifecycle", "path": catalog_root.clone()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let catalog_id = created["id"].as_str().unwrap().to_owned();
+
+    let (status, missing) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/catalogs/00000000000000000000000000000000",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["code"], "catalog_not_found");
+    assert!(
+        !missing
+            .to_string()
+            .contains(temporary.path().to_string_lossy().as_ref()),
+        "safe errors do not disclose filesystem roots"
+    );
+
+    let (status, detached) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/catalogs/{catalog_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detached["detached"], true);
+    assert_eq!(detached["deletedOnDisk"], false);
+    assert!(catalog_root.is_dir(), "detach preserves catalog files");
+
+    let (status, attached) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs/attach",
+        json!({"path": catalog_root.clone()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{attached}");
+    assert_eq!(attached["id"], catalog_id);
+
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/catalogs/{catalog_id}/on-disk"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deletedOnDisk"], true);
+    assert!(
+        !catalog_root.exists(),
+        "only explicit on-disk delete removes files"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_attached_catalog_errors_are_typed_and_do_not_leak_paths() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let catalog_root = temporary.path().join("private").join("catalog");
+    let app = create_app(settings).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({"name": "Corrupt", "path": catalog_root.clone()}),
+    )
+    .await;
+    let catalog_id = created["id"].as_str().unwrap();
+    std::fs::write(catalog_root.join("catalog.json"), b"not json").unwrap();
+
+    let (status, error) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error["code"], "catalog_corrupt");
+    assert!(
+        !error
+            .to_string()
+            .contains(temporary.path().to_string_lossy().as_ref()),
+        "client error must not expose the attached filesystem path"
+    );
+}

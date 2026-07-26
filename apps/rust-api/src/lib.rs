@@ -105,6 +105,11 @@ use person::{
 };
 mod projects;
 use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
+mod catalogs;
+use catalogs::{
+    attach_catalog, catalog_facets, create_catalog, delete_catalog_on_disk, detach_catalog,
+    get_catalog, get_catalog_status, list_catalogs, query_catalog,
+};
 mod assets;
 use assets::{
     delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
@@ -1251,6 +1256,22 @@ fn create_app_with_state_mode(
         .route("/api/v1/auth/verify", post(verify_access))
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
+        .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
+        .route("/api/v1/catalogs/attach", post(attach_catalog))
+        .route(
+            "/api/v1/catalogs/:catalog_id",
+            get(get_catalog).delete(detach_catalog),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/status",
+            get(get_catalog_status),
+        )
+        .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
+        .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
+        .route(
+            "/api/v1/catalogs/:catalog_id/on-disk",
+            delete(delete_catalog_on_disk),
+        )
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/projects/:project_id", get(get_project))
         .route(
