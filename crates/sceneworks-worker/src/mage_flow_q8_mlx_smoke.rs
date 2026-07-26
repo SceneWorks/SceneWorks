@@ -17,12 +17,21 @@
 //!   4. `inference_runtime::load("mage_flow_base", &spec)` — the real engine load,
 //!   5. a render, checked non-degenerate.
 //!
-//! **Why q8 and not the default q4 tier.** Mage's q4 tier does not render correctly — at 512x512/30
-//! steps it produces a repeating tiled texture where bf16 and q8 both produce the prompt. That is a
-//! PRE-EXISTING defect in the q4 quantization from sc-14046, not the re-host: load-time q4 over the
-//! ORIGINAL dense `microsoft/Mage-Flow-Base` snapshot produces the identical image, and the packed q4
-//! artifact is bit-identical to it (`max_abs 0.0`). Filed separately. This smoke therefore exercises
-//! the split layout on q8, where a correct render actually proves the right weights were wired.
+//! **Why q8 and not the default q4 tier.** Historical, and no longer a statement about q4's health.
+//! When this smoke was written, Mage's q4 tier did not render correctly — at 512x512/30 steps it
+//! produced a repeating tiled texture where bf16 and q8 both produced the prompt — so q8 was the
+//! only tier on which "a correct render" could prove the split layout had wired the right weights.
+//! **That defect is fixed (sc-15071):** two projections needed an 8-bit floor (the DiT's
+//! `norm_out.linear` and the Qwen3-VL LM's decoder layers), the q4 artifacts on all seven mirrors
+//! were regenerated, and q4 now renders the prompt.
+//!
+//! The smoke stays on q8 because the thing it gates is the **split layout** — DiT-only tier subdir
+//! plus co-requisite TE/VAE dirs — which is identical across tiers, and q8 is what the cache is
+//! already primed with. Tier *correctness* is not this test's job and is no longer left to a
+//! non-degenerate-render check: it belongs to
+//! `mlx-gen-mage/tests/quant_real_weights.rs::every_tier_renders_the_reference_scene_and_a_uniform_q4_head_fails_the_gate`,
+//! which compares each tier against the bf16 render at a fixed seed and is proven by mutation to
+//! fail on exactly the tiled output this file's original note describes.
 //!
 //! Setup — with the q8 tier of BOTH repos in the HF cache, no env is needed:
 //! ```text

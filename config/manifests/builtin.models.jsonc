@@ -40,20 +40,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
+          "revision": "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
+          "revision": "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -62,7 +72,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
+          "revision": "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -72,18 +82,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -94,7 +104,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -106,7 +116,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -117,7 +127,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -128,7 +138,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
@@ -244,20 +254,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
+          "revision": "dbd4a9c07faca94491ad88ab21225d62e054d9cc",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
+          "revision": "dbd4a9c07faca94491ad88ab21225d62e054d9cc",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -266,7 +286,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
+          "revision": "dbd4a9c07faca94491ad88ab21225d62e054d9cc",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -276,18 +296,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -298,7 +318,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -310,7 +330,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -321,7 +341,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -332,7 +352,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
@@ -445,20 +465,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
+          "revision": "75c11a2957aca2c78272984375502105b2b235ab",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
+          "revision": "75c11a2957aca2c78272984375502105b2b235ab",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -467,7 +497,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
+          "revision": "75c11a2957aca2c78272984375502105b2b235ab",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -477,18 +507,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -499,7 +529,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -511,7 +541,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -522,7 +552,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -533,7 +563,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
@@ -648,20 +678,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
+          "revision": "d642341926fcdb450c17c8fbda03759e8f731c9b",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
+          "revision": "d642341926fcdb450c17c8fbda03759e8f731c9b",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -670,7 +710,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
+          "revision": "d642341926fcdb450c17c8fbda03759e8f731c9b",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -680,18 +720,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -702,7 +742,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -714,7 +754,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -725,7 +765,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -736,7 +776,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
@@ -826,20 +866,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
+          "revision": "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
+          "revision": "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -848,7 +898,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
+          "revision": "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -858,18 +908,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -880,7 +930,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -892,7 +942,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -903,7 +953,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -914,7 +964,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
@@ -1004,20 +1054,30 @@
       // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
       // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
       // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      //
+      // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
+      // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
+      // repeating tiled texture. Two projections have an 8-bit floor — the DiT's `norm_out.linear`
+      // and the Qwen3-VL LM's 36 decoder layers — so q4 now shares q8's decoder layers and differs
+      // only in the token embedding and the vision tower. The q4 DiT grew 2.317 -> 2.326 GB for the
+      // same reason. `mlx.quantize: 4` stays the default because q4 is now correct; the full q4
+      // install is 7.00 GB against q8's 9.45 GB, and peaks at 7.87 GB of unified memory against
+      // 10.11 GB. All six q4 artifacts were regenerated and re-uploaded, which is what moved every
+      // `revision` below — the q8 and bf16 payloads in those commits are byte-identical to before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
+          "revision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 2316856860,
-          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 2326294167,
+          "footprint": { "diskSizeBytes": 2326294167, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
+          "revision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 4374163324,
@@ -1026,7 +1086,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
+          "revision": "79016f10f96b441bebb6e6f461838adb8fb3ff5c",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 8231571754,
@@ -1036,18 +1096,18 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q4",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "estimatedSizeBytes": 2514418914
+          "estimatedSizeBytes": 4331077508
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "q8",
@@ -1058,7 +1118,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "text_encoder",
           "variant": "bf16",
@@ -1070,7 +1130,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q4",
@@ -1081,7 +1141,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "q8",
@@ -1092,7 +1152,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Components-mlx",
-          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "revision": "c936de2a107ee8d0869137e73943f6414f23adaa",
           "coRequisite": true,
           "componentId": "vae",
           "variant": "bf16",
