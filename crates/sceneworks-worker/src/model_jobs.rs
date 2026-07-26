@@ -1739,6 +1739,27 @@ pub(crate) fn resolve_co_requisites(
     manifest_entry: &Value,
     settings: &Settings,
 ) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
+    resolve_co_requisites_for_tier(descriptor, manifest_entry, settings, None)
+}
+
+/// [`resolve_co_requisites`], for a model whose co-requisites are themselves **per-tier** (sc-14980).
+///
+/// Mage-Flow hosts its shared Qwen3-VL text encoder and Mage-VAE once, as `q4/`+`q8/`+`bf16/`
+/// subtrees of one components mirror, so a component id maps to THREE `coRequisite` rows that differ
+/// only by `variant`. `tier` selects among them, and each row's `subdir` addresses the component dir
+/// inside the shared snapshot (`resolve_co_requisites` otherwise resolves whole-snapshot dirs, which
+/// cannot express "the `q4/text_encoder/` subtree").
+///
+/// Behavior is unchanged wherever a component id maps to exactly ONE row — every audio co-requisite
+/// today — so this is additive. When a component id maps to several rows, a `tier` is REQUIRED: a
+/// first-wins pick would silently serve a bf16 text encoder to a q4 request, which is precisely the
+/// class of silent tier mismatch physical per-tier artifacts exist to eliminate.
+pub(crate) fn resolve_co_requisites_for_tier(
+    descriptor: &gen_core::ModelDescriptor,
+    manifest_entry: &Value,
+    settings: &Settings,
+    tier: Option<&str>,
+) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
     let mut components = BTreeMap::new();
     if descriptor.required_components.is_empty() {
         return Ok(components);
@@ -1750,21 +1771,51 @@ pub(crate) fn resolve_co_requisites(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     for &component_id in descriptor.required_components {
-        // The `coRequisite` download that PROVISIONS this component id — matched on the explicit
+        // The `coRequisite` download(s) that PROVISION this component id — matched on the explicit
         // `componentId` field the manifest sets (never inferred from repo names, sc-13679).
-        let download = downloads
+        let candidates: Vec<&Value> = downloads
             .iter()
-            .find(|download| {
+            .filter(|download| {
                 download.get("coRequisite").and_then(Value::as_bool) == Some(true)
                     && download.get("componentId").and_then(Value::as_str) == Some(component_id)
             })
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "{model_id} requires the model component '{component_id}', but its catalog entry \
+            .collect();
+        let download = match candidates.as_slice() {
+            [] => {
+                return Err(WorkerError::InvalidPayload(format!(
+                "{model_id} requires the model component '{component_id}', but its catalog entry \
                      declares no `coRequisite` download tagged `componentId: \"{component_id}\"` — \
                      the model manifest entry is misconfigured"
-                ))
-            })?;
+            )))
+            }
+            [only] => *only,
+            many => {
+                let tier = tier.ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{model_id}: the '{component_id}' component declares {} per-tier \
+                         `coRequisite` rows but no tier was resolved for this request — refusing to \
+                         guess, because picking the wrong one would silently serve another tier's \
+                         weights",
+                        many.len()
+                    ))
+                })?;
+                many.iter()
+                    .copied()
+                    .find(|download| {
+                        download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .is_some_and(|variant| variant.eq_ignore_ascii_case(tier))
+                    })
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{model_id}: the '{component_id}' component declares no `coRequisite` row \
+                             for the resolved {tier} tier — install {model_id}'s {tier} tier, or the \
+                             model manifest entry is misconfigured"
+                        ))
+                    })?
+            }
+        };
         let repo = download
             .get("repo")
             .and_then(Value::as_str)
@@ -1796,7 +1847,12 @@ pub(crate) fn resolve_co_requisites(
             .map(|files| files.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
         let source = match files.as_slice() {
-            [file] => {
+            // A single LITERAL filename resolves to that file (chatterbox's `ve.safetensors`). A
+            // single GLOB does not: it names a set, so it must take the directory arm below like any
+            // other multi-entry predicate (sc-14980 — Mage's `["q4/text_encoder/*"]`). Without this
+            // guard the pattern is `safe_join`ed verbatim, `is_file()` is false for a path with a
+            // literal `*` in it, and a correctly-installed component reports as missing.
+            [file] if !file.contains(['*', '?', '[']) => {
                 // `file` comes from the payload `modelManifestEntry`; confine it under the snapshot so
                 // a `..`/absolute entry can't stage an arbitrary host file as this component's weights
                 // (on Windows `join` with an absolute path replaces the base entirely) (sc-13583).
@@ -1809,11 +1865,13 @@ pub(crate) fn resolve_co_requisites(
                 }
                 gen_core::WeightsSource::File(path)
             }
-            [] => gen_core::WeightsSource::Dir(snapshot),
+            [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
             _ => {
                 // Multi-file components are staged as directories because providers join their own
                 // internal paths, but the pre-load all-or-nothing contract still requires every
-                // manifest-declared file or pattern to be present.
+                // manifest-declared file or pattern to be present. The declared patterns are
+                // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
+                // what the provider is handed — so check against the snapshot, stage the subdir.
                 for file in &files {
                     if !snapshot_contains_declared_file(&snapshot, file)? {
                         return Err(WorkerError::InvalidPayload(format!(
@@ -1822,12 +1880,40 @@ pub(crate) fn resolve_co_requisites(
                         )));
                     }
                 }
-                gen_core::WeightsSource::Dir(snapshot)
+                gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
             }
         };
         components.insert(component_id.to_owned(), source);
     }
     Ok(components)
+}
+
+/// The directory a co-requisite download stages: the cached snapshot, narrowed by an optional
+/// `subdir` (sc-14980).
+///
+/// A shared components mirror hosts several components AND several tiers in one repo
+/// (`<tier>/text_encoder/`, `<tier>/vae/`), so "the snapshot" is not the thing a provider should be
+/// handed. `subdir` names the exact component dir. It arrives from the payload `modelManifestEntry`
+/// — unvalidated over the LAN jobs API — so it is confined under the snapshot with [`safe_join`] for
+/// the same reason `files` and `revision` are (sc-13583 / sc-13842): a `..`/absolute entry would
+/// otherwise stage an arbitrary host directory as this component's weights.
+fn component_dir(snapshot: &Path, download: &Value, model_id: &str) -> WorkerResult<PathBuf> {
+    let Some(subdir) = download
+        .get("subdir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(snapshot.to_path_buf());
+    };
+    let dir = safe_join(snapshot, subdir)?;
+    if !dir.is_dir() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model_id}: the co-requisite subdirectory `{subdir}` is missing from the cached \
+             snapshot — reinstall {model_id} to repair it"
+        )));
+    }
+    Ok(dir)
 }
 
 fn snapshot_contains_declared_file(snapshot: &Path, declared: &str) -> WorkerResult<bool> {
@@ -4923,6 +5009,133 @@ mod co_requisite_tests {
             "config.json",
         ),
     ];
+
+    fn mage_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
+        gen_core::ModelDescriptor {
+            id,
+            family: "mage-flow",
+            backend: "mlx",
+            modality: gen_core::Modality::Image,
+            capabilities: gen_core::Capabilities::default(),
+            required_components: &["text_encoder", "vae"],
+        }
+    }
+
+    /// The six SHIPPED Mage rows, whose shared text encoder + VAE are per-tier co-requisites.
+    const MAGE_MODEL_IDS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+    ];
+
+    /// Stage the shared components mirror's `<tier>/text_encoder/` + `<tier>/vae/` for one tier.
+    fn stage_mage_components(data_dir: &Path, manifest: &Value, tier: &str) {
+        for download in manifest["downloads"].as_array().expect("downloads") {
+            if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            if download.get("variant").and_then(Value::as_str) != Some(tier) {
+                continue;
+            }
+            let repo = download["repo"].as_str().expect("repo");
+            let revision = download["revision"].as_str().expect("revision");
+            let subdir = download["subdir"].as_str().expect("subdir");
+            // One real file inside the component dir, so both the `files` glob check and the
+            // `subdir` is_dir() check see a populated tree.
+            stage_snapshot_file(
+                data_dir,
+                repo,
+                revision,
+                &format!("{subdir}/model.safetensors"),
+            );
+        }
+    }
+
+    /// sc-14980/sc-14979 — a per-tier co-requisite resolves to the tier's own component DIR.
+    ///
+    /// Discriminating in the way that matters: only the q4 tier is staged, and the assertion is that
+    /// each component path ends in `q4/<component>`. A resolver that ignored `subdir` would hand
+    /// back the snapshot ROOT (the engine would then look for `text_encoder/` at the top level and
+    /// fail), and one that ignored `variant` would pick whichever row came first.
+    #[test]
+    fn mage_per_tier_co_requisites_resolve_to_the_matching_tier_component_dir() {
+        for &model_id in MAGE_MODEL_IDS {
+            let _env = isolate_hf_cache();
+            let data_dir = tempfile::tempdir().expect("temp data dir");
+            let manifest = builtin_manifest_entry(model_id);
+            stage_mage_components(data_dir.path(), &manifest, "q4");
+
+            let components = resolve_co_requisites_for_tier(
+                &mage_descriptor(model_id),
+                &manifest,
+                &settings_at(data_dir.path().to_path_buf()),
+                Some("q4"),
+            )
+            .unwrap_or_else(|error| panic!("{model_id}: q4 components are staged: {error:?}"));
+
+            let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+            assert_eq!(keys, vec!["text_encoder", "vae"], "{model_id}");
+            for component in ["text_encoder", "vae"] {
+                let gen_core::WeightsSource::Dir(dir) = &components[component] else {
+                    panic!("{model_id}: {component} must stage as a directory");
+                };
+                assert!(
+                    dir.ends_with(format!("q4/{component}")),
+                    "{model_id}: {component} must resolve to the q4 component dir, got {}",
+                    dir.display()
+                );
+                assert!(dir.is_dir(), "{model_id}: {component} dir must exist");
+            }
+        }
+    }
+
+    /// Asking for a tier whose shared components are NOT installed fails BEFORE the engine load,
+    /// rather than silently handing back another tier's text encoder.
+    #[test]
+    fn mage_co_requisites_refuse_a_tier_that_is_not_installed() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let manifest = builtin_manifest_entry("mage_flow_base");
+        stage_mage_components(data_dir.path(), &manifest, "q4");
+
+        let error = resolve_co_requisites_for_tier(
+            &mage_descriptor("mage_flow_base"),
+            &manifest,
+            &settings_at(data_dir.path().to_path_buf()),
+            Some("bf16"),
+        )
+        .expect_err("bf16 components are not staged, so resolution must fail");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("not installed") || message.contains("missing"),
+            "the failure must be actionable, got {message}"
+        );
+    }
+
+    /// A per-tier component with NO tier in scope is refused rather than guessed. Picking the first
+    /// matching row would silently serve a bf16 text encoder to a q4 render.
+    #[test]
+    fn mage_co_requisites_refuse_to_guess_a_tier_when_none_is_resolved() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let manifest = builtin_manifest_entry("mage_flow_base");
+        stage_mage_components(data_dir.path(), &manifest, "q4");
+
+        let error = resolve_co_requisites_for_tier(
+            &mage_descriptor("mage_flow_base"),
+            &manifest,
+            &settings_at(data_dir.path().to_path_buf()),
+            None,
+        )
+        .expect_err("three per-tier rows with no tier in scope must not be guessed");
+        assert!(
+            format!("{error:?}").contains("refusing to guess"),
+            "got {error:?}"
+        );
+    }
 
     #[test]
     fn moss_codec_co_requisite_resolves_from_every_live_moss_tts_entry() {

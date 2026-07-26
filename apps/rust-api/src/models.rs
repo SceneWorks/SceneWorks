@@ -524,7 +524,18 @@ pub(crate) async fn create_model_download_job(
     // is a different artifact than the model's primary checkpoint and must not be reconciled
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
-    for co_requisite in model_co_requisite_downloads(&model) {
+    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
+    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
+    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
+    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
+    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
+    let selected_variant = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    for co_requisite in
+        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
+    {
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
@@ -3011,7 +3022,57 @@ fn install_state_for(
         let mut hard_co_requisites_installed = true;
         let mut soft_co_requisite_update = false;
         let mut co_requisite_incomplete = false;
-        for co_requisite in model_co_requisite_downloads(model) {
+        // Tier-scoped co-requisites (sc-14980) are gated like the tiers themselves: this state is a
+        // model-level AGGREGATE that counts a quant-matrix model installed when ANY tier is fully
+        // present, so requiring every tier's shared text encoder would report a complete, working q4
+        // install as incomplete forever. Satisfy them when at least one tier's set is fully cached;
+        // tier-agnostic co-requisites (every other family) keep the strict all-must-be-present rule.
+        let tier_scoped: Vec<Value> = model_co_requisite_downloads(model)
+            .into_iter()
+            .filter(|download| co_requisite_variant(download).is_some())
+            .collect();
+        if !tier_scoped.is_empty() {
+            let tiers: std::collections::BTreeSet<String> = tier_scoped
+                .iter()
+                .filter_map(co_requisite_variant)
+                .collect();
+            let any_tier_complete = tiers.iter().any(|tier| {
+                tier_scoped
+                    .iter()
+                    .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
+                    .all(|download| {
+                        download
+                            .get("repo")
+                            .and_then(Value::as_str)
+                            .and_then(|repo| huggingface_repo_cache_path(data_dir, repo))
+                            .map(|path| {
+                                huggingface_cache_health(
+                                    &path,
+                                    &string_array_field(download, "files"),
+                                )
+                            })
+                            .is_some_and(|health| health.installed)
+                    })
+            });
+            if !any_tier_complete {
+                hard_co_requisites_installed = false;
+                missing_required_files.extend(
+                    tier_scoped
+                        .iter()
+                        .filter_map(|download| {
+                            download
+                                .get("repo")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect::<std::collections::BTreeSet<_>>(),
+                );
+            }
+        }
+        for co_requisite in model_co_requisite_downloads(model)
+            .into_iter()
+            .filter(|download| co_requisite_variant(download).is_none())
+        {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
@@ -3713,10 +3774,20 @@ fn apply_model_catalog_size_fields(
     // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
     // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
     // from the manifest (the live HF estimate above only sizes the primary repo).
-    let co_requisite_size_bytes: u64 = model_co_requisite_downloads(model)
-        .iter()
-        .filter_map(|download| manifest_download_size_bytes(model, download))
-        .sum();
+    // Only the co-requisites the SELECTED tier actually pulls (sc-14980) — otherwise a q4 Mage-Flow
+    // install would advertise the sum of all three shared text-encoder tiers.
+    // The displayed footprint is for the DEFAULT download, so size only the co-requisites that
+    // download actually pulls (sc-14980) — otherwise a q4 Mage-Flow install would advertise the sum
+    // of all three shared text-encoder tiers (16.1 GB instead of 2.51 GB).
+    let default_variant = model_download(model)
+        .as_ref()
+        .and_then(|download| download.get("variant").and_then(Value::as_str))
+        .map(str::to_owned);
+    let co_requisite_size_bytes: u64 =
+        model_co_requisite_downloads_for_variant(model, default_variant.as_deref())
+            .iter()
+            .filter_map(|download| manifest_download_size_bytes(model, download))
+            .sum();
     let effective_download_size_bytes = match primary_size_bytes {
         Some(primary) => Some(primary + co_requisite_size_bytes),
         None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
@@ -4287,6 +4358,45 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
 /// has already restricted `downloads` to the current OS (`retain_downloads_for_os`), so every entry
 /// returned applies to this platform. Only provider-supported entries are returned.
+/// Whether a co-requisite row is scoped to ONE quant tier (sc-14980).
+///
+/// Every co-requisite before sc-14980 is tier-agnostic — the PiD decoder's gemma caption encoder,
+/// chatterbox's `ve`/`perth`, MMAudio's five components — and carries no `variant`, so it applies to
+/// whatever tier is selected. Mage-Flow's shared Qwen3-VL text encoder and Mage-VAE are the first
+/// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
+/// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
+/// the presence of `variant` keeps every existing co-requisite on exactly its current path.
+pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
+    download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// The co-requisite downloads that apply to `variant` (sc-14980).
+///
+/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
+/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
+/// across tiers still see them all.
+pub(crate) fn model_co_requisite_downloads_for_variant(
+    model: &Value,
+    variant: Option<&str>,
+) -> Vec<Value> {
+    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
+    model_co_requisite_downloads(model)
+        .into_iter()
+        .filter(
+            |download| match (co_requisite_variant(download), wanted.as_deref()) {
+                (None, _) => true,
+                (Some(_), None) => true,
+                (Some(row), Some(wanted)) => row == wanted,
+            },
+        )
+        .collect()
+}
+
 pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
     model
         .get("downloads")
@@ -6686,11 +6796,18 @@ mod variant_delete_tests {
         assert_eq!(removal.reclaimed_bytes, 0);
     }
 
+    /// A model whose logical tiers SHARE one file predicate reclaims nothing and keeps the snapshot.
+    ///
+    /// This is the load-time-quant contract, and it is still the right behavior for any family that
+    /// ships one dense snapshot per variant. Mage-Flow used to be the shipping example; since
+    /// sc-14980 its tiers are physically distinct, so the fixture below is a synthetic overlapping
+    /// model rather than a Mage row — see
+    /// `mage_flow_per_tier_delete_reclaims_only_that_tiers_dit` for Mage's actual shape.
     #[tokio::test]
     async fn overlapping_logical_tiers_retain_the_shared_snapshot_and_reclaim_zero() {
         let tmp = tempfile::tempdir().unwrap();
         let hub = tmp.path().join("hub");
-        let repo = hub.join("models--SceneWorks--Mage-Flow");
+        let repo = hub.join("models--Org--overlapping-tiers");
         seed(
             &repo,
             "transformer/diffusion_pytorch_model.safetensors",
@@ -6724,6 +6841,97 @@ mod variant_delete_tests {
             .exists());
         assert!(repo.join("blobs/te").exists());
         assert!(repo.join("blobs/vae").exists());
+    }
+
+    /// sc-14980 / sc-14979 — Mage-Flow's per-tier delete reclaims REAL bytes, and reclaims only its
+    /// own tier's DiT.
+    ///
+    /// This is the physical-reclaim acceptance sc-14046 delegated. It replaces the honest-but-empty
+    /// zero-byte outcome the load-time-quant layout could offer, and it is the reason the tiers had
+    /// to become physically distinct artifacts. The byte counts are the REAL sizes measured on the
+    /// uploaded mirrors, so a re-host that silently changed the layout would move them.
+    ///
+    /// Three things must hold simultaneously, and each is a distinct way the design could fail:
+    ///   - the deleted tier's DiT bytes are actually reclaimed (not 0);
+    ///   - the OTHER installed tier's DiT survives intact (predicates are disjoint);
+    ///   - the SHARED text encoder + VAE survive — they live in a different repo entirely and are
+    ///     co-requisites, so a variant/tier delete can never strand another installed variant.
+    #[tokio::test]
+    async fn mage_flow_per_tier_delete_reclaims_only_that_tiers_dit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        // The variant mirror: q4 and q8 DiT tiers installed side by side.
+        let variant = hub.join("models--SceneWorks--Mage-Flow-Base");
+        // Real uploaded sizes, scaled down by 1e6 so the fixture stays a unit test; the RATIO and
+        // the disjointness are what the assertions are about.
+        const Q4_DIT: usize = 2316; // 2.317 GB
+        const Q8_DIT: usize = 4374; // 4.374 GB
+        seed(
+            &variant,
+            "q4/transformer/diffusion_pytorch_model.safetensors",
+            "q4dit",
+            Q4_DIT,
+        );
+        seed(&variant, "q4/model_index.json", "q4idx", 1);
+        seed(
+            &variant,
+            "q8/transformer/diffusion_pytorch_model.safetensors",
+            "q8dit",
+            Q8_DIT,
+        );
+        seed(&variant, "q8/model_index.json", "q8idx", 1);
+        // The SHARED components mirror — a different repo, reached only through co-requisite rows.
+        let components = hub.join("models--SceneWorks--Mage-Flow-Components-mlx");
+        seed(
+            &components,
+            "q4/text_encoder/model.safetensors",
+            "q4te",
+            2514,
+        );
+        seed(
+            &components,
+            "q4/vae/diffusion_pytorch_model.safetensors",
+            "q4vae",
+            345,
+        );
+
+        // Delete the q4 tier. `retained` carries the SURVIVING tiers' predicates, exactly as
+        // `delete_model_variant` builds it (co-requisites are excluded there by construction, which
+        // is why no components predicate appears here).
+        let removal = remove_tier_artifacts(
+            Some(variant.clone()),
+            None,
+            &["q4/*".to_owned()],
+            &["q8/*".to_owned()],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // 1. Real bytes, not zero: exactly the q4 DiT + its tier index.
+        assert_eq!(
+            removal.reclaimed_bytes,
+            (Q4_DIT + 1) as u64,
+            "a Mage tier delete must reclaim that tier's own bytes — a 0 here means the tiers went \
+             back to sharing one file predicate"
+        );
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!variant.join("blobs/q4dit").exists());
+        assert!(!variant.join("snapshots/rev/q4").exists());
+
+        // 2. The sibling tier is untouched.
+        assert!(variant.join("blobs/q8dit").exists());
+        assert!(variant
+            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model.safetensors")
+            .exists());
+
+        // 3. The shared components are untouched — different repo, never in the delete's scope.
+        assert!(components.join("blobs/q4te").exists());
+        assert!(components.join("blobs/q4vae").exists());
+        assert!(components
+            .join("snapshots/rev/q4/text_encoder/model.safetensors")
+            .exists());
     }
 
     // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus
