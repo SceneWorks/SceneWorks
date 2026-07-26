@@ -1101,6 +1101,10 @@ pub(crate) fn create_app_with_state(
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
+        #[cfg(test)]
+        model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        model_size_estimate_disabled_override: Arc::new(Mutex::new(None)),
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),

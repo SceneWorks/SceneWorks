@@ -279,6 +279,11 @@ pub struct AppState {
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
+    #[cfg(test)]
+    pub(crate) model_size_estimate_test_hook:
+        Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
+    #[cfg(test)]
+    pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI
