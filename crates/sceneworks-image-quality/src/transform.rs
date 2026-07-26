@@ -150,11 +150,14 @@ mod tests {
     ///  2. The compiled `image` build genuinely cannot decode it.
     ///
     /// This used to hand-build a BMP, which made the test pass under
-    /// `cargo test -p sceneworks-image-quality` but FAIL under a workspace `cargo test`. Cargo
-    /// unifies features for the shared `image` 0.25 across workspace members, and `apps/rust-api`
-    /// enables `bmp` — so a workspace build (i.e. every shipped build) decodes BMP natively and gate
-    /// 2 stopped holding. This crate's own `default-features = false, features = [png, jpeg, webp]`
-    /// is NOT what it gets in a real build; the union today is bmp/gif/jpeg/png/tiff/webp.
+    /// `cargo test -p sceneworks-image-quality` but FAIL under a workspace `cargo test` (sc-15028):
+    /// Cargo unified features for the shared `image` 0.25 across members, another member enabled
+    /// `bmp`, and so every shipped build decoded BMP natively and gate 2 stopped holding.
+    /// sc-15052 removed that particular trapdoor — `image` is declared once in the root
+    /// `[workspace.dependencies]` (bmp/gif/jpeg/png/tiff/webp), so this crate's declared features
+    /// and its compiled features are now the same thing in either scope. Gate 2 must still not
+    /// lean on a format merely being absent from that list: the list is workspace-wide and one
+    /// line away from growing.
     ///
     /// HEIC is immune to that drift: `image` 0.25 ships no HEIC decoder under any feature, so gate 2
     /// cannot be silently invalidated by another crate's Cargo.toml. Generated at test time with the

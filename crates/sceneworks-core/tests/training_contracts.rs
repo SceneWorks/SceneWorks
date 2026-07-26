@@ -149,7 +149,13 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
-            "wan_lora"
+            "wan_lora",
+            // Mage-Flow (sc-14055, offered in sc-14056): the `mlx-gen-mage` trainer reports
+            // `supports_lokr` and has a real LoKr branch, and Mage inference installs LoKr through
+            // the same strict adapter seam as LoRA (`apply_mage_adapters`). It was absent from this
+            // list only because the target never advertised `lokr` — shipped but unreachable.
+            "mage_flow_base_lora",
+            "mage_flow_edit_base_lora"
         ]
     );
 }
@@ -282,11 +288,42 @@ fn builtin_registry_exposes_both_mage_flow_foundation_targets() {
         assert_eq!(target.base_model_repo.as_deref(), Some(repo));
         assert_eq!(target.kernel, "mage_flow_lora");
         assert_eq!(target.defaults.resolution, 1024);
+        // The Training Studio's network-type picker is built from exactly this list, so this
+        // assertion is what keeps each capability OFFERABLE. All three of Mage's trainer paths must
+        // appear: `lora` and `lokr` (both advertised by the `mlx-gen-mage` trainer and both loadable
+        // back through `apply_mage_adapters`), plus `full` — the base fine-tune, which Mage-Flow is
+        // the only family to have. `lokr` and `full` were each shipped-but-unreachable purely
+        // because they were absent here (sc-14055 / sc-14056).
         assert_eq!(
             target.limits.get("networkTypes"),
-            Some(&serde_json::json!(["lora"]))
+            Some(&serde_json::json!(["lora", "lokr", "full"]))
         );
     }
+}
+
+/// sc-14056: `full` is a Mage-Flow-only network type. Every other built-in target must keep
+/// advertising only adapter networks — a stray `full` on a family whose trainer has no full path
+/// would offer the user a run the engine rejects (gen-core's `validate_full_finetune_request` floor).
+#[test]
+fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
+    let registry = builtin_training_targets();
+    let full_targets: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| {
+            target
+                .limits
+                .get("networkTypes")
+                .and_then(Value::as_array)
+                .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some("full")))
+        })
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        full_targets,
+        vec!["mage_flow_base_lora", "mage_flow_edit_base_lora"],
+        "only the Mage-Flow targets may advertise the full base fine-tune network type"
+    );
 }
 
 #[test]

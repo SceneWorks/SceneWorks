@@ -1520,6 +1520,7 @@ use scail2::{scail2_engine_id, scail2_raw_settings};
 pub(crate) mod ltx;
 #[cfg(target_os = "macos")]
 use ltx::{generate_ltx, ltx_available, ltx_engine_id, ltx_raw_settings, LTX_ADAPTER};
+pub use ltx::{text_encoder_options_for_adapter, TextEncoderOption};
 mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};

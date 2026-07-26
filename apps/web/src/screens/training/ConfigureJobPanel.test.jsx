@@ -259,3 +259,78 @@ describe("every validated numeric field maps to a reachable, outline-able input"
     });
   }
 });
+
+// sc-14056 — the full base fine-tune. Gradient (activation) checkpointing has no full-tune
+// implementation yet (sc-14989) and the engine hard-errors on `full_finetune + gradient_checkpointing`
+// rather than ignoring the flag, so the worker clears it for a full run. If the panel kept offering a
+// checked box, the user would tick a control that is then silently dropped — the exact silence the
+// engine refuses. Assert the swap in BOTH directions so this cannot pass by hiding the box always.
+describe("ConfigureJobPanel full base fine-tune", () => {
+  function checkpointingCheckbox() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")].find((node) =>
+      node.textContent.includes("Gradient checkpointing"),
+    );
+  }
+
+  it("offers the gradient-checkpointing toggle on an adapter run", () => {
+    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true, isFullFinetune: false })} />);
+    expect(checkpointingCheckbox()).toBeTruthy();
+    expect(container.textContent).not.toContain("not available for a full base fine-tune");
+  });
+
+  it("replaces it with an explanation on a full base fine-tune", () => {
+    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true, isFullFinetune: true })} />);
+    expect(checkpointingCheckbox()).toBeFalsy();
+    expect(container.textContent).toContain(
+      "Gradient checkpointing is not available for a full base fine-tune yet",
+    );
+  });
+
+  // Mage advertises all three of its trainer paths. Each must render a HUMAN label, not the raw
+  // token — an option falling through `networkTypeLabel`'s `?? value` shows "lokr"/"full" verbatim,
+  // which is how you can tell a label was never added.
+  it("offers all three Mage network types with human labels", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          showNetworkType: true,
+          networkTypeOptions: ["lora", "lokr", "full"],
+          configDraft: { ...VALID_DRAFT, networkType: "full" },
+          isFullFinetune: true,
+        })}
+      />,
+    );
+    const select = [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Network type"))
+      ?.querySelector("select");
+    expect(select).toBeTruthy();
+    const options = [...select.querySelectorAll("option")].map((option) => option.textContent.trim());
+    expect(options).toEqual(["LoRA", "LoKr (LyCORIS Kronecker)", "Full base fine-tune"]);
+    expect(options).not.toContain("lokr");
+    expect(options).not.toContain("full");
+  });
+
+  // LoKr is an ADAPTER path, so it must keep the gradient-checkpointing control that the full path
+  // replaces — the swap keys off the full-tune flag, not merely off "not lora".
+  it("keeps the gradient-checkpointing toggle on a LoKr run", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          showNetworkType: true,
+          networkTypeOptions: ["lora", "lokr", "full"],
+          configDraft: { ...VALID_DRAFT, networkType: "lokr" },
+          isLokrNetwork: true,
+          isFullFinetune: false,
+        })}
+      />,
+    );
+    expect(checkpointingCheckbox()).toBeTruthy();
+    // …and the LoKr factor field appears, which is the control LoKr actually needs.
+    const factor = [...container.querySelectorAll("label")].find((node) =>
+      node.textContent.trim().startsWith("LoKr factor"),
+    );
+    expect(factor).toBeTruthy();
+  });
+});

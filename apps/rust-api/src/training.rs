@@ -1531,6 +1531,30 @@ pub(crate) async fn create_training_job(
         if let Some(message) = training_disk_space_error(&output_dir) {
             return Err(ApiError::bad_request(message));
         }
+        // A FULL base fine-tune (sc-14056) trains every DiT weight, so it holds the full-precision
+        // master weights + optimizer state + (without gradient checkpointing, sc-14989) the whole
+        // retained backward graph — an envelope far larger than a frozen-base LoRA run, and one that at
+        // production resolution exceeds any consumer Mac. Refuse a full-tune this machine can't hold,
+        // platform-aware, with an actionable message. Only the full path needs this; a LoRA/LoKr run
+        // rides the base-installed check above. Inert for non-full runs and for non-MLX platforms
+        // (the worker probe returns no budget), and a no-op when the base isn't installed.
+        if training_is_full_finetune(&payload.config) {
+            let base_model_dir = resolve_base_model_path(target, &data_dir);
+            if let Some(message) = sceneworks_worker::full_finetune_memory_error(
+                FsPath::new(&base_model_dir),
+                payload.config.resolution,
+                // The accumulator buffer is a real term in the envelope, not a detail — see
+                // `FULL_FINETUNE_ACCUM_MULTIPLIER`. Passing the configured window is what keeps a
+                // 64–80 GB Mac out of an uncatchable SIGKILL.
+                payload.config.gradient_accumulation,
+                // The BASE MODEL's label, not the target's: a training target is named for what it
+                // normally produces ("Mage-Flow Base LoRA"), which reads as nonsense in a full-tune
+                // rejection ("A full base fine-tune of Mage-Flow Base LoRA at 1024px…").
+                &training_base_model_label(target),
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
     }
 
     // Rust resolves and validates the normalized plan before any job is queued.
@@ -1935,6 +1959,50 @@ fn macos_wan_base_path(data_dir: &FsPath, target: &TrainingTarget) -> Option<Str
         let _ = (data_dir, target);
     }
     None
+}
+
+/// Whether a training request selects the **full base fine-tune** path (sc-14056) — `advanced.
+/// networkType == "full"` — rather than a LoRA/LoKr adapter. Drives the full-tune memory-envelope
+/// submit gate ([`full_finetune_memory_error`](sceneworks_worker::full_finetune_memory_error)). A
+/// missing / other value (`"lora"`, `"lokr"`) is the adapter path, so this is additive: existing LoRA
+/// submissions are unaffected.
+/// The **base model's** display label for a training target, derived from the target's name by
+/// dropping the trailing output-kind word.
+///
+/// A training target is named for the artifact it normally produces — "Mage-Flow Base LoRA",
+/// "SDXL LoRA" — which is exactly wrong in a message about fine-tuning the base itself: the sc-14056
+/// full-tune rejection read "A full base fine-tune of Mage-Flow Base LoRA at 1024px…". The target
+/// carries no separate base-model display name (`base_model` is an id like `mage_flow_base`), so
+/// strip the suffix. Names without a recognized suffix are returned unchanged.
+pub(crate) fn training_base_model_label(
+    target: &sceneworks_core::training::TrainingTarget,
+) -> String {
+    const OUTPUT_KIND_SUFFIXES: [&str; 4] = ["lora", "lokr", "control", "controlnet"];
+    let name = target.name.trim();
+    let Some((head, last)) = name.rsplit_once(char::is_whitespace) else {
+        return name.to_owned();
+    };
+    if OUTPUT_KIND_SUFFIXES
+        .iter()
+        .any(|suffix| last.eq_ignore_ascii_case(suffix))
+    {
+        let head = head.trim_end();
+        if !head.is_empty() {
+            return head.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+pub(crate) fn training_is_full_finetune(
+    config: &sceneworks_core::training::TrainingConfig,
+) -> bool {
+    config
+        .advanced
+        .get("networkType")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().eq_ignore_ascii_case("full"))
+        .unwrap_or(false)
 }
 
 /// GPU selection for a training job, read from the config's advanced bag (the
