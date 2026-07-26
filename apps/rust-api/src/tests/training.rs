@@ -3341,6 +3341,65 @@ fn mage_flow_foundation_targets_resolve_the_installed_flat_mirrors() {
 }
 
 #[test]
+fn mage_flow_foundation_targets_are_missing_when_not_installed() {
+    // sc-14056: the counterpart to the "installed ⇒ Ready" case above. Because Mage's mirror is a FLAT
+    // all-platform snapshot (q4/q8/bf16 are load-time quant over the same dense files, sc-14054), its
+    // reachable states are Ready ↔ Missing on every platform — there is no separate dense training tier
+    // to be absent, so `TrainingTierMissing` (a tiered-turnkey / macOS-Wan state) is correctly
+    // unreachable for Mage and no platform-aware override is needed. An uninstalled mirror is `Missing`,
+    // and a real run is blocked with the "install it" message.
+    for base_model in ["mage_flow_base", "mage_flow_edit_base"] {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("data");
+        let target = crate::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} target present"));
+
+        // Nothing on disk (no repo cache, no managed install) ⇒ Missing, not TrainingTierMissing.
+        assert_eq!(
+            training_base_model_status(&data_dir, &target),
+            TrainingBaseStatus::Missing,
+            "{base_model}: an uninstalled flat mirror is Missing"
+        );
+        let message = training_base_unavailable_message(
+            training_base_model_status(&data_dir, &target),
+            &target.base_model,
+        )
+        .unwrap_or_else(|| panic!("{base_model}: a real run must be blocked when uninstalled"));
+        assert!(
+            message.contains("not installed"),
+            "{base_model}: Missing message should say 'not installed': {message}"
+        );
+    }
+}
+
+#[test]
+fn training_is_full_finetune_reads_the_network_type() {
+    // sc-14056: the submit-gate predicate that routes a run to the full base fine-tune memory envelope.
+    let mut config = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.base_model == "mage_flow_base")
+        .expect("mage_flow_base target present")
+        .defaults;
+    // The Mage default (advanced.networkType == "lora") is an adapter run, not a full fine-tune.
+    assert!(!training_is_full_finetune(&config));
+    // A LoKr adapter is also not a full fine-tune.
+    config
+        .advanced
+        .insert("networkType".to_owned(), serde_json::json!("lokr"));
+    assert!(!training_is_full_finetune(&config));
+    // Only "full" selects the full base fine-tune path (case/whitespace-insensitive).
+    config
+        .advanced
+        .insert("networkType".to_owned(), serde_json::json!("  Full "));
+    assert!(training_is_full_finetune(&config));
+}
+
+#[test]
 fn stock_sdxl_target_points_at_installed_turnkey() {
     // Regression guard for issue #1694: the stock `sdxl` training target must name the same
     // `SceneWorks/sdxl-base-mlx` turnkey the catalog + engine install — pointing at the flat

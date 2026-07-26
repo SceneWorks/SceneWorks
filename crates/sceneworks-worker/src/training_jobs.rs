@@ -768,6 +768,25 @@ pub(crate) async fn run_training_execution(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    // Guard the full base fine-tune signal (sc-14056) until its execution path is wired end to end.
+    // The engine `TrainingConfig.full_finetune` flag ships with a newer sceneworks-gen-core than this
+    // worker pins, and `mage_flow_lora` is not yet in the MLX-routed training set, so
+    // `map_training_config` would otherwise silently map `networkType == "full"` to a LoRA adapter
+    // (`NetworkType::parse("full") == Lora`) and train the WRONG thing. Reject it explicitly instead —
+    // the API submit gate already sizes the full-tune memory envelope; this closes the execution-path
+    // footgun until the engine wiring + routing cutover land (sc-14056 follow-up).
+    if advanced_str(&plan.config.advanced, "networkType", "lora")
+        .trim()
+        .eq_ignore_ascii_case("full")
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Full base fine-tune (networkType \"full\") is not yet available through the training \
+             worker — it needs the mage_flow full-fine-tune engine wiring and MLX routing cutover \
+             (sc-14056 follow-up). Train a LoRA/LoKr adapter, or run the full fine-tune via the \
+             engine trainer directly."
+                .to_owned(),
+        ));
+    }
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
     // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.

@@ -123,6 +123,10 @@ use gpu::*;
 mod fit_gate;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+// The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
+// (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
+// training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
+pub use mlx_fit_gate::full_finetune_memory_error;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
