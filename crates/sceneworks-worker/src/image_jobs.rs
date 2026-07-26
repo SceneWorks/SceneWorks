@@ -1024,8 +1024,10 @@ pub(crate) async fn run_image_generate_job(
                         request.model
                     )));
                 }
-                // Plain candle txt2img (sc-3675, epic 3672): sdxl/realvisxl on the narrow txt2img lane.
-                CandleImageRoute::CandleTxt2Img => {
+                // Registry-driven candle generation. Mage Edit is named separately by the resolver so
+                // an edit without its required source can never fall through as plain T2I; both variants
+                // use the same generic stream once their request shapes are resolved.
+                CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
                     generate_candle_stream(
                         api,
                         settings,
