@@ -165,6 +165,7 @@ mod sensenova_jobs;
 use sensenova_jobs::*;
 mod video_jobs;
 use video_jobs::*;
+pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // Pure audio generation — the SceneWorks Audio Studio job path (epic 13400 / sc-13404). Compiled on
 // every platform (the dispatch arm is uniform); the actual candle audio lane is resolved through
 // `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a

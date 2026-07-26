@@ -98,6 +98,8 @@ import {
 } from "../samplerOptions.js";
 
 const ltxVideoModelId = "ltx_2_3";
+const legacyDefaultTextEncoderId = "default";
+const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge"]);
 // Keep Video Studio's MLX lane q4-first (sc-10859). Unlike Image Studio, it deliberately does not
 // inherit the app-wide generation-quality setting: video activation peaks need a larger safety margin.
@@ -190,6 +192,11 @@ export function VideoStudio() {
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
+  const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
+  const [textEncoderSelection, setTextEncoderSelection] = useState({
+    modelId: saved.model ?? null,
+    id: saved.textEncoderModel ?? null,
+  });
   const [quantization, setQuantization] = useState(saved.quantization ?? "auto");
   // MLX generation tier (sc-12165), separate from the torch/GGUF `quantization` state above.
   // The explicit pick is persisted per (video, model), outside the workspace settings snapshot.
@@ -199,6 +206,16 @@ export function VideoStudio() {
   const [recipeModelNotice, setRecipeModelNotice] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  const textEncoderModel =
+    textEncoderSelection.modelId === model ? textEncoderSelection.id : null;
+  const setTextEncoderModel = (next, modelId = model) =>
+    setTextEncoderSelection((current) => {
+      const currentId = current.modelId === modelId ? current.id : null;
+      return {
+        modelId,
+        id: typeof next === "function" ? next(currentId) : next,
+      };
+    });
   const [guideOpen, setGuideOpen] = useState(false);
   // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
   const macVideoModels = useMemo(
@@ -211,6 +228,23 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Runtime-curated selector surface (sc-13800). The API emits only complete encoders the worker can
+  // resolve; Video Studio stays adapter-agnostic and future models can expose the same shape.
+  const textEncoderOptions = selectedModel?.textEncoderOptions ?? [];
+  const supportsTextEncoderSelection = textEncoderOptions.length > 0;
+  const defaultTextEncoderId =
+    textEncoderOptions.find((option) => option.isDefault)?.id ??
+    textEncoderOptions[0]?.id ??
+    legacyDefaultTextEncoderId;
+  const selectedTextEncoderModel =
+    textEncoderModel == null ||
+    (textEncoderModel === legacyDefaultTextEncoderId &&
+      !textEncoderOptions.some((option) => option.id === legacyDefaultTextEncoderId))
+      ? defaultTextEncoderId
+      : textEncoderModel;
+  const selectedTextEncoderAvailable = textEncoderOptions.some(
+    (option) => option.id === selectedTextEncoderModel,
+  );
   // Models gated on the selected tab, not tabs on the selected model (sc-5716). A model "serves" a
   // mode when it declares the capability AND, under active Mac gating, that mode is MLX-routed for
   // it (`macVideoModeBlock` is a no-op off-Mac, so there this is pure capability). The mode tabs,
@@ -743,6 +777,12 @@ export function VideoStudio() {
     setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
     setDistilledVariant(rawSettings.distilledVariant ?? "1.1");
     setPrecision(rawSettings.precision ?? "fp8");
+    setEnhancePrompt(rawSettings.enhancePrompt === true);
+    setTextEncoderModel(
+      rawSettings.textEncoderModel ??
+        (rawSettings.useUncensoredEnhancer === true ? amoralTextEncoderId : null),
+      recipe.model && recipeModelAvailable ? recipe.model : model,
+    );
     setQuantization(rawSettings.quantization ?? "auto");
     setLightning(rawSettings.lightning ?? true);
     setLtxVideoCfg(rawSettings.videoCfgGuidanceScale ?? "");
@@ -845,6 +885,8 @@ export function VideoStudio() {
       ["quantization", setQuantization],
       ["ltxPipeline", setLtxPipeline],
       ["distilledVariant", setDistilledVariant],
+      ["enhancePrompt", setEnhancePrompt],
+      ["textEncoderModel", setTextEncoderModel],
       ["motion", setMotion],
       ["videoCfgGuidanceScale", setLtxVideoCfg],
       ["videoStgGuidanceScale", setLtxVideoStg],
@@ -874,6 +916,9 @@ export function VideoStudio() {
       quantization,
       ltxPipeline,
       distilledVariant,
+      ...(supportsTextEncoderSelection
+        ? { enhancePrompt, textEncoderModel: selectedTextEncoderModel }
+        : {}),
       motion,
       videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
       videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
@@ -890,6 +935,8 @@ export function VideoStudio() {
     ltxPipeline,
     distilledVariant,
     precision,
+    enhancePrompt,
+    textEncoderModel,
     quantization,
     advancedOpen,
     selectedLoraIds,
@@ -1218,6 +1265,14 @@ export function VideoStudio() {
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
+          ...(supportsTextEncoderSelection && enhancePrompt
+            ? { enhancePrompt: true }
+            : {}),
+          ...(supportsTextEncoderSelection &&
+          enhancePrompt &&
+          selectedTextEncoderModel !== defaultTextEncoderId
+            ? { textEncoderModel: selectedTextEncoderModel }
+            : {}),
           ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
           ...(selectedMlxQuantize !== null ? { mlxQuantize: selectedMlxQuantize } : {}),
           // Configurable sampler / scheduler (epic 1753). Sealed adapters
@@ -1699,6 +1754,52 @@ export function VideoStudio() {
                       <option value="bf16">BF16 (higher quality, CPU offload)</option>
                     </select>
                   </label>
+                </>
+              ) : null}
+              {supportsTextEncoderSelection ? (
+                <>
+                  <div className="lightning-toggle">
+                    <label className="checkline">
+                      <input
+                        checked={enhancePrompt}
+                        onChange={(event) => setEnhancePrompt(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Enhance prompt before generation
+                    </label>
+                    <p className="helper-copy">
+                      Rewrites the prompt with the selected text encoder before the model encodes it.
+                    </p>
+                  </div>
+                  <label>
+                    Text encoder model
+                    <select
+                      aria-label="Text encoder model"
+                      disabled={!enhancePrompt}
+                      onChange={(event) => setTextEncoderModel(event.target.value)}
+                      value={selectedTextEncoderModel}
+                    >
+                      {textEncoderOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                      {!selectedTextEncoderAvailable &&
+                      selectedTextEncoderModel !== defaultTextEncoderId ? (
+                        <option disabled value={selectedTextEncoderModel}>
+                          Previously selected encoder (not staged)
+                        </option>
+                      ) : null}
+                    </select>
+                  </label>
+                  <p className="helper-copy">
+                    {!selectedTextEncoderAvailable &&
+                    selectedTextEncoderModel !== defaultTextEncoderId
+                      ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
+                      : textEncoderOptions.length > 1
+                        ? "Only complete encoders already staged for this worker are listed."
+                        : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
+                  </p>
                 </>
               ) : null}
               {selectedModel?.adapter === "ltx_video" ? (
