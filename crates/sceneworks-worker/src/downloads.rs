@@ -1724,6 +1724,7 @@ mod public_source_url_tests {
             parse_public_dataset_url("https://example.com/start/").expect("public redirect base");
         for location in [
             "http://127.0.0.1/admin",
+            "http://[fec0::1]/admin",
             "//user:secret@example.net/image",
             "file:///etc/passwd",
         ] {
@@ -1733,6 +1734,10 @@ mod public_source_url_tests {
                 "{location} redirect must fail"
             );
         }
+        let public_v6_redirect = base
+            .join("https://[2606:4700:4700::1111]/image")
+            .expect("global IPv6 redirect");
+        assert!(parse_public_dataset_url(public_v6_redirect.as_str()).is_ok());
     }
 
     #[tokio::test]
@@ -1983,6 +1988,57 @@ mod public_source_url_tests {
             .expect_err("resolver must time out");
         assert!(error.to_string().contains("DNS resolution timed out"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn dataset_resolver_blocks_non_global_ipv6_and_preserves_global_results() {
+        let url = reqwest::Url::parse("https://resolved-source.example/image.png").expect("URL");
+        let options = PublicSourceUrlFetchOptions::default();
+        for blocked in [
+            "::",
+            "::1",
+            "100::",
+            "64:ff9b:1::1",
+            "fc00::1",
+            "fe80::1",
+            "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ff00::1",
+            "2001:2::",
+            "2001:5::",
+            "2001:db8::1",
+            "3fff::1",
+        ] {
+            let address = blocked.parse::<IpAddr>().expect("blocked fixture");
+            let error = bounded_public_source_url_client_with_resolver(
+                &url,
+                &options,
+                move |_host, port| async move { Ok(vec![SocketAddr::new(address, port)]) },
+            )
+            .await
+            .expect_err("non-global resolver result must fail");
+            assert!(
+                error.to_string().contains("host is not allowed"),
+                "{blocked} must be rejected: {error}"
+            );
+        }
+
+        for public in [
+            "64:ff9b::101:101",
+            "2001:20::1",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+        ] {
+            let address = public.parse::<IpAddr>().expect("public fixture");
+            bounded_public_source_url_client_with_resolver(
+                &url,
+                &options,
+                move |_host, port| async move { Ok(vec![SocketAddr::new(address, port)]) },
+            )
+            .await
+            .expect("global resolver result must build a pinned client");
+        }
     }
 }
 
