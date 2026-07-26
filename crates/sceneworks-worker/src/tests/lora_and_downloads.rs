@@ -240,6 +240,107 @@ async fn lora_url_import_downloads_to_named_file() {
     );
 }
 
+/// A minimal valid safetensors adapter: 8-byte LE header length + JSON header + tensor bytes.
+fn safetensors_adapter_bytes(metadata: Value, keys: &[&str]) -> Vec<u8> {
+    let mut header = serde_json::Map::new();
+    header.insert("__metadata__".to_owned(), metadata);
+    for key in keys {
+        header.insert(
+            (*key).to_owned(),
+            json!({"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}),
+        );
+    }
+    let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("serialize header");
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    buffer.extend_from_slice(&[0u8; 4]);
+    buffer
+}
+
+/// 🔴 sc-14057: the URL/repo import route has **no file on disk when the API queues the job**, so
+/// the API's pre-flight `read_adapter_metadata` — which fills `networkType` / `rank` / `alpha` for a
+/// local or uploaded source — records nothing. Without a post-download read, two identical adapters
+/// would be described differently purely by how they were ingested.
+///
+/// End-to-end through `run_lora_import_job`: the queued `manifestEntry` carries no declared
+/// metadata, and the manifest actually written to disk carries exactly what the downloaded file
+/// states. Remove the `apply_adapter_metadata_to_manifest_entry` call in `run_lora_import_job` and
+/// this goes red.
+#[tokio::test]
+async fn lora_url_import_records_the_downloaded_adapters_declared_metadata() {
+    let temp = tempdir().expect("tempdir creates");
+    // Declares a network type and rank but NO alpha — the common third-party shape, and the case
+    // that must not be back-filled from `rank`.
+    let adapter = safetensors_adapter_bytes(
+        json!({ "networkType": "lokr", "rank": "16" }),
+        &["transformer_blocks.0.attn.to_q.lokr_w1"],
+    );
+    let base_url = spawn_binary_stub(adapter).await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().join("data");
+    settings.config_dir = temp.path().join("config");
+    let manifest_path = settings
+        .config_dir
+        .join("manifests")
+        .join("user.loras.jsonc");
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("lora_import");
+    // Exactly what `queue_lora_import_job` emits for a `sourceUrl` import: a manifest entry with
+    // no `networkType` / `rank` / `alpha`, because there was no file to inspect.
+    job_json["payload"] = json!({
+        "loraId": "mage_flow_realism",
+        "sourceUrl": format!("{base_url}/loras/realism.safetensors"),
+        "manifestPath": manifest_path.display().to_string(),
+        "manifestEntry": {
+            "id": "mage_flow_realism",
+            "name": "Realism",
+            "scope": "global",
+            "source": {
+                "provider": "url",
+                "url": format!("{base_url}/loras/realism.safetensors"),
+                "path": "loras/mage_flow_realism",
+            },
+            "files": ["realism.safetensors"],
+            "triggerWords": [],
+        },
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    super::model_jobs::run_lora_import_job(&api, &settings, &client, &job)
+        .await
+        .expect("url LoRA import completes");
+
+    let written = tokio::fs::read_to_string(&manifest_path)
+        .await
+        .expect("manifest written");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        &written,
+    ))
+        .expect("manifest parses as JSON");
+    let entry = manifest["loras"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["id"] == "mage_flow_realism"))
+        .expect("the imported entry is in the manifest");
+
+    assert_eq!(entry["networkType"], json!("lokr"));
+    assert_eq!(entry["rank"], json!(16));
+    // 🔴 The file declares no alpha, so none is recorded — `alpha` must NOT inherit `rank`.
+    assert!(
+        entry.get("alpha").is_none(),
+        "alpha must stay absent, not inherit rank: {entry}"
+    );
+    // The family reconcile this rides alongside still works: a 1-block LoKr proves no architecture,
+    // so the entry stays family-less rather than being mislabelled.
+    assert!(
+        entry.get("family").is_none(),
+        "an inconclusive adapter must not gain a family: {entry}"
+    );
+}
+
 #[tokio::test]
 async fn lora_url_import_skips_existing_matching_file() {
     let temp = tempdir().expect("tempdir creates");

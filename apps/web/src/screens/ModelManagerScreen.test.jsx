@@ -1756,3 +1756,105 @@ describe("ModelManagerScreen Audio Models tab + capability chips (sc-13406)", ()
     expect(cardFor("OpenVoice V2 (Voice Clone)").querySelector(".model-audio-capabilities")).toBeNull();
   });
 });
+
+// sc-14057: the LoRA row's meta line reports what the adapter FILE declared in its
+// safetensors `__metadata__` at import — network type, rank, alpha — and reports nothing it
+// was not told. A great many third-party adapters declare no rank/alpha, and showing an
+// inferred value (e.g. alpha defaulted to rank) would misstate the file.
+describe("ModelManagerScreen LoRA declared adapter metadata (sc-14057)", () => {
+  let container;
+  let root;
+  let ModelManagerScreen;
+  let AppContext;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.__TAURI__ = { core: { invoke: vi.fn(async () => null) } };
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(loras) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras,
+      models: [],
+      presets: [],
+      workersById: new Map(),
+      visibleWorkers: [],
+      jobAction: () => {},
+      setActiveView: () => {},
+      createModelDownloadJob: () => {},
+      createLoraDownloadJob: () => {},
+      createModelConvertJob: () => {},
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const metaFor = (name) =>
+    [...container.querySelectorAll(".lora-row, article")]
+      .find((row) => row.querySelector("strong")?.textContent === name)
+      ?.querySelector("small")?.textContent ?? "";
+
+  it("shows the declared network type, rank and alpha for a Mage-Flow adapter", async () => {
+    await render([
+      {
+        id: "mage_flow_my_style",
+        name: "My Mage Style",
+        scope: "global",
+        family: "mage-flow",
+        networkType: "lokr",
+        rank: 16,
+        alpha: 32,
+      },
+    ]);
+    await selectTab(container, "LoRAs");
+    const meta = metaFor("My Mage Style");
+    expect(meta).toContain("mage-flow");
+    expect(meta).toContain("lokr");
+    expect(meta).toContain("rank 16");
+    expect(meta).toContain("alpha 32");
+  });
+
+  it("omits rank/alpha entirely when the file declared none", async () => {
+    await render([
+      { id: "bare_lora", name: "Bare LoRA", scope: "global", family: "mage-flow" },
+    ]);
+    await selectTab(container, "LoRAs");
+    const meta = metaFor("Bare LoRA");
+    expect(meta).toContain("mage-flow");
+    expect(meta).not.toContain("rank");
+    expect(meta).not.toContain("alpha");
+  });
+
+  it("keeps a declared alpha of 0 (a legitimate scale-0 adapter), not treating it as absent", async () => {
+    await render([
+      { id: "zero_alpha", name: "Zero Alpha", scope: "global", family: "mage-flow", rank: 8, alpha: 0 },
+    ]);
+    await selectTab(container, "LoRAs");
+    expect(metaFor("Zero Alpha")).toContain("alpha 0");
+  });
+});
