@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "./api.js";
+import {
+  beginAssetRequest,
+  recordStartupMark,
+  settleAssetRequest,
+} from "./startupTiming.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
@@ -1077,8 +1082,20 @@ export function App() {
     setVisitedKeepAliveViews((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
+  // Passive effects run after React commits the state batch from refreshData.
+  // Keep this before the active-project effect so the marks reflect the commit
+  // order that unlocks the project-scoped catalog request below.
+  useEffect(() => {
+    if (projectsLoaded) {
+      recordStartupMark("projects-committed");
+    }
+  }, [projectsLoaded, projects]);
+
   useEffect(() => {
     activeProjectRef.current = activeProject;
+    if (activeProject) {
+      recordStartupMark("active-project-selected");
+    }
   }, [activeProject]);
 
   useEffect(() => {
@@ -1461,6 +1478,7 @@ export function App() {
     if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
       return;
     }
+    const timingStartedAt = beginAssetRequest();
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
       // sc-8858: an SSE-triggered refresh for the just-active project can resolve
@@ -1477,6 +1495,8 @@ export function App() {
     } catch (err) {
       if (isAbortError(err)) return;
       setError(err.message);
+    } finally {
+      settleAssetRequest(timingStartedAt);
     }
   }
 
@@ -2355,6 +2375,9 @@ export function App() {
     queueTimelineVideoJob,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
+    assetsReady: Boolean(
+      activeProject && loadedAssetsProjectId === activeProject.id
+    ),
     selectedAsset,
     // The RAW selection id (null when nothing is explicitly selected). Studios need it
     // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
@@ -2515,7 +2538,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
+    assets, loadedAssetsProjectId, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,

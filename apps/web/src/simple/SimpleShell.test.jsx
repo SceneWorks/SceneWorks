@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { resetStartupTimingForTests } from "../startupTiming.js";
 
 // The Simple shell mounts inside App's providers and reads everything through them, so a
 // single legacy <AppContext.Provider> is enough to drive it in isolation (see AppContext's
@@ -121,6 +122,8 @@ describe("SimpleShell", () => {
 
   afterEach(async () => {
     await unmountRoot(root, container);
+    resetStartupTimingForTests();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -140,6 +143,27 @@ describe("SimpleShell", () => {
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Queue");
     await click(navButton(container, "Licenses"));
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Licenses");
+  });
+
+  it("records Assets ready only when the Simple Assets surface mounts", async () => {
+    const mark = vi.fn();
+    vi.stubGlobal("performance", {
+      clearMarks: vi.fn(),
+      clearMeasures: vi.fn(),
+      mark,
+      measure: vi.fn(),
+      now: () => 1,
+    });
+    resetStartupTimingForTests();
+
+    await renderShell(root, baseContext({ assetsReady: true }));
+    expect(mark).not.toHaveBeenCalled();
+
+    await click(navButton(container, "Assets"));
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Assets");
+    expect(mark.mock.calls.map(([name]) => name)).toEqual([
+      "sceneworks.assets-ready-render",
+    ]);
   });
 
   it("shows the live queue count as a nav badge and drops it when nothing is pending", async () => {

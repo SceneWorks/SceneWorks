@@ -8,6 +8,71 @@ fn default_api_host_is_loopback() {
     assert!(ip.is_loopback(), "default API host must be loopback");
 }
 
+#[test]
+fn api_timing_route_labels_exclude_ids_queries_and_unknown_path_tails() {
+    let matched = normalized_api_route(
+        "/api/v1/projects/project-secret/assets/asset-secret",
+        Some("/api/v1/projects/:project_id/assets/:asset_id"),
+    );
+    assert_eq!(
+        matched.as_deref(),
+        Some("/api/v1/projects/:project_id/assets/:asset_id")
+    );
+    assert!(!matched
+        .as_deref()
+        .expect("API route is timed")
+        .contains("secret"));
+
+    // Middleware receives `Uri::path()`, never the query, and unknown paths
+    // collapse instead of echoing their potentially sensitive tail.
+    assert_eq!(
+        normalized_api_route("/api/v1/unknown/access-token-value", None).as_deref(),
+        Some("/api/<unmatched>")
+    );
+    assert_eq!(
+        normalized_api_route("/mcp/private-client-id", None).as_deref(),
+        Some("/mcp/<unmatched>")
+    );
+    assert_eq!(normalized_api_route("/assets/index.js", None), None);
+}
+
+#[tokio::test]
+async fn api_timing_adds_numeric_server_timing_to_success_and_error_responses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, headers, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/v1/access?ticket=never-echo",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let timing = headers
+        .get("server-timing")
+        .and_then(|value| value.to_str().ok())
+        .expect("API success exposes Server-Timing");
+    assert!(timing.starts_with("app;dur="));
+    assert!(timing["app;dur=".len()..].parse::<f64>().is_ok());
+    assert!(!timing.contains("ticket"));
+
+    let (status, headers, _) = request_raw(
+        app,
+        "GET",
+        "/api/v1/not-a-route/private-value",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        headers.contains_key("server-timing"),
+        "fallback API responses are timed too"
+    );
+}
+
 /// F-003 / sc-11159: the enqueue gate must reject a path-unsafe `model` id (traversal /
 /// separators / absolute), since it flows verbatim into the worker's asset filename. A
 /// plain single-component id — including an uncatalogued one the stub lane serves — is

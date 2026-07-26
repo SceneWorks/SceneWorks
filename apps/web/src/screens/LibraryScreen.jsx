@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useLayoutEffect, useState } from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
@@ -6,6 +6,7 @@ import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { recordStartupMark } from "../startupTiming.js";
 
 // Free-text Library search across an asset's display name, prompt, and tags.
 // Case-insensitive substring match; an empty needle matches everything so callers
@@ -24,6 +25,7 @@ export function LibraryScreen() {
   const {
     activeProject,
     assets,
+    assetsReady = false,
     jobs = [],
     imageModels = [],
     createVqaJob,
@@ -42,6 +44,11 @@ export function LibraryScreen() {
     updateAssetTags,
     audioModels = [],
   } = useAppContext();
+  useLayoutEffect(() => {
+    if (assetsReady) {
+      recordStartupMark("assets-ready-render");
+    }
+  }, [assetsReady]);
   // Shared multi-select + batch toolbar (selection state, fan-out, Discard/Move).
   const batch = useAssetBatch();
   // ONE audio transport for the screen (sc-14391): the grid tiles and the detail stage drive
