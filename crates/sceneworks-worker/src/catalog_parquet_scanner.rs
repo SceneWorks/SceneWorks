@@ -597,8 +597,8 @@ fn catalog_record_for_row(
     let digest = Sha256::digest(url.as_bytes());
     let id = format!("pq_{}", hex_prefix(&digest, 32));
     RowOutcome::Accept(NewCatalogRecord {
+        image_path: format!("images/{id}"),
         id,
-        image_path: url.clone(),
         thumbnail_path: None,
         embedding_path: None,
         artifact_path: None,

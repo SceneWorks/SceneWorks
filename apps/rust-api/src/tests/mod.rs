@@ -4,6 +4,7 @@
 mod auth;
 mod catalog;
 mod compression;
+mod dataset_catalogs;
 #[cfg(feature = "embed-web")]
 mod embedded_web;
 mod jobs;

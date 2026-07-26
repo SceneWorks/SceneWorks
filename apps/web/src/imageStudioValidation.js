@@ -9,6 +9,7 @@
 // of their inputs, so the requirement/error split is unit-testable.
 
 import { presetLoraIssues } from "./generationValidation.js";
+import { MAX_IMAGE_DIMENSION, MIN_IMAGE_DIMENSION } from "./resolutionOverride.js";
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
@@ -56,6 +57,11 @@ export function imageGenerateValidation({
   // imageMultiPhase.multiPhaseIssues (an enabled-but-broken phase list blocks Generate with an
   // error). Empty when the editor is off or the model has no multi-phase lane.
   multiPhaseIssues = [],
+  // Free Width/Height override out of the selected model's native range or off its required stride
+  // (sc-14058, native-resolution families like Mage-Flow). A pre-computed, user-facing ERROR string
+  // (or null) — a value the user actively broke that nothing else on the form explains, so it blocks
+  // Generate AND is surfaced. Null/absent leaves the gate unchanged for every other model.
+  dimensionError = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -104,7 +110,25 @@ export function imageGenerateValidation({
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   // Multi-phase denoise problems (sc-13885) — already kinded (errors) by multiPhaseIssues.
   issues.push(...multiPhaseIssues);
+  // A broken free Width/Height override (sc-14058): an error, not a requirement — the two number boxes
+  // hold a value the user actively broke, and only this message explains the dead Generate button.
+  if (dimensionError) {
+    issues.push(issue.error(null, dimensionError));
+  }
   return issues;
+}
+
+// The user-facing ERROR for an inline [WxH] batch directive that breaks the selected model's geometry
+// (sc-14058). Names the offending size, then the model's own range — and its required stride when the
+// model renders at native resolution (a declared step > 1, e.g. Mage-Flow's ÷16). A non-native model
+// (step <= 1) keeps the exact "out of range — each side must be MIN–MAX" wording it always had, so those
+// models don't regress. This is the batch-path twin of dimensionConstraintMessage for the single path.
+export function batchResolutionMessage({ width, height } = {}, { min, max, step } = {}) {
+  const size = `[${width}×${height}]`;
+  if (Number.isInteger(step) && step > 1) {
+    return `A prompt’s ${size} size isn’t valid for this model — each side must be ${min}–${max} and a multiple of ${step}.`;
+  }
+  return `A prompt’s ${size} size is out of range — each side must be ${min}–${max}.`;
 }
 
 // The prompt-batch Run. The errors are pushed in the same priority order the batch panel
@@ -119,8 +143,11 @@ export function imageBatchValidation({
   groupIssues = [],
   resolutionIssues = [],
   promptBudgetOverages = [],
-  minDimension,
-  maxDimension,
+  // Per-model geometry constraints for the inline [WxH] batch directive (sc-14058). Same source the
+  // single-generate gate reads — modelDimensionConstraints(selectedModel) — so a native-resolution model
+  // (Mage-Flow) narrows the batch check to its own range + ÷16 stride, while every other model keeps the
+  // global 256–4096 / no-stride envelope. Defaults to that global envelope for callers with no model.
+  dimensionConstraints = { min: MIN_IMAGE_DIMENSION, max: MAX_IMAGE_DIMENSION, step: 1 },
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -146,10 +173,7 @@ export function imageBatchValidation({
     );
   }
   if (resolutionIssues.length) {
-    const res = resolutionIssues[0];
-    issues.push(
-      issue.error(null, `A prompt’s [${res.width}×${res.height}] size is out of range — each side must be ${minDimension}–${maxDimension}.`),
-    );
+    issues.push(issue.error(null, batchResolutionMessage(resolutionIssues[0], dimensionConstraints)));
   }
   if (promptBudgetOverages.length) {
     issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -5,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
@@ -25,6 +27,17 @@ const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAGE_SIZE: u32 = 10_000;
+const MAX_CONTRACT_STATE_BYTES: usize = 1024 * 1024;
+const MAX_QUERY_FILTERS: usize = 16;
+const MAX_FILTER_VALUES: usize = 64;
+const MAX_FACET_FIELDS: usize = 16;
+const MAX_FACET_VALUES: u32 = 200;
+const MAX_FACET_VALUE_BYTES: u32 = 512;
+
+const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
+const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
+const CHECKPOINTS_METADATA_KEY: &str = "checkpoints";
+const PROGRESS_METADATA_KEY: &str = "processing_progress";
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -135,6 +148,89 @@ pub struct CatalogStorageAccounting {
     pub artifact_bytes: u64,
     pub total_bytes: u64,
     pub record_count: u64,
+}
+
+/// Stable, forward-compatible source configuration stored inside the catalog.
+/// Source paths are canonical absolute paths selected by the user; arbitrary
+/// options stay source-kind specific without changing the lifecycle contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSourceConfig {
+    pub kind: String,
+    pub paths: Vec<PathBuf>,
+    #[serde(default = "empty_json_object")]
+    pub options: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogProcessingState {
+    #[default]
+    Idle,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogProcessingProgress {
+    pub state: CatalogProcessingState,
+    pub candidate_count: u64,
+    pub processed_count: u64,
+    pub accepted_count: u64,
+    pub rejected_count: u64,
+    pub error_count: u64,
+    pub message: Option<String>,
+    pub updated_at: String,
+}
+
+impl Default for CatalogProcessingProgress {
+    fn default() -> Self {
+        Self {
+            state: CatalogProcessingState::Idle,
+            candidate_count: 0,
+            processed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            error_count: 0,
+            message: None,
+            updated_at: utc_now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogContractState {
+    pub source_config: Option<CatalogSourceConfig>,
+    #[serde(default)]
+    pub analyzer_versions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub checkpoints: BTreeMap<String, Value>,
+    pub processing: CatalogProcessingProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRecordFilter {
+    pub field: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogFacetCount {
+    pub value: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogFacet {
+    pub field: String,
+    pub values: Vec<CatalogFacetCount>,
 }
 
 #[derive(Debug)]
@@ -412,7 +508,20 @@ impl Catalog {
         after_cursor: Option<i64>,
         limit: u32,
     ) -> CatalogResult<CatalogRecordPage> {
+        self.query_records_after(after_cursor, limit, &[])
+    }
+
+    /// Reads a bounded, filtered keyset page. Filter fields address top-level or
+    /// dotted metadata keys and are always passed to SQLite as bound JSON paths;
+    /// neither field names nor values are interpolated into SQL.
+    pub fn query_records_after(
+        &self,
+        after_cursor: Option<i64>,
+        limit: u32,
+        filters: &[CatalogRecordFilter],
+    ) -> CatalogResult<CatalogRecordPage> {
         validate_page_size(limit)?;
+        validate_filters(filters)?;
         let database_path = self.database_path();
         let cursor = after_cursor.unwrap_or(0);
         if cursor < 0 {
@@ -420,19 +529,22 @@ impl Catalog {
                 "Catalog page cursor cannot be negative".to_owned(),
             ));
         }
+        let mut sql = String::from(
+            "select rowid, id, image_path, thumbnail_path, embedding_path, artifact_path,
+                    metadata_json, created_at, updated_at
+             from catalog_records
+             where rowid > ?",
+        );
+        let mut bindings = vec![SqlValue::Integer(cursor)];
+        append_filter_sql(&mut sql, &mut bindings, filters);
+        sql.push_str(" order by rowid limit ?");
+        bindings.push(SqlValue::Integer(i64::from(limit) + 1));
         let mut statement = self
             .connection
-            .prepare_cached(
-                "select rowid, id, image_path, thumbnail_path, embedding_path, artifact_path,
-                        metadata_json, created_at, updated_at
-                 from catalog_records
-                 where rowid > ?1
-                 order by rowid
-                 limit ?2",
-            )
+            .prepare(&sql)
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let rows = statement
-            .query_map(params![cursor, limit], |row| {
+            .query_map(params_from_iter(bindings), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -447,7 +559,7 @@ impl Catalog {
             })
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let mut records = Vec::new();
-        let mut next_cursor = None;
+        let mut cursors = Vec::new();
         for row in rows {
             let (
                 rowid,
@@ -465,7 +577,7 @@ impl Catalog {
                     path: database_path.clone(),
                     detail: format!("record {id} contains invalid metadata JSON: {error}"),
                 })?;
-            next_cursor = Some(rowid);
+            cursors.push(rowid);
             records.push(CatalogRecord {
                 id,
                 image_path,
@@ -477,10 +589,206 @@ impl Catalog {
                 updated_at,
             });
         }
+        let has_more = records.len() > limit as usize;
+        if has_more {
+            records.pop();
+            cursors.pop();
+        }
+        let next_cursor = has_more.then(|| {
+            *cursors
+                .last()
+                .expect("a page with a lookahead row has a returned row")
+        });
         Ok(CatalogRecordPage {
             records,
             next_cursor,
         })
+    }
+
+    /// Computes bounded facet buckets in SQLite. The database may scan matching
+    /// rows, but the API process retains only `max_values_per_facet` buckets per
+    /// requested field and never materializes the result set.
+    pub fn facet_counts(
+        &self,
+        fields: &[String],
+        filters: &[CatalogRecordFilter],
+        max_values_per_facet: u32,
+    ) -> CatalogResult<Vec<CatalogFacet>> {
+        if fields.is_empty() || fields.len() > MAX_FACET_FIELDS {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog facets require 1 to {MAX_FACET_FIELDS} fields"
+            )));
+        }
+        if max_values_per_facet == 0 || max_values_per_facet > MAX_FACET_VALUES {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog facet size must be between 1 and {MAX_FACET_VALUES}"
+            )));
+        }
+        validate_filters(filters)?;
+        for field in fields {
+            metadata_json_path(field)?;
+        }
+
+        let database_path = self.database_path();
+        let mut facets = Vec::with_capacity(fields.len());
+        for field in fields {
+            let json_path = metadata_json_path(field)?;
+            let mut sql = String::from(
+                "select cast(json_extract(metadata_json, ?) as text) as facet_value,
+                        count(*) as facet_count
+                 from catalog_records
+                 where json_type(metadata_json, ?) is not null
+                   and length(cast(json_extract(metadata_json, ?) as blob))
+                       between 1 and ?",
+            );
+            let mut bindings = vec![
+                SqlValue::Text(json_path.clone()),
+                SqlValue::Text(json_path.clone()),
+                SqlValue::Text(json_path),
+                SqlValue::Integer(i64::from(MAX_FACET_VALUE_BYTES)),
+            ];
+            append_filter_sql(&mut sql, &mut bindings, filters);
+            sql.push_str(
+                " group by facet_value
+                  order by facet_count desc, facet_value asc
+                  limit ?",
+            );
+            bindings.push(SqlValue::Integer(i64::from(max_values_per_facet)));
+            let mut statement = self
+                .connection
+                .prepare(&sql)
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let rows = statement
+                .query_map(params_from_iter(bindings), |row| {
+                    Ok(CatalogFacetCount {
+                        value: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let values = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            facets.push(CatalogFacet {
+                field: field.clone(),
+                values,
+            });
+        }
+        Ok(facets)
+    }
+
+    pub fn contract_state(&self) -> CatalogResult<CatalogContractState> {
+        let mut processing: CatalogProcessingProgress = self
+            .read_contract_value(PROGRESS_METADATA_KEY)?
+            .unwrap_or_else(|| CatalogProcessingProgress {
+                updated_at: self.descriptor.created_at.clone(),
+                ..CatalogProcessingProgress::default()
+            });
+        if processing.updated_at.is_empty() {
+            processing.updated_at = self.descriptor.created_at.clone();
+        }
+        Ok(CatalogContractState {
+            source_config: self.read_contract_value(SOURCE_CONFIG_METADATA_KEY)?,
+            analyzer_versions: self
+                .read_contract_value(ANALYZER_VERSIONS_METADATA_KEY)?
+                .unwrap_or_default(),
+            checkpoints: self
+                .read_contract_value(CHECKPOINTS_METADATA_KEY)?
+                .unwrap_or_default(),
+            processing,
+        })
+    }
+
+    /// Persists the source/analyzer/checkpoint/progress snapshot transactionally.
+    /// Scanner and analyzer stories can update this stable contract without
+    /// touching SceneWorks' jobs or project databases.
+    pub fn set_contract_state(&self, state: &CatalogContractState) -> CatalogResult<()> {
+        let mut normalized = state.clone();
+        if let Some(source) = normalized.source_config.as_mut() {
+            normalize_source_config(source)?;
+        }
+        validate_contract_state(&normalized)?;
+        let database_path = self.database_path();
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        match &normalized.source_config {
+            Some(source_config) => {
+                transaction
+                    .execute(
+                        "insert or replace into catalog_metadata(key, value) values (?1, ?2)",
+                        params![
+                            SOURCE_CONFIG_METADATA_KEY,
+                            serde_json::to_string(source_config)?
+                        ],
+                    )
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+            None => {
+                transaction
+                    .execute(
+                        "delete from catalog_metadata where key = ?1",
+                        [SOURCE_CONFIG_METADATA_KEY],
+                    )
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
+        for (key, value) in [
+            (
+                ANALYZER_VERSIONS_METADATA_KEY,
+                serde_json::to_string(&normalized.analyzer_versions)?,
+            ),
+            (
+                CHECKPOINTS_METADATA_KEY,
+                serde_json::to_string(&normalized.checkpoints)?,
+            ),
+            (
+                PROGRESS_METADATA_KEY,
+                serde_json::to_string(&normalized.processing)?,
+            ),
+        ] {
+            transaction
+                .execute(
+                    "insert or replace into catalog_metadata(key, value) values (?1, ?2)",
+                    params![key, value],
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&database_path, error))
+    }
+
+    fn read_contract_value<T: for<'de> Deserialize<'de>>(
+        &self,
+        key: &str,
+    ) -> CatalogResult<Option<T>> {
+        let database_path = self.database_path();
+        let payload: Option<String> = self
+            .connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        if payload.len() > MAX_CONTRACT_STATE_BYTES {
+            return Err(CatalogError::Corrupt {
+                path: database_path,
+                detail: format!("catalog metadata {key} exceeds its size limit"),
+            });
+        }
+        serde_json::from_str(&payload)
+            .map(Some)
+            .map_err(|error| CatalogError::Corrupt {
+                path: database_path,
+                detail: format!("catalog metadata {key} is invalid: {error}"),
+            })
     }
 
     pub fn storage_accounting(&self) -> CatalogResult<CatalogStorageAccounting> {
@@ -564,27 +872,6 @@ impl CatalogRegistry {
         Catalog::open(root)
     }
 
-    /// Resolves an attached catalog by its stable identity. Callers that operate
-    /// on catalog IDs use this instead of accepting a root path from a request.
-    pub fn open_attached(&self, catalog_id: &str) -> CatalogResult<Catalog> {
-        let attached = self
-            .load()?
-            .catalogs
-            .into_iter()
-            .find(|catalog| catalog.id == catalog_id)
-            .ok_or_else(|| {
-                CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
-            })?;
-        let catalog = Catalog::open(&attached.path)?;
-        if catalog.descriptor().id != catalog_id {
-            return Err(CatalogError::InvalidCatalog(format!(
-                "Attached catalog identity changed at {}",
-                attached.path.display()
-            )));
-        }
-        Ok(catalog)
-    }
-
     pub fn attach(&self, root: impl AsRef<Path>) -> CatalogResult<AttachedCatalog> {
         let catalog = Catalog::open(root)?;
         self.attach_descriptor(catalog.descriptor())
@@ -594,7 +881,33 @@ impl CatalogRegistry {
         Ok(self.load()?.catalogs)
     }
 
+    pub fn get(&self, catalog_id: &str) -> CatalogResult<AttachedCatalog> {
+        validated_catalog_id(catalog_id)?;
+        self.load()?
+            .catalogs
+            .into_iter()
+            .find(|catalog| catalog.id == catalog_id)
+            .ok_or_else(|| {
+                CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
+            })
+    }
+
+    /// Resolves a catalog ID only through the lightweight attached registry and
+    /// rechecks the on-disk identity. Request handlers must use this method
+    /// instead of accepting a root path for catalog-id operations.
+    pub fn open_attached(&self, catalog_id: &str) -> CatalogResult<Catalog> {
+        let attached = self.get(catalog_id)?;
+        let catalog = Catalog::open(&attached.path)?;
+        if catalog.descriptor().id != catalog_id {
+            return Err(CatalogError::InvalidCatalog(
+                "Attached catalog identity does not match its registry entry".to_owned(),
+            ));
+        }
+        Ok(catalog)
+    }
+
     pub fn detach(&self, catalog_id: &str) -> CatalogResult<AttachedCatalog> {
+        validated_catalog_id(catalog_id)?;
         let _guard = lock_store_path(&self.registry_path);
         let mut registry = self.load()?;
         let index = registry
@@ -610,6 +923,7 @@ impl CatalogRegistry {
     }
 
     pub fn delete_on_disk(&self, catalog_id: &str) -> CatalogResult<AttachedCatalog> {
+        validated_catalog_id(catalog_id)?;
         let _guard = lock_store_path(&self.registry_path);
         let mut registry = self.load()?;
         let index = registry
@@ -780,6 +1094,23 @@ fn validated_name(name: String) -> CatalogResult<String> {
     Ok(name)
 }
 
+fn empty_json_object() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+fn validated_catalog_id(catalog_id: &str) -> CatalogResult<()> {
+    if catalog_id.len() != 32
+        || !catalog_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog id has an invalid format".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -796,11 +1127,7 @@ fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
             "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
         ));
     }
-    if record.image_path.trim().is_empty() || record.image_path.contains('\0') {
-        return Err(CatalogError::InvalidCatalog(
-            "Catalog record image path is required".to_owned(),
-        ));
-    }
+    validate_catalog_relative_path(&record.image_path, "image")?;
     for path in [
         record.thumbnail_path.as_deref(),
         record.embedding_path.as_deref(),
@@ -809,11 +1136,34 @@ fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
     .into_iter()
     .flatten()
     {
-        if path.trim().is_empty() || path.contains('\0') {
-            return Err(CatalogError::InvalidCatalog(
-                "Catalog artifact paths cannot be blank or contain NUL".to_owned(),
-            ));
-        }
+        validate_catalog_relative_path(path, "artifact")?;
+    }
+    Ok(())
+}
+
+fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> {
+    use std::path::Component;
+
+    if path.trim().is_empty() || path.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog record {label} path is required"
+        )));
+    }
+    // Interpret both separators so a catalog created on Unix cannot persist a
+    // Windows traversal (or vice versa) that becomes dangerous after relocation.
+    let portable = path.replace('\\', "/");
+    let path = Path::new(&portable);
+    let has_windows_prefix =
+        portable.as_bytes().get(1) == Some(&b':') || portable.starts_with("//");
+    if has_windows_prefix
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog record {label} path must stay within the catalog root"
+        )));
     }
     Ok(())
 }
@@ -851,6 +1201,161 @@ fn validate_page_size(limit: u32) -> CatalogResult<()> {
     Ok(())
 }
 
+fn validate_filters(filters: &[CatalogRecordFilter]) -> CatalogResult<()> {
+    if filters.len() > MAX_QUERY_FILTERS {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog queries support at most {MAX_QUERY_FILTERS} filters"
+        )));
+    }
+    for filter in filters {
+        metadata_json_path(&filter.field)?;
+        if filter.values.is_empty() || filter.values.len() > MAX_FILTER_VALUES {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Each catalog filter requires 1 to {MAX_FILTER_VALUES} values"
+            )));
+        }
+        if filter
+            .values
+            .iter()
+            .any(|value| value.len() > 512 || value.contains('\0'))
+        {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog filter values cannot exceed 512 bytes or contain NUL".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn metadata_json_path(field: &str) -> CatalogResult<String> {
+    if field.is_empty() || field.len() > 128 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata fields must contain 1 to 128 bytes".to_owned(),
+        ));
+    }
+    let segments = field.split('.').collect::<Vec<_>>();
+    if segments.iter().any(|segment| {
+        segment.is_empty()
+            || segment.len() > 64
+            || !segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }) {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata fields may contain ASCII letters, numbers, '_' and '-'".to_owned(),
+        ));
+    }
+    Ok(format!(
+        "$.{}",
+        segments
+            .into_iter()
+            .map(|segment| format!("\"{segment}\""))
+            .collect::<Vec<_>>()
+            .join(".")
+    ))
+}
+
+fn append_filter_sql(
+    sql: &mut String,
+    bindings: &mut Vec<SqlValue>,
+    filters: &[CatalogRecordFilter],
+) {
+    for filter in filters {
+        let json_path =
+            metadata_json_path(&filter.field).expect("catalog filters were validated before SQL");
+        sql.push_str(" and cast(json_extract(metadata_json, ?) as text) in (");
+        bindings.push(SqlValue::Text(json_path));
+        for (index, value) in filter.values.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            bindings.push(SqlValue::Text(value.clone()));
+        }
+        sql.push(')');
+    }
+}
+
+fn normalize_source_config(source: &mut CatalogSourceConfig) -> CatalogResult<()> {
+    let kind = source.kind.trim();
+    if kind.is_empty()
+        || kind.len() > 64
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog source kind has an invalid format".to_owned(),
+        ));
+    }
+    if source.paths.is_empty() || source.paths.len() > 256 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog source configuration requires 1 to 256 paths".to_owned(),
+        ));
+    }
+    if !source.options.is_object() {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog source options must be an object".to_owned(),
+        ));
+    }
+    source.kind = kind.to_owned();
+    for path in &mut source.paths {
+        if !path.is_absolute() {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog source paths must be absolute".to_owned(),
+            ));
+        }
+        *path = fs::canonicalize(&*path).map_err(|_| {
+            CatalogError::InvalidCatalog(
+                "A selected catalog source path does not exist or cannot be accessed".to_owned(),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_contract_state(state: &CatalogContractState) -> CatalogResult<()> {
+    if state.analyzer_versions.len() > 128
+        || state.analyzer_versions.iter().any(|(name, version)| {
+            name.trim().is_empty()
+                || name.len() > 128
+                || version.trim().is_empty()
+                || version.len() > 512
+        })
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer provenance is invalid".to_owned(),
+        ));
+    }
+    if state.checkpoints.len() > 256
+        || state
+            .checkpoints
+            .keys()
+            .any(|name| name.trim().is_empty() || name.len() > 128)
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog checkpoints are invalid".to_owned(),
+        ));
+    }
+    if state
+        .processing
+        .message
+        .as_ref()
+        .is_some_and(|message| message.len() > 4096)
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog processing message exceeds 4096 bytes".to_owned(),
+        ));
+    }
+    let serialized = serde_json::to_vec(state)?;
+    if serialized.len() > MAX_CONTRACT_STATE_BYTES {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog contract state exceeds {MAX_CONTRACT_STATE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn configure_connection(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
     connection
         .busy_timeout(Duration::from_secs(5))
@@ -865,7 +1370,10 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
-        .pragma_update(None, "temp_store", "memory")
+        // A facet may encounter millions of distinct values. Spill SQLite's
+        // transient GROUP BY sorter to disk instead of growing the API heap
+        // with catalog cardinality.
+        .pragma_update(None, "temp_store", "file")
         .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
         .pragma_update(None, "cache_size", -65_536)
@@ -1330,6 +1838,11 @@ mod tests {
         assert_eq!(writer.sqlite_setting("journal_mode").unwrap(), "wal");
         assert_eq!(writer.sqlite_setting("busy_timeout").unwrap(), "5000");
         assert_eq!(writer.sqlite_setting("foreign_keys").unwrap(), "1");
+        assert_eq!(
+            writer.sqlite_setting("temp_store").unwrap(),
+            "1",
+            "facet aggregation temp state must spill to files, not process memory"
+        );
 
         let records = (0..2_500)
             .map(|index| record(&format!("record-{index:04}")))
@@ -1357,6 +1870,9 @@ mod tests {
             }
             cursor = page.next_cursor;
             ids.extend(page.records.into_iter().map(|record| record.id));
+            if cursor.is_none() {
+                break;
+            }
         }
         assert_eq!(ids.len(), 2_500);
         ids.sort();
@@ -1551,6 +2067,207 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("keep.txt")).unwrap(),
             "user data"
+        );
+    }
+
+    #[test]
+    fn contract_state_and_query_facets_are_persisted_and_bounded() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let source = temporary.path().join("source.parquet");
+        fs::write(&source, b"fixture").unwrap();
+        let mut catalog = Catalog::create(&root, "Queryable").expect("catalog creates");
+        let mut first = record("one");
+        first.metadata = serde_json::json!({
+            "medium": "photo",
+            "personCount": 1,
+            "analysis": { "fullBody": true }
+        });
+        let mut second = record("two");
+        second.metadata = serde_json::json!({
+            "medium": "illustration",
+            "personCount": 1,
+            "analysis": { "fullBody": false }
+        });
+        let mut third = record("three");
+        third.metadata = serde_json::json!({
+            "medium": "photo",
+            "personCount": 2,
+            "analysis": { "fullBody": true }
+        });
+        catalog.append_records(&[first, second, third]).unwrap();
+
+        let state = CatalogContractState {
+            source_config: Some(CatalogSourceConfig {
+                kind: "parquet".to_owned(),
+                paths: vec![source.clone()],
+                options: serde_json::json!({"captionColumn": "TEXT"}),
+            }),
+            analyzer_versions: BTreeMap::from([(
+                "person_detector".to_owned(),
+                "model@sha256:abc".to_owned(),
+            )]),
+            checkpoints: BTreeMap::from([(
+                "scan".to_owned(),
+                serde_json::json!({"shard": 2, "row": 48}),
+            )]),
+            processing: CatalogProcessingProgress {
+                state: CatalogProcessingState::Paused,
+                candidate_count: 9,
+                processed_count: 3,
+                accepted_count: 2,
+                rejected_count: 1,
+                error_count: 1,
+                message: Some("user requested pause".to_owned()),
+                updated_at: "2026-07-26T00:00:00Z".to_owned(),
+            },
+        };
+        catalog.set_contract_state(&state).unwrap();
+        assert_eq!(
+            catalog
+                .contract_state()
+                .unwrap()
+                .source_config
+                .unwrap()
+                .paths,
+            [fs::canonicalize(source).unwrap()]
+        );
+
+        let photo = CatalogRecordFilter {
+            field: "medium".to_owned(),
+            values: vec!["photo".to_owned()],
+        };
+        let first_page = catalog
+            .query_records_after(None, 1, std::slice::from_ref(&photo))
+            .unwrap();
+        assert_eq!(first_page.records.len(), 1);
+        assert!(
+            first_page.next_cursor.is_some(),
+            "a lookahead row produces a continuation cursor"
+        );
+        let second_page = catalog
+            .query_records_after(first_page.next_cursor, 1, std::slice::from_ref(&photo))
+            .unwrap();
+        assert_eq!(second_page.records.len(), 1);
+        assert!(
+            second_page.next_cursor.is_none(),
+            "the final page does not advertise an empty trailing page"
+        );
+
+        let facets = catalog
+            .facet_counts(
+                &["medium".to_owned(), "analysis.fullBody".to_owned()],
+                &[],
+                1,
+            )
+            .unwrap();
+        assert_eq!(facets.len(), 2);
+        assert_eq!(facets[0].values.len(), 1, "facet output honors its cap");
+        assert_eq!(facets[0].values[0].value, "photo");
+        assert_eq!(facets[0].values[0].count, 2);
+    }
+
+    #[test]
+    fn record_paths_and_attached_ids_cannot_escape_catalog_scope() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry.create_catalog(&root, "Scoped").unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+
+        for unsafe_path in [
+            "../outside.jpg",
+            r"..\outside.jpg",
+            "/outside.jpg",
+            r"C:\outside.jpg",
+        ] {
+            let mut unsafe_record = record("unsafe");
+            unsafe_record.image_path = unsafe_path.to_owned();
+            assert!(
+                matches!(
+                    catalog.append_records(&[unsafe_record]),
+                    Err(CatalogError::InvalidCatalog(_))
+                ),
+                "{unsafe_path} must be rejected"
+            );
+        }
+        catalog.close();
+
+        assert_eq!(
+            registry.open_attached(&catalog_id).unwrap().descriptor().id,
+            catalog_id
+        );
+        assert!(matches!(
+            registry.open_attached("../../catalog"),
+            Err(CatalogError::InvalidCatalog(_))
+        ));
+        assert!(matches!(
+            registry.open_attached("00000000000000000000000000000000"),
+            Err(CatalogError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn absent_processing_state_uses_the_stable_catalog_creation_time() {
+        let temporary = tempdir().expect("temp directory");
+        let catalog = Catalog::create(temporary.path().join("catalog"), "Legacy state").unwrap();
+        let created_at = catalog.descriptor().created_at.clone();
+
+        let first = catalog.contract_state().unwrap().processing;
+        let second = catalog.contract_state().unwrap().processing;
+        assert_eq!(first.updated_at, created_at);
+        assert_eq!(second.updated_at, created_at);
+        assert_eq!(first, second, "repeated status reads must be stable");
+    }
+
+    #[test]
+    fn high_cardinality_facets_are_disk_backed_and_exclude_oversized_keys() {
+        let temporary = tempdir().expect("temp directory");
+        let mut catalog =
+            Catalog::create(temporary.path().join("catalog"), "Bounded facets").unwrap();
+        let mut records = (0..2_048)
+            .map(|index| {
+                let mut item = record(&format!("record-{index:04}"));
+                item.metadata = serde_json::json!({"unique": format!("value-{index:04}")});
+                item
+            })
+            .collect::<Vec<_>>();
+        let mut oversized = record("oversized");
+        oversized.metadata =
+            serde_json::json!({"unique": "x".repeat(MAX_FACET_VALUE_BYTES as usize + 1)});
+        records.push(oversized);
+        catalog.append_records(&records).unwrap();
+
+        assert_eq!(catalog.sqlite_setting("temp_store").unwrap(), "1");
+        let facets = catalog
+            .facet_counts(&["unique".to_owned()], &[], 7)
+            .unwrap();
+        assert_eq!(
+            facets[0].values.len(),
+            7,
+            "high-cardinality output is capped"
+        );
+        assert!(facets[0]
+            .values
+            .iter()
+            .all(|bucket| bucket.value.len() <= MAX_FACET_VALUE_BYTES as usize));
+
+        let mut oversized_only = Catalog::create(
+            temporary.path().join("oversized-catalog"),
+            "Oversized facets",
+        )
+        .unwrap();
+        let mut oversized_record = record("only");
+        oversized_record.metadata =
+            serde_json::json!({"unique": "x".repeat(MAX_FACET_VALUE_BYTES as usize + 1)});
+        oversized_only.append_records(&[oversized_record]).unwrap();
+        assert!(
+            oversized_only
+                .facet_counts(&["unique".to_owned()], &[], 10)
+                .unwrap()[0]
+                .values
+                .is_empty(),
+            "oversized facet keys are excluded before grouping"
         );
     }
 }
