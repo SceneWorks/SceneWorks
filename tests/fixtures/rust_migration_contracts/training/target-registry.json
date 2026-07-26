@@ -2,6 +2,188 @@
   "schemaVersion": 1,
   "targets": [
     {
+      "id": "mage_flow_base_lora",
+      "name": "Mage-Flow Base LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "mage-flow",
+      "baseModel": "mage_flow_base",
+      "baseModelRepo": "SceneWorks/Mage-Flow-Base",
+      "kernel": "mage_flow_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 5.0,
+          "sampleSteps": 30,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "datasetModality": "image",
+        "description": "Train an image LoRA against the undistilled Mage-Flow Base model.",
+        "label": "Mage-Flow Base LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "mage_flow_edit_base_lora",
+      "name": "Mage-Flow Edit-Base LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "mage-flow",
+      "baseModel": "mage_flow_edit_base",
+      "baseModelRepo": "SceneWorks/Mage-Flow-Edit-Base",
+      "kernel": "mage_flow_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "sampleGuidanceScale": 5.0,
+          "sampleSteps": 30,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "datasetModality": "image",
+        "description": "Train an image-editing LoRA against the undistilled Mage-Flow Edit-Base model.",
+        "label": "Mage-Flow Edit-Base LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
       "id": "z_image_turbo_lora",
       "name": "Z-Image-Turbo LoRA",
       "modality": "image",

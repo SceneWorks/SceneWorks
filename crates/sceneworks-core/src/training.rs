@@ -437,6 +437,20 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
     TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
+            mage_flow_lora_target(
+                "mage_flow_base_lora",
+                "Mage-Flow Base LoRA",
+                "mage_flow_base",
+                "SceneWorks/Mage-Flow-Base",
+                "Train an image LoRA against the undistilled Mage-Flow Base model.",
+            ),
+            mage_flow_lora_target(
+                "mage_flow_edit_base_lora",
+                "Mage-Flow Edit-Base LoRA",
+                "mage_flow_edit_base",
+                "SceneWorks/Mage-Flow-Edit-Base",
+                "Train an image-editing LoRA against the undistilled Mage-Flow Edit-Base model.",
+            ),
             z_image_turbo_lora_target(),
             sdxl_lora_target(),
             illustrious_xl_v1_lora_target(),
@@ -1241,6 +1255,85 @@ where
         quality_preset: quality_preset.to_owned(),
         config,
         ui,
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Mage-Flow LoRA training targets.
+///
+/// Both foundation variants are flat, dense diffusers snapshots. Their catalog `q4`/`q8`/`bf16`
+/// variants are logical load-time choices over the same installed files, rather than separate
+/// on-disk tier directories. Pointing at the live SceneWorks mirrors keeps the training pre-flight
+/// resolver aligned with what Model Manager installs on macOS and Windows/Linux (sc-14054).
+///
+/// The execution kernel is registered here as the stable contract consumed by the Mage trainer
+/// slice (sc-14055). Until a worker advertises that kernel, the existing worker-capability gate
+/// leaves jobs queued rather than treating registration itself as runtime support.
+fn mage_flow_lora_target(
+    id: &str,
+    name: &str,
+    base_model: &str,
+    base_model_repo: &str,
+    description: &str,
+) -> TrainingTarget {
+    TrainingTarget {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "mage-flow".to_owned(),
+        base_model: base_model.to_owned(),
+        base_model_repo: Some(base_model_repo.to_owned()),
+        kernel: "mage_flow_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                "sampleEvery": 500,
+                "sampleSteps": 30,
+                "sampleGuidanceScale": 5.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [512, 768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            "networkTypes": ["lora"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": name,
+            "description": description,
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image"
+        })),
         extra: ExtraFields::new(),
     }
 }

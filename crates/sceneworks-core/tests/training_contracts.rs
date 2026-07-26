@@ -256,6 +256,40 @@ fn builtin_registry_exposes_z_image_turbo_target() {
 }
 
 #[test]
+fn builtin_registry_exposes_both_mage_flow_foundation_targets() {
+    let registry = builtin_training_targets();
+    for (id, base_model, repo) in [
+        (
+            "mage_flow_base_lora",
+            "mage_flow_base",
+            "SceneWorks/Mage-Flow-Base",
+        ),
+        (
+            "mage_flow_edit_base_lora",
+            "mage_flow_edit_base",
+            "SceneWorks/Mage-Flow-Edit-Base",
+        ),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"));
+        assert_eq!(target.modality, TrainingModality::Image);
+        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+        assert_eq!(target.family, "mage-flow");
+        assert_eq!(target.base_model, base_model);
+        assert_eq!(target.base_model_repo.as_deref(), Some(repo));
+        assert_eq!(target.kernel, "mage_flow_lora");
+        assert_eq!(target.defaults.resolution, 1024);
+        assert_eq!(
+            target.limits.get("networkTypes"),
+            Some(&serde_json::json!(["lora"]))
+        );
+    }
+}
+
+#[test]
 fn builtin_registry_exposes_sdxl_target() {
     let registry = builtin_training_targets();
     let target = registry
@@ -370,6 +404,49 @@ fn every_training_base_repo_is_installed_by_its_catalog_entry() {
             target.base_model,
             catalog_repos
         );
+    }
+}
+
+/// sc-14054 — Mage's three logical quality variants all install the same flat dense snapshot.
+/// They must remain available on every desktop platform and point at the target's live mirror;
+/// otherwise Training Studio can offer a target whose platform-specific catalog view cannot install
+/// the repo used by the API pre-flight resolver.
+#[test]
+fn mage_flow_training_repos_are_available_on_macos_windows_and_linux() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded in BUILTIN_MANIFESTS");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses as JSON");
+    let models = catalog["models"].as_array().expect("catalog models array");
+
+    for (base_model, repo) in [
+        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
+        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model["id"] == base_model)
+            .unwrap_or_else(|| panic!("{base_model} catalog entry present"));
+        let downloads = model["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{base_model} downloads array"));
+        for tier in ["q4", "q8", "bf16"] {
+            let download = downloads
+                .iter()
+                .find(|download| download["variant"] == tier)
+                .unwrap_or_else(|| panic!("{base_model} has {tier} training tier"));
+            assert_eq!(download["repo"], repo);
+            assert!(
+                download.get("platforms").is_none(),
+                "{base_model}/{tier} must be installable on macOS, Windows, and Linux"
+            );
+        }
     }
 }
 

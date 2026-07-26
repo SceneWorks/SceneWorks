@@ -3299,6 +3299,48 @@ fn flat_diffusers_snapshot_is_not_treated_as_a_tiered_turnkey() {
 }
 
 #[test]
+fn mage_flow_foundation_targets_resolve_the_installed_flat_mirrors() {
+    // sc-14054: Mage's q4/q8/bf16 catalog variants all materialize the same flat dense snapshot on
+    // every platform. The training targets must therefore resolve their live SceneWorks mirrors
+    // directly and report them ready without inventing a physical `bf16/` subdirectory.
+    for (base_model, expected_repo) in [
+        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
+        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
+    ] {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("data");
+        let target = crate::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} target present"));
+        assert_eq!(target.base_model_repo.as_deref(), Some(expected_repo));
+
+        let repo_root =
+            huggingface_repo_cache_path(&data_dir, expected_repo).expect("repo cache path");
+        let revision = "rev14054";
+        let snapshot = repo_root.join("snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+        std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+        // A readable config/payload certifies a materialized flat snapshot for the resolver path.
+        std::fs::write(snapshot.join("config.json"), "{}").expect("flat snapshot config");
+
+        assert_eq!(
+            resolve_base_model_path(&target, &data_dir),
+            snapshot.display().to_string(),
+            "{base_model}: training resolves the installed flat mirror root"
+        );
+        assert_eq!(
+            training_base_model_status(&data_dir, &target),
+            TrainingBaseStatus::Ready,
+            "{base_model}: the installed flat mirror is training-ready"
+        );
+    }
+}
+
+#[test]
 fn stock_sdxl_target_points_at_installed_turnkey() {
     // Regression guard for issue #1694: the stock `sdxl` training target must name the same
     // `SceneWorks/sdxl-base-mlx` turnkey the catalog + engine install — pointing at the flat
