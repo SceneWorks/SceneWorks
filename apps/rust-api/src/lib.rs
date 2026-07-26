@@ -78,6 +78,8 @@ use uuid::Uuid;
 
 mod auth;
 use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
+mod startup;
+use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
 use saved_voices::{create_saved_voice, delete_saved_voice, list_saved_voices};
 mod characters;
@@ -165,8 +167,8 @@ use dto::{
     ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
     PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
     QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
-    TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest,
-    VerifyResponse, VideoJobRequest, VqaJobRequest,
+    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -495,7 +497,13 @@ async fn spawn_inprocess_utility_worker(
     // This API process is the top-level owner of the in-process utility loops, which deliberately
     // call `run_worker_loop` directly. Recover once here before any loop can claim a conversion;
     // never put recovery inside each child loop, where sibling restarts could sweep live backups.
-    sceneworks_worker::recover_stranded_model_conversions(&worker_settings.data_dir).await?;
+    {
+        let _phase = StartupPhaseTimer::start(
+            "utility_conversion_recovery",
+            StartupCriticality::ReadinessCritical,
+        );
+        sceneworks_worker::recover_stranded_model_conversions(&worker_settings.data_dir).await?;
+    }
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
     let count = inprocess_utility_worker_count();
     let base_worker_id = worker_settings.worker_id.clone();
@@ -763,6 +771,15 @@ pub(crate) fn sweep_stale_uploads(
     subdir: &str,
     cutoff: SystemTime,
 ) -> std::io::Result<usize> {
+    sweep_stale_uploads_cancellable(data_dir, subdir, cutoff, || true)
+}
+
+pub(crate) fn sweep_stale_uploads_cancellable(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+) -> std::io::Result<usize> {
     let upload_root = data_dir.join("cache").join(subdir);
     let entries = match std::fs::read_dir(upload_root) {
         Ok(entries) => entries,
@@ -771,6 +788,9 @@ pub(crate) fn sweep_stale_uploads(
     };
     let mut removed = 0usize;
     for entry in entries {
+        if !should_continue() {
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -786,33 +806,37 @@ pub(crate) fn sweep_stale_uploads(
         if !entry.file_name().to_string_lossy().starts_with("upload-") {
             continue;
         }
+        if !should_continue() {
+            break;
+        }
         let is_dir = match entry.file_type() {
             Ok(file_type) => file_type.is_dir(),
             Err(error) => {
                 tracing::warn!(
                     event = "stale_upload_stat_failed",
                     sweep = subdir,
-                    path = %entry.path().display(),
                     error = %error,
                     "could not stat a stale-upload entry; skipping it"
                 );
                 continue;
             }
         };
+        if !should_continue() {
+            break;
+        }
         let modified = match entry.metadata() {
             Ok(metadata) => metadata.modified().unwrap_or(UNIX_EPOCH),
             Err(error) => {
                 tracing::warn!(
                     event = "stale_upload_stat_failed",
                     sweep = subdir,
-                    path = %entry.path().display(),
                     error = %error,
                     "could not read a stale-upload entry's mtime; skipping it"
                 );
                 continue;
             }
         };
-        if modified <= cutoff {
+        if modified <= cutoff && should_continue() {
             let path = entry.path();
             let removal = if is_dir {
                 std::fs::remove_dir_all(&path)
@@ -827,7 +851,6 @@ pub(crate) fn sweep_stale_uploads(
                     tracing::warn!(
                         event = "stale_upload_remove_failed",
                         sweep = subdir,
-                        path = %path.display(),
                         error = %error,
                         "could not remove a stale upload entry; leaving it and continuing"
                     );
@@ -890,34 +913,6 @@ fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
             sweep = kind,
             error = %error,
             "stale upload sweep failed; leaked temp uploads may remain"
-        );
-    }
-}
-
-/// One-shot pre-bind phase timer. Startup has only four of these, and `Drop`
-/// ensures a failing phase is still visible without changing the existing error
-/// propagation.
-struct StartupPhaseTimer {
-    phase: &'static str,
-    started: Instant,
-}
-
-impl StartupPhaseTimer {
-    fn start(phase: &'static str) -> Self {
-        Self {
-            phase,
-            started: Instant::now(),
-        }
-    }
-}
-
-impl Drop for StartupPhaseTimer {
-    fn drop(&mut self) {
-        tracing::info!(
-            event = "startup_phase_duration",
-            phase = self.phase,
-            duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
-            "SceneWorks API pre-bind startup phase completed"
         );
     }
 }
@@ -990,6 +985,35 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, false)
+}
+
+#[cfg(test)]
+pub(crate) fn create_app_with_deferred_startup_maintenance(
+    settings: Settings,
+    timeout: Duration,
+) -> Result<(Router, AppState), JobsStoreError> {
+    let (router, state) = create_app_with_pending_startup_maintenance(settings)?;
+    state
+        .startup_maintenance
+        .start(state.settings.data_dir.clone(), timeout);
+    Ok((router, state))
+}
+
+pub(crate) fn create_app_with_pending_startup_maintenance(
+    settings: Settings,
+) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, true)
+}
+
+fn create_app_with_state_mode(
+    settings: Settings,
+    defer_upload_sweeps: bool,
+) -> Result<(Router, AppState), JobsStoreError> {
+    let _filesystem_phase = StartupPhaseTimer::start(
+        "filesystem_preflight",
+        StartupCriticality::ReadinessCritical,
+    );
     // sc-8882 (F-080): a permissions/disk failure here is otherwise invisible until a
     // downstream 500 — surface it as a warning so it is diagnosable. Non-fatal: startup
     // continues (a missing dir surfaces later where it is actually used).
@@ -1013,8 +1037,8 @@ pub(crate) fn create_app_with_state(
             std::fs::create_dir_all(jobs_db_parent),
         );
     }
-    {
-        let _phase = StartupPhaseTimer::start("upload_sweeps");
+    if !defer_upload_sweeps {
+        let _phase = StartupPhaseTimer::start("upload_sweeps", StartupCriticality::BackgroundSafe);
         // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
         // and was previously silent. WARN (never fatal) so the operator can investigate.
         warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
@@ -1023,8 +1047,12 @@ pub(crate) fn create_app_with_state(
         // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
         warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
     }
+    drop(_filesystem_phase);
     let (jobs_store, interrupted_jobs_on_startup) = {
-        let _phase = StartupPhaseTimer::start("jobs_retention_recovery");
+        let _phase = StartupPhaseTimer::start(
+            "jobs_retention_recovery",
+            StartupCriticality::ReadinessCritical,
+        );
         let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
         jobs_store.initialize()?;
         let purged_terminal_jobs =
@@ -1043,7 +1071,10 @@ pub(crate) fn create_app_with_state(
         settings.app_version.clone(),
     ));
     {
-        let _phase = StartupPhaseTimer::start("reserved_project_initialization");
+        let _phase = StartupPhaseTimer::start(
+            "reserved_project_initialization",
+            StartupCriticality::ReadinessCritical,
+        );
         // Reserved global pose library (epic 2282): created up front so its assets
         // endpoint returns [] (not 404) before any pose is saved. Best-effort.
         if let Err(error) = project_store.ensure_global_poses_project() {
@@ -1070,7 +1101,10 @@ pub(crate) fn create_app_with_state(
     // Best-effort and non-fatal — a failure just leaves the stale rows for next
     // startup; the sidecars are untouched, so nothing is lost.
     {
-        let _phase = StartupPhaseTimer::start("orphaned_asset_maintenance");
+        let _phase = StartupPhaseTimer::start(
+            "orphaned_asset_maintenance",
+            StartupCriticality::ReadinessCritical,
+        );
         match project_store.prune_all_orphaned_assets() {
             Ok(0) => {}
             Ok(pruned) => tracing::info!(
@@ -1111,6 +1145,11 @@ pub(crate) fn create_app_with_state(
         )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
+        startup_maintenance: if defer_upload_sweeps {
+            StartupMaintenance::pending()
+        } else {
+            StartupMaintenance::complete()
+        },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
@@ -1586,6 +1625,11 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
             })
         },
         interrupted_jobs_on_startup: state.interrupted_jobs_on_startup,
+        readiness: StartupReadinessResponse {
+            status: "ready",
+            criticality: "readiness-critical",
+        },
+        startup_maintenance: state.startup_maintenance.snapshot(),
     })
 }
 
