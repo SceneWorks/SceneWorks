@@ -328,12 +328,22 @@ pub struct AppState {
     /// Caps filesystem/Parquet metadata validation before it reaches Tokio's
     /// shared blocking pool, preserving capacity for catalog DB operations.
     pub(crate) catalog_scan_preflight_slots: Arc<Semaphore>,
+    /// Separately caps long-running scanner startup and row passes. Tasks wait
+    /// asynchronously before entering Tokio's shared blocking pool, reserving
+    /// capacity for status/query database work even when many catalogs run.
+    pub(crate) catalog_scan_work_slots: Arc<Semaphore>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     #[cfg(test)]
     pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
     pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_before_terminal_exit_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_terminal_exit_reached: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_terminal_exit_release: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
     #[cfg(test)]

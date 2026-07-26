@@ -618,6 +618,108 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
 }
 
 #[tokio::test]
+async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 100_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Paused teardown handoff",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+
+    let mut pause_response = None;
+    for _ in 0..1_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "running" {
+            state
+                .catalog_scan_before_terminal_exit_once
+                .store(true, Ordering::SeqCst);
+            let terminal = state.catalog_scan_terminal_exit_reached.notified();
+            let (pause_status, paused) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/catalogs/{id}/pause"),
+                json!({
+                    "expectedRevision": current["processingControl"]["revision"]
+                }),
+            )
+            .await;
+            if pause_status == StatusCode::OK {
+                tokio::time::timeout(Duration::from_secs(5), terminal)
+                    .await
+                    .expect("scanner publishes paused and releases its lease");
+                pause_response = Some(paused);
+                break;
+            }
+            state
+                .catalog_scan_before_terminal_exit_once
+                .store(false, Ordering::SeqCst);
+            state.catalog_scan_terminal_exit_release.notify_waiters();
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let paused = pause_response.expect("pause wins before completion");
+    let (resume_status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({
+            "expectedRevision": paused["processingControl"]["revision"]
+        }),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["processingControl"]["desiredState"], "running");
+    assert_eq!(
+        state.catalog_scan_supervisor.active_count().await,
+        1,
+        "the terminal generation remains registered while restart is queued"
+    );
+    state.catalog_scan_terminal_exit_release.notify_waiters();
+
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "completed" {
+            completed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert_eq!(
+        completed.expect("queued successor completes")["counts"]["recordCount"],
+        100_000
+    );
+}
+
+#[tokio::test]
 async fn interrupted_bounded_driver_is_reconciled_and_public_restart_completes() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
@@ -1225,6 +1327,125 @@ async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
     assert_eq!(
         completed.expect("scan starts after long lease contention")["counts"]["recordCount"],
         1_000
+    );
+}
+
+#[tokio::test]
+async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 100);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Busy retry handoff",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let catalog = registry.open_attached(&id).expect("catalog opens");
+    let mut contract = catalog.contract_state().expect("contract reads");
+    contract.source_config = Some(CatalogSourceConfig {
+        kind: "parquet".to_owned(),
+        paths: vec![source],
+        options: json!({}),
+    });
+    contract.processing.state = CatalogProcessingState::Running;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("contract updates");
+    let paused = catalog
+        .request_processing_control(
+            0,
+            sceneworks_core::catalog_store::CatalogProcessingDesiredState::Paused,
+        )
+        .expect("initial pause intent");
+    contract.processing.state = CatalogProcessingState::Paused;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("paused progress persists");
+    catalog.close();
+
+    let before_start = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    let (status, running) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": paused.revision }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{running}");
+    let contended = registry.open_attached(&id).expect("catalog reopens");
+    let held_lease = CatalogProcessingLease::try_acquire(&contended).expect("test lease");
+    contended
+        .set_processing_progress(&CatalogProcessingProgress {
+            state: CatalogProcessingState::Running,
+            message: Some("contended processor is stopping".to_owned()),
+            updated_at: catalog_timestamp_now(),
+            ..CatalogProcessingProgress::default()
+        })
+        .expect("active progress publishes");
+    state
+        .catalog_scan_before_terminal_exit_once
+        .store(true, Ordering::SeqCst);
+    let terminal = state.catalog_scan_terminal_exit_reached.notified();
+    before_start.wait().await;
+
+    let (pause_status, paused_again) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/pause"),
+        json!({
+            "expectedRevision": running["processingControl"]["revision"]
+        }),
+    )
+    .await;
+    assert_eq!(pause_status, StatusCode::OK, "{paused_again}");
+    tokio::time::timeout(Duration::from_secs(2), terminal)
+        .await
+        .expect("Busy retry observes terminal pause decision");
+    drop(held_lease);
+    contended.close();
+
+    let (resume_status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({
+            "expectedRevision": paused_again["processingControl"]["revision"]
+        }),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+    state.catalog_scan_terminal_exit_release.notify_waiters();
+
+    let mut completed = None;
+    for _ in 0..1_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "completed" {
+            completed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert_eq!(
+        completed.expect("queued Busy successor completes")["counts"]["recordCount"],
+        100
     );
 }
 

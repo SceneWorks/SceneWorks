@@ -23,6 +23,8 @@ use sceneworks_worker::catalog_parquet_scanner::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::catalog_scan_supervisor::CatalogScanSpawn;
 use crate::{ApiError, ApiJson, AppState};
@@ -631,6 +633,13 @@ async fn schedule_catalog_scan(
     let before_start = state.catalog_scan_before_driver_start_once.clone();
     #[cfg(test)]
     let stop_after_pass = state.catalog_scan_stop_after_pass_once.clone();
+    #[cfg(test)]
+    let before_terminal_exit = state.catalog_scan_before_terminal_exit_once.clone();
+    #[cfg(test)]
+    let terminal_exit_reached = state.catalog_scan_terminal_exit_reached.clone();
+    #[cfg(test)]
+    let terminal_exit_release = state.catalog_scan_terminal_exit_release.clone();
+    let work_slots = state.catalog_scan_work_slots.clone();
     let log_catalog_id = catalog_id.clone();
     let spawned = state
         .catalog_scan_supervisor
@@ -651,7 +660,7 @@ async fn schedule_catalog_scan(
                 }
                 let pass_config_dir = config_dir.clone();
                 let pass_catalog_id = catalog_id.clone();
-                let start = tokio::task::spawn_blocking(move || {
+                let start = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
                     AttachedCatalogParquetScanDriver::try_start(
                         &CatalogRegistry::new(pass_config_dir),
                         &pass_catalog_id,
@@ -659,25 +668,37 @@ async fn schedule_catalog_scan(
                 })
                 .await;
                 match start {
-                    Ok(Ok(driver)) => break driver,
-                    Ok(Err(CatalogParquetScanError::Busy(_))) => {
+                    Ok(Some(Ok(driver))) => break driver,
+                    Ok(Some(Err(CatalogParquetScanError::Busy(_)))) => {
                         let retry_config_dir = config_dir.clone();
                         let retry_catalog_id = catalog_id.clone();
-                        let should_retry = tokio::task::spawn_blocking(move || {
-                            let registry = CatalogRegistry::new(retry_config_dir);
-                            let catalog = registry.open_attached(&retry_catalog_id)?;
-                            let desired = catalog.processing_control()?.desired_state;
-                            let actual = catalog.contract_state()?.processing.state;
-                            Ok::<_, CatalogError>(
-                                desired == CatalogProcessingDesiredState::Running
-                                    && actual != CatalogProcessingState::Completed,
-                            )
-                        })
-                        .await;
+                        let should_retry =
+                            catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                                let registry = CatalogRegistry::new(retry_config_dir);
+                                let catalog = registry.open_attached(&retry_catalog_id)?;
+                                let desired = catalog.processing_control()?.desired_state;
+                                let actual = catalog.contract_state()?.processing.state;
+                                Ok::<_, CatalogError>(
+                                    desired == CatalogProcessingDesiredState::Running
+                                        && actual != CatalogProcessingState::Completed,
+                                )
+                            })
+                            .await;
                         match should_retry {
-                            Ok(Ok(true)) => {}
-                            Ok(Ok(false)) | Ok(Err(CatalogError::NotFound(_))) => return,
-                            Ok(Err(error)) => {
+                            Ok(Some(Ok(true))) => {}
+                            Ok(Some(Ok(false))) => {
+                                #[cfg(test)]
+                                catalog_scan_terminal_test_barrier(
+                                    &before_terminal_exit,
+                                    &terminal_exit_reached,
+                                    &terminal_exit_release,
+                                    &cancellation,
+                                )
+                                .await;
+                                return;
+                            }
+                            Ok(Some(Err(CatalogError::NotFound(_)))) | Ok(None) => return,
+                            Ok(Some(Err(error))) => {
                                 tracing::error!(
                                     event = "catalog_parquet_scan_retry_check_failed",
                                     catalog_id,
@@ -704,7 +725,7 @@ async fn schedule_catalog_scan(
                             .saturating_mul(2)
                             .min(CATALOG_SCAN_START_MAX_BACKOFF);
                     }
-                    Ok(Err(error)) => {
+                    Ok(Some(Err(error))) => {
                         tracing::error!(
                             event = "catalog_parquet_scan_start_failed",
                             catalog_id,
@@ -713,6 +734,7 @@ async fn schedule_catalog_scan(
                         );
                         return;
                     }
+                    Ok(None) => return,
                     Err(error) => {
                         tracing::error!(
                             event = "catalog_parquet_scan_task_failed",
@@ -728,7 +750,7 @@ async fn schedule_catalog_scan(
                 let pass_source = plan.source.clone();
                 let pass_options = plan.options.clone();
                 let pass_cancellation = cancellation.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
                     let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
                         pass_cancellation.is_cancelled()
                     });
@@ -745,9 +767,18 @@ async fn schedule_catalog_scan(
                         );
                         break;
                     }
-                    Ok((next_driver, Ok(report))) => {
+                    Ok(Some((next_driver, Ok(report)))) => {
                         driver = next_driver;
                         if report.paused || report.checkpoint.complete {
+                            drop(driver);
+                            #[cfg(test)]
+                            catalog_scan_terminal_test_barrier(
+                                &before_terminal_exit,
+                                &terminal_exit_reached,
+                                &terminal_exit_release,
+                                &cancellation,
+                            )
+                            .await;
                             break;
                         }
                         #[cfg(test)]
@@ -759,7 +790,7 @@ async fn schedule_catalog_scan(
                             break;
                         }
                     }
-                    Ok((_next_driver, Err(CatalogParquetScanError::Interrupted(error)))) => {
+                    Ok(Some((_next_driver, Err(CatalogParquetScanError::Interrupted(error))))) => {
                         tracing::info!(
                             event = "catalog_parquet_scan_interrupted",
                             catalog_id,
@@ -768,7 +799,7 @@ async fn schedule_catalog_scan(
                         );
                         break;
                     }
-                    Ok((_next_driver, Err(error))) => {
+                    Ok(Some((_next_driver, Err(error)))) => {
                         tracing::error!(
                             event = "catalog_parquet_scan_failed",
                             catalog_id,
@@ -777,17 +808,18 @@ async fn schedule_catalog_scan(
                         );
                         break;
                     }
+                    Ok(None) => break,
                 }
             }
         })
         .await;
     match spawned {
         CatalogScanSpawn::Started => {}
-        CatalogScanSpawn::AlreadyRunning => {
+        CatalogScanSpawn::RestartQueued => {
             tracing::debug!(
-                event = "catalog_parquet_scan_deduplicated",
+                event = "catalog_parquet_scan_restart_queued",
                 catalog_id = log_catalog_id,
-                "catalog Parquet scan already has a supervised task"
+                "catalog Parquet scan restart was handed off to the live generation"
             );
         }
         CatalogScanSpawn::ShuttingDown => {
@@ -798,6 +830,46 @@ async fn schedule_catalog_scan(
             );
         }
     }
+}
+
+#[cfg(test)]
+async fn catalog_scan_terminal_test_barrier(
+    enabled: &std::sync::atomic::AtomicBool,
+    reached: &tokio::sync::Notify,
+    release: &tokio::sync::Notify,
+    cancellation: &CancellationToken,
+) {
+    if enabled.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        reached.notify_waiters();
+        tokio::select! {
+            _ = release.notified() => {}
+            _ = cancellation.cancelled() => {}
+        }
+    }
+}
+
+async fn catalog_scan_blocking<T, F>(
+    slots: std::sync::Arc<Semaphore>,
+    cancellation: &CancellationToken,
+    operation: F,
+) -> Result<Option<T>, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = tokio::select! {
+        permit = slots.acquire_owned() => match permit {
+            Ok(permit) => permit,
+            Err(_) => return Ok(None),
+        },
+        _ = cancellation.cancelled() => return Ok(None),
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map(Some)
 }
 
 fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {
@@ -885,4 +957,65 @@ const fn default_query_limit() -> u32 {
 
 const fn default_facet_limit() -> u32 {
     DEFAULT_FACET_LIMIT
+}
+
+#[cfg(test)]
+mod scan_admission_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn global_scan_admission_bounds_distinct_catalog_work_and_preserves_db_capacity() {
+        let slots = Arc::new(Semaphore::new(2));
+        let release = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let cancellation = CancellationToken::new();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let slots = slots.clone();
+            let release = release.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            let cancellation = cancellation.clone();
+            tasks.push(tokio::spawn(async move {
+                catalog_scan_blocking(slots, &cancellation, move || {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+                .expect("blocking task joins")
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("two scan slots fill");
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(slots.available_permits(), 0);
+
+        let status_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::task::spawn_blocking(|| 42_u64),
+        )
+        .await
+        .expect("unrelated catalog DB work retains blocking-pool capacity")
+        .expect("status task joins");
+        assert_eq!(status_result, 42);
+
+        release.store(true, Ordering::SeqCst);
+        for task in tasks {
+            assert!(task.await.expect("admission task joins").is_some());
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
 }

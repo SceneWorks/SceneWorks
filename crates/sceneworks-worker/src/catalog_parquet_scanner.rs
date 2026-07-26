@@ -29,6 +29,7 @@ const MAX_FILTER_TERMS: usize = 100;
 const MAX_FILTER_TERM_CHARS: usize = 256;
 pub const MAX_PARQUET_SHARDS: usize = 4_096;
 const MAX_PARQUET_DIRECTORY_ENTRIES: usize = 100_000;
+const SHARD_RECHECKS_PER_PASS: usize = 16;
 
 #[derive(Debug)]
 pub enum CatalogParquetScanError {
@@ -166,6 +167,7 @@ pub struct CatalogParquetScanReport {
 pub struct AttachedCatalogParquetScanDriver {
     catalog: Catalog,
     _lease: CatalogProcessingLease,
+    prepared: Option<PreparedCatalogParquetScan>,
 }
 
 impl AttachedCatalogParquetScanDriver {
@@ -184,6 +186,7 @@ impl AttachedCatalogParquetScanDriver {
         Ok(Self {
             catalog,
             _lease: lease,
+            prepared: None,
         })
     }
 
@@ -207,12 +210,38 @@ impl AttachedCatalogParquetScanDriver {
     where
         F: Fn() -> bool,
     {
-        let result =
-            scan_parquet_catalog_under_lease(&mut self.catalog, source, options, &should_cancel);
+        let result = (|| {
+            match self.prepared.as_mut() {
+                Some(prepared) => prepared.verify_pass(source, options, &should_cancel)?,
+                None => {
+                    self.prepared = Some(PreparedCatalogParquetScan::new(
+                        source,
+                        options,
+                        &should_cancel,
+                    )?);
+                }
+            }
+            scan_prepared_parquet_catalog_under_lease(
+                &mut self.catalog,
+                self.prepared
+                    .as_mut()
+                    .expect("prepared scan is initialized above"),
+                options,
+                &should_cancel,
+            )
+        })();
         if let Err(error) = &result {
             publish_scan_failure(&self.catalog, error);
         }
         result
+    }
+
+    #[cfg(test)]
+    fn validation_counts(&self) -> (u64, u64) {
+        self.prepared
+            .as_ref()
+            .map(|prepared| (prepared.directory_traversals, prepared.shard_metadata_reads))
+            .unwrap_or_default()
     }
 
     /// Marks a between-pass cancellation durably before releasing the lease.
@@ -223,6 +252,151 @@ impl AttachedCatalogParquetScanDriver {
                 "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
             ),
         );
+    }
+}
+
+#[derive(Clone)]
+struct FileSnapshot {
+    path: PathBuf,
+    bytes: u64,
+    modified_nanos: u128,
+}
+
+struct PreparedCatalogParquetScan {
+    source: FileSnapshot,
+    source_is_directory: bool,
+    shards: Vec<FileSnapshot>,
+    source_signature: String,
+    options_signature: String,
+    recheck_cursor: usize,
+    #[cfg(test)]
+    directory_traversals: u64,
+    #[cfg(test)]
+    shard_metadata_reads: u64,
+}
+
+impl PreparedCatalogParquetScan {
+    fn new(
+        source: &Path,
+        options: &CatalogParquetScanOptions,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> CatalogParquetScanResult<Self> {
+        validate_options(options)?;
+        let canonical_source = std::fs::canonicalize(source)?;
+        let source_metadata = std::fs::metadata(&canonical_source)?;
+        let source_is_directory = source_metadata.is_dir();
+        let source = snapshot_from_metadata(canonical_source, &source_metadata);
+        let paths = parquet_shards_with_cancel(&source.path, should_cancel)?;
+        let mut shards = Vec::with_capacity(paths.len());
+        for path in paths {
+            if should_cancel() {
+                return Err(preflight_interrupted());
+            }
+            shards.push(snapshot_file(path)?);
+        }
+        let source_signature = source_signature_from_snapshots(&shards);
+        Ok(Self {
+            source,
+            source_is_directory,
+            shards,
+            source_signature,
+            options_signature: options_signature(options)?,
+            recheck_cursor: 0,
+            #[cfg(test)]
+            directory_traversals: 1,
+            #[cfg(test)]
+            shard_metadata_reads: 0,
+        })
+    }
+
+    fn verify_pass(
+        &mut self,
+        source: &Path,
+        options: &CatalogParquetScanOptions,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> CatalogParquetScanResult<()> {
+        validate_options(options)?;
+        if options_signature(options)? != self.options_signature {
+            return Err(source_changed(
+                "Parquet scan options changed during processing",
+            ));
+        }
+        let canonical = std::fs::canonicalize(source)?;
+        if canonical != self.source.path {
+            return Err(source_changed(
+                "Parquet source path changed during processing",
+            ));
+        }
+        let metadata = std::fs::metadata(&canonical)?;
+        let current = snapshot_from_metadata(canonical, &metadata);
+        if current.bytes != self.source.bytes
+            || current.modified_nanos != self.source.modified_nanos
+            || metadata.is_dir() != self.source_is_directory
+        {
+            return Err(source_changed(
+                "Parquet source directory or file changed during processing",
+            ));
+        }
+        let checks = self.shards.len().min(SHARD_RECHECKS_PER_PASS);
+        for offset in 0..checks {
+            if should_cancel() {
+                return Err(preflight_interrupted());
+            }
+            let index = (self.recheck_cursor + offset) % self.shards.len();
+            self.verify_shard(index)?;
+        }
+        self.recheck_cursor = (self.recheck_cursor + checks) % self.shards.len();
+        Ok(())
+    }
+
+    fn verify_shard(&mut self, index: usize) -> CatalogParquetScanResult<()> {
+        #[cfg(test)]
+        {
+            self.shard_metadata_reads = self.shard_metadata_reads.saturating_add(1);
+        }
+        let expected = &self.shards[index];
+        let metadata = std::fs::metadata(&expected.path)?;
+        let current = snapshot_from_metadata(expected.path.clone(), &metadata);
+        if !metadata.is_file()
+            || current.bytes != expected.bytes
+            || current.modified_nanos != expected.modified_nanos
+        {
+            return Err(source_changed(
+                "Parquet shard changed during catalog processing",
+            ));
+        }
+        Ok(())
+    }
+
+    fn shard_paths(&self) -> Vec<PathBuf> {
+        self.shards.iter().map(|shard| shard.path.clone()).collect()
+    }
+}
+
+fn source_changed(detail: &str) -> CatalogParquetScanError {
+    CatalogParquetScanError::InvalidSource(format!(
+        "{detail}; create a new catalog or restore the original source."
+    ))
+}
+
+fn snapshot_file(path: PathBuf) -> CatalogParquetScanResult<FileSnapshot> {
+    let metadata = std::fs::metadata(&path)?;
+    if !metadata.is_file() {
+        return Err(source_changed("Parquet shard is no longer a regular file"));
+    }
+    Ok(snapshot_from_metadata(path, &metadata))
+}
+
+fn snapshot_from_metadata(path: PathBuf, metadata: &std::fs::Metadata) -> FileSnapshot {
+    FileSnapshot {
+        path,
+        bytes: metadata.len(),
+        modified_nanos: metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos())
+            .unwrap_or_default(),
     }
 }
 
@@ -289,17 +463,28 @@ fn publish_scan_failure(catalog: &Catalog, error: &CatalogParquetScanError) {
     }
 }
 
+#[cfg(test)]
 fn scan_parquet_catalog_under_lease(
     catalog: &mut Catalog,
     source: &Path,
     options: &CatalogParquetScanOptions,
     should_cancel: &dyn Fn() -> bool,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
-    validate_options(options)?;
-    let shards = parquet_shards_with_cancel(source, should_cancel)?;
-    let source_signature = source_signature(&shards, should_cancel)?;
-    let options_signature = options_signature(options)?;
-    let mut checkpoint = load_checkpoint(catalog, &source_signature, &options_signature)?;
+    let mut prepared = PreparedCatalogParquetScan::new(source, options, should_cancel)?;
+    scan_prepared_parquet_catalog_under_lease(catalog, &mut prepared, options, should_cancel)
+}
+
+fn scan_prepared_parquet_catalog_under_lease(
+    catalog: &mut Catalog,
+    prepared: &mut PreparedCatalogParquetScan,
+    options: &CatalogParquetScanOptions,
+    should_cancel: &dyn Fn() -> bool,
+) -> CatalogParquetScanResult<CatalogParquetScanReport> {
+    let mut checkpoint = load_checkpoint(
+        catalog,
+        &prepared.source_signature,
+        &prepared.options_signature,
+    )?;
     if checkpoint.complete {
         publish_progress(
             catalog,
@@ -309,7 +494,7 @@ fn scan_parquet_catalog_under_lease(
         )?;
         return Ok(CatalogParquetScanReport {
             checkpoint,
-            source_shards: shards,
+            source_shards: prepared.shard_paths(),
             paused: false,
         });
     }
@@ -322,7 +507,7 @@ fn scan_parquet_catalog_under_lease(
         )?;
         return Ok(CatalogParquetScanReport {
             checkpoint,
-            source_shards: shards,
+            source_shards: prepared.shard_paths(),
             paused: true,
         });
     }
@@ -344,8 +529,10 @@ fn scan_parquet_catalog_under_lease(
     let mut pending = Vec::with_capacity(batch_size);
     let mut pending_ids = HashSet::with_capacity(batch_size);
 
-    for (shard_index, shard) in shards.iter().enumerate().skip(checkpoint.shard) {
-        let reader = SerializedFileReader::new(File::open(shard)?)?;
+    for shard_index in checkpoint.shard..prepared.shards.len() {
+        prepared.verify_shard(shard_index)?;
+        let shard = prepared.shards[shard_index].path.clone();
+        let reader = SerializedFileReader::new(File::open(&shard)?)?;
         let row_group_start = if shard_index == checkpoint.shard {
             checkpoint.row_group
         } else {
@@ -379,7 +566,7 @@ fn scan_parquet_catalog_under_lease(
                     }
                     return Ok(CatalogParquetScanReport {
                         checkpoint,
-                        source_shards: shards,
+                        source_shards: prepared.shard_paths(),
                         paused,
                     });
                 }
@@ -392,7 +579,7 @@ fn scan_parquet_catalog_under_lease(
                 match row {
                     Ok(row) => match catalog_record_for_row(
                         &row,
-                        shard,
+                        &shard,
                         shard_index,
                         row_group_index,
                         row_index as u64,
@@ -425,7 +612,7 @@ fn scan_parquet_catalog_under_lease(
                     if flush_batch(catalog, &mut pending, &checkpoint)? {
                         return Ok(CatalogParquetScanReport {
                             checkpoint,
-                            source_shards: shards,
+                            source_shards: prepared.shard_paths(),
                             paused: true,
                         });
                     }
@@ -443,7 +630,7 @@ fn scan_parquet_catalog_under_lease(
             if flush_batch(catalog, &mut pending, &checkpoint)? {
                 return Ok(CatalogParquetScanReport {
                     checkpoint,
-                    source_shards: shards,
+                    source_shards: prepared.shard_paths(),
                     paused: true,
                 });
             }
@@ -461,7 +648,7 @@ fn scan_parquet_catalog_under_lease(
         if flush_batch(catalog, &mut pending, &checkpoint)? {
             return Ok(CatalogParquetScanReport {
                 checkpoint,
-                source_shards: shards,
+                source_shards: prepared.shard_paths(),
                 paused: true,
             });
         }
@@ -483,7 +670,7 @@ fn scan_parquet_catalog_under_lease(
     )?;
     Ok(CatalogParquetScanReport {
         checkpoint,
-        source_shards: shards,
+        source_shards: prepared.shard_paths(),
         paused: false,
     })
 }
@@ -1149,28 +1336,15 @@ fn has_parquet_extension(path: &Path) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
 }
 
-fn source_signature(
-    shards: &[PathBuf],
-    should_cancel: &dyn Fn() -> bool,
-) -> CatalogParquetScanResult<String> {
+fn source_signature_from_snapshots(shards: &[FileSnapshot]) -> String {
     let mut digest = Sha256::new();
     for shard in shards {
-        if should_cancel() {
-            return Err(preflight_interrupted());
-        }
-        let metadata = std::fs::metadata(shard)?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_nanos())
-            .unwrap_or_default();
-        digest.update(shard.to_string_lossy().as_bytes());
+        digest.update(shard.path.to_string_lossy().as_bytes());
         digest.update([0]);
-        digest.update(metadata.len().to_le_bytes());
-        digest.update(modified.to_le_bytes());
+        digest.update(shard.bytes.to_le_bytes());
+        digest.update(shard.modified_nanos.to_le_bytes());
     }
-    Ok(hex_prefix(&digest.finalize(), 64))
+    hex_prefix(&digest.finalize(), 64)
 }
 
 fn options_signature(options: &CatalogParquetScanOptions) -> CatalogParquetScanResult<String> {
@@ -1902,6 +2076,64 @@ mod tests {
             error,
             CatalogParquetScanError::CheckpointMismatch(_)
         ));
+    }
+
+    #[test]
+    fn attached_driver_enumerates_once_and_detects_mutation_with_bounded_rechecks() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source creates");
+        for index in 0..40 {
+            write_rows(
+                &source.join(format!("part-{index:05}.parquet")),
+                &[vec![row("https://example.com/image.jpg", "one person")]],
+            );
+        }
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Cached shards")
+            .expect("catalog creates");
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let mut driver =
+            AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id).expect("driver");
+        let options = CatalogParquetScanOptions {
+            max_rows: Some(1),
+            batch_size: 1,
+            ..CatalogParquetScanOptions::default()
+        };
+        let first = driver.scan_pass(&source, &options).expect("first pass");
+        assert!(!first.checkpoint.complete);
+        let (directory_traversals, first_pass_reads) = driver.validation_counts();
+        assert_eq!(directory_traversals, 1);
+        assert!(
+            first_pass_reads <= 2,
+            "a one-row budget opens only the current and boundary shard"
+        );
+
+        use std::io::Write as _;
+        let mut changed = std::fs::OpenOptions::new()
+            .append(true)
+            .open(source.join("part-00030.parquet"))
+            .expect("mutated shard opens");
+        changed.write_all(b"mutation").expect("mutation writes");
+        changed.sync_all().expect("mutation syncs");
+        drop(changed);
+
+        driver.scan_pass(&source, &options).expect("bounded pass");
+        let error = driver
+            .scan_pass(&source, &options)
+            .expect_err("rotating recheck catches an unvisited shard mutation");
+        assert!(matches!(error, CatalogParquetScanError::InvalidSource(_)));
+        let (directory_traversals, metadata_reads) = driver.validation_counts();
+        assert_eq!(
+            directory_traversals, 1,
+            "the attached driver retains its canonical shard set"
+        );
+        assert!(
+            metadata_reads <= 2 + 2 * (SHARD_RECHECKS_PER_PASS as u64 + 2),
+            "each pass performs only bounded rotating checks plus the shard it opens"
+        );
     }
 
     #[test]

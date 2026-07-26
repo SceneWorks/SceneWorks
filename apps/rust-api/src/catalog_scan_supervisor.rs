@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -9,10 +10,14 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+type CatalogScanFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type CatalogScanTaskFn = Box<dyn FnOnce(CancellationToken) -> CatalogScanFuture + Send + 'static>;
+
 struct CatalogScanTask {
     generation: u64,
     cancellation: CancellationToken,
     handle: JoinHandle<()>,
+    restart: Option<CatalogScanTaskFn>,
 }
 
 #[derive(Default)]
@@ -51,23 +56,38 @@ impl CatalogScanSupervisor {
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        let task: CatalogScanTaskFn = Box::new(move |cancellation| Box::pin(task(cancellation)));
         let mut state = self.inner.state.lock().await;
         if state.shutting_down {
             return CatalogScanSpawn::ShuttingDown;
         }
-        if state
-            .tasks
-            .get(&catalog_id)
-            .is_some_and(|entry| !entry.handle.is_finished())
-        {
-            return CatalogScanSpawn::AlreadyRunning;
+        if let Some(entry) = state.tasks.get_mut(&catalog_id) {
+            if !entry.handle.is_finished() {
+                // A lifecycle request may commit desired=running while the
+                // current generation is publishing a terminal paused/completed
+                // state but before its wrapper has reaped itself. Retain one
+                // successor under the same single-flight key so that request
+                // cannot be lost in the teardown window. Repeated requests
+                // coalesce to the newest equivalent restart.
+                entry.restart = Some(task);
+                return CatalogScanSpawn::RestartQueued;
+            }
         }
         state.tasks.remove(&catalog_id);
+        Self::spawn_boxed_locked(&self.inner, &mut state, catalog_id, task);
+        CatalogScanSpawn::Started
+    }
 
-        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+    fn spawn_boxed_locked(
+        inner: &Arc<CatalogScanSupervisorInner>,
+        state: &mut SupervisorState,
+        catalog_id: String,
+        task: CatalogScanTaskFn,
+    ) {
+        let generation = inner.next_generation.fetch_add(1, Ordering::Relaxed);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let weak_inner = Arc::downgrade(&self.inner);
+        let weak_inner = Arc::downgrade(inner);
         let task_catalog_id = catalog_id.clone();
         let handle = tokio::spawn(async move {
             task(task_cancellation).await;
@@ -75,12 +95,21 @@ impl CatalogScanSupervisor {
                 return;
             };
             let mut state = inner.state.lock().await;
-            if state
+            let matching = state
                 .tasks
                 .get(&task_catalog_id)
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                state.tasks.remove(&task_catalog_id);
+                .is_some_and(|entry| entry.generation == generation);
+            if !matching {
+                return;
+            }
+            let completed = state
+                .tasks
+                .remove(&task_catalog_id)
+                .expect("matching generation remains registered");
+            if !state.shutting_down {
+                if let Some(restart) = completed.restart {
+                    Self::spawn_boxed_locked(&inner, &mut state, task_catalog_id, restart);
+                }
             }
         });
         state.tasks.insert(
@@ -89,9 +118,9 @@ impl CatalogScanSupervisor {
                 generation,
                 cancellation,
                 handle,
+                restart: None,
             },
         );
-        CatalogScanSpawn::Started
     }
 
     /// Cancels every registered task and does not return until each async
@@ -143,7 +172,7 @@ impl CatalogScanSupervisor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogScanSpawn {
     Started,
-    AlreadyRunning,
+    RestartQueued,
     ShuttingDown,
 }
 
@@ -176,7 +205,7 @@ mod tests {
         started.notified().await;
         assert_eq!(
             supervisor.spawn("catalog-a".to_owned(), |_| async {}).await,
-            CatalogScanSpawn::AlreadyRunning
+            CatalogScanSpawn::RestartQueued
         );
 
         let result = supervisor.shutdown().await;
@@ -255,5 +284,58 @@ mod tests {
         .await
         .expect("completion reaping is prompt and bounded");
         assert_eq!(supervisor.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn request_during_terminal_teardown_hands_off_to_one_successor() {
+        let supervisor = Arc::new(CatalogScanSupervisor::default());
+        let terminal = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert_eq!(
+            supervisor
+                .spawn("catalog-race".to_owned(), {
+                    let terminal = terminal.clone();
+                    let release = release.clone();
+                    let runs = runs.clone();
+                    move |_| async move {
+                        runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        terminal.wait().await;
+                        release.wait().await;
+                    }
+                })
+                .await,
+            CatalogScanSpawn::Started
+        );
+        terminal.wait().await;
+        for _ in 0..3 {
+            assert_eq!(
+                supervisor
+                    .spawn("catalog-race".to_owned(), {
+                        let runs = runs.clone();
+                        move |_| async move {
+                            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    })
+                    .await,
+                CatalogScanSpawn::RestartQueued
+            );
+        }
+        release.wait().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if supervisor.tracked_count().await == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor completes");
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "restart requests coalesce to exactly one successor"
+        );
     }
 }
