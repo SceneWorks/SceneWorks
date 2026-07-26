@@ -86,9 +86,10 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
       return "open";
     }
     if (!accessResolved) {
-      // First probe still in flight: stay out of the way so a healthy host never flashes
-      // a blocker. Only a probe that has already FAILED blocks.
-      return accessProbeFailed ? "awaiting-host" : "open";
+      // The auth requirement is still unknown, so no protected screen may mount.
+      // A failed probe changes the copy/notice, but both states remain full-page
+      // blockers until the host answers.
+      return accessProbeFailed ? "awaiting-host" : "probing";
     }
     if (!access.authRequired) {
       return "open";

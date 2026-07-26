@@ -6322,6 +6322,7 @@ name = "sceneworks-core"
 version = "0.8.0"
 dependencies = [
  "directories",
+ "fs2",
  "getrandom 0.3.4",
  "image",
  "imagesize",
@@ -6418,6 +6419,7 @@ dependencies = [
  "mime_guess",
  "nix",
  "parking_lot",
+ "parquet",
  "reqwest 0.12.28",
  "rmcp",
  "rusqlite",
@@ -6467,6 +6469,7 @@ dependencies = [
  "runtime-cuda",
  "runtime-macos",
  "rusqlite",
+ "same-file",
  "sceneworks-core",
  "sceneworks-gen-core",
  "sceneworks-image-quality",
@@ -7884,6 +7887,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

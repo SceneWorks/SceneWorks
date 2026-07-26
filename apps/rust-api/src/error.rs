@@ -63,6 +63,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn service_unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: detail.into(),
+            code: Some("catalog_preflight_unavailable"),
+        }
+    }
+
     pub(crate) fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -166,6 +174,11 @@ impl From<CatalogError> for ApiError {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog location is not empty or is already in use".to_owned(),
                 code: Some("catalog_already_exists"),
+            },
+            CatalogError::Conflict(_) => Self {
+                status: StatusCode::CONFLICT,
+                detail: "Catalog processing state changed or is active".to_owned(),
+                code: Some("catalog_processing_conflict"),
             },
             CatalogError::Incompatible { .. } => Self {
                 status: StatusCode::CONFLICT,

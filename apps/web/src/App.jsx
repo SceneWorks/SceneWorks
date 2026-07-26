@@ -35,7 +35,7 @@ import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
-import { putUiPreferences } from "./uiPreferences.js";
+import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import {
   dropUpscaledVariants,
@@ -162,6 +162,11 @@ const ModelManagerScreen = lazyScreen(
   "ModelManagerScreen",
   "Models",
 );
+const DatasetCatalogsScreen = lazyScreen(
+  () => import("./screens/DatasetCatalogsScreen.jsx"),
+  "DatasetCatalogsScreen",
+  "Dataset Catalogs",
+);
 const SettingsScreen = lazyScreen(
   () => import("./screens/SettingsScreen.jsx"),
   "SettingsScreen",
@@ -262,6 +267,7 @@ export const navSections = [
     items: [
       { id: "Library", label: "Assets", icon: Icon.Library },
       { id: "LibraryDataSets", label: "Data Sets", icon: Icon.Train },
+      { id: "DatasetCatalogs", label: "Dataset Catalogs", icon: Icon.Book },
       { id: "Poses", label: "Pose Library", icon: Icon.Character },
       { id: "Keypoints", label: "Key Point Library", icon: Icon.Character },
       { id: "Presets", icon: Icon.Preset },
@@ -284,6 +290,10 @@ export const navSections = [
 export const viewTitles = {
   Library: { title: "Assets", blurb: "Browse stills and clips across all your projects." },
   LibraryDataSets: { title: "Data Sets", blurb: "Create and caption training datasets." },
+  DatasetCatalogs: {
+    title: "Dataset Catalogs",
+    blurb: "Index, analyze, and monitor large datasets independently of any workspace.",
+  },
   Poses: { title: "Pose Library", blurb: "Manage whole-body pose skeletons and create new ones from photos." },
   Keypoints: {
     title: "Key Point Library",
@@ -510,6 +520,7 @@ export function App() {
   const [setupCompleted, setSetupCompleted] = useState(isDesktopShell ? null : true);
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
+  const [navigationHydrated, setNavigationHydrated] = useState(false);
   const [simpleActiveScreen, setSimpleActiveScreen] = useState("image");
   // Selective lazy keep-alive (sc-11959): the set of keep-alive views the user has
   // visited at least once. A view mounts on first visit (activeView === view) and,
@@ -1242,6 +1253,11 @@ export function App() {
     activeViewRef.current = activeView;
   }, [activeView]);
 
+  useEffect(() => {
+    if (!navigationHydrated) return;
+    persistNavigationPreferences({ activeView });
+  }, [activeView, navigationHydrated]);
+
   // Record a keep-alive view the first time it becomes active so it stays mounted
   // thereafter (sc-11959). Never-visited keep-alive views are absent from the DOM.
   useEffect(() => {
@@ -1337,8 +1353,15 @@ export function App() {
         if (prefs?.perModelTier) {
           seedLastTiersFromServer(prefs.perModelTier);
         }
+        const persistedView = prefs?.activeView;
+        if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
+          setActiveView(persistedView);
+        }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setNavigationHydrated(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -2801,12 +2824,22 @@ export function App() {
   };
   // First-run gate: until at least one workspace exists, replace the studio area
   // with a create prompt so navigation never lands on dead, project-scoped controls.
-  const needsFirstProject = authenticated && projectsLoaded && projects.length === 0;
+  const needsFirstProject =
+    authenticated &&
+    projectsLoaded &&
+    projects.length === 0 &&
+    activeView !== "DatasetCatalogs";
   // Desktop first-run wizard (sc-1473): supersedes the project gate while the
   // completion marker is unset. `null` means we're still reading the marker on
   // desktop — hold the studio/gate back briefly to avoid a flash.
-  const setupGateLoading = isDesktopShell && setupCompleted === null;
-  const showSetupWizard = isDesktopShell && setupCompleted === false && authenticated;
+  const catalogBypassesProjectSetup = activeView === "DatasetCatalogs";
+  const setupGateLoading =
+    isDesktopShell && setupCompleted === null && !catalogBypassesProjectSetup;
+  const showSetupWizard =
+    isDesktopShell &&
+    setupCompleted === false &&
+    authenticated &&
+    !catalogBypassesProjectSetup;
   // The Simple shell replaces the workspace only once the app is actually usable. The
   // first-run flows — the desktop setup wizard and the "create your first workspace"
   // gate — stay on the existing shell that owns them, so Simple never renders studios
@@ -3250,6 +3283,7 @@ export function App() {
         {activeView === "Library" ? <LibraryScreen /> : null}
         {activeView === "Queue" ? <QueueScreen /> : null}
         {activeView === "Models" ? <ModelManagerScreen /> : null}
+        {authenticated && activeView === "DatasetCatalogs" ? <DatasetCatalogsScreen /> : null}
         {/* Accent + the Simple-mode default live in App state alongside the sidebar's mode
             switch (they are not on the app context), so Settings receives them as props —
             the same pair SimpleShell gets, writing through to the same ui-preferences store. */}

@@ -5,7 +5,11 @@ vi.mock("./api.js", () => ({ apiFetch: vi.fn(() => Promise.resolve({})) }));
 
 import { apiFetch } from "./api.js";
 import { ACCESS_TOKEN_KEY } from "./accessToken.js";
-import { putUiPreferences } from "./uiPreferences.js";
+import {
+  persistNavigationPreferences,
+  putUiPreferences,
+  resetNavigationPreferenceQueueForTests,
+} from "./uiPreferences.js";
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -13,9 +17,18 @@ beforeEach(() => {
   apiFetch.mockImplementation(() => Promise.resolve({}));
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await resetNavigationPreferenceQueueForTests();
   window.localStorage.clear();
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
 
 // sc-15136. `/api/v1/ui-preferences` is method-asymmetric on the server: the GET is public (the
 // pre-auth theme read) but the PUT writes to disk and is GATED (sc-8869, F-067). Six call sites
@@ -69,5 +82,38 @@ describe("putUiPreferences", () => {
     // SettingsScreen awaits this to roll back its optimistic cache and surface an error.
     apiFetch.mockImplementation(() => Promise.reject(new Error("401 Unauthorized")));
     await expect(putUiPreferences({ theme: "dark" })).rejects.toThrow("401 Unauthorized");
+  });
+});
+
+describe("persistNavigationPreferences", () => {
+  it("serializes writes, coalesces the latest intent, and reads the token at request time", async () => {
+    const first = deferred();
+    const second = deferred();
+    apiFetch
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    window.localStorage.setItem(ACCESS_TOKEN_KEY, "lan-password-1");
+
+    const all = persistNavigationPreferences({ activeView: "Library" });
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    expect(apiFetch.mock.calls[0][1]).toBe("lan-password-1");
+    expect(JSON.parse(apiFetch.mock.calls[0][2].body)).toEqual({ activeView: "Library" });
+
+    persistNavigationPreferences({ activeView: "DatasetCatalogs" });
+    persistNavigationPreferences({ selectedCatalogId: "older" });
+    persistNavigationPreferences({ selectedCatalogId: "newest" });
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+
+    window.localStorage.setItem(ACCESS_TOKEN_KEY, "rotated-password");
+    first.resolve({});
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    expect(apiFetch.mock.calls[1][1]).toBe("rotated-password");
+    expect(JSON.parse(apiFetch.mock.calls[1][2].body)).toEqual({
+      activeView: "DatasetCatalogs",
+      selectedCatalogId: "newest",
+    });
+
+    second.resolve({});
+    await all;
   });
 });

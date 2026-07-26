@@ -83,6 +83,7 @@ use uuid::Uuid;
 
 mod auth;
 use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
+mod catalog_scan_supervisor;
 mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
@@ -109,7 +110,8 @@ use projects::{create_project, get_project, list_projects, reindex_project_endpo
 mod catalogs;
 use catalogs::{
     attach_catalog, catalog_facets, create_catalog, delete_catalog_on_disk, detach_catalog,
-    get_catalog, get_catalog_status, list_catalogs, query_catalog,
+    get_catalog, get_catalog_status, list_catalogs, pause_catalog, query_catalog, resume_catalog,
+    update_catalog_analyzer_config,
 };
 mod assets;
 use assets::{
@@ -1202,6 +1204,32 @@ fn create_app_with_state_mode(
             StartupMaintenance::complete()
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
+        catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
+            std::collections::HashSet::new(),
+        )),
+        catalog_scan_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        catalog_scan_work_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        #[cfg(test)]
+        catalog_scan_before_driver_start_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        catalog_scan_stop_after_pass_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(test)]
+        catalog_scan_before_terminal_exit_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(test)]
+        catalog_scan_terminal_exit_reached: Arc::new(tokio::sync::Notify::new()),
+        #[cfg(test)]
+        catalog_scan_terminal_exit_release: Arc::new(tokio::sync::Notify::new()),
+        #[cfg(test)]
+        catalog_scan_preflight_delay_ms_once: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_preflight_started: Arc::new(tokio::sync::Notify::new()),
+        #[cfg(test)]
+        catalog_scan_preflight_admission_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_preflight_execution_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_preflight_test_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
@@ -1269,6 +1297,12 @@ fn create_app_with_state_mode(
         )
         .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
         .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
+        .route(
+            "/api/v1/catalogs/:catalog_id/analyzer-config",
+            put(update_catalog_analyzer_config),
+        )
+        .route("/api/v1/catalogs/:catalog_id/pause", post(pause_catalog))
+        .route("/api/v1/catalogs/:catalog_id/resume", post(resume_catalog))
         .route(
             "/api/v1/catalogs/:catalog_id/on-disk",
             delete(delete_catalog_on_disk),

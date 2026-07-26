@@ -28,11 +28,12 @@ export function isAbortError(err) {
 // existing `setError(err.message)` call sites are untouched; the status just rides
 // along for the few places that want it.
 export class ApiError extends Error {
-  constructor(message, { status, detail, authRequired } = {}) {
+  constructor(message, { status, detail, authRequired, code } = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.code = code;
     // The API tags its auth rejection (`apps/rust-api/src/auth.rs`); other 4xx bodies
     // don't carry the key, so this is a plain boolean rather than a tri-state.
     this.authRequired = authRequired === true;
@@ -110,6 +111,7 @@ export async function apiFetch(path, token, options = {}) {
       status: response.status,
       detail,
       authRequired: payload?.authRequired,
+      code: payload?.code,
     });
     // `token` matters: a 401 on a request that deliberately presented NO credential says
     // nothing about the session token, so it must not drag the gate up. The case that

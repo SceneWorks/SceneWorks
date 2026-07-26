@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -35,6 +37,7 @@ use sceneworks_core::jobs_store::JobsStore;
 use sceneworks_core::project_store::ProjectStore;
 
 use crate::auth::{cors_layer, AuthThrottle};
+use crate::catalog_scan_supervisor::CatalogScanSupervisor;
 use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
@@ -320,6 +323,42 @@ pub struct AppState {
     /// idempotent catalog/project writes. A retry re-checks the DB after taking
     /// this lock, so two overlapping terminal reports cannot duplicate work.
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
+    /// Owns, deduplicates, cancels, and drains background catalog scans.
+    pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
+    /// Catalog ids for which this AppState has already published an invalid
+    /// persisted recovery plan. Valid scheduled recoveries remain retryable if
+    /// their generation later exits incomplete.
+    pub(crate) catalog_scan_invalid_recovery_reported:
+        Arc<AsyncMutex<std::collections::HashSet<String>>>,
+    /// Caps filesystem/Parquet metadata validation before it reaches Tokio's
+    /// shared blocking pool, preserving capacity for catalog DB operations.
+    pub(crate) catalog_scan_preflight_slots: Arc<Semaphore>,
+    /// Separately caps long-running scanner startup and row passes. Tasks wait
+    /// asynchronously before entering Tokio's shared blocking pool, reserving
+    /// capacity for status/query database work even when many catalogs run.
+    pub(crate) catalog_scan_work_slots: Arc<Semaphore>,
+    /// Deterministic catalog scheduler seams. Production has no hook fields or
+    /// branch overhead.
+    #[cfg(test)]
+    pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_before_terminal_exit_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_terminal_exit_reached: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_terminal_exit_release: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_admission_timeout_ms: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_execution_timeout_ms: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_test_ticks: Arc<AtomicU64>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
@@ -589,6 +628,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result = &mut serve => {
                 state.startup_maintenance.cancel();
                 progress_side_effect_recovery.abort();
+                shutdown_catalog_scans(&state).await;
                 result?;
                 return Ok(());
             }
@@ -600,12 +640,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_result = serve.await;
     state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
+    shutdown_catalog_scans(&state).await;
     serve_result?;
 
     if let Some(worker) = utility_worker {
         worker.shutdown().await;
     }
     Ok(())
+}
+
+async fn shutdown_catalog_scans(state: &AppState) {
+    let result = state.catalog_scan_supervisor.shutdown().await;
+    if result.requested > 0 {
+        tracing::info!(
+            event = "catalog_scan_shutdown_complete",
+            requested = result.requested,
+            joined = result.joined,
+            "catalog scans drained during graceful shutdown"
+        );
+    }
 }
 
 /// Dispatched from `main` when `SCENEWORKS_WORKER_ONLY=1`; the desktop app uses

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -23,6 +23,10 @@ pub const CATALOG_REGISTRY_FILE: &str = "attached-catalogs.json";
 pub const CATALOG_ARTIFACT_DIRECTORIES: &[&str] =
     &["images", "thumbnails", "embeddings", "artifacts"];
 
+pub fn catalog_timestamp_now() -> String {
+    utc_now()
+}
+
 const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
@@ -38,6 +42,9 @@ const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
 const CHECKPOINTS_METADATA_KEY: &str = "checkpoints";
 const PROGRESS_METADATA_KEY: &str = "processing_progress";
+const PROCESSING_CONTROL_METADATA_KEY: &str = "processing_control";
+const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
+const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
 const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
 const CATALOG_NAME_METADATA_KEY: &str = "name";
 const CATALOG_CREATED_AT_METADATA_KEY: &str = "created_at";
@@ -47,6 +54,12 @@ const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
     CATALOG_NAME_METADATA_KEY,
     CATALOG_CREATED_AT_METADATA_KEY,
     CATALOG_SCHEMA_VERSION_METADATA_KEY,
+    SOURCE_CONFIG_METADATA_KEY,
+    ANALYZER_VERSIONS_METADATA_KEY,
+    CHECKPOINTS_METADATA_KEY,
+    PROGRESS_METADATA_KEY,
+    PROCESSING_CONTROL_METADATA_KEY,
+    ANALYZER_CONFIG_METADATA_KEY,
 ];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -59,6 +72,7 @@ pub enum CatalogError {
     InvalidCatalog(String),
     NotFound(String),
     AlreadyExists(String),
+    Conflict(String),
     Corrupt { path: PathBuf, detail: String },
     Incompatible { found: u32, supported: u32 },
 }
@@ -72,6 +86,7 @@ impl std::fmt::Display for CatalogError {
             Self::InvalidCatalog(detail) => write!(formatter, "{detail}"),
             Self::NotFound(detail) => write!(formatter, "{detail}"),
             Self::AlreadyExists(detail) => write!(formatter, "{detail}"),
+            Self::Conflict(detail) => write!(formatter, "{detail}"),
             Self::Corrupt { path, detail } => {
                 write!(
                     formatter,
@@ -183,6 +198,102 @@ pub enum CatalogProcessingState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogProcessingDesiredState {
+    #[default]
+    Running,
+    Paused,
+}
+
+/// Narrow, revisioned user intent for cooperative catalog processors.
+///
+/// This is deliberately stored separately from [`CatalogContractState`]. A
+/// pause/resume request can therefore never replace a scanner checkpoint,
+/// analyzer version, source configuration, or freshly-published progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogProcessingControl {
+    pub desired_state: CatalogProcessingDesiredState,
+    pub revision: u64,
+    pub updated_at: String,
+}
+
+impl Default for CatalogProcessingControl {
+    fn default() -> Self {
+        Self {
+            desired_state: CatalogProcessingDesiredState::Running,
+            revision: 0,
+            updated_at: utc_now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerThresholds {
+    pub person_min_confidence: f64,
+    pub face_min_confidence: f64,
+    pub pose_min_keypoint_confidence: f64,
+    pub prominent_frame_fraction: f64,
+    pub frame_edge_margin: f64,
+    pub min_pose_coverage: f64,
+}
+
+impl Default for CatalogAnalyzerThresholds {
+    fn default() -> Self {
+        Self {
+            person_min_confidence: 0.25,
+            face_min_confidence: 0.65,
+            pose_min_keypoint_confidence: 0.3,
+            prominent_frame_fraction: 0.2,
+            frame_edge_margin: 0.01,
+            min_pose_coverage: 0.72,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerSettings {
+    pub structured_analysis_enabled: bool,
+    pub vision_analysis_enabled: bool,
+    pub semantic_embeddings_enabled: bool,
+    pub thresholds: CatalogAnalyzerThresholds,
+}
+
+impl Default for CatalogAnalyzerSettings {
+    fn default() -> Self {
+        Self {
+            structured_analysis_enabled: true,
+            vision_analysis_enabled: false,
+            semantic_embeddings_enabled: false,
+            thresholds: CatalogAnalyzerThresholds::default(),
+        }
+    }
+}
+
+/// Revisioned catalog-owned analyzer intent. Model versions and run results
+/// remain processor-owned; these settings are durable user choices that later
+/// orchestration can consume without racing scanner/analyzer checkpoints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerConfig {
+    pub settings: CatalogAnalyzerSettings,
+    pub revision: u64,
+    pub updated_at: String,
+}
+
+impl Default for CatalogAnalyzerConfig {
+    fn default() -> Self {
+        Self {
+            settings: CatalogAnalyzerSettings::default(),
+            revision: 0,
+            updated_at: utc_now(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogProcessingProgress {
@@ -241,6 +352,66 @@ pub struct CatalogFacetCount {
 pub struct CatalogFacet {
     pub field: String,
     pub values: Vec<CatalogFacetCount>,
+}
+
+/// Cross-process exclusive lease for all catalog processing and lifecycle
+/// operations that must not overlap it.
+///
+/// The handle releases automatically on drop, including process exit. Scanner
+/// implementations hold it for their complete bounded pass; detach/delete
+/// acquire the same lease before changing registry or disk state.
+#[derive(Debug)]
+pub struct CatalogProcessingLease {
+    _file: File,
+}
+
+impl CatalogProcessingLease {
+    pub fn try_acquire(catalog: &Catalog) -> CatalogResult<Self> {
+        use fs2::FileExt as _;
+
+        let lock_path = catalog.root.join(PROCESSING_LEASE_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(CatalogError::InvalidCatalog(
+                    "Catalog processing lock must be a regular file".to_owned(),
+                ));
+            }
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        let contended = fs2::lock_contended_error().raw_os_error();
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(error) if error.raw_os_error() == contended => Err(CatalogError::Conflict(
+                "Catalog processing is active".to_owned(),
+            )),
+            Err(error) => Err(CatalogError::Io(error)),
+        }
+    }
+
+    pub fn is_active(catalog: &Catalog) -> CatalogResult<bool> {
+        match Self::try_acquire(catalog) {
+            Ok(lease) => {
+                drop(lease);
+                Ok(false)
+            }
+            Err(CatalogError::Conflict(_)) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reconciles a processor state left behind by a crashed process.
+    ///
+    /// Holding this lease proves that no live processor owns the catalog. The
+    /// update is deliberately limited to the progress metadata row so scanner
+    /// checkpoints, source configuration, analyzers, and user intent survive.
+    pub fn reconcile_interrupted(&self, catalog: &Catalog) -> CatalogResult<bool> {
+        catalog.reconcile_interrupted_processing()
+    }
 }
 
 #[derive(Debug)]
@@ -770,6 +941,240 @@ impl Catalog {
             .map_err(|error| map_sqlite_error(&database_path, error))
     }
 
+    pub fn processing_control(&self) -> CatalogResult<CatalogProcessingControl> {
+        self.read_contract_value(PROCESSING_CONTROL_METADATA_KEY)
+            .map(|control| {
+                control.unwrap_or_else(|| CatalogProcessingControl {
+                    updated_at: self.descriptor.created_at.clone(),
+                    ..CatalogProcessingControl::default()
+                })
+            })
+    }
+
+    pub fn analyzer_config(&self) -> CatalogResult<CatalogAnalyzerConfig> {
+        self.read_contract_value(ANALYZER_CONFIG_METADATA_KEY)
+            .map(|config| {
+                config.unwrap_or_else(|| CatalogAnalyzerConfig {
+                    updated_at: self.descriptor.created_at.clone(),
+                    ..CatalogAnalyzerConfig::default()
+                })
+            })
+    }
+
+    /// Atomically advances user analyzer settings without rewriting processor
+    /// provenance, checkpoints, or progress.
+    pub fn request_analyzer_config(
+        &self,
+        expected_revision: u64,
+        settings: CatalogAnalyzerSettings,
+    ) -> CatalogResult<CatalogAnalyzerConfig> {
+        validate_analyzer_settings(&settings)?;
+        let database_path = self.database_path();
+        let default = CatalogAnalyzerConfig {
+            updated_at: self.descriptor.created_at.clone(),
+            ..CatalogAnalyzerConfig::default()
+        };
+        self.connection
+            .execute(
+                "insert or ignore into catalog_metadata(key, value) values (?1, ?2)",
+                params![
+                    ANALYZER_CONFIG_METADATA_KEY,
+                    serde_json::to_string(&default)?
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current_payload: String = self
+            .connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [ANALYZER_CONFIG_METADATA_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current = serde_json::from_str::<CatalogAnalyzerConfig>(&current_payload)?;
+        if current.revision != expected_revision {
+            return Err(CatalogError::Conflict(
+                "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+            ));
+        }
+        let next = CatalogAnalyzerConfig {
+            settings,
+            revision: current.revision.checked_add(1).ok_or_else(|| {
+                CatalogError::Conflict("Catalog analyzer revision is exhausted".to_owned())
+            })?,
+            updated_at: utc_now(),
+        };
+        let changed = self
+            .connection
+            .execute(
+                "update catalog_metadata set value = ?1 where key = ?2 and value = ?3",
+                params![
+                    serde_json::to_string(&next)?,
+                    ANALYZER_CONFIG_METADATA_KEY,
+                    current_payload
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        if changed != 1 {
+            return Err(CatalogError::Conflict(
+                "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+            ));
+        }
+        Ok(next)
+    }
+
+    /// Atomically advances user processing intent without reading or rewriting
+    /// any other catalog contract field.
+    pub fn request_processing_control(
+        &self,
+        expected_revision: u64,
+        desired_state: CatalogProcessingDesiredState,
+    ) -> CatalogResult<CatalogProcessingControl> {
+        let database_path = self.database_path();
+        let default = CatalogProcessingControl {
+            updated_at: self.descriptor.created_at.clone(),
+            ..CatalogProcessingControl::default()
+        };
+        self.connection
+            .execute(
+                "insert or ignore into catalog_metadata(key, value) values (?1, ?2)",
+                params![
+                    PROCESSING_CONTROL_METADATA_KEY,
+                    serde_json::to_string(&default)?
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current_payload: String = self
+            .connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [PROCESSING_CONTROL_METADATA_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current = serde_json::from_str::<CatalogProcessingControl>(&current_payload)?;
+        if current.revision != expected_revision {
+            return Err(CatalogError::Conflict(
+                "Catalog processing control changed; refresh and retry".to_owned(),
+            ));
+        }
+        let progress_payload: Option<String> = self
+            .connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [PROGRESS_METADATA_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let actual = progress_payload
+            .map(|payload| serde_json::from_str::<CatalogProcessingProgress>(&payload))
+            .transpose()?
+            .unwrap_or_default();
+        let valid = matches!(
+            (current.desired_state, actual.state, desired_state),
+            (
+                CatalogProcessingDesiredState::Running,
+                CatalogProcessingState::Running,
+                CatalogProcessingDesiredState::Paused
+            ) | (
+                CatalogProcessingDesiredState::Paused,
+                CatalogProcessingState::Paused,
+                CatalogProcessingDesiredState::Running
+            ) | (
+                _,
+                CatalogProcessingState::Failed,
+                CatalogProcessingDesiredState::Running
+            )
+        );
+        if !valid {
+            return Err(CatalogError::Conflict(
+                "Catalog processing state does not allow that transition".to_owned(),
+            ));
+        }
+        let next = CatalogProcessingControl {
+            desired_state,
+            revision: current.revision.checked_add(1).ok_or_else(|| {
+                CatalogError::Conflict("Catalog processing revision is exhausted".to_owned())
+            })?,
+            updated_at: utc_now(),
+        };
+        let changed = self
+            .connection
+            .execute(
+                "update catalog_metadata set value = ?1 where key = ?2 and value = ?3",
+                params![
+                    serde_json::to_string(&next)?,
+                    PROCESSING_CONTROL_METADATA_KEY,
+                    current_payload
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        if changed != 1 {
+            return Err(CatalogError::Conflict(
+                "Catalog processing control changed; refresh and retry".to_owned(),
+            ));
+        }
+        Ok(next)
+    }
+
+    /// Publishes actual processor progress without replacing source, analyzer,
+    /// checkpoint, or desired-control metadata.
+    pub fn set_processing_progress(
+        &self,
+        progress: &CatalogProcessingProgress,
+    ) -> CatalogResult<()> {
+        validate_processing_progress(progress)?;
+        let database_path = self.database_path();
+        self.connection
+            .execute(
+                "insert or replace into catalog_metadata(key, value) values (?1, ?2)",
+                params![PROGRESS_METADATA_KEY, serde_json::to_string(progress)?],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        Ok(())
+    }
+
+    fn reconcile_interrupted_processing(&self) -> CatalogResult<bool> {
+        let database_path = self.database_path();
+        loop {
+            let current_payload: Option<String> = self
+                .connection
+                .query_row(
+                    "select value from catalog_metadata where key = ?1",
+                    [PROGRESS_METADATA_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let Some(current_payload) = current_payload else {
+                return Ok(false);
+            };
+            let mut progress = serde_json::from_str::<CatalogProcessingProgress>(&current_payload)?;
+            if progress.state != CatalogProcessingState::Running {
+                return Ok(false);
+            }
+            progress.state = CatalogProcessingState::Failed;
+            progress.message =
+                Some("Catalog processing was interrupted; restart it to continue".to_owned());
+            progress.updated_at = utc_now();
+            let changed = self
+                .connection
+                .execute(
+                    "update catalog_metadata set value = ?1 where key = ?2 and value = ?3",
+                    params![
+                        serde_json::to_string(&progress)?,
+                        PROGRESS_METADATA_KEY,
+                        current_payload
+                    ],
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            if changed == 1 {
+                return Ok(true);
+            }
+        }
+    }
+
     fn read_contract_value<T: for<'de> Deserialize<'de>>(
         &self,
         key: &str,
@@ -927,6 +1332,17 @@ impl CatalogRegistry {
             .ok_or_else(|| {
                 CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
             })?;
+        let attached = registry.catalogs[index].clone();
+        let catalog = Catalog::open(&attached.path)
+            .ok()
+            .filter(|catalog| catalog.descriptor().id == catalog_id);
+        let processing_lease = catalog
+            .as_ref()
+            .map(CatalogProcessingLease::try_acquire)
+            .transpose()?;
+        if let (Some(catalog), Some(processing_lease)) = (&catalog, &processing_lease) {
+            processing_lease.reconcile_interrupted(catalog)?;
+        }
         let detached = registry.catalogs.remove(index);
         self.save(&registry)?;
         Ok(detached)
@@ -944,15 +1360,16 @@ impl CatalogRegistry {
                 CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
             })?;
         let attached = registry.catalogs[index].clone();
-        {
-            let catalog = Catalog::open(&attached.path)?;
-            if catalog.descriptor().id != catalog_id {
-                return Err(CatalogError::InvalidCatalog(format!(
-                    "Refusing to delete {} because its catalog identity changed",
-                    attached.path.display()
-                )));
-            }
+        let catalog = Catalog::open(&attached.path)?;
+        if catalog.descriptor().id != catalog_id {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Refusing to delete {} because its catalog identity changed",
+                attached.path.display()
+            )));
         }
+        let processing_lease = CatalogProcessingLease::try_acquire(&catalog)?;
+        processing_lease.reconcile_interrupted(&catalog)?;
+        drop(catalog);
         registry.catalogs.remove(index);
         self.save(&registry)?;
         if let Err(error) = fs::remove_dir_all(&attached.path) {
@@ -1191,7 +1608,7 @@ fn validate_metadata_entry(key: &str, value: &str) -> CatalogResult<()> {
     validate_metadata_key(key)?;
     if RESERVED_CATALOG_METADATA_KEYS.contains(&key) {
         return Err(CatalogError::InvalidCatalog(
-            "Catalog identity metadata is read-only".to_owned(),
+            "Catalog internal metadata is read-only".to_owned(),
         ));
     }
     if value.len() > 1024 * 1024 || value.contains('\0') {
@@ -1347,8 +1764,51 @@ fn validate_contract_state(state: &CatalogContractState) -> CatalogResult<()> {
             "Catalog checkpoints are invalid".to_owned(),
         ));
     }
-    if state
-        .processing
+    validate_processing_progress(&state.processing)?;
+    let serialized = serde_json::to_vec(state)?;
+    if serialized.len() > MAX_CONTRACT_STATE_BYTES {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog contract state exceeds {MAX_CONTRACT_STATE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_analyzer_settings(settings: &CatalogAnalyzerSettings) -> CatalogResult<()> {
+    let thresholds = &settings.thresholds;
+    for (name, value) in [
+        ("personMinConfidence", thresholds.person_min_confidence),
+        ("faceMinConfidence", thresholds.face_min_confidence),
+        (
+            "prominentFrameFraction",
+            thresholds.prominent_frame_fraction,
+        ),
+        ("frameEdgeMargin", thresholds.frame_edge_margin),
+        ("minPoseCoverage", thresholds.min_pose_coverage),
+    ] {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog analyzer {name} must be between 0 and 1"
+            )));
+        }
+    }
+    if thresholds.frame_edge_margin > 0.25 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer frameEdgeMargin must not exceed 0.25".to_owned(),
+        ));
+    }
+    if !thresholds.pose_min_keypoint_confidence.is_finite()
+        || thresholds.pose_min_keypoint_confidence < 0.0
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer poseMinKeypointConfidence must be finite and non-negative".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_processing_progress(progress: &CatalogProcessingProgress) -> CatalogResult<()> {
+    if progress
         .message
         .as_ref()
         .is_some_and(|message| message.len() > 4096)
@@ -1357,11 +1817,10 @@ fn validate_contract_state(state: &CatalogContractState) -> CatalogResult<()> {
             "Catalog processing message exceeds 4096 bytes".to_owned(),
         ));
     }
-    let serialized = serde_json::to_vec(state)?;
-    if serialized.len() > MAX_CONTRACT_STATE_BYTES {
-        return Err(CatalogError::InvalidCatalog(format!(
-            "Catalog contract state exceeds {MAX_CONTRACT_STATE_BYTES} bytes"
-        )));
+    if progress.updated_at.len() > 128 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog processing timestamp is invalid".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2335,5 +2794,256 @@ mod tests {
                 .is_empty(),
             "oversized facet keys are excluded before grouping"
         );
+    }
+
+    #[test]
+    fn processing_control_is_narrow_revisioned_and_preserves_concurrent_contract_updates() {
+        let temporary = tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let catalog = Catalog::create(temporary.path().join("catalog"), "Controlled").unwrap();
+        let mut contract = CatalogContractState {
+            source_config: Some(CatalogSourceConfig {
+                kind: "parquet".to_owned(),
+                paths: vec![source.clone()],
+                options: serde_json::json!({"captionColumn": "TEXT"}),
+            }),
+            analyzer_versions: BTreeMap::from([(
+                "tagger".to_owned(),
+                "model@sha256:one".to_owned(),
+            )]),
+            checkpoints: BTreeMap::from([("scanner".to_owned(), serde_json::json!({"row": 4}))]),
+            processing: CatalogProcessingProgress {
+                state: CatalogProcessingState::Running,
+                message: Some("active".to_owned()),
+                updated_at: catalog_timestamp_now(),
+                ..CatalogProcessingProgress::default()
+            },
+        };
+        catalog.set_contract_state(&contract).unwrap();
+
+        // A processor publishes newer provenance/checkpoint data immediately
+        // before the user request. The narrow control write must not replace it
+        // with an earlier full-contract snapshot.
+        contract
+            .analyzer_versions
+            .insert("tagger".to_owned(), "model@sha256:newer".to_owned());
+        contract
+            .checkpoints
+            .insert("scanner".to_owned(), serde_json::json!({"row": 9}));
+        catalog.set_contract_state(&contract).unwrap();
+        let paused = catalog
+            .request_processing_control(0, CatalogProcessingDesiredState::Paused)
+            .unwrap();
+        assert_eq!(paused.revision, 1);
+        let preserved = catalog.contract_state().unwrap();
+        assert_eq!(preserved.analyzer_versions["tagger"], "model@sha256:newer");
+        assert_eq!(preserved.checkpoints["scanner"]["row"], 9);
+        assert_eq!(
+            preserved.source_config.unwrap().paths,
+            vec![fs::canonicalize(source).unwrap()]
+        );
+        assert!(matches!(
+            catalog.request_processing_control(0, CatalogProcessingDesiredState::Paused),
+            Err(CatalogError::Conflict(_))
+        ));
+        assert!(matches!(
+            catalog.request_processing_control(1, CatalogProcessingDesiredState::Running),
+            Err(CatalogError::Conflict(_))
+        ));
+
+        let mut actual = catalog.contract_state().unwrap().processing;
+        actual.state = CatalogProcessingState::Paused;
+        actual.updated_at = catalog_timestamp_now();
+        catalog.set_processing_progress(&actual).unwrap();
+        let resumed = catalog
+            .request_processing_control(1, CatalogProcessingDesiredState::Running)
+            .unwrap();
+        assert_eq!(resumed.revision, 2);
+        assert_eq!(
+            catalog.contract_state().unwrap().processing.state,
+            CatalogProcessingState::Paused,
+            "desired resume never claims actual running"
+        );
+    }
+
+    #[test]
+    fn simultaneous_processing_control_requests_have_one_conflict_loser() {
+        let temporary = tempdir().expect("temp directory");
+        let registry_root = temporary.path().join("state");
+        let registry = CatalogRegistry::new(&registry_root);
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Concurrent")
+            .unwrap();
+        let id = catalog.descriptor().id.clone();
+        catalog
+            .set_processing_progress(&CatalogProcessingProgress {
+                state: CatalogProcessingState::Running,
+                updated_at: catalog_timestamp_now(),
+                ..CatalogProcessingProgress::default()
+            })
+            .unwrap();
+        catalog.close();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let registry_root = registry_root.clone();
+                let id = id.clone();
+                std::thread::spawn(move || {
+                    let catalog = CatalogRegistry::new(registry_root)
+                        .open_attached(&id)
+                        .unwrap();
+                    barrier.wait();
+                    catalog.request_processing_control(0, CatalogProcessingDesiredState::Paused)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("request thread joins"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CatalogError::Conflict(_))))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn analyzer_configuration_is_durable_validated_and_revision_guarded() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let catalog = Catalog::create(&root, "Analyzers").unwrap();
+        let initial = catalog.analyzer_config().unwrap();
+        assert_eq!(initial.revision, 0);
+        assert!(initial.settings.structured_analysis_enabled);
+        assert!(!initial.settings.vision_analysis_enabled);
+
+        let mut settings = initial.settings;
+        settings.vision_analysis_enabled = true;
+        settings.semantic_embeddings_enabled = true;
+        settings.thresholds.person_min_confidence = 0.4;
+        let updated = catalog
+            .request_analyzer_config(0, settings.clone())
+            .expect("analyzer settings persist");
+        assert_eq!(updated.revision, 1);
+        assert_eq!(updated.settings, settings);
+        assert!(matches!(
+            catalog.request_analyzer_config(0, CatalogAnalyzerSettings::default()),
+            Err(CatalogError::Conflict(_))
+        ));
+
+        let mut invalid = settings;
+        invalid.thresholds.frame_edge_margin = 0.5;
+        assert!(matches!(
+            catalog.request_analyzer_config(1, invalid),
+            Err(CatalogError::InvalidCatalog(_))
+        ));
+        catalog.close();
+
+        let reopened = Catalog::open(root).unwrap();
+        assert_eq!(reopened.analyzer_config().unwrap(), updated);
+    }
+
+    #[test]
+    fn detach_and_delete_are_blocked_by_the_shared_active_processing_lease() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Lifecycle")
+            .unwrap();
+        let id = catalog.descriptor().id.clone();
+        let mut contract = catalog.contract_state().unwrap();
+        contract
+            .analyzer_versions
+            .insert("tagger".to_owned(), "model@sha256:keep".to_owned());
+        contract
+            .checkpoints
+            .insert("scanner".to_owned(), serde_json::json!({"row": 17}));
+        contract.processing = CatalogProcessingProgress {
+            state: CatalogProcessingState::Running,
+            updated_at: catalog_timestamp_now(),
+            ..CatalogProcessingProgress::default()
+        };
+        catalog.set_contract_state(&contract).unwrap();
+        let lease = CatalogProcessingLease::try_acquire(&catalog).unwrap();
+        assert!(matches!(
+            registry.detach(&id),
+            Err(CatalogError::Conflict(_))
+        ));
+        assert!(matches!(
+            registry.delete_on_disk(&id),
+            Err(CatalogError::Conflict(_))
+        ));
+        assert!(registry.get(&id).is_ok());
+        assert!(catalog.root().exists());
+        drop(lease);
+        catalog.close();
+        let detached = registry
+            .detach(&id)
+            .expect("stale running state without a lease detaches");
+        let reconciled = Catalog::open(&detached.path).unwrap();
+        let reconciled_contract = reconciled.contract_state().unwrap();
+        let progress = reconciled_contract.processing;
+        assert_eq!(progress.state, CatalogProcessingState::Failed);
+        assert!(progress
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("interrupted")));
+        assert_eq!(
+            reconciled_contract.analyzer_versions["tagger"],
+            "model@sha256:keep"
+        );
+        assert_eq!(reconciled_contract.checkpoints["scanner"]["row"], 17);
+        reconciled.close();
+        registry.attach(&detached.path).expect("catalog reattaches");
+        registry
+            .delete_on_disk(&id)
+            .expect("reconciled catalog deletes safely");
+        assert!(!detached.path.exists());
+    }
+
+    #[test]
+    fn unavailable_or_replaced_catalog_can_be_detached_without_touching_disk() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let missing = registry
+            .create_catalog(temporary.path().join("missing"), "Missing")
+            .unwrap();
+        let missing_id = missing.descriptor().id.clone();
+        let missing_path = missing.root().to_owned();
+        missing.close();
+        fs::remove_dir_all(&missing_path).expect("catalog becomes unavailable");
+
+        let detached_missing = registry
+            .detach(&missing_id)
+            .expect("missing catalog detaches from the registry");
+        assert_eq!(detached_missing.id, missing_id);
+        assert!(!missing_path.exists());
+
+        let original = registry
+            .create_catalog(temporary.path().join("replaced"), "Original")
+            .unwrap();
+        let original_id = original.descriptor().id.clone();
+        let original_path = original.root().to_owned();
+        original.close();
+        fs::remove_dir_all(&original_path).expect("original catalog removes");
+        let replacement = Catalog::create(&original_path, "Replacement").unwrap();
+        let replacement_id = replacement.descriptor().id.clone();
+        replacement.close();
+
+        let detached_replaced = registry
+            .detach(&original_id)
+            .expect("stale identity detaches from the registry");
+        assert_eq!(detached_replaced.id, original_id);
+        let replacement = Catalog::open(&original_path).expect("replacement remains untouched");
+        assert_eq!(replacement.descriptor().id, replacement_id);
     }
 }
