@@ -122,10 +122,11 @@ describe("ApiError (sc-15105)", () => {
   });
 
   // A 401 on a request that deliberately presented no credential says nothing about the
-  // session token. `PUT /api/v1/ui-preferences` (theme, accent, default quality, last
-  // tier) is a gated route the client calls with "" and a swallowed rejection — routing
-  // those to the gate would slam a remote browser into the full-page blocker on a theme
-  // toggle.
+  // session token, so it must not raise the gate. The motivating case was the
+  // `PUT /api/v1/ui-preferences` writes (theme, accent, default quality, last tier) hitting
+  // that gated route with "" and a swallowed rejection — routing those to the gate would
+  // slam a remote browser into the full-page blocker on a theme toggle. Those writes now
+  // send the real token (sc-15136); the rule itself is about the credential, not the route.
   it("ignores a 401 from a request that presented no token", async () => {
     const handler = vi.fn();
     setUnauthorizedHandler(handler);

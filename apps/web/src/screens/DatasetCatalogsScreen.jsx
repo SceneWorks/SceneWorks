@@ -194,8 +194,8 @@ export function DatasetCatalogsScreen() {
     mutationAbortRef.current?.abort();
     setBusy("");
     setSelectedId(id);
-    persistNavigationPreferences({ selectedCatalogId: id }, token);
-  }, [token]);
+    persistNavigationPreferences({ selectedCatalogId: id });
+  }, []);
 
   const refresh = useCallback(async ({ quiet = false, signal, generation = generationRef.current } = {}) => {
     if (!quiet) setLoading(true);

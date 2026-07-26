@@ -433,9 +433,11 @@ describe("useAccessGate (sc-9750)", () => {
     });
 
     it("ignores a 401 from a request that presented no token", async () => {
-      // Several callers hit gated routes with an empty token on purpose (the
-      // `PUT /api/v1/ui-preferences` writes) and swallow the rejection. Those 401s say
-      // nothing about the session, and must not drag the blocker over a live app.
+      // A 401 on a request that presented no credential says nothing about the session and
+      // must not drag the blocker over a live app. The motivating case was the
+      // `PUT /api/v1/ui-preferences` writes hitting that gated route with "" and swallowing
+      // the rejection; they now send the real token (sc-15136), so this guards the rule
+      // itself — the credential decides, not the route.
       const { get, statuses } = await mountUnlocked({ verify: { ok: true } });
       const before = verifyCount();
       statuses.length = 0;

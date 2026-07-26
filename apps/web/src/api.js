@@ -114,10 +114,14 @@ export async function apiFetch(path, token, options = {}) {
       code: payload?.code,
     });
     // `token` matters: a 401 on a request that deliberately presented NO credential says
-    // nothing about the session token, so it must not drag the gate up. Several callers
-    // do exactly that — e.g. the `PUT /api/v1/ui-preferences` writes pass "" — and before
-    // sc-15105 their 401s were simply swallowed by a `.catch(() => {})`. Without this
-    // check a remote browser would slam into the full-page blocker on a theme toggle.
+    // nothing about the session token, so it must not drag the gate up. The case that
+    // motivated this (sc-15105) was the `PUT /api/v1/ui-preferences` writes passing "" on a
+    // gated route and swallowing the 401 with `.catch(() => {})`: without this check a remote
+    // browser would slam into the full-page blocker on a theme toggle. Those call sites now
+    // send the real token (sc-15136), so the guard is no longer load-bearing for THEM — but it
+    // stays, both because the reasoning is method-independent and because the remaining
+    // credential-less callers (`/api/v1/access`, `/api/v1/health`, the pre-auth ui-preferences
+    // GET) are only public by server convention, which a future gating change could revisit.
     if (response.status === 401 && token) {
       // Notify before throwing so the gate reacts even for the callers that swallow
       // their own errors, and record whether it claimed the session. A throwing handler
