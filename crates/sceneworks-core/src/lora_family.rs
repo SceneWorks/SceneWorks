@@ -832,6 +832,60 @@ struct BucketSignature {
     markers: &'static [&'static str],
 }
 
+/// Every block-index prefix a `blocks.<n>.` family spells its transformer blocks with:
+/// diffusers (`transformer.blocks.`), native/ComfyUI (`diffusion_model.blocks.`), and the
+/// kohya/musubi flattened forms (`diffusion_model_blocks_`, `lora_unet_blocks_`).
+///
+/// Wan **and** Anima (Cosmos-Predict2) both use this prefix set, so the prefix alone proves
+/// nothing — [`COSMOS_LEAF_MODULE_MARKERS`] and [`COSMOS_ADALN_MARKERS`] are what separate
+/// them. Shared by the Anima signatures so an Anima LoRA is recognized in whichever export
+/// spelling its trainer produced, matching the prefixes the Wan signatures already accept.
+const BLOCK_PREFIX_MARKERS: &[&str] = &[
+    "diffusion_model.blocks.",
+    "diffusion_model_blocks_",
+    "transformer.blocks.",
+    "lora_unet_blocks_",
+];
+
+/// Anima's Cosmos-Predict2 adaLN-modulation module names (`adaln_modulation_{self_attn,
+/// cross_attn,mlp}.{1,2}` down/up pairs), in the spelling shared by the dotted and
+/// flattened exports. No other family we detect modulates this way — Wan has none, and
+/// Ideogram's is a bare `.adaln_modulation` with no `_self_attn`/`_cross_attn`/`_mlp`
+/// suffix — so one of these keys positively identifies Anima.
+const COSMOS_ADALN_MARKERS: &[&str] = &[
+    "adaln_modulation_self_attn",
+    "adaln_modulation_cross_attn",
+    "adaln_modulation_mlp",
+];
+
+/// Anima's Cosmos-Predict2 *leaf module* names inside a transformer block, in both the
+/// diffusers-dotted and the kohya-flattened spelling.
+///
+/// This is the discriminator that does not depend on which targets a trainer chose. Cosmos
+/// names its attention projections `{self_attn,cross_attn}.{q,k,v}_proj` + `output_proj`
+/// and its feedforward `mlp.layer1` / `mlp.layer2`; Wan — the only other family sharing
+/// [`BLOCK_PREFIX_MARKERS`] — names the very same modules `{self_attn,cross_attn}.{q,k,v,o}`
+/// and `ffn.0` / `ffn.2`. A Wan block key therefore can never contain one of these
+/// substrings, which is what makes them safe both as an Anima requirement and as a Wan
+/// disqualifier.
+///
+/// The `_attn.`/`_attn_` lead-in matches `self_attn` and `cross_attn` in one substring. CLIP
+/// text-encoder keys (`..._self_attn_q_proj`) also contain these, so every signature using
+/// this list pairs it with a block prefix requirement and disqualifies the `lora_te*`
+/// text-encoder prefixes.
+const COSMOS_LEAF_MODULE_MARKERS: &[&str] = &[
+    "_attn.q_proj",
+    "_attn.k_proj",
+    "_attn.v_proj",
+    "_attn.output_proj",
+    "_attn_q_proj",
+    "_attn_k_proj",
+    "_attn_v_proj",
+    "_attn_output_proj",
+    ".mlp.layer",
+    "_mlp_layer",
+];
+
 const SIGNATURES: &[BucketSignature] = &[
     BucketSignature {
         bucket: Bucket::Flux,
@@ -901,6 +955,17 @@ const SIGNATURES: &[BucketSignature] = &[
         disqualifiers: &[
             "transformer.transformer_blocks.",
             "single_transformer_blocks.",
+            // Anima (Cosmos-Predict2) reuses this prefix too, so disqualify on its Cosmos
+            // module naming — no real Wan LoRA carries it (SceneWorks#1670). See the
+            // native/ComfyUI Wan signature below for the full rationale.
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
+            "_attn.q_proj",
+            "_attn.k_proj",
+            "_attn.v_proj",
+            "_attn.output_proj",
+            ".mlp.layer",
         ],
         markers: &[
             "transformer.blocks.",
@@ -934,6 +999,17 @@ const SIGNATURES: &[BucketSignature] = &[
             "adaln_modulation_self_attn",
             "adaln_modulation_cross_attn",
             "adaln_modulation_mlp",
+            // The adaLN keys above only exist when the trainer *targeted* the modulation layers.
+            // An Anima LoRA that trains just attention (and/or the MLP) — the common shape — has
+            // none, and used to land here and be reported as a confident `wan-video`, hard-rejecting
+            // the import (SceneWorks#1670). The Cosmos leaf module names are present in every shape,
+            // and Wan spells the same modules `.q.`/`.k.`/`.v.`/`.o.` + `ffn.0`/`ffn.2`, so they can
+            // never appear in a Wan LoRA — see `COSMOS_LEAF_MODULE_MARKERS`.
+            "_attn.q_proj",
+            "_attn.k_proj",
+            "_attn.v_proj",
+            "_attn.output_proj",
+            ".mlp.layer",
         ],
         markers: &[
             "diffusion_model.blocks.",
@@ -955,7 +1031,24 @@ const SIGNATURES: &[BucketSignature] = &[
             &["lora_unet_blocks_"],
             &["_self_attn_", "_cross_attn_", "_ffn_"],
         ],
-        disqualifiers: &["lora_te_", "lora_te1_", "lora_te2_"],
+        disqualifiers: &[
+            "lora_te_",
+            "lora_te1_",
+            "lora_te2_",
+            // A kohya/musubi-flattened Anima (Cosmos-Predict2) LoRA lands on this same
+            // `lora_unet_blocks_<n>_{self,cross}_attn_...` layout, so the Anima discriminators apply
+            // here exactly as they do to the native/ComfyUI Wan signature above (SceneWorks#1670):
+            // the Cosmos adaLN modulation, and — for the attention/MLP-only shape that trains no
+            // modulation at all — the Cosmos leaf module names, which no Wan LoRA can carry.
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
+            "_attn_q_proj",
+            "_attn_k_proj",
+            "_attn_v_proj",
+            "_attn_output_proj",
+            "_mlp_layer",
+        ],
         markers: &["lora_unet_blocks_", "_self_attn_", "_cross_attn_", "_ffn_"],
     },
     BucketSignature {
@@ -1043,14 +1136,12 @@ const SIGNATURES: &[BucketSignature] = &[
         // The kohya-flattened underscore forms are matched alongside the dotted forms. Wan/Flux/LTX/
         // Ideogram block-word forms are disqualified belt-and-braces; the colliding native-Wan
         // signature additionally disqualifies on the Cosmos adaLN markers so the two never co-score.
-        require_all_of: &[
-            &["diffusion_model.blocks.", "diffusion_model_blocks_"],
-            &[
-                "adaln_modulation_self_attn",
-                "adaln_modulation_cross_attn",
-                "adaln_modulation_mlp",
-            ],
-        ],
+        //
+        // The accepted prefixes are the full `BLOCK_PREFIX_MARKERS` set (not just the ComfyUI
+        // `diffusion_model.` forms), so a kohya/musubi-flattened (`lora_unet_blocks_`) or
+        // diffusers (`transformer.blocks.`) Anima export is recognized here rather than falling
+        // through to the Wan signature that accepts those same prefixes (SceneWorks#1670).
+        require_all_of: &[BLOCK_PREFIX_MARKERS, COSMOS_ADALN_MARKERS],
         disqualifiers: &[
             ".ffn.",
             "_ffn_",
@@ -1058,10 +1149,15 @@ const SIGNATURES: &[BucketSignature] = &[
             "double_blocks.",
             "single_blocks",
             "diffusion_model.layers.",
+            "lora_te_",
+            "lora_te1_",
+            "lora_te2_",
         ],
         markers: &[
             "diffusion_model.blocks.",
             "diffusion_model_blocks_",
+            "transformer.blocks.",
+            "lora_unet_blocks_",
             "adaln_modulation_self_attn",
             "adaln_modulation_cross_attn",
             "adaln_modulation_mlp",
@@ -1069,7 +1165,64 @@ const SIGNATURES: &[BucketSignature] = &[
             "_llm_adapter_",
             ".self_attn.",
             ".cross_attn.",
+            "_self_attn_",
+            "_cross_attn_",
             ".mlp.layer",
+            "_mlp_layer",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::Anima,
+        // Anima, the shape that trains no adaLN modulation (SceneWorks#1670). The signature above
+        // keys on the Cosmos adaLN-modulation modules, which only exist in the file when the trainer
+        // *targeted* them — the two official LoRAs do, but the ordinary attention-only (and
+        // attention+MLP) LoRAs people train and share do not. Such a file carries nothing but the
+        // block prefix and `{self,cross}_attn` markers, which is exactly the native/ComfyUI Wan
+        // layout, so it used to be reported as a confident `wan-video` and the import hard-rejected
+        // ("LoRA file appears to be a wan-video model, but family was declared as anima").
+        //
+        // The discriminator that survives any choice of targets is the Cosmos *leaf module* naming —
+        // `{self,cross}_attn.{q,k,v}_proj` / `output_proj` and `mlp.layer{1,2}` against Wan's
+        // `.{q,k,v,o}.` and `ffn.{0,2}` (see `COSMOS_LEAF_MODULE_MARKERS`). Requiring a block prefix
+        // AND one such leaf name identifies Anima positively; the colliding Wan signatures disqualify
+        // on the same list, so the buckets never co-score and trip the runner-up margin.
+        //
+        // Disqualified whenever the adaLN keys are present so this never co-scores with the signature
+        // above (two same-bucket scores would fail the 1.5× margin and return ambiguous — the
+        // x-flux/Flux precedent). `lora_te*` is disqualified because CLIP text-encoder keys
+        // (`..._self_attn_q_proj`) also contain the flattened leaf markers.
+        require_all_of: &[BLOCK_PREFIX_MARKERS, COSMOS_LEAF_MODULE_MARKERS],
+        disqualifiers: &[
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
+            ".ffn.",
+            "_ffn_",
+            "transformer_blocks.",
+            "double_blocks.",
+            "single_blocks",
+            "diffusion_model.layers.",
+            "lora_te_",
+            "lora_te1_",
+            "lora_te2_",
+        ],
+        markers: &[
+            "diffusion_model.blocks.",
+            "diffusion_model_blocks_",
+            "transformer.blocks.",
+            "lora_unet_blocks_",
+            "llm_adapter.",
+            "_llm_adapter_",
+            "_attn.q_proj",
+            "_attn.k_proj",
+            "_attn.v_proj",
+            "_attn.output_proj",
+            "_attn_q_proj",
+            "_attn_k_proj",
+            "_attn_v_proj",
+            "_attn_output_proj",
+            ".mlp.layer",
+            "_mlp_layer",
         ],
     },
     BucketSignature {
@@ -1457,6 +1610,25 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // to match the `ideogram_4` catalog `family` / `loraCompatibility.families`.
     if normalized.contains("ideogram") {
         return Some("ideogram".to_owned());
+    }
+    // Anima (epic 10512): the Cosmos-Predict2 anime DiT. Its catalog/training-base ids are
+    // `anima_base` / `anima_aesthetic` / `anima_turbo` and its weight files
+    // `anima-<variant>-v1.0.safetensors`, so a trainer that stamps the base id or file name
+    // names the family here (SceneWorks#1670) instead of falling through to key detection,
+    // where a metadata-less Anima file can be mistaken for Wan.
+    //
+    // Matched on a token boundary, NOT `contains("anima")`: several unrelated SDXL/SD1.5
+    // architectures embed that substring — Animagine XL (`animagine-xl-3.1`) and AnimateDiff
+    // (`animatediff`) most notably — and mapping one of those to `anima` would hard-reject a
+    // perfectly good SDXL LoRA, the exact failure mode this whole path exists to avoid.
+    if normalized == "anima"
+        || normalized.starts_with("anima_")
+        || normalized.starts_with("anima-")
+        || normalized.contains("cosmos-predict")
+        || normalized.contains("cosmos_predict")
+        || normalized.contains("cosmospredict")
+    {
+        return Some("anima".to_owned());
     }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
@@ -2469,6 +2641,128 @@ mod tests {
         assert_eq!(
             detect_lora_family(&wan_header).as_deref(),
             Some("wan-video")
+        );
+    }
+
+    /// The Cosmos DiT attention/MLP surface WITHOUT the adaLN-modulation targets — the shape an
+    /// ordinary (non-official) Anima LoRA has, and the one SceneWorks#1670 reports. `prefix_key`
+    /// builds the export spelling under test so every prefix the Wan signatures accept is covered.
+    fn anima_attention_only_keys(
+        blocks: usize,
+        prefix_key: fn(usize, &str, &str) -> String,
+    ) -> Vec<String> {
+        let mut keys = Vec::new();
+        for b in 0..blocks {
+            for attn in ["self_attn", "cross_attn"] {
+                for proj in ["q_proj", "k_proj", "v_proj", "output_proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(prefix_key(b, &format!("{attn}.{proj}"), role));
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    fn comfy_dotted_key(block: usize, module: &str, role: &str) -> String {
+        format!("diffusion_model.blocks.{block}.{module}.{role}")
+    }
+
+    fn diffusers_dotted_key(block: usize, module: &str, role: &str) -> String {
+        format!("transformer.blocks.{block}.{module}.{role}")
+    }
+
+    fn kohya_flattened_key(block: usize, module: &str, role: &str) -> String {
+        format!(
+            "lora_unet_blocks_{block}_{}.{role}",
+            module.replace('.', "_")
+        )
+    }
+
+    #[test]
+    fn detects_anima_lora_without_adaln_targets() {
+        // SceneWorks#1670: an Anima LoRA that trains only the attention projections carries no
+        // `adaln_modulation_*` and no `llm_adapter` key, so neither the adaLN signature nor the
+        // unique-key path fires. It has exactly the native/ComfyUI Wan surface — `diffusion_model.
+        // blocks.<n>.{self,cross}_attn.…` — and used to be detected as a confident `wan-video`,
+        // which hard-rejects the import ("appears to be a wan-video model, but family was declared
+        // as anima"). The Cosmos leaf module names (`q_proj`/`output_proj`, never Wan's `.q.`/`.o.`)
+        // are what identify it.
+        let keys = anima_attention_only_keys(28, comfy_dotted_key);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn detects_anima_lora_without_adaln_targets_in_every_export_spelling() {
+        // The same attention-only file as above in the two other prefix spellings a trainer may
+        // emit — diffusers (`transformer.blocks.`) and kohya/musubi (`lora_unet_blocks_`). Both
+        // prefixes are accepted by a Wan signature, so both would otherwise mis-detect.
+        for build in [
+            diffusers_dotted_key as fn(usize, &str, &str) -> String,
+            kohya_flattened_key as fn(usize, &str, &str) -> String,
+        ] {
+            let keys = anima_attention_only_keys(28, build);
+            let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+        }
+    }
+
+    #[test]
+    fn detects_kohya_flattened_anima_lora_with_adaln() {
+        // A kohya/musubi-flattened Anima LoRA that *does* train the modulation layers. Its
+        // `lora_unet_blocks_<n>_…` prefix is the one the kohya Wan signature requires, and its
+        // flattened adaLN keys (`…_adaln_modulation_self_attn_1`) even contain `_self_attn_`, so
+        // before this fix it scored as Wan while the Anima signature — which accepted only the
+        // `diffusion_model.` prefixes — could not see it at all.
+        let mut keys = anima_attention_only_keys(28, kohya_flattened_key);
+        for b in 0..28 {
+            for adaln in [
+                "adaln_modulation_self_attn",
+                "adaln_modulation_cross_attn",
+                "adaln_modulation_mlp",
+            ] {
+                for updown in ["1", "2"] {
+                    for role in ["lora_down.weight", "lora_up.weight"] {
+                        keys.push(format!("lora_unet_blocks_{b}_{adaln}_{updown}.{role}"));
+                    }
+                }
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn anima_metadata_base_ids_detect_without_tensor_evidence() {
+        // A trainer that stamps the Anima training base / weight file names the family outright,
+        // so detection never has to lean on the Wan-shaped tensor keys (SceneWorks#1670).
+        for value in [
+            "anima",
+            "anima_base",
+            "anima_turbo",
+            "anima-aesthetic-v1.0",
+            "cosmos-predict2-2b",
+        ] {
+            assert_eq!(
+                super::metadata_value_to_family(value).as_deref(),
+                Some("anima"),
+                "{value} should name the anima family"
+            );
+        }
+    }
+
+    #[test]
+    fn anima_metadata_match_does_not_swallow_animagine_or_animatediff() {
+        // `contains("anima")` would map Animagine XL and AnimateDiff — both SDXL/SD1.5 — onto the
+        // anima family and hard-reject legitimate SDXL LoRAs, so the match is token-bounded.
+        // Neither names a family (an inconclusive `None` keeps the user's declared family), and
+        // crucially neither is claimed as `anima`.
+        assert_eq!(super::metadata_value_to_family("animagine-xl-3.1"), None);
+        assert_eq!(super::metadata_value_to_family("animatediff"), None);
+        assert_eq!(
+            super::metadata_value_to_family("sdxl_animagine_v3").as_deref(),
+            Some("sdxl")
         );
     }
 
