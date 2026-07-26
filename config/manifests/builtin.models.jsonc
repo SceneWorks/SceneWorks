@@ -3933,7 +3933,7 @@
           // (`DENSE_TE_TIER_MODELS`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
+          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -3943,7 +3943,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
+          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -3954,7 +3954,7 @@
           // per-variant tracking (sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
-          "revision": "1d36c68041725a14c76566cdf6cea4270b264b03",
+          "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -4095,7 +4095,7 @@
           // load via `DENSE_TE_TIER_MODELS`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
+          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4105,7 +4105,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
+          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 26100000000,
@@ -4114,7 +4114,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
-          "revision": "fc6579b25dcb7e1bce85dd27cb9b901312110bab",
+          "revision": "406265beebe141024a06e24038c3713cf7af87d8",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 34600000000,
@@ -4324,7 +4324,7 @@
           // bf16 tier added separately. q8/ is a second entry (tier selection: epic 8506 sc-8508/8509).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
-          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -4334,7 +4334,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
-          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 55000000000,
@@ -4347,7 +4347,7 @@
           // generates; 256² fits a 128 GB box, production 1024² wants >128 GB).
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-dev-mlx",
-          "revision": "0c9b86f4d91eeaec3db11bcc9cc0e4c006faed74",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 113000000000,
