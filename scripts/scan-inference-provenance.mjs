@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-export const REVISION = "078acac3cbc012029a4a8e4bcda50e134fad9481";
+export const REVISION = "c7c14ad4ca44a6906a9c7f796b88adf9efec3886";
 export const MARKER =
   /\b(?:faithful(?:\s+\w+){0,3}\s+ports?|ported\s+from|ports?\s+of|vendors?|vendored|transcribed|copied(?:\s+\w+){0,3}\s+verbatim|adapted\s+from)\b/giu;
 
