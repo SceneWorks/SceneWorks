@@ -641,6 +641,8 @@ async fn schedule_catalog_scan(
     let terminal_exit_release = state.catalog_scan_terminal_exit_release.clone();
     let work_slots = state.catalog_scan_work_slots.clone();
     let log_catalog_id = catalog_id.clone();
+    let rejected_config_dir = config_dir.clone();
+    let rejected_catalog_id = catalog_id.clone();
     let spawned = state
         .catalog_scan_supervisor
         .spawn(catalog_id.clone(), move |cancellation| async move {
@@ -650,12 +652,19 @@ async fn schedule_catalog_scan(
             if let Some(barrier) = start_barrier {
                 tokio::select! {
                     _ = barrier.wait() => {}
-                    _ = cancellation.cancelled() => return,
+                    _ = cancellation.cancelled() => {
+                        reconcile_cancelled_catalog_scan(
+                            config_dir.clone(),
+                            catalog_id.clone(),
+                        ).await;
+                        return;
+                    },
                 }
             }
             let mut retry_delay = std::time::Duration::from_millis(10);
             let mut driver = loop {
                 if cancellation.is_cancelled() {
+                    reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
                     return;
                 }
                 let pass_config_dir = config_dir.clone();
@@ -695,9 +704,24 @@ async fn schedule_catalog_scan(
                                     &cancellation,
                                 )
                                 .await;
+                                if cancellation.is_cancelled() {
+                                    reconcile_cancelled_catalog_scan(
+                                        config_dir.clone(),
+                                        catalog_id.clone(),
+                                    )
+                                    .await;
+                                }
                                 return;
                             }
-                            Ok(Some(Err(CatalogError::NotFound(_)))) | Ok(None) => return,
+                            Ok(Some(Err(CatalogError::NotFound(_)))) => return,
+                            Ok(None) => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                )
+                                .await;
+                                return;
+                            }
                             Ok(Some(Err(error))) => {
                                 tracing::error!(
                                     event = "catalog_parquet_scan_retry_check_failed",
@@ -719,7 +743,13 @@ async fn schedule_catalog_scan(
                         }
                         tokio::select! {
                             _ = tokio::time::sleep(retry_delay) => {}
-                            _ = cancellation.cancelled() => return,
+                            _ = cancellation.cancelled() => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                ).await;
+                                return;
+                            },
                         }
                         retry_delay = retry_delay
                             .saturating_mul(2)
@@ -734,7 +764,11 @@ async fn schedule_catalog_scan(
                         );
                         return;
                     }
-                    Ok(None) => return,
+                    Ok(None) => {
+                        reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
+                            .await;
+                        return;
+                    }
                     Err(error) => {
                         tracing::error!(
                             event = "catalog_parquet_scan_task_failed",
@@ -779,6 +813,13 @@ async fn schedule_catalog_scan(
                                 &cancellation,
                             )
                             .await;
+                            if cancellation.is_cancelled() {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                )
+                                .await;
+                            }
                             break;
                         }
                         #[cfg(test)]
@@ -808,7 +849,11 @@ async fn schedule_catalog_scan(
                         );
                         break;
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
+                            .await;
+                        break;
+                    }
                 }
             }
         })
@@ -823,10 +868,73 @@ async fn schedule_catalog_scan(
             );
         }
         CatalogScanSpawn::ShuttingDown => {
+            reconcile_cancelled_catalog_scan(rejected_config_dir, rejected_catalog_id).await;
             tracing::warn!(
                 event = "catalog_parquet_scan_rejected_during_shutdown",
                 catalog_id = log_catalog_id,
                 "catalog Parquet scan was not started because the server is shutting down"
+            );
+        }
+    }
+}
+
+async fn reconcile_cancelled_catalog_scan(config_dir: PathBuf, catalog_id: String) {
+    let log_catalog_id = catalog_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = match registry.open_attached(&catalog_id) {
+            Ok(catalog) => catalog,
+            Err(CatalogError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let _lease = match CatalogProcessingLease::try_acquire(&catalog) {
+            Ok(lease) => lease,
+            Err(CatalogError::Conflict(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let control = catalog.processing_control()?;
+        let mut progress = catalog.contract_state()?.processing;
+        if control.desired_state != CatalogProcessingDesiredState::Running
+            || matches!(
+                progress.state,
+                CatalogProcessingState::Completed | CatalogProcessingState::Failed
+            )
+        {
+            return Ok(false);
+        }
+        progress.state = CatalogProcessingState::Failed;
+        progress.message = Some(
+            "Catalog scan was interrupted before it could continue; restart it to resume"
+                .to_owned(),
+        );
+        progress.updated_at = sceneworks_core::catalog_store::catalog_timestamp_now();
+        catalog.set_processing_progress(&progress)?;
+        Ok(true)
+    })
+    .await;
+    match result {
+        Ok(Ok(true)) => {
+            tracing::info!(
+                event = "catalog_parquet_scan_prestart_interrupted",
+                catalog_id = log_catalog_id,
+                "catalog Parquet scan cancellation was published for public restart"
+            );
+        }
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_interruption_publish_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scan cancellation could not be published"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_interruption_task_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scan cancellation publisher stopped"
             );
         }
     }

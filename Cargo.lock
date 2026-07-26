@@ -6438,6 +6438,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtime-cuda",
  "runtime-macos",
+ "same-file",
  "sceneworks-core",
  "sceneworks-gen-core",
  "sceneworks-image-quality",
