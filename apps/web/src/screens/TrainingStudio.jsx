@@ -312,6 +312,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
+    deleteTrainingDataset,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetParquetImportJob,
     createTrainingDatasetUpscaleJob,
@@ -358,6 +359,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
+  const [deletingDataset, setDeletingDataset] = useState(false);
+  // Guards the async gap between the delete click and the confirm resolving, so a
+  // double-click can't fire two DELETEs before `deletingDataset` disables the button.
+  const deleteDatasetGuardRef = useRef(false);
   const openDatasetRef = useRef(null);
   const handledParquetImportJobsRef = useRef(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
@@ -968,6 +973,54 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     await openDataset(activeDataset.id);
+  }
+
+  // Permanently delete the OPEN dataset — the backend wipes its on-disk root (images,
+  // caption sidecars, embedding/face sidecars, manifest) and the SQLite index row. A
+  // danger confirm gates it (window.confirm no-ops in the Tauri WebView); if any caption/
+  // analysis/upscale/training job is still running against this dataset, the confirm warns
+  // that yanking the files will fail those jobs. On success the editor is cleared like the
+  // open-nothing branch of openDataset, and the hook's refresh drops it from the picker.
+  async function handleDeleteDataset() {
+    const dataset = activeDataset;
+    if (!dataset?.id || deleteDatasetGuardRef.current || typeof deleteTrainingDataset !== "function") {
+      return;
+    }
+    const itemCount = (dataset.items ?? []).length;
+    const runningJobs = jobs.filter(
+      (job) => job.payload?.datasetId === dataset.id && !terminalStatuses.has(job.status),
+    ).length;
+    const jobWarning = runningJobs
+      ? ` ${runningJobs} running job${runningJobs === 1 ? "" : "s"} on this dataset will fail once its files are removed.`
+      : "";
+    const proceed = await appConfirm({
+      title: "Delete this dataset?",
+      message: `“${dataset.name}” and all ${itemCount} image${itemCount === 1 ? "" : "s"}, their captions, and analysis data will be permanently deleted. This cannot be undone.${jobWarning}`,
+      confirmLabel: "Delete permanently",
+      cancelLabel: "Cancel",
+      tone: "danger",
+    });
+    if (!proceed) {
+      return;
+    }
+    deleteDatasetGuardRef.current = true;
+    setDeletingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      await deleteTrainingDataset(dataset.id, activeProject?.id);
+      setActiveDataset(null);
+      setDraftName("");
+      setSelectedAssetIds([]);
+      setAssociatedCharacterId("");
+      setSelectedDatasetId("");
+      setDatasetMessage("Dataset deleted");
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setDeletingDataset(false);
+      deleteDatasetGuardRef.current = false;
+    }
   }
 
   useEffect(() => {
@@ -1721,6 +1774,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   renaming, memberAssets, applyOrderedNames, setCaptionDialog, health,
                   canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
                   removeUnavailableAsset, onImportParquet: importParquetDataset,
+                  onDeleteDataset: handleDeleteDataset, deletingDataset,
                 }}
                 captionSession={{
                   captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,

@@ -197,6 +197,28 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
   );
 
+  // Permanently delete a dataset: the DELETE endpoint removes the on-disk dataset root
+  // (images, caption sidecars, embedding/face sidecars, manifest) AND the SQLite index
+  // row in one cascade. Like create/update, refresh the list afterward so the removed
+  // dataset drops out of the picker.
+  const deleteTrainingDataset = useCallback(
+    async (datasetId, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const result = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`,
+        token,
+        { method: "DELETE" },
+      );
+      if (isCurrentTrainingRequest(projectId)) {
+        await refreshTrainingDatasets(projectId);
+      }
+      return result;
+    },
+    [token, activeProject, isCurrentTrainingRequest, refreshTrainingDatasets],
+  );
+
   const writeTrainingDatasetCaptionSidecars = useCallback(
     async (datasetId, payload, projectId = activeProject?.id) => {
       if (!projectId || !datasetId) {
@@ -390,6 +412,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     uploadTrainingDatasetItem,
     updateTrainingDataset,
     batchRenameTrainingDataset,
+    deleteTrainingDataset,
     writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob,
     createTrainingDatasetParquetImportJob,
