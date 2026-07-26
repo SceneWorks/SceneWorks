@@ -193,7 +193,12 @@ def wait_for_health(
         try:
             response = httpx.get(f"{base_url}/api/v1/health", timeout=1)
             if response.status_code == 200:
-                return
+                body = response.json()
+                readiness = body.get("readiness")
+                if body.get("status") == "ok" and (
+                    readiness is None or readiness.get("status") == "ready"
+                ):
+                    return
         except httpx.HTTPError as exc:
             last_error = exc
         time.sleep(0.25)

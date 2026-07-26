@@ -9,6 +9,7 @@
 // what main.test.jsx defined. It is named *.testSupport.jsx (not *.test.jsx) so
 // Vitest's default include glob does not collect it as a test file.
 import React, { act } from "react";
+import { waitForLazyScreenImports } from "./components/LazyScreen.jsx";
 import { AppContext } from "./context/AppContext.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
@@ -200,6 +201,13 @@ export function errorResponse(status, detail) {
 
 export async function settle() {
   await act(async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await Promise.resolve();
+    }
+    // Route screens resolve through Vite's dynamic-import transform. Await the
+    // imports tracked by the shared lazy boundary, then drain the React work
+    // queued when each Suspense boundary resolves.
+    await waitForLazyScreenImports();
     for (let index = 0; index < 6; index += 1) {
       await Promise.resolve();
     }

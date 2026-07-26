@@ -15,28 +15,40 @@
 //! module reaches them through `crate::`.
 
 use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{Json, Router};
 use parking_lot::Mutex;
+use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tower::ServiceExt;
 
 use sceneworks_core::jobs_store::JobsStore;
 use sceneworks_core::project_store::ProjectStore;
 
-use crate::auth::AuthThrottle;
+use crate::auth::{cors_layer, AuthThrottle};
 use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
 use crate::manifest::ManifestCache;
 use crate::models::{ModelCatalogCache, ModelSizeCache};
+use crate::startup::{
+    StartupCriticality, StartupMaintenance, StartupPhaseTimer, BACKGROUND_MAINTENANCE_TIMEOUT,
+};
 use crate::tickets::TicketStore;
 use crate::{
-    create_app_with_state, env_path_or, env_string, open_bind_override_enabled, parent_death,
-    parent_pid_to_watch, seed_mode_for_config_dir, should_warn_open_bind, shutdown_signal,
-    spawn_inprocess_utility_worker, DEFAULT_API_HOST, DEFAULT_CORS_ORIGINS,
+    create_app_with_pending_startup_maintenance, env_path_or, env_string,
+    open_bind_override_enabled, parent_death, parent_pid_to_watch, seed_mode_for_config_dir,
+    should_warn_open_bind, shutdown_signal, spawn_inprocess_utility_worker, DEFAULT_API_HOST,
+    DEFAULT_CORS_ORIGINS,
 };
 
 #[derive(Debug, Clone)]
@@ -301,6 +313,9 @@ pub struct AppState {
     pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
+    /// Safe, path-free status for bounded stale-upload cleanup that starts
+    /// after the listener is bound and readiness-critical initialization ends.
+    pub(crate) startup_maintenance: StartupMaintenance,
     /// Serializes the durable terminal-progress handoff from the jobs DB to
     /// idempotent catalog/project writes. A retry re-checks the DB after taking
     /// this lock, so two overlapping terminal reports cannot duplicate work.
@@ -323,6 +338,89 @@ pub struct AppState {
     pub(crate) progress_side_effects_fail_job_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     #[cfg(test)]
     pub(crate) progress_side_effects_attempts: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+#[derive(Clone)]
+struct BootstrapState {
+    settings: Settings,
+    ready_app: Arc<OnceLock<Router>>,
+    startup_maintenance: StartupMaintenance,
+}
+
+fn bootstrap_router(
+    settings: Settings,
+    ready_app: Arc<OnceLock<Router>>,
+    startup_maintenance: StartupMaintenance,
+) -> Router {
+    let cors = cors_layer(&settings);
+    Router::new()
+        .fallback(bootstrap_dispatch)
+        .with_state(BootstrapState {
+            settings,
+            ready_app,
+            startup_maintenance,
+        })
+        // Keep the browser-visible readiness surface usable while the real
+        // application router is still performing readiness-critical startup.
+        // The same configured policy is retained after the ready router is
+        // installed; duplicate allow-origin insertion is idempotent.
+        .layer(cors)
+}
+
+async fn bootstrap_dispatch(
+    State(state): State<BootstrapState>,
+    request: Request<Body>,
+) -> Response {
+    if let Some(app) = state.ready_app.get() {
+        return match app.clone().oneshot(request).await {
+            Ok(response) => response,
+            Err(error) => match error {},
+        };
+    }
+
+    match request.uri().path() {
+        "/api/v1/health" => {
+            let token_configured = !state.settings.access_token.is_empty();
+            Json(json!({
+                "status": "starting",
+                "service": "sceneworks-api",
+                "runtime": "rust",
+                "version": state.settings.app_version,
+                "authRequired": token_configured,
+                "directories": if token_configured {
+                    None
+                } else {
+                    Some(json!({
+                        "data": state.settings.data_dir.display().to_string(),
+                        "config": state.settings.config_dir.display().to_string(),
+                        "projects": state.settings.projects_dir().display().to_string(),
+                        "jobsDb": state.settings.jobs_db_path.display().to_string(),
+                    }))
+                },
+                "interruptedJobsOnStartup": 0,
+                "readiness": {
+                    "status": "initializing",
+                    "criticality": "readiness-critical",
+                },
+                "startupMaintenance": state.startup_maintenance.snapshot(),
+            }))
+            .into_response()
+        }
+        "/api/v1/access" => Json(json!({
+            "authRequired": !state.settings.access_token.is_empty(),
+            "tokenHeader": "X-SceneWorks-Token",
+        }))
+        .into_response(),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "1")],
+            Json(json!({
+                "detail": "SceneWorks API readiness-critical startup is still running",
+                "code": "api_initializing",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -357,14 +455,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // customizations live in the separate `user.*.jsonc` files, which seeding never touches.
     let seed_mode =
         seed_mode_for_config_dir(std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref());
-    if let Err(error) =
-        sceneworks_core::builtin_manifests::seed_builtin_manifests(&settings.config_dir, seed_mode)
     {
-        return Err(format!(
-            "failed to seed builtin manifests into {}: {error}",
-            settings.config_dir.join("manifests").display()
-        )
-        .into());
+        let _phase =
+            StartupPhaseTimer::start("builtin_manifest_seed", StartupCriticality::BindCritical);
+        if let Err(error) = sceneworks_core::builtin_manifests::seed_builtin_manifests(
+            &settings.config_dir,
+            seed_mode,
+        ) {
+            return Err(format!(
+                "failed to seed builtin manifests into {}: {error}",
+                settings.config_dir.join("manifests").display()
+            )
+            .into());
+        }
     }
     let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
     // sc-4201 (F-API-1) / sc-5720 (API-001): a non-loopback bind with no access token
@@ -413,35 +516,89 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let run_utility_inprocess = settings.run_utility_inprocess;
     let utility_data_dir = settings.data_dir.clone();
-    let (app, state) = create_app_with_state(settings)?;
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    let progress_side_effect_recovery =
-        crate::jobs::spawn_terminal_progress_side_effect_recovery(state);
+    // Bind before any readiness-critical filesystem/SQLite initialization and
+    // before background-safe network-volume sweeps. The socket can accept as
+    // soon as the router is ready; stale upload cleanup can never hold the port
+    // closed indefinitely.
+    let listener = {
+        let _phase = StartupPhaseTimer::start("listener_bind", StartupCriticality::BindCritical);
+        tokio::net::TcpListener::bind(address).await?
+    };
     // Use the actual bound address so port 0 (OS-assigned) is reported and the
-    // in-process worker connects to the real port.
+    // in-process worker connects to the real port. `api_listening` now means the
+    // bootstrap health/access surface is accepting; `api_ready` below means all
+    // readiness-critical invariants are complete.
     let bound = listener.local_addr()?;
     let port = bound.port();
+    let ready_app = Arc::new(OnceLock::new());
+    let bootstrap_maintenance = StartupMaintenance::pending();
+    let bootstrap = bootstrap_router(
+        settings.clone(),
+        ready_app.clone(),
+        bootstrap_maintenance.clone(),
+    );
     tracing::info!(
         event = "api_listening",
         address = %bound,
-        "SceneWorks API listening"
+        "SceneWorks API bootstrap health/access surface listening"
     );
 
+    // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to
+    // both the bootstrap dispatcher and, once installed, the real router's auth
+    // middleware. Poll this server while readiness-critical filesystem/SQLite
+    // work builds the real router on the blocking pool.
+    let serve = axum::serve(
+        listener,
+        bootstrap.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .into_future();
+    tokio::pin!(serve);
+    let mut build =
+        tokio::task::spawn_blocking(move || create_app_with_pending_startup_maintenance(settings));
+    let build_result = tokio::select! {
+        result = &mut build => result?,
+        result = &mut serve => {
+            bootstrap_maintenance.cancel();
+            build.abort();
+            result?;
+            return Ok(());
+        }
+    };
+    let (app, state) = build_result?;
+    state.startup_maintenance.start(
+        state.settings.data_dir.clone(),
+        BACKGROUND_MAINTENANCE_TIMEOUT,
+    );
+    ready_app
+        .set(app)
+        .map_err(|_| "SceneWorks API router was initialized more than once")?;
+    tracing::info!(
+        event = "api_ready",
+        address = %bound,
+        "SceneWorks API readiness-critical startup completed"
+    );
+    let progress_side_effect_recovery =
+        crate::jobs::spawn_terminal_progress_side_effect_recovery(state.clone());
+
+    // Conversion recovery is readiness-critical for the utility worker, not for
+    // HTTP. Keep polling the already-ready server while the worker initializes.
     let utility_worker = if run_utility_inprocess {
-        Some(spawn_inprocess_utility_worker(port, utility_data_dir).await?)
+        tokio::select! {
+            worker = spawn_inprocess_utility_worker(port, utility_data_dir) => Some(worker?),
+            result = &mut serve => {
+                state.startup_maintenance.cancel();
+                progress_side_effect_recovery.abort();
+                result?;
+                return Ok(());
+            }
+        }
     } else {
         None
     };
 
-    // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
-    // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI
-    // and worker password-free while LAN clients stay gated).
-    let serve_result = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
+    let serve_result = serve.await;
+    state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
     serve_result?;
 
@@ -495,7 +652,10 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod server_tests {
-    use super::{default_mcp_api_url, env_secs};
+    use super::{bootstrap_router, default_mcp_api_url, env_secs};
+    use crate::startup::StartupMaintenance;
+    use crate::tests::support::test_settings;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     #[test]
@@ -517,6 +677,110 @@ mod server_tests {
         assert_eq!(env_secs(name, default), default, "unparseable → default");
 
         std::env::remove_var(name);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_listener_serves_health_and_access_before_readiness() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let ready_app = Arc::new(OnceLock::new());
+        let bootstrap = bootstrap_router(
+            settings.clone(),
+            ready_app.clone(),
+            StartupMaintenance::pending(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("bound address reads");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                bootstrap.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+        });
+        let client = reqwest::Client::new();
+
+        let bootstrap_started = std::time::Instant::now();
+        let health_response = client
+            .get(format!("http://{address}/api/v1/health"))
+            .header("origin", "http://localhost:5173")
+            .send()
+            .await
+            .expect("bootstrap health responds");
+        assert_eq!(
+            health_response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        let health = health_response
+            .json::<serde_json::Value>()
+            .await
+            .expect("bootstrap health parses");
+        assert_eq!(health["status"], "starting");
+        assert_eq!(health["readiness"]["status"], "initializing");
+        let access = client
+            .get(format!("http://{address}/api/v1/access"))
+            .header("origin", "http://localhost:5173")
+            .send()
+            .await
+            .expect("bootstrap access responds");
+        assert_eq!(access.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            access
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        let preflight = client
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{address}/api/v1/access"),
+            )
+            .header("origin", "http://localhost:5173")
+            .header("access-control-request-method", "GET")
+            .send()
+            .await
+            .expect("bootstrap preflight responds");
+        assert_eq!(preflight.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173")
+        );
+        eprintln!(
+            "SC-14788 socket readiness timing: bootstrap /health + /access={:?}",
+            bootstrap_started.elapsed()
+        );
+        let unavailable = client
+            .get(format!("http://{address}/api/v1/projects"))
+            .send()
+            .await
+            .expect("bootstrap non-readiness route responds");
+        assert_eq!(
+            unavailable.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let (app, _) = crate::create_app_with_state(settings).expect("ready app creates");
+        ready_app.set(app).expect("ready app installs once");
+        let ready = client
+            .get(format!("http://{address}/api/v1/health"))
+            .send()
+            .await
+            .expect("ready health responds")
+            .json::<serde_json::Value>()
+            .await
+            .expect("ready health parses");
+        assert_eq!(ready["status"], "ok");
+        assert_eq!(ready["readiness"]["status"], "ready");
+        server.abort();
     }
 
     #[test]
