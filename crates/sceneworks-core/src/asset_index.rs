@@ -7,7 +7,10 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::project_store::{ProjectStoreError, ProjectStoreResult};
+use crate::project_store::{
+    record_asset_list_filesystem_operation, AssetListFilesystemOperation, ProjectStoreError,
+    ProjectStoreResult,
+};
 use crate::store_util::{
     is_safe_id, optional_bool, optional_str, optional_u64, read_json, relative_string,
 };
@@ -34,7 +37,9 @@ pub(crate) struct AssetRecord {
 pub(crate) fn sidecar_content_fingerprint(
     path: &Path,
 ) -> ProjectStoreResult<(u64, Option<String>, String)> {
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
     let bytes = fs::read(path)?;
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
     let modified_ns = fs::metadata(path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
@@ -133,11 +138,14 @@ pub(crate) fn asset_sidecars(project_path: &Path) -> ProjectStoreResult<Vec<Path
 }
 
 pub(crate) fn collect_sidecars(path: &Path, sidecars: &mut Vec<PathBuf>) -> ProjectStoreResult<()> {
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
     if !path.exists() {
         return Ok(());
     }
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::DirectoryScan);
     for entry in fs::read_dir(path)? {
         let path = entry?.path();
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::PathStat);
         if path.is_dir() {
             collect_sidecars(&path, sidecars)?;
         } else if path
@@ -227,6 +235,7 @@ pub(crate) fn normalize_asset_cached(
     sidecar_path: &Path,
     generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
+    record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
     let mut asset = read_json(sidecar_path)?;
     hydrate_asset(project_id, project_path, &mut asset, generation_sets)?;
     let sidecar_rel = relative_string(project_path, sidecar_path)?;
@@ -261,7 +270,10 @@ fn hydrate_asset(
         // at read time so it reflects the real on-disk state; images never have one.
         let poster_url = (asset.get("type").and_then(Value::as_str) == Some("video"))
             .then(|| Path::new(&normalized_path).with_extension("poster.jpg"))
-            .filter(|poster_rel| project_path.join(poster_rel).is_file())
+            .filter(|poster_rel| {
+                record_asset_list_filesystem_operation(AssetListFilesystemOperation::PosterStat);
+                project_path.join(poster_rel).is_file()
+            })
             .map(|poster_rel| {
                 format!(
                     "/api/v1/projects/{project_id}/files/{}",
@@ -296,6 +308,9 @@ fn hydrate_asset(
                 let generation_set_path = project_path
                     .join("generation-sets")
                     .join(format!("{generation_set_id}.json"));
+                record_asset_list_filesystem_operation(
+                    AssetListFilesystemOperation::GenerationSetRead,
+                );
                 read_json(&generation_set_path).ok()
             });
         if let Some(generation_set) = cached.clone() {

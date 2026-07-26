@@ -12,7 +12,10 @@ use crate::asset_index::{
     GenerationSetCache,
 };
 use crate::contracts;
-use crate::project_store::{connect_project_db_migrated, ProjectStoreError, ProjectStoreResult};
+use crate::project_store::{
+    connect_project_db_migrated, record_asset_list_filesystem_operation, AssetIndexMutation,
+    AssetListFilesystemOperation, ProjectStoreError, ProjectStoreResult,
+};
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
     relative_string, write_json,
@@ -313,6 +316,7 @@ impl<'a> CharacterStore<'a> {
             "approvedAt": if input.approved { Value::String(now) } else { Value::Null }
         });
 
+        let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
@@ -340,6 +344,7 @@ impl<'a> CharacterStore<'a> {
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
         transaction.commit()?;
+        asset_index_mutation.commit();
 
         hydrate_character(project_id, &self.project_path, character)
     }
@@ -391,6 +396,7 @@ impl<'a> CharacterStore<'a> {
                 .insert("notes".to_owned(), Value::String(notes));
         }
 
+        let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
@@ -404,6 +410,7 @@ impl<'a> CharacterStore<'a> {
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
         transaction.commit()?;
+        asset_index_mutation.commit();
 
         hydrate_character(project_id, &self.project_path, character)
     }
@@ -425,6 +432,7 @@ impl<'a> CharacterStore<'a> {
             .find(|item| item.get("assetId").and_then(Value::as_str) == Some(asset_id))
             .ok_or_else(|| ProjectStoreError::NotFound("Reference not found".to_owned()))?;
 
+        let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
         let transaction = connection.transaction()?;
         update_asset_character_link(
@@ -447,6 +455,7 @@ impl<'a> CharacterStore<'a> {
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
         transaction.commit()?;
+        asset_index_mutation.commit();
 
         hydrate_character(project_id, &self.project_path, character)
     }
@@ -801,6 +810,7 @@ fn reindex_characters_with_fingerprint(
 ) -> ProjectStoreResult<u32> {
     let mut count = 0;
     for sidecar_path in character_sidecars(project_path)? {
+        record_asset_list_filesystem_operation(AssetListFilesystemOperation::CharacterRead);
         let Ok(character) = read_json(&sidecar_path) else {
             continue;
         };
