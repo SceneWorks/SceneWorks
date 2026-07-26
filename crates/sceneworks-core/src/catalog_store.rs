@@ -38,6 +38,16 @@ const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
 const CHECKPOINTS_METADATA_KEY: &str = "checkpoints";
 const PROGRESS_METADATA_KEY: &str = "processing_progress";
+const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
+const CATALOG_NAME_METADATA_KEY: &str = "name";
+const CATALOG_CREATED_AT_METADATA_KEY: &str = "created_at";
+const CATALOG_SCHEMA_VERSION_METADATA_KEY: &str = "schema_version";
+const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
+    CATALOG_ID_METADATA_KEY,
+    CATALOG_NAME_METADATA_KEY,
+    CATALOG_CREATED_AT_METADATA_KEY,
+    CATALOG_SCHEMA_VERSION_METADATA_KEY,
+];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
 
@@ -338,8 +348,22 @@ impl Catalog {
     }
 
     pub fn append_records(&mut self, records: &[NewCatalogRecord]) -> CatalogResult<usize> {
+        self.append_records_and_metadata(records, &[])
+    }
+
+    /// Appends a bounded record batch and advances scanner metadata in the same
+    /// SQLite transaction. A process crash can therefore only leave both the
+    /// records and checkpoint committed, or neither committed.
+    pub fn append_records_and_metadata(
+        &mut self,
+        records: &[NewCatalogRecord],
+        metadata: &[(&str, &str)],
+    ) -> CatalogResult<usize> {
         for record in records {
             validate_record(record)?;
+        }
+        for (key, value) in metadata {
+            validate_metadata_entry(key, value)?;
         }
         let database_path = self.database_path();
         let transaction = self
@@ -377,10 +401,50 @@ impl Catalog {
                     .map_err(|error| map_sqlite_error(&database_path, error))?;
             }
         }
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "insert into catalog_metadata(key, value) values (?1, ?2)
+                     on conflict(key) do update set value = excluded.value",
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            for (key, value) in metadata {
+                statement
+                    .execute(params![key, value])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         Ok(records.len())
+    }
+
+    pub fn metadata(&self, key: &str) -> CatalogResult<Option<String>> {
+        validate_metadata_key(key)?;
+        self.connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    pub fn contains_record_id(&self, record_id: &str) -> CatalogResult<bool> {
+        if record_id.trim().is_empty() || record_id.len() > 512 || record_id.contains('\0') {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
+            ));
+        }
+        self.connection
+            .query_row(
+                "select exists(select 1 from catalog_records where id = ?1)",
+                [record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))
     }
 
     pub fn page_records(&self, offset: u64, limit: u32) -> CatalogResult<Vec<CatalogRecord>> {
@@ -1114,6 +1178,30 @@ fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> 
     Ok(())
 }
 
+fn validate_metadata_key(key: &str) -> CatalogResult<()> {
+    if key.trim().is_empty() || key.len() > 256 || key.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata keys must contain 1 to 256 non-NUL bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_metadata_entry(key: &str, value: &str) -> CatalogResult<()> {
+    validate_metadata_key(key)?;
+    if RESERVED_CATALOG_METADATA_KEYS.contains(&key) {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog identity metadata is read-only".to_owned(),
+        ));
+    }
+    if value.len() > 1024 * 1024 || value.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata values cannot exceed 1 MiB or contain NUL".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_page_size(limit: u32) -> CatalogResult<()> {
     if limit == 0 || limit > MAX_PAGE_SIZE {
         return Err(CatalogError::InvalidCatalog(format!(
@@ -1443,9 +1531,12 @@ fn write_database_metadata(
         .unchecked_transaction()
         .map_err(|error| map_sqlite_error(database_path, error))?;
     for (key, value) in [
-        ("catalog_id", descriptor.id.as_str()),
-        ("name", descriptor.name.as_str()),
-        ("created_at", descriptor.created_at.as_str()),
+        (CATALOG_ID_METADATA_KEY, descriptor.id.as_str()),
+        (CATALOG_NAME_METADATA_KEY, descriptor.name.as_str()),
+        (
+            CATALOG_CREATED_AT_METADATA_KEY,
+            descriptor.created_at.as_str(),
+        ),
     ] {
         transaction
             .execute(
@@ -1465,9 +1556,12 @@ fn validate_database_metadata(
     descriptor: &CatalogDescriptor,
 ) -> CatalogResult<()> {
     for (key, expected) in [
-        ("catalog_id", descriptor.id.as_str()),
-        ("name", descriptor.name.as_str()),
-        ("created_at", descriptor.created_at.as_str()),
+        (CATALOG_ID_METADATA_KEY, descriptor.id.as_str()),
+        (CATALOG_NAME_METADATA_KEY, descriptor.name.as_str()),
+        (
+            CATALOG_CREATED_AT_METADATA_KEY,
+            descriptor.created_at.as_str(),
+        ),
     ] {
         let actual: Option<String> = connection
             .query_row(
@@ -2127,6 +2221,56 @@ mod tests {
             registry.open_attached("00000000000000000000000000000000"),
             Err(CatalogError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn atomic_scanner_metadata_cannot_overwrite_catalog_identity() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Reserved metadata").expect("catalog creates");
+        let descriptor = catalog.descriptor().clone();
+        let original = RESERVED_CATALOG_METADATA_KEYS
+            .iter()
+            .map(|key| {
+                (
+                    *key,
+                    catalog
+                        .metadata(key)
+                        .expect("reserved metadata reads before attempted write"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (index, (key, expected)) in original.iter().enumerate() {
+            let record_id = format!("reserved-{index}");
+            let attempted_record = record(&record_id);
+            assert!(
+                matches!(
+                    catalog.append_records_and_metadata(&[attempted_record], &[(*key, "tampered")]),
+                    Err(CatalogError::InvalidCatalog(_))
+                ),
+                "{key} must be read-only"
+            );
+            assert_eq!(
+                catalog.metadata(key).expect("reserved metadata rereads"),
+                *expected,
+                "{key} must remain unchanged"
+            );
+            assert!(
+                !catalog
+                    .contains_record_id(&record_id)
+                    .expect("record existence checks"),
+                "record and metadata writes must fail atomically for {key}"
+            );
+        }
+        catalog.close();
+
+        let reopened = Catalog::open(&root).expect("catalog remains reopenable");
+        assert_eq!(reopened.descriptor(), &descriptor);
+        assert_eq!(reopened.storage_accounting().unwrap().record_count, 0);
+        for (key, expected) in original {
+            assert_eq!(reopened.metadata(key).unwrap(), expected);
+        }
     }
 
     #[test]
