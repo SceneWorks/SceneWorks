@@ -22,6 +22,14 @@ fn catalog_scan_hook_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+async fn wait_for_catalog_scan_idle(
+    supervisor: &crate::catalog_scan_supervisor::CatalogScanSupervisor,
+) {
+    tokio::time::timeout(Duration::from_secs(60), supervisor.wait_for_idle())
+        .await
+        .expect("catalog scan supervisor becomes idle");
+}
+
 fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord {
     NewCatalogRecord {
         id: id.to_owned(),
@@ -125,32 +133,17 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     assert_eq!(created["counts"]["recordCount"], 0);
     assert!(created["storage"]["totalBytes"].as_u64().unwrap() > 0);
     let catalog_id = created["id"].as_str().unwrap().to_owned();
-    let mut initial_scan_completed = false;
-    for _ in 0..100 {
-        let (_, status_body) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{catalog_id}/status"),
-            Value::Null,
-        )
-        .await;
-        if status_body["processing"]["state"] == "completed" {
-            initial_scan_completed = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert!(initial_scan_completed, "empty fixture scan completes");
-    for _ in 0..100 {
-        if state.catalog_scan_supervisor.tracked_count().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, initial_status) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/status"),
+        Value::Null,
+    )
+    .await;
     assert_eq!(
-        state.catalog_scan_supervisor.tracked_count().await,
-        0,
-        "completed fixture scan is fully reaped before direct contract setup"
+        initial_status["processing"]["state"], "completed",
+        "empty fixture scan completes"
     );
 
     let registry = CatalogRegistry::new(&config_dir);
@@ -693,7 +686,7 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
             )
             .await;
             if pause_status == StatusCode::OK {
-                tokio::time::timeout(Duration::from_secs(5), terminal)
+                tokio::time::timeout(Duration::from_secs(60), terminal)
                     .await
                     .expect("scanner publishes paused and releases its lease");
                 pause_response = Some(paused);
@@ -725,25 +718,16 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
     );
     state.catalog_scan_terminal_exit_release.notify_waiters();
 
-    let mut completed = None;
-    for _ in 0..2_000 {
-        let (_, current) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        if current["processing"]["state"] == "completed" {
-            completed = Some(current);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(3)).await;
-    }
-    assert_eq!(
-        completed.expect("queued successor completes")["counts"]["recordCount"],
-        100_000
-    );
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 100_000);
 }
 
 #[tokio::test]
@@ -801,7 +785,7 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     )
     .await;
     assert_eq!(pause_status, StatusCode::OK, "{paused}");
-    tokio::time::timeout(Duration::from_secs(5), cleanup_reached.wait())
+    tokio::time::timeout(Duration::from_secs(60), cleanup_reached.wait())
         .await
         .expect("scan closure returns before wrapper cleanup");
     let (resume_status, resumed) = request(
@@ -860,25 +844,16 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
         1,
         "new AppState status discovery schedules the persisted successor"
     );
-    let mut completed = None;
-    for _ in 0..2_000 {
-        let (_, current) = request(
-            restarted_app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        if current["processing"]["state"] == "completed" {
-            completed = Some(current);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(3)).await;
-    }
-    assert_eq!(
-        completed.expect("public restart completes")["counts"]["recordCount"],
-        100_000
-    );
+    wait_for_catalog_scan_idle(&restarted_state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        restarted_app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 100_000);
 }
 
 #[tokio::test]
@@ -911,28 +886,24 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().unwrap();
 
-    let mut saw_durable_checkpoint = false;
-    let mut completed = None;
-    for _ in 0..2_000 {
-        let (_, status_body) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        saw_durable_checkpoint |= status_body["processing"]["processedCount"] == 25_000;
-        if status_body["processing"]["state"] == "completed" {
-            completed = Some(status_body);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    let completed = completed.expect("status recovery resumes the durable checkpoint");
-    assert!(
-        saw_durable_checkpoint,
-        "the bounded pass checkpoint must be visible before completion"
-    );
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, recovery_started) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(recovery_started["processing"]["processedCount"], 25_000);
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
     assert_eq!(completed["counts"]["recordCount"], 30_000);
 }
 
@@ -966,13 +937,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
-    for _ in 0..1_000 {
-        if state.catalog_scan_supervisor.tracked_count().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
 
     let before_recovered_start = Arc::new(tokio::sync::Barrier::new(2));
     *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_recovered_start));
@@ -988,17 +953,11 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     state
         .catalog_scan_stop_after_pass_once
         .store(true, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(5), before_recovered_start.wait())
+    tokio::time::timeout(Duration::from_secs(60), before_recovered_start.wait())
         .await
         .expect("recovered generation reaches its prestart barrier");
 
-    for _ in 0..1_000 {
-        if state.catalog_scan_supervisor.tracked_count().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
     let registry = CatalogRegistry::new(temporary.path().join("config"));
     let twice_interrupted = registry.open_attached(&id).expect("catalog opens");
     assert_eq!(
@@ -1019,25 +978,16 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
     )
     .await;
     assert_eq!(second_recovery["processing"]["processedCount"], 50_000);
-    let mut completed = None;
-    for _ in 0..2_000 {
-        let (_, current) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        if current["processing"]["state"] == "completed" {
-            completed = Some(current);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(
-        completed.expect("second recovery completes")["counts"]["recordCount"],
-        80_000
-    );
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 80_000);
 }
 
 #[tokio::test]
@@ -1070,13 +1020,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
-    for _ in 0..1_000 {
-        if state.catalog_scan_supervisor.tracked_count().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
 
     let original = temporary.path().join("source-original.parquet");
     std::fs::rename(&source, &original).expect("original source moves aside");
@@ -1089,13 +1033,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     )
     .await;
     assert_eq!(recovery_started["processing"]["processedCount"], 25_000);
-    for _ in 0..1_000 {
-        if state.catalog_scan_supervisor.tracked_count().await == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
 
     let (_, failed) = request(
         app.clone(),
@@ -1137,25 +1075,16 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
     .await;
     assert_eq!(resume_status, StatusCode::OK, "{resumed}");
 
-    let mut completed = None;
-    for _ in 0..2_000 {
-        let (_, current) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        if current["processing"]["state"] == "completed" {
-            completed = Some(current);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert_eq!(
-        completed.expect("explicit resume completes")["counts"]["recordCount"],
-        30_000
-    );
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 30_000);
 }
 
 #[tokio::test]

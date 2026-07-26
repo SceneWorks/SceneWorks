@@ -34,6 +34,8 @@ struct CatalogScanSupervisorInner {
     state: Mutex<SupervisorState>,
     next_generation: AtomicU64,
     #[cfg(test)]
+    state_changed: tokio::sync::Notify,
+    #[cfg(test)]
     wrapper_cleanup_barriers:
         parking_lot::Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
@@ -48,6 +50,8 @@ impl Default for CatalogScanSupervisor {
             inner: Arc::new(CatalogScanSupervisorInner {
                 state: Mutex::new(SupervisorState::default()),
                 next_generation: AtomicU64::new(1),
+                #[cfg(test)]
+                state_changed: tokio::sync::Notify::new(),
                 #[cfg(test)]
                 wrapper_cleanup_barriers: parking_lot::Mutex::new(None),
             }),
@@ -123,6 +127,9 @@ impl CatalogScanSupervisor {
                     Self::spawn_boxed_locked(&inner, &mut state, task_catalog_id, restart);
                 }
             }
+            drop(state);
+            #[cfg(test)]
+            inner.state_changed.notify_waiters();
         });
         state.tasks.insert(
             catalog_id,
@@ -153,6 +160,8 @@ impl CatalogScanSupervisor {
             }
             tasks
         };
+        #[cfg(test)]
+        self.inner.state_changed.notify_waiters();
         let requested = tasks.len();
         let mut joined = 0;
         for task in tasks {
@@ -178,6 +187,19 @@ impl CatalogScanSupervisor {
     #[cfg(test)]
     pub(crate) async fn tracked_count(&self) -> usize {
         self.inner.state.lock().await.tasks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.inner.state_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.tracked_count().await == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     #[cfg(test)]
@@ -296,16 +318,9 @@ mod tests {
                 CatalogScanSpawn::Started
             );
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if supervisor.tracked_count().await == 0 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("completion reaping is prompt and bounded");
+        tokio::time::timeout(Duration::from_secs(1), supervisor.wait_for_idle())
+            .await
+            .expect("completion reaping is prompt and bounded");
         assert_eq!(supervisor.active_count().await, 0);
     }
 
@@ -345,16 +360,9 @@ mod tests {
             );
         }
         release.wait().await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if supervisor.tracked_count().await == 0 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("successor completes");
+        tokio::time::timeout(Duration::from_secs(1), supervisor.wait_for_idle())
+            .await
+            .expect("successor completes");
         assert_eq!(
             runs.load(std::sync::atomic::Ordering::SeqCst),
             2,
