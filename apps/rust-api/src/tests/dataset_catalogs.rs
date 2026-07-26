@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parquet::data_type::{ByteArray, ByteArrayType, Int32Type};
 use parquet::file::properties::WriterProperties;
@@ -16,6 +16,11 @@ use sceneworks_core::catalog_store::{
 use sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS;
 
 use super::support::*;
+
+fn catalog_scan_hook_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord {
     NewCatalogRecord {
@@ -640,6 +645,7 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
 
 #[tokio::test]
 async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 100_000);
@@ -742,6 +748,7 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
 
 #[tokio::test]
 async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -876,6 +883,7 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
 
 #[tokio::test]
 async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoint() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 30_000);
@@ -930,6 +938,7 @@ async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoi
 
 #[tokio::test]
 async fn status_retries_after_a_recovered_generation_exits_incomplete() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 80_000);
@@ -1033,6 +1042,7 @@ async fn status_retries_after_a_recovered_generation_exits_incomplete() {
 
 #[tokio::test]
 async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 30_000);
@@ -1150,6 +1160,7 @@ async fn runtime_scan_failure_stays_terminal_until_explicit_resume() {
 
 #[tokio::test]
 async fn transient_prestart_read_lease_cannot_strand_scheduled_processing() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 1_000);
@@ -1591,6 +1602,7 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
 
 #[tokio::test]
 async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 1_000);
@@ -1680,6 +1692,7 @@ async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
 
 #[tokio::test]
 async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 100);
@@ -1799,6 +1812,7 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
 
 #[tokio::test]
 async fn new_appstate_recovers_after_shutdown_lease_contention_clears() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -1991,6 +2005,7 @@ async fn invalid_or_missing_persisted_recovery_plan_fails_once_without_launch_lo
 
 #[tokio::test]
 async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
@@ -2073,6 +2088,7 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
 
 #[tokio::test]
 async fn cancellation_while_waiting_for_global_scan_permit_is_restartable() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
