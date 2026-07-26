@@ -22,9 +22,9 @@ import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
 import { expandBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
-  MAX_IMAGE_DIMENSION,
-  MIN_IMAGE_DIMENSION,
-  resolveEffectiveDimensions,
+  dimensionConstraintMessage,
+  evaluateModelDimensions,
+  modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
@@ -1571,15 +1571,23 @@ export function ImageStudio() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest?.id]);
   const [dropdownWidth, dropdownHeight] = resolution.split("x").map((value) => Number(value));
+  // Per-model geometry constraints for the free Width/Height override (sc-14058). Native-resolution
+  // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
+  // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
+  const dimensionConstraints = modelDimensionConstraints(selectedModel);
   // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect
   // dropdown. The resulting dims flow through the existing top-level width/height payload,
   // so submit() and the batch builder need no further change. Logic lives in the pure,
-  // unit-tested resolveEffectiveDimensions helper.
-  const { width, height, invalid: dimensionsInvalid } = resolveEffectiveDimensions({
+  // unit-tested evaluateModelDimensions helper, which layers the model's range + stride on top.
+  const dimensionEval = evaluateModelDimensions({
+    model: selectedModel,
     resolution,
     widthOverride,
     heightOverride,
   });
+  const { width, height, invalid: dimensionsInvalid } = dimensionEval;
+  // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
+  const dimensionError = dimensionConstraintMessage(dimensionEval);
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -1867,7 +1875,7 @@ export function ImageStudio() {
       return;
     }
     if (dimensionsInvalid) {
-      setSubmitError("Width and height must each be between 256 and 4096.");
+      setSubmitError(dimensionError ?? "Width and height must each be between 256 and 4096.");
       return;
     }
     setSubmitting(true);
@@ -2131,7 +2139,7 @@ export function ImageStudio() {
       return;
     }
     if (dimensionsInvalid) {
-      setBatchError("Width and height must each be between 256 and 4096.");
+      setBatchError(dimensionError ?? "Width and height must each be between 256 and 4096.");
       return;
     }
     setBatchError("");
@@ -2228,17 +2236,22 @@ export function ImageStudio() {
   }, [batchRun, jobs]);
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
-  // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
-  // range — block the run and name the offending size.
+  // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
+  // SAME per-model range + stride the single-generate gate enforces (sc-14058), not the raw backend
+  // envelope. For a native-resolution model (Mage-Flow) an off-range OR off-÷16-stride size blocks the
+  // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
+  // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
     .map((line) => parsePromptResolution(line).resolution)
     .filter(
       (res) =>
         res &&
-        (res.width < MIN_IMAGE_DIMENSION ||
-          res.width > MAX_IMAGE_DIMENSION ||
-          res.height < MIN_IMAGE_DIMENSION ||
-          res.height > MAX_IMAGE_DIMENSION),
+        evaluateModelDimensions({
+          model: selectedModel,
+          resolution: `${res.width}x${res.height}`,
+          widthOverride: "",
+          heightOverride: "",
+        }).invalid,
     );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
@@ -2267,8 +2280,10 @@ export function ImageStudio() {
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
       resolutionIssues: batchResolutionIssues,
-      minDimension: MIN_IMAGE_DIMENSION,
-      maxDimension: MAX_IMAGE_DIMENSION,
+      // Per-model range + stride for the inline [WxH] directive — the SAME constraints the free
+      // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
+      // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
+      dimensionConstraints,
     }),
     [
       activeProject,
@@ -2277,6 +2292,7 @@ export function ImageStudio() {
       batchMissingKeys,
       batchGroupIssues,
       batchResolutionIssues,
+      dimensionConstraints,
     ],
   );
   // sc-13131 / sc-13133: the live composed-prompt preview for the selected Style Catalog entry, and
@@ -2323,6 +2339,10 @@ export function ImageStudio() {
       modelName: selectedModel?.name,
       // Multi-phase denoise problems (sc-13885): an enabled-but-broken phase list blocks Generate.
       multiPhaseIssues: multiPhaseValidationIssues,
+      // Free Width/Height override out of the model's range or off its ÷16 stride (sc-14058). A precise
+      // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
+      // not only on click. null when the dimensions are valid.
+      dimensionError,
     }),
     [
       activeProject,
@@ -2343,6 +2363,7 @@ export function ImageStudio() {
       selectedLoraValidationResult,
       selectedModel,
       multiPhaseValidationIssues,
+      dimensionError,
     ],
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
@@ -3180,8 +3201,9 @@ export function ImageStudio() {
               <label>
                 Width override
                 <input
-                  min="256"
-                  max="4096"
+                  min={dimensionConstraints.min}
+                  max={dimensionConstraints.max}
+                  step={dimensionConstraints.step}
                   onChange={(event) => setWidthOverride(event.target.value)}
                   placeholder={String(dropdownWidth)}
                   type="number"
@@ -3191,8 +3213,9 @@ export function ImageStudio() {
               <label>
                 Height override
                 <input
-                  min="256"
-                  max="4096"
+                  min={dimensionConstraints.min}
+                  max={dimensionConstraints.max}
+                  step={dimensionConstraints.step}
                   onChange={(event) => setHeightOverride(event.target.value)}
                   placeholder={String(dropdownHeight)}
                   type="number"

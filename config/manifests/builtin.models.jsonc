@@ -78,12 +78,24 @@
         "scheduler": "default"
       },
       "limits": {
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
         "resolutions": [
           "512x512",
           "768x768",
           "1024x1024",
+          "1536x1536",
+          "2048x2048",
           "1280x720",
-          "720x1280"
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
         ],
         "count": [
           1,
@@ -95,7 +107,10 @@
         ],
         "schedulers": [
           "default"
-        ]
+        ],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
         "quantize": 4
@@ -190,12 +205,24 @@
         "scheduler": "default"
       },
       "limits": {
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
         "resolutions": [
           "512x512",
           "768x768",
           "1024x1024",
+          "1536x1536",
+          "2048x2048",
           "1280x720",
-          "720x1280"
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
         ],
         "count": [
           1,
@@ -207,7 +234,10 @@
         ],
         "schedulers": [
           "default"
-        ]
+        ],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
         "quantize": 4
@@ -299,12 +329,24 @@
         "scheduler": "default"
       },
       "limits": {
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
         "resolutions": [
           "512x512",
           "768x768",
           "1024x1024",
+          "1536x1536",
+          "2048x2048",
           "1280x720",
-          "720x1280"
+          "1536x1024",
+          "2048x1024",
+          "2048x512",
+          "720x1280",
+          "1024x1536",
+          "1024x2048",
+          "512x2048"
         ],
         "count": [
           1,
@@ -316,7 +358,10 @@
         ],
         "schedulers": [
           "default"
-        ]
+        ],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
         "quantize": 4
@@ -390,10 +435,21 @@
         "scheduler": "default"
       },
       "limits": {
-        "resolutions": ["512x512", "768x768", "1024x1024", "1280x720", "720x1280"],
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
+        "resolutions": [
+          "512x512", "768x768", "1024x1024", "1536x1536", "2048x2048",
+          "1280x720", "1536x1024", "2048x1024", "2048x512",
+          "720x1280", "1024x1536", "1024x2048", "512x2048"
+        ],
         "count": [1, 2, 4],
         "samplers": ["default"],
-        "schedulers": ["default"]
+        "schedulers": ["default"],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
@@ -460,10 +516,21 @@
         "scheduler": "default"
       },
       "limits": {
-        "resolutions": ["512x512", "768x768", "1024x1024", "1280x720", "720x1280"],
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
+        "resolutions": [
+          "512x512", "768x768", "1024x1024", "1536x1536", "2048x2048",
+          "1280x720", "1536x1024", "2048x1024", "2048x512",
+          "720x1280", "1024x1536", "1024x2048", "512x2048"
+        ],
         "count": [1, 2, 4],
         "samplers": ["default"],
-        "schedulers": ["default"]
+        "schedulers": ["default"],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
@@ -530,10 +597,21 @@
         "scheduler": "default"
       },
       "limits": {
-        "resolutions": ["512x512", "768x768", "1024x1024", "1280x720", "720x1280"],
+        // Mage-Flow is native-resolution (512–2048 per side, any aspect incl. 4:1). This advisory
+        // menu is the curated aspect ladder; the free Width/Height override (bounded by these
+        // extremes and the binding stride below) covers everything in between. Every entry is a
+        // multiple of 16 so a preset can never violate the stride.
+        "resolutions": [
+          "512x512", "768x768", "1024x1024", "1536x1536", "2048x2048",
+          "1280x720", "1536x1024", "2048x1024", "2048x512",
+          "720x1280", "1024x1536", "1024x2048", "512x2048"
+        ],
         "count": [1, 2, 4],
         "samplers": ["default"],
-        "schedulers": ["default"]
+        "schedulers": ["default"],
+        // NR-MMDiT patch=1 over 16x-downsampled Mage-VAE latents ⇒ both sides must be multiples of 16.
+        // The Studio enforces this stride on the free Width/Height override (resolutionOverride.js).
+        "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
