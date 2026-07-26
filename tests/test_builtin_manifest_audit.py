@@ -187,10 +187,10 @@ def test_cached_manifest_and_schema_loaders_return_isolated_copies():
 
 
 COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
-COMPONENTS_REVISION = "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62"
+COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
 # Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
-DIT_BYTES = {"q4": 2316856860, "q8": 4374163324, "bf16": 8231571754}
-TE_BYTES = {"q4": 2514418914, "q8": 4731076490, "bf16": 8887219239}
+DIT_BYTES = {"q4": 2326294167, "q8": 4374163324, "bf16": 8231571754}
+TE_BYTES = {"q4": 4331077508, "q8": 4731076490, "bf16": 8887219239}
 VAE_BYTES = 345053168
 TIERS = ("q4", "q8", "bf16")
 
@@ -242,9 +242,9 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
     """sc-14047 + sc-14980: the generation variants ship physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     expected = {
-        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "2c0b473896ef87af5a0873a26ed62c319213ae36", 30, 5),
-        "mage_flow": ("SceneWorks/Mage-Flow", "b9204c289b235bce9ade608f76a009f80a135bfd", 20, 5),
-        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "dca431fa8dfb4b3411cf3986435540ed31a7e8b7", 4, 1),
+        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "d642341926fcdb450c17c8fbda03759e8f731c9b", 30, 5),
+        "mage_flow": ("SceneWorks/Mage-Flow", "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db", 20, 5),
+        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "79016f10f96b441bebb6e6f461838adb8fb3ff5c", 4, 1),
     }
     for model_id, (repo, revision, steps, guidance) in expected.items():
         model = models[model_id]
@@ -264,9 +264,9 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
     """sc-14050 + sc-14980: every edit variant ships physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     expected = {
-        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "199b4cae841403e8a1cca3c585a09f10fc70d3f1", 30, 5),
-        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503", 30, 5),
-        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "c3437cbb91e565ab6373e3c7b8e9b8048d29831b", 4, 1),
+        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d", 30, 5),
+        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "dbd4a9c07faca94491ad88ab21225d62e054d9cc", 30, 5),
+        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "75c11a2957aca2c78272984375502105b2b235ab", 4, 1),
     }
     for model_id, (repo, revision, steps, guidance) in expected.items():
         model = models[model_id]
