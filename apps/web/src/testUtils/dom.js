@@ -7,6 +7,7 @@
 // that runs inside the caller's own `act`) intentionally keep their own copy.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { waitForLazyScreenImports } from "../components/LazyScreen.jsx";
 
 // Dispatch a bubbling click and flush the resulting React work inside `act`.
 // Matches the `async function click(element)` form the studio suites shared.
@@ -14,6 +15,10 @@ export async function click(element) {
   await act(async () => {
     element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   });
+  // Navigation can resolve a route-level dynamic import after the click
+  // commit. Flush that tracked import in a second act so callers observe the
+  // mounted screen, not only its Suspense fallback.
+  await act(async () => waitForLazyScreenImports());
 }
 
 // Set a controlled <input> value through the native setter (bypassing React's

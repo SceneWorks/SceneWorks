@@ -9,28 +9,12 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
+import { lazyScreen } from "./components/LazyScreen.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
-import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
-import { KeyPointLibraryScreen } from "./screens/KeyPointLibraryScreen.jsx";
-import { ModelManagerScreen } from "./screens/ModelManagerScreen.jsx";
-import { ImageStudio } from "./screens/ImageStudio.jsx";
-import { DocumentStudio } from "./screens/DocumentStudio.jsx";
-import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { AudioStudio } from "./screens/AudioStudio.jsx";
-import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
-import { CharacterStudio } from "./screens/CharacterStudio.jsx";
-import { EditorScreen } from "./screens/EditorScreen.jsx";
-import { QueueScreen } from "./screens/QueueScreen.jsx";
-import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
-import { SettingsScreen } from "./screens/SettingsScreen.jsx";
-import { LogsScreen } from "./screens/LogsScreen.jsx";
-import { StatsScreen } from "./screens/StatsScreen.jsx";
-import { LicensesScreen } from "./screens/LicensesScreen.jsx";
-import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset, workflowModelType } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
@@ -64,7 +48,6 @@ import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
 // renders instead of this workspace when the sidebar switch is on Simple. The workspace
 // below is unchanged apart from that switch in its footer.
-import { SimpleShell } from "./simple/SimpleShell.jsx";
 import { SimpleModeSwitch } from "./simple/SimpleModeSwitch.jsx";
 import { useViewportWidth } from "./simple/useContainerWidth.js";
 import {
@@ -110,8 +93,102 @@ import { refreshFailure, refreshSuccess } from "./refreshResult.js";
 
 // Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
 // initial bundle and the jsdom test path — it only loads when the view is opened.
-const ImageEditor = React.lazy(() =>
-  import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
+const ImageStudio = lazyScreen(
+  () => import("./screens/ImageStudio.jsx"),
+  "ImageStudio",
+  "Image Studio",
+);
+const VideoStudio = lazyScreen(
+  () => import("./screens/VideoStudio.jsx"),
+  "VideoStudio",
+  "Video Studio",
+);
+const AudioStudio = lazyScreen(
+  () => import("./screens/AudioStudio.jsx"),
+  "AudioStudio",
+  "Audio Studio",
+);
+const CharacterStudio = lazyScreen(
+  () => import("./screens/CharacterStudio.jsx"),
+  "CharacterStudio",
+  "Characters",
+);
+const DocumentStudio = lazyScreen(
+  () => import("./screens/DocumentStudio.jsx"),
+  "DocumentStudio",
+  "Document Studio",
+);
+const loadTrainingScreens = () => import("./screens/TrainingStudio.jsx");
+const TrainingStudio = lazyScreen(loadTrainingScreens, "TrainingStudio", "Training Studio");
+const TrainingDataSetsLibrary = lazyScreen(
+  loadTrainingScreens,
+  "TrainingDataSetsLibrary",
+  "Data Sets",
+);
+const PresetManagerScreen = lazyScreen(
+  () => import("./screens/PresetManagerScreen.jsx"),
+  "PresetManagerScreen",
+  "Presets",
+);
+const PoseLibraryScreen = lazyScreen(
+  () => import("./screens/PoseLibraryScreen.jsx"),
+  "PoseLibraryScreen",
+  "Pose Library",
+);
+const KeyPointLibraryScreen = lazyScreen(
+  () => import("./screens/KeyPointLibraryScreen.jsx"),
+  "KeyPointLibraryScreen",
+  "Key Point Library",
+);
+const EditorScreen = lazyScreen(
+  () => import("./screens/EditorScreen.jsx"),
+  "EditorScreen",
+  "Video Editor",
+);
+const ImageEditor = lazyScreen(
+  () => import("./screens/ImageEditor.jsx"),
+  "ImageEditor",
+  "Image Editor",
+);
+const QueueScreen = lazyScreen(
+  () => import("./screens/QueueScreen.jsx"),
+  "QueueScreen",
+  "Queue",
+);
+const ModelManagerScreen = lazyScreen(
+  () => import("./screens/ModelManagerScreen.jsx"),
+  "ModelManagerScreen",
+  "Models",
+);
+const SettingsScreen = lazyScreen(
+  () => import("./screens/SettingsScreen.jsx"),
+  "SettingsScreen",
+  "Settings",
+);
+const StatsScreen = lazyScreen(
+  () => import("./screens/StatsScreen.jsx"),
+  "StatsScreen",
+  "Generation Stats",
+);
+const LogsScreen = lazyScreen(
+  () => import("./screens/LogsScreen.jsx"),
+  "LogsScreen",
+  "Logs",
+);
+const LicensesScreen = lazyScreen(
+  () => import("./screens/LicensesScreen.jsx"),
+  "LicensesScreen",
+  "Licenses",
+);
+const SetupWizard = lazyScreen(
+  () => import("./screens/SetupWizard.jsx"),
+  "SetupWizard",
+  "Setup Wizard",
+);
+const SimpleShell = lazyScreen(
+  () => import("./simple/SimpleShell.jsx"),
+  "SimpleShell",
+  "Simple UI",
 );
 
 // Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
@@ -3273,9 +3350,7 @@ export function App() {
 
         {keepAliveMounted("ImageEditor") ? (
           <KeepAlivePane active={activeView === "ImageEditor"}>
-            <React.Suspense fallback={<section className="page-frame">Loading editor…</section>}>
-              <ImageEditor key={activeProject?.id ?? "default"} />
-            </React.Suspense>
+            <ImageEditor key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
           </>
