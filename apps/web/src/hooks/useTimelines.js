@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { ensureItemVersionFields } from "../timeline.js";
 
 // Canonical serialization of a persisted-timeline snapshot for dirty comparison (sc-11967).
@@ -112,12 +114,15 @@ export function useTimelines({
   const refreshTimelines = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
       if (!projectId) {
-        return;
+        return refreshFailure("missing-project");
+      }
+      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
+        return refreshFailure("stale");
       }
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
-        if (activeProjectRef.current?.id && activeProjectRef.current.id !== projectId) {
-          return;
+        if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
+          return refreshFailure("stale");
         }
         setTimelines(items);
         setTimelinesProjectId(projectId);
@@ -127,15 +132,26 @@ export function useTimelines({
           savedTimelineSnapshotRef.current = null;
         }
         setError("");
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
+          return refreshFailure("stale", err);
+        }
+        if (isAbortError(err)) return refreshFailure("aborted", err);
         setError(err.message);
+        return refreshFailure("error", err);
       }
     },
     [token, activeProject, activeProjectRef, setError],
   );
 
   async function loadTimeline(projectId, timelineId) {
+    if (
+      !isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId) ||
+      selectedTimelineIdRef.current !== timelineId
+    ) {
+      return;
+    }
     try {
       const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
       if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
@@ -149,6 +165,12 @@ export function useTimelines({
       pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, "");
       setError("");
     } catch (err) {
+      if (
+        !isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId) ||
+        selectedTimelineIdRef.current !== timelineId
+      ) {
+        return;
+      }
       setError(err.message);
     }
   }
