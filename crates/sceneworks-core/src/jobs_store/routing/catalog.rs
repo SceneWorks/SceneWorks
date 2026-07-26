@@ -1195,13 +1195,16 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while a generic worker is refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
-/// 7982), so — like LTX — only an mlx worker runs it today.
+/// 7982), so — like LTX — only an mlx worker runs it today. `mage_flow_lora` is registered as a
+/// training-target contract in sc-14054 ahead of its native trainer (sc-14055); keeping it here makes
+/// every worker refuse it until that worker explicitly adds the kernel to its routed set.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "ltx_mlx_lora",
     "krea_lora",
     "sd3_lora",
     "anima_lora",
     "krea_control",
+    "mage_flow_lora",
 ];
 
 #[cfg(test)]
@@ -1488,6 +1491,7 @@ mod tests {
         "sd3_lora",
         "anima_lora",
         "krea_control",
+        "mage_flow_lora",
     ];
 
     #[test]
