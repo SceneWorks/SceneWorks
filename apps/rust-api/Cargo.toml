@@ -36,6 +36,7 @@ tracing = { workspace = true }
 trash = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 # Unix-only: parent-death watchdog liveness probe (safe kill(pid, None) wrapper).
@@ -67,6 +68,5 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile = "3.13"
-tower = { version = "0.5", features = ["util"] }
 [lints]
 workspace = true

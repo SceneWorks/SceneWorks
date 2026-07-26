@@ -1,5 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { upsertJobNewest } from "../sorters.js";
 
@@ -42,6 +44,7 @@ export function useModelsAndLoras({
   activeProject,
   activeProjectRef,
   setError,
+  setLoraError = setError,
   setJobs,
   setActiveView,
   refreshData,
@@ -54,6 +57,12 @@ export function useModelsAndLoras({
   // SSE-driven re-renders, letting appContextValue memoize.
   const refreshLoras = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
+      if (
+        projectId &&
+        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
+      ) {
+        return refreshFailure("stale");
+      }
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
@@ -62,17 +71,28 @@ export function useModelsAndLoras({
         // LoRA overlay with the old one's. Drop the stale response — mirrors
         // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
         // are guarded; a global refresh (projectId undefined) still commits.
-        if (projectId && activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
-          return;
+        if (
+          projectId &&
+          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
+        ) {
+          return refreshFailure("stale");
         }
         setLoras(items);
-        setError("");
+        setLoraError("");
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err)) return;
-        setError(err.message);
+        if (
+          projectId &&
+          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
+        ) {
+          return refreshFailure("stale", err);
+        }
+        if (isAbortError(err)) return refreshFailure("aborted", err);
+        setLoraError(err.message);
+        return refreshFailure("error", err);
       }
     },
-    [token, activeProject, activeProjectRef, setError],
+    [token, activeProject, activeProjectRef, setLoraError],
   );
 
   const deleteModel = useCallback(
@@ -148,11 +168,11 @@ export function useModelsAndLoras({
     if (result.removedManifestEntry) {
       setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
     }
-    setError("");
+    setLoraError("");
     await refreshDataWithLoraOverlay(activeProject?.id);
     return result;
     },
-    [token, activeProject, setError, refreshDataWithLoraOverlay],
+    [token, activeProject, setLoraError, refreshDataWithLoraOverlay],
   );
 
   // Edit a catalog LoRA's trigger keywords / notes after import (epic 10328). Only
@@ -171,11 +191,11 @@ export function useModelsAndLoras({
         method: "PATCH",
         body: JSON.stringify(updates),
       });
-      setError("");
+      setLoraError("");
       await refreshDataWithLoraOverlay(activeProject?.id);
       return updated;
     },
-    [token, activeProject, setError, refreshDataWithLoraOverlay],
+    [token, activeProject, setLoraError, refreshDataWithLoraOverlay],
   );
 
   // Best-effort trigger-keyword suggestions read from the installed LoRA's embedded
@@ -281,10 +301,10 @@ export function useModelsAndLoras({
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
     }
-    setError("");
+    setLoraError("");
     return job;
     },
-    [token, activeProject, setJobs, setActiveView, setError],
+    [token, activeProject, setJobs, setActiveView, setLoraError],
   );
 
   const createModelDownloadJob = useCallback(
@@ -341,14 +361,14 @@ export function useModelsAndLoras({
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
         setJobs((items) => upsertJobNewest(items, job));
-        setError("");
+        setLoraError("");
         return job;
       } catch (err) {
-        setError(err.message);
+        setLoraError(err.message);
         return null;
       }
     },
-    [token, setJobs, setError],
+    [token, setJobs, setLoraError],
   );
 
   return {

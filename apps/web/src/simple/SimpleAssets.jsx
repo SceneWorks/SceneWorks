@@ -23,7 +23,12 @@ const FILTERS = [
 ];
 
 export function SimpleAssets() {
-  const { assets = [], assetsReady = false } = useAppContext();
+  const {
+    assets = [],
+    assetsReady = false,
+    assetsLoading = false,
+    assetsError = "",
+  } = useAppContext();
   const { breakpoint, openPreview, loadedTakeId } = useSimpleUi();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -78,7 +83,11 @@ export function SimpleAssets() {
         ))}
       </div>
 
-      {visible.length ? (
+      {assetsLoading ? (
+        <p className="su-empty" role="status">Loading assets…</p>
+      ) : assetsError ? (
+        <p className="su-empty" role="alert">Couldn&apos;t load assets: {assetsError}</p>
+      ) : visible.length ? (
         <div
           className="su-asset-grid"
           style={{ "--su-asset-cols": assetGridColumns(breakpoint) }}

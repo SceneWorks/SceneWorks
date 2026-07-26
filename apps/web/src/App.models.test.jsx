@@ -429,7 +429,7 @@ describe("SceneWorks app shell", () => {
     const loraRequests = global.fetch.mock.calls
       .map(([url]) => new URL(url))
       .filter((url) => url.pathname.endsWith("/loras"));
-    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "")).toBe(false);
     expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
   });
 
@@ -474,7 +474,7 @@ describe("SceneWorks app shell", () => {
     const loraRequests = global.fetch.mock.calls
       .map(([url]) => new URL(url))
       .filter((url) => url.pathname.endsWith("/loras"));
-    expect(loraRequests.some((url) => url.search === "")).toBe(true);
+    expect(loraRequests.some((url) => url.search === "")).toBe(false);
     expect(loraRequests.some((url) => url.search === "?projectId=project-1")).toBe(true);
   });
 

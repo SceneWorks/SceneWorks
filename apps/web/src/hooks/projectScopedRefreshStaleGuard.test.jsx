@@ -15,18 +15,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCharacters } from "./useCharacters.js";
 import { useModelsAndLoras } from "./useModelsAndLoras.js";
 import { usePersonTracks } from "./usePersonTracks.js";
+import { useTimelines } from "./useTimelines.js";
 
 // Controllable fetch: each apiFetch call parks its resolver so a test can resolve
 // project A's response AFTER the active project has switched to B.
-const pendingResolvers = [];
+const pendingRequests = [];
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
     apiFetch: vi.fn(
       () =>
-        new Promise((resolve) => {
-          pendingResolvers.push(resolve);
+        new Promise((resolve, reject) => {
+          pendingRequests.push({ resolve, reject });
         }),
     ),
   };
@@ -47,6 +48,7 @@ const CASES = [
   { name: "useCharacters.refreshCharacters", hook: useCharacters, refreshKey: "refreshCharacters", stateKey: "characters" },
   { name: "useModelsAndLoras.refreshLoras", hook: useModelsAndLoras, refreshKey: "refreshLoras", stateKey: "loras" },
   { name: "usePersonTracks.refreshPersonTracks", hook: usePersonTracks, refreshKey: "refreshPersonTracks", stateKey: "personTracks" },
+  { name: "useTimelines.refreshTimelines", hook: useTimelines, refreshKey: "refreshTimelines", stateKey: "timelines" },
 ];
 
 describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey, stateKey }) => {
@@ -55,7 +57,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
-    pendingResolvers.length = 0;
+    pendingRequests.length = 0;
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -67,7 +69,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
 
   // Renders the hook, exposing its live api and a way to force a re-render so committed
   // state re-reads. activeProjectRef is a plain mutable ref the test flips mid-flight.
-  function mount(activeProjectRef) {
+  function mount(activeProjectRef, setError = () => {}) {
     let latest = null;
     function Harness() {
       const [, setN] = useState(0);
@@ -76,7 +78,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
           token: "tok",
           activeProject: activeProjectRef.current,
           activeProjectRef,
-          setError: () => {},
+          setError,
           setJobs: () => {},
           requestedGpu: "auto",
           setActiveView: () => {},
@@ -107,12 +109,45 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
 
     // A's response resolves — it must be dropped, not committed.
     await act(async () => {
-      pendingResolvers[0]([{ id: "from-A" }]);
+      pendingRequests[0].resolve([{ id: "from-A" }]);
       await pending;
     });
     await settle();
 
     expect(get().api[stateKey]).toEqual([]);
+  });
+
+  it("does NOT commit or surface an error after project A is closed", async () => {
+    const activeProjectRef = { current: { id: "A", name: "A" } };
+    const setError = vi.fn();
+    const get = mount(activeProjectRef, setError);
+
+    let pending;
+    act(() => {
+      pending = get().api[refreshKey]("A");
+    });
+    activeProjectRef.current = null;
+
+    await act(async () => {
+      pendingRequests[0].reject(new Error("late A failure"));
+      await pending;
+    });
+    await settle();
+
+    expect(get().api[stateKey]).toEqual([]);
+    expect(setError).not.toHaveBeenCalledWith("late A failure");
+  });
+
+  it("rejects an already-stale explicit refresh before making a request", async () => {
+    const activeProjectRef = { current: { id: "B", name: "B" } };
+    const get = mount(activeProjectRef);
+
+    await act(async () => {
+      const result = await get().api[refreshKey]("A");
+      expect(result).toMatchObject({ ok: false, reason: "stale" });
+    });
+
+    expect(pendingRequests).toHaveLength(0);
   });
 
   it("DOES commit a response for the still-active project", async () => {
@@ -126,7 +161,7 @@ describe.each(CASES)("$name stale-project guard (sc-8858)", ({ hook, refreshKey,
 
     // Active project unchanged — the response is current and must land.
     await act(async () => {
-      pendingResolvers[0]([{ id: "from-A" }]);
+      pendingRequests[0].resolve([{ id: "from-A" }]);
       await pending;
     });
     await settle();
@@ -144,7 +179,7 @@ describe("useModelsAndLoras.refreshLoras global (no project) still commits (sc-8
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
-    pendingResolvers.length = 0;
+    pendingRequests.length = 0;
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -190,7 +225,7 @@ describe("useModelsAndLoras.refreshLoras global (no project) still commits (sc-8
     activeProjectRef.current = { id: "B", name: "B" };
 
     await act(async () => {
-      pendingResolvers[0]([{ id: "global-lora" }]);
+      pendingRequests[0].resolve([{ id: "global-lora" }]);
       await pending;
     });
     await settle();

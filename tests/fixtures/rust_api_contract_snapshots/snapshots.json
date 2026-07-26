@@ -1590,8 +1590,19 @@
       "projects": "<runtime-root>/data/projects"
     },
     "interruptedJobsOnStartup": 0,
+    "readiness": {
+      "criticality": "readiness-critical",
+      "status": "ready"
+    },
     "runtime": "<runtime>",
     "service": "sceneworks-api",
+    "startupMaintenance": {
+      "criticality": "background-safe",
+      "failureCount": 0,
+      "phase": "upload_sweeps",
+      "removedUploads": 0,
+      "status": "<maintenance-status>"
+    },
     "status": "ok",
     "version": "0.2.0"
   },

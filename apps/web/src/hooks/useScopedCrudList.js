@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Shared global/project-scoped catalog mutations. Recipe presets and prompt
 // batches intentionally expose different domain names, but their request,
@@ -24,17 +25,22 @@ export function useScopedCrudList({
 
   const refresh = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
+      if (
+        projectId &&
+        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
+      ) return refreshFailure("stale");
       try {
         const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
         const next = await apiFetch(`${resourcePath}${query}`, token, { signal });
-        if (!isCurrentRequest(projectId)) return [];
+        if (!isCurrentRequest(projectId)) return refreshFailure("stale");
         setItems(next);
         setError("");
-        return next;
+        return refreshSuccess(next);
       } catch (error) {
-        if (isAbortError(error) || !isCurrentRequest(projectId)) return [];
+        if (!isCurrentRequest(projectId)) return refreshFailure("stale", error);
+        if (isAbortError(error)) return refreshFailure("aborted", error);
         setError(error.message);
-        return [];
+        return refreshFailure("error", error);
       }
     },
     [activeProject, isCurrentRequest, resourcePath, setError, token],

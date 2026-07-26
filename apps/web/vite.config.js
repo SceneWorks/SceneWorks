@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, searchForWorkspaceRoot } from "vite";
 
 import precompressPlugin from "./vite-plugin-precompress.js";
+import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
@@ -13,6 +14,9 @@ import themeInitPlugin from "./vite-plugin-theme-init.js";
 // unavailable — see the sidebar footer in App.jsx.
 const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8"),
+);
+const bundleBudgets = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./bundle-budgets.json", import.meta.url)), "utf8"),
 );
 
 // The About → Licenses screen (sc-3778) imports the bundled-license corpus
@@ -36,7 +40,11 @@ const configDir = fileURLToPath(new URL("../../config", import.meta.url));
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
-  plugins: [themeInitPlugin(), precompressPlugin()],
+  plugins: [
+    themeInitPlugin(),
+    bundleReportPlugin({ budgets: bundleBudgets }),
+    precompressPlugin(),
+  ],
   // Matches the existing import.meta.env.VITE_* convention (see api.js). Defining
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
@@ -60,20 +68,6 @@ export default defineConfig({
       // Keep the default workspace-root allowance and add the desktop license
       // corpus the Licenses screen imports from.
       allow: [searchForWorkspaceRoot(process.cwd()), licensesDir, documentsDir, configDir],
-    },
-  },
-  build: {
-    rollupOptions: {
-      output: {
-        // Peel third-party code (React et al.) into a separate, rarely-changing
-        // chunk so the app bundle stays under Vite's size warning and the vendor
-        // chunk caches across app-only deploys.
-        manualChunks(id) {
-          if (id.includes("node_modules")) {
-            return "vendor";
-          }
-        },
-      },
     },
   },
 });
