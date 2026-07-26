@@ -286,13 +286,16 @@ describe("ConfigureJobPanel full base fine-tune", () => {
     );
   });
 
-  it("offers Full base fine-tune in the network-type picker when the target advertises it", () => {
+  // Mage advertises all three of its trainer paths. Each must render a HUMAN label, not the raw
+  // token — an option falling through `networkTypeLabel`'s `?? value` shows "lokr"/"full" verbatim,
+  // which is how you can tell a label was never added.
+  it("offers all three Mage network types with human labels", () => {
     mount(
       <ConfigureJobPanel
         {...baseProps({
           showAdvancedConfig: true,
           showNetworkType: true,
-          networkTypeOptions: ["lora", "full"],
+          networkTypeOptions: ["lora", "lokr", "full"],
           configDraft: { ...VALID_DRAFT, networkType: "full" },
           isFullFinetune: true,
         })}
@@ -303,8 +306,31 @@ describe("ConfigureJobPanel full base fine-tune", () => {
       ?.querySelector("select");
     expect(select).toBeTruthy();
     const options = [...select.querySelectorAll("option")].map((option) => option.textContent.trim());
-    // The label must be human, not the raw `full` token — `networkTypeLabels` carries it.
-    expect(options).toContain("Full base fine-tune");
-    expect(options).toContain("LoRA");
+    expect(options).toEqual(["LoRA", "LoKr (LyCORIS Kronecker)", "Full base fine-tune"]);
+    expect(options).not.toContain("lokr");
+    expect(options).not.toContain("full");
+  });
+
+  // LoKr is an ADAPTER path, so it must keep the gradient-checkpointing control that the full path
+  // replaces — the swap keys off the full-tune flag, not merely off "not lora".
+  it("keeps the gradient-checkpointing toggle on a LoKr run", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          showNetworkType: true,
+          networkTypeOptions: ["lora", "lokr", "full"],
+          configDraft: { ...VALID_DRAFT, networkType: "lokr" },
+          isLokrNetwork: true,
+          isFullFinetune: false,
+        })}
+      />,
+    );
+    expect(checkpointingCheckbox()).toBeTruthy();
+    // …and the LoKr factor field appears, which is the control LoKr actually needs.
+    const factor = [...container.querySelectorAll("label")].find((node) =>
+      node.textContent.trim().startsWith("LoKr factor"),
+    );
+    expect(factor).toBeTruthy();
   });
 });

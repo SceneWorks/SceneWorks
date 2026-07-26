@@ -149,7 +149,13 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
-            "wan_lora"
+            "wan_lora",
+            // Mage-Flow (sc-14055, offered in sc-14056): the `mlx-gen-mage` trainer reports
+            // `supports_lokr` and has a real LoKr branch, and Mage inference installs LoKr through
+            // the same strict adapter seam as LoRA (`apply_mage_adapters`). It was absent from this
+            // list only because the target never advertised `lokr` — shipped but unreachable.
+            "mage_flow_base_lora",
+            "mage_flow_edit_base_lora"
         ]
     );
 }
@@ -282,12 +288,15 @@ fn builtin_registry_exposes_both_mage_flow_foundation_targets() {
         assert_eq!(target.base_model_repo.as_deref(), Some(repo));
         assert_eq!(target.kernel, "mage_flow_lora");
         assert_eq!(target.defaults.resolution, 1024);
-        // sc-14056: Mage-Flow is the only family with a full-base-fine-tune trainer, so it is the
-        // only target that offers `full` beside `lora`. The Training Studio's network-type picker is
-        // built from exactly this list, so this assertion is what keeps the capability offerable.
+        // The Training Studio's network-type picker is built from exactly this list, so this
+        // assertion is what keeps each capability OFFERABLE. All three of Mage's trainer paths must
+        // appear: `lora` and `lokr` (both advertised by the `mlx-gen-mage` trainer and both loadable
+        // back through `apply_mage_adapters`), plus `full` — the base fine-tune, which Mage-Flow is
+        // the only family to have. `lokr` and `full` were each shipped-but-unreachable purely
+        // because they were absent here (sc-14055 / sc-14056).
         assert_eq!(
             target.limits.get("networkTypes"),
-            Some(&serde_json::json!(["lora", "full"]))
+            Some(&serde_json::json!(["lora", "lokr", "full"]))
         );
     }
 }

@@ -1484,6 +1484,7 @@
         ],
         "networkTypes": [
           "lora",
+          "lokr",
           "full"
         ],
         "optimizers": [
@@ -1576,6 +1577,7 @@
         ],
         "networkTypes": [
           "lora",
+          "lokr",
           "full"
         ],
         "optimizers": [

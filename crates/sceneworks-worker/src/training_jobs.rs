@@ -2525,7 +2525,30 @@ mod tests {
 
         // Case/whitespace tolerance, matching the rust-api submit predicate.
         assert!(mapped("  FULL ").full_finetune);
-        assert!(!mapped("lokr").full_finetune);
+
+        // sc-14055 LoKr, offered from the picker in sc-14056. The failure mode that made `full`
+        // dangerous — `NetworkType::parse` mapping every unrecognized string to `Lora`, so the run
+        // trains the WRONG network and reports success — applies verbatim to `lokr` if the enum ever
+        // loses that arm. Assert the third value THREADS rather than falling back, and that it does
+        // not accidentally trip the full-tune flag.
+        let lokr = mapped("lokr");
+        assert!(
+            matches!(lokr.network_type, NetworkType::Lokr),
+            "networkType \"lokr\" must reach the engine as NetworkType::Lokr — a silent fallback to \
+             Lora would train a plain adapter and report success"
+        );
+        assert!(
+            !lokr.full_finetune,
+            "a LoKr adapter run is not a full base fine-tune"
+        );
+        assert!(
+            lokr.gradient_checkpointing,
+            "LoKr is an adapter path, so it keeps honoring the checkbox like LoRA"
+        );
+        assert!(matches!(mapped("  LoKr ").network_type, NetworkType::Lokr));
+        // …and the three values are genuinely distinct at the engine boundary: exactly one selects
+        // Lokr, exactly one selects the full path, and they are not the same one.
+        assert!(matches!(lora.network_type, NetworkType::Lora));
     }
 
     #[cfg(any(
