@@ -24,9 +24,11 @@ const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 #[derive(Clone)]
 pub(crate) struct ModelSizeEstimateTestHook {
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    followers: Arc<std::sync::atomic::AtomicUsize>,
     started: Arc<tokio::sync::Semaphore>,
+    joined: Arc<tokio::sync::Semaphore>,
     release: Option<Arc<tokio::sync::Semaphore>>,
-    response: Option<u64>,
+    response: Arc<Mutex<Option<u64>>>,
 }
 
 #[cfg(test)]
@@ -34,9 +36,11 @@ impl ModelSizeEstimateTestHook {
     pub(crate) fn immediate(response: Option<u64>) -> Self {
         Self {
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            followers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             started: Arc::new(tokio::sync::Semaphore::new(0)),
+            joined: Arc::new(tokio::sync::Semaphore::new(0)),
             release: None,
-            response,
+            response: Arc::new(Mutex::new(response)),
         }
     }
 
@@ -51,6 +55,10 @@ impl ModelSizeEstimateTestHook {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(crate) fn follower_count(&self) -> usize {
+        self.followers.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub(crate) async fn wait_for_call(&self) {
         self.started
             .acquire()
@@ -59,11 +67,29 @@ impl ModelSizeEstimateTestHook {
             .forget();
     }
 
+    pub(crate) async fn wait_for_follower(&self) {
+        self.joined
+            .acquire()
+            .await
+            .expect("model-size test hook remains open")
+            .forget();
+    }
+
+    pub(crate) fn set_response(&self, response: Option<u64>) {
+        *self.response.lock() = response;
+    }
+
     pub(crate) fn release_one(&self) {
         self.release
             .as_ref()
             .expect("blocked model-size test hook")
             .add_permits(1);
+    }
+
+    fn note_follower(&self) {
+        self.followers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.joined.add_permits(1);
     }
 
     async fn request(&self) -> Option<u64> {
@@ -76,7 +102,7 @@ impl ModelSizeEstimateTestHook {
                 .expect("model-size test hook remains open")
                 .forget();
         }
-        self.response
+        *self.response.lock()
     }
 }
 
@@ -103,9 +129,62 @@ fn validate_huggingface_repo(repo: &str) -> Result<(), ApiError> {
 pub(crate) struct ModelSizeCache {
     entries: HashMap<ModelSizeCacheKey, CachedSizeEstimate>,
     order: VecDeque<ModelSizeCacheKey>,
+    in_flight: HashMap<ModelSizeCacheKey, Arc<ModelSizeInFlight>>,
 }
 
 type ModelSizeCacheKey = (String, Vec<String>);
+
+#[derive(Debug, Clone, Copy)]
+enum ModelSizeFlightStatus {
+    Pending,
+    Complete(Option<u64>),
+    Aborted,
+}
+
+#[derive(Debug)]
+struct ModelSizeInFlight {
+    status: Mutex<ModelSizeFlightStatus>,
+    changed: tokio::sync::Notify,
+}
+
+impl ModelSizeInFlight {
+    fn pending() -> Self {
+        Self {
+            status: Mutex::new(ModelSizeFlightStatus::Pending),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait(&self) -> ModelSizeFlightStatus {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let status = *self.status.lock();
+            if !matches!(status, ModelSizeFlightStatus::Pending) {
+                return status;
+            }
+            changed.await;
+        }
+    }
+
+    fn complete(&self, estimate: Option<u64>) {
+        *self.status.lock() = ModelSizeFlightStatus::Complete(estimate);
+        self.changed.notify_waiters();
+    }
+
+    fn abort(&self) {
+        *self.status.lock() = ModelSizeFlightStatus::Aborted;
+        self.changed.notify_waiters();
+    }
+}
+
+enum ModelSizeLookup {
+    Cached(Option<u64>),
+    Lead(Arc<ModelSizeInFlight>),
+    Follow(Arc<ModelSizeInFlight>),
+    Unshared,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CachedSizeEstimate {
@@ -130,6 +209,52 @@ impl ModelSizeCache {
             return Some(entry.size_bytes);
         }
         None
+    }
+
+    fn lookup_or_start(&mut self, key: &ModelSizeCacheKey) -> ModelSizeLookup {
+        if let Some(cached) = self.get(key) {
+            return ModelSizeLookup::Cached(cached);
+        }
+        if let Some(in_flight) = self.in_flight.get(key) {
+            return ModelSizeLookup::Follow(in_flight.clone());
+        }
+        if self.in_flight.len() >= MODEL_SIZE_CACHE_LIMIT {
+            return ModelSizeLookup::Unshared;
+        }
+        let in_flight = Arc::new(ModelSizeInFlight::pending());
+        self.in_flight.insert(key.clone(), in_flight.clone());
+        ModelSizeLookup::Lead(in_flight)
+    }
+
+    fn finish(
+        &mut self,
+        key: &ModelSizeCacheKey,
+        in_flight: &Arc<ModelSizeInFlight>,
+        estimate: Option<u64>,
+    ) {
+        if self
+            .in_flight
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, in_flight))
+        {
+            self.in_flight.remove(key);
+            match estimate {
+                Some(estimate) => self.insert(key.clone(), estimate),
+                None => self.insert_failure(key.clone()),
+            }
+        }
+        in_flight.complete(estimate);
+    }
+
+    fn abort(&mut self, key: &ModelSizeCacheKey, in_flight: &Arc<ModelSizeInFlight>) {
+        if self
+            .in_flight
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, in_flight))
+        {
+            self.in_flight.remove(key);
+        }
+        in_flight.abort();
     }
 
     pub(crate) fn insert(&mut self, key: ModelSizeCacheKey, value: u64) {
@@ -174,6 +299,43 @@ impl ModelSizeCache {
     fn touch(&mut self, key: &ModelSizeCacheKey) {
         self.order.retain(|existing| existing != key);
         self.order.push_back(key.clone());
+    }
+}
+
+struct ModelSizeFlightLeader {
+    cache: Arc<Mutex<ModelSizeCache>>,
+    key: ModelSizeCacheKey,
+    in_flight: Arc<ModelSizeInFlight>,
+    finished: bool,
+}
+
+impl ModelSizeFlightLeader {
+    fn new(
+        cache: Arc<Mutex<ModelSizeCache>>,
+        key: ModelSizeCacheKey,
+        in_flight: Arc<ModelSizeInFlight>,
+    ) -> Self {
+        Self {
+            cache,
+            key,
+            in_flight,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self, estimate: Option<u64>) {
+        self.cache
+            .lock()
+            .finish(&self.key, &self.in_flight, estimate);
+        self.finished = true;
+    }
+}
+
+impl Drop for ModelSizeFlightLeader {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cache.lock().abort(&self.key, &self.in_flight);
+        }
     }
 }
 
@@ -3521,6 +3683,24 @@ mod model_size_concurrency_tests {
         assert!(expires_at > before);
         assert!(expires_at <= before + MODEL_SIZE_POSITIVE_TTL + Duration::from_secs(1));
     }
+
+    #[test]
+    fn in_flight_key_registry_is_bounded() {
+        let mut cache = ModelSizeCache::default();
+        for index in 0..MODEL_SIZE_CACHE_LIMIT {
+            let key = (format!("owner/model-{index}"), Vec::new());
+            assert!(matches!(
+                cache.lookup_or_start(&key),
+                ModelSizeLookup::Lead(_)
+            ));
+        }
+        let overflow = ("owner/overflow".to_owned(), Vec::new());
+        assert!(matches!(
+            cache.lookup_or_start(&overflow),
+            ModelSizeLookup::Unshared
+        ));
+        assert_eq!(cache.in_flight.len(), MODEL_SIZE_CACHE_LIMIT);
+    }
 }
 
 fn group_model_catalog_work_items(
@@ -4401,31 +4581,65 @@ pub(crate) async fn estimate_huggingface_download_size(
         return None;
     }
     let cache_key = (repo.to_owned(), files.to_vec());
-    if let Some(cached) = state.model_size_cache.lock().get(&cache_key) {
-        return cached;
+    loop {
+        let lookup = state.model_size_cache.lock().lookup_or_start(&cache_key);
+        match lookup {
+            ModelSizeLookup::Cached(cached) => return cached,
+            ModelSizeLookup::Follow(in_flight) => {
+                #[cfg(test)]
+                if let Some(hook) = state.model_size_estimate_test_hook.lock().clone() {
+                    hook.note_follower();
+                }
+                match in_flight.wait().await {
+                    ModelSizeFlightStatus::Complete(estimate) => return estimate,
+                    ModelSizeFlightStatus::Aborted => continue,
+                    ModelSizeFlightStatus::Pending => unreachable!("wait returns a terminal state"),
+                }
+            }
+            ModelSizeLookup::Lead(in_flight) => {
+                let leader = ModelSizeFlightLeader::new(
+                    state.model_size_cache.clone(),
+                    cache_key.clone(),
+                    in_flight,
+                );
+                let estimate = estimate_huggingface_download_size_request(state, repo, files).await;
+                leader.finish(estimate);
+                return estimate;
+            }
+            ModelSizeLookup::Unshared => {
+                let estimate = estimate_huggingface_download_size_request(state, repo, files).await;
+                match estimate {
+                    Some(estimate) => state
+                        .model_size_cache
+                        .lock()
+                        .insert(cache_key.clone(), estimate),
+                    None => state
+                        .model_size_cache
+                        .lock()
+                        .insert_failure(cache_key.clone()),
+                }
+                return estimate;
+            }
+        }
     }
+}
+
+async fn estimate_huggingface_download_size_request(
+    state: &AppState,
+    repo: &str,
+    files: &[String],
+) -> Option<u64> {
     #[cfg(test)]
     let test_hook = { state.model_size_estimate_test_hook.lock().clone() };
     #[cfg(test)]
     if let Some(hook) = test_hook {
-        let estimate = hook.request().await;
-        match estimate {
-            Some(estimate) => state.model_size_cache.lock().insert(cache_key, estimate),
-            None => state.model_size_cache.lock().insert_failure(cache_key),
-        }
-        return estimate;
+        return hook.request().await;
     }
     let url = format!(
         "https://huggingface.co/api/models/{}?blobs=true",
         quote_huggingface_repo(repo)
     );
-    let estimate =
-        estimate_huggingface_download_size_uncached(&state.http_client, &url, files).await;
-    match estimate {
-        Some(estimate) => state.model_size_cache.lock().insert(cache_key, estimate),
-        None => state.model_size_cache.lock().insert_failure(cache_key),
-    }
-    estimate
+    estimate_huggingface_download_size_uncached(&state.http_client, &url, files).await
 }
 
 pub(crate) async fn estimate_huggingface_download_size_uncached(
