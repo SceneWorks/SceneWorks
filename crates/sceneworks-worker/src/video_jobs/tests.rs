@@ -3,7 +3,7 @@ use super::candle::*;
 use super::seedvr2::*;
 use super::*;
 #[cfg(target_os = "macos")]
-use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
+use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{bernini::*, mochi::*, svd::*, wan::*};
 
@@ -37,6 +37,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             "pub(super) async fn generate_scail2(",
         ),
         (
+            "krea_realtime",
+            include_str!("krea_realtime.rs"),
+            "pub(super) async fn generate_krea_realtime(",
+        ),
+        (
             "ltx",
             include_str!("ltx.rs"),
             "pub(super) async fn generate_ltx(",
@@ -63,7 +68,16 @@ fn video_jobs_remains_split_into_real_engine_modules() {
         "engine families must be real Rust modules, not textual include! composition"
     );
     for family in [
-        "seedvr2", "wan", "candle", "bernini", "scail2", "ltx", "mochi", "svd", "vace",
+        "seedvr2",
+        "wan",
+        "candle",
+        "bernini",
+        "scail2",
+        "krea_realtime",
+        "ltx",
+        "mochi",
+        "svd",
+        "vace",
     ] {
         assert!(
             !PARENT.contains(&format!("{family}::*")),
@@ -2720,6 +2734,279 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
     });
     std::fs::remove_dir_all(&root).ok();
     std::fs::remove_dir_all(&empty).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Krea Realtime 14B (epic 8431 / sc-8443 S10) — routing + VideoRequest→GenerationRequest mapping.
+// ---------------------------------------------------------------------------
+
+/// A temp dir holding just a `config.json`, so `local_mlx_dir` accepts it as a resolvable Krea
+/// Realtime snapshot (the loader is stubbed in the mapping test, so the contents are never read).
+#[cfg(target_os = "macos")]
+fn krea_fake_model_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("krea_{tag}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.json"), "{}").unwrap();
+    dir
+}
+
+/// A `JobSnapshot` for a Krea Realtime video job.
+#[cfg(target_os = "macos")]
+fn krea_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-krea-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "krea_realtime_14b" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-07-26T00:00:00Z",
+        "updatedAt": "2026-07-26T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("the krea job snapshot deserializes")
+}
+
+/// The SceneWorks id maps to the engine id 1:1 and matches nothing else — so appending the krea arm to
+/// the route ladder can't shadow (or be shadowed by) any pre-existing engine.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_engine_id_maps_only_krea() {
+    assert_eq!(
+        krea_realtime_engine_id("krea_realtime_14b"),
+        Some("krea_realtime_14b")
+    );
+    for other in [
+        "wan_2_2",
+        "wan_2_2_t2v_14b",
+        "scail2_14b",
+        "bernini",
+        "mochi_1",
+        "svd",
+        "ltx_2_3",
+        "krea_2_turbo", // the unrelated IMAGE crate — must NOT collide with the video engine
+    ] {
+        assert_eq!(
+            krea_realtime_engine_id(other),
+            None,
+            "{other} must not resolve to the Krea Realtime engine"
+        );
+    }
+}
+
+/// The invariant this story exists to wire, tested on the pure shape helper without a GPU or assets:
+/// a reference still → i2v `Reference` with `strength` DROPPED (`None`); a source clip → v2v
+/// `VideoClip` with `strength` HONORED; a clip WINS over a still (v2v precedence, matching the engine's
+/// `run`); no media → t2v (empty). Discriminating: the `VideoClip` strength must equal the value passed
+/// (not a hardcoded default), and the `Reference` strength must be `None` — a future edit that started
+/// honoring i2v strength would turn this red.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_conditioning_i2v_drops_strength_v2v_honors_it() {
+    let still = || gen_core::Image {
+        width: 2,
+        height: 2,
+        pixels: vec![0u8; 12],
+    };
+    let clip = || {
+        vec![gen_core::Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0u8; 12],
+        }]
+    };
+
+    // i2v: a still, strength argument is a no-op → Reference { strength: None }.
+    let i2v = krea_realtime_conditioning(Some(still()), None, 0.9);
+    assert_eq!(i2v.len(), 1);
+    match &i2v[0] {
+        Conditioning::Reference { strength, .. } => assert_eq!(
+            *strength, None,
+            "i2v strength is a NO-OP — the reference must carry no strength"
+        ),
+        other => panic!("i2v must be a Reference, got {other:?}"),
+    }
+
+    // v2v: a clip → VideoClip whose strength equals the honored value (0.35, not a default).
+    let v2v = krea_realtime_conditioning(None, Some(clip()), 0.35);
+    assert_eq!(v2v.len(), 1);
+    match &v2v[0] {
+        Conditioning::VideoClip {
+            frames, strength, ..
+        } => {
+            assert_eq!(frames.len(), 1);
+            assert_eq!(*strength, 0.35, "v2v must HONOR the resolved strength");
+        }
+        other => panic!("v2v must be a VideoClip, got {other:?}"),
+    }
+
+    // A clip and a still together → v2v wins (the engine prefers VideoClip).
+    let both = krea_realtime_conditioning(Some(still()), Some(clip()), 0.5);
+    assert_eq!(both.len(), 1);
+    assert!(
+        matches!(both[0], Conditioning::VideoClip { .. }),
+        "a clip must take precedence over a still (v2v)"
+    );
+
+    // No media → t2v (no conditioning).
+    assert!(krea_realtime_conditioning(None, None, 1.0).is_empty());
+}
+
+/// A Krea Realtime job with resolvable weights routes to `VideoRoute::KreaRealtime` — and, critically,
+/// one whose weights DON'T resolve must NOT silently become `VideoRoute::Stub` output: the Stub arm's
+/// fail-loud gate (`ensure_video_engine_weights`) must error. Also pins that adding the krea arm does
+/// not pull any other model onto it.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() {
+    let model_dir = krea_fake_model_dir("route");
+    let settings = Settings {
+        data_dir: std::env::temp_dir().join(format!("krea_route_data_{}", std::process::id())),
+        ..Settings::from_env()
+    };
+    let req = request(json!({
+        "projectId": "p", "model": "krea_realtime_14b", "mode": "text_to_video", "prompt": "p"
+    }));
+    temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        model_dir.to_str().unwrap(),
+        || {
+            assert_eq!(
+                resolve_video_route(&req, &settings),
+                VideoRoute::KreaRealtime("krea_realtime_14b")
+            );
+            // A non-krea model never lands on the krea route (even though krea weights ARE available):
+            // routing is keyed on the model id, not merely availability.
+            for other in ["wan_2_2", "scail2_14b", "bernini", "mochi_1"] {
+                let r = request(json!({
+                    "projectId": "p", "model": other, "mode": "text_to_video", "prompt": "p"
+                }));
+                assert!(
+                    !matches!(
+                        resolve_video_route(&r, &settings),
+                        VideoRoute::KreaRealtime(_)
+                    ),
+                    "{other} must not route to KreaRealtime"
+                );
+            }
+        },
+    );
+
+    // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
+    // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
+    let empty = std::env::temp_dir().join(format!("krea_empty_{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    let bare = Settings {
+        data_dir: empty.clone(),
+        ..Settings::from_env()
+    };
+    temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
+        assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+        let err = ensure_video_engine_weights(&req, &bare)
+            .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
+        let WorkerError::InvalidPayload(message) = err else {
+            panic!("expected an actionable InvalidPayload");
+        };
+        assert!(
+            message.contains("krea_realtime_14b") && message.contains("Model Manager"),
+            "the error must name the model and tell the user what to do: {message}"
+        );
+    });
+    std::fs::remove_dir_all(&model_dir).ok();
+    std::fs::remove_dir_all(&empty).ok();
+}
+
+/// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
+/// `generate_video` heartbeat funnel) against a stub generator and asserts on the `GenerationRequest`
+/// that REACHED the engine — prompt, `steps` (from advanced), seed, fps, and the Wan-lattice frame
+/// count — for a t2v job (no conditioning). CFG off: no negative prompt reaches the engine. This is
+/// what proves the VideoRequest→GenerationRequest scalar mapping AND that the generate path
+/// structurally runs through the funnel (a clip comes back).
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
+    let model_dir = krea_fake_model_dir("map");
+    let settings = Settings {
+        data_dir: model_dir.join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_realtime_14b",
+        "mode": "text_to_video",
+        "prompt": "aurora over a fjord",
+        "seed": 4242,
+        "fps": 16,
+        "duration": 2.0,
+        "advanced": { "steps": 6 }
+    }));
+    // raw = round(2.0 * 16) = 32; the Wan 1-mod-4 stride floors 32 → 29 (the DiT + z16 VAE ARE stock Wan).
+    assert_eq!(wan_frame_count(req.raw_frame_count()), 29);
+
+    let job = krea_job_snapshot();
+    let probe = ArmProbe::default();
+    let loader = probe.loader();
+    let decoded = temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        model_dir.to_str().unwrap(),
+        || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(generate_krea_realtime_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &job,
+                    &req,
+                    // project_path — never touched by a t2v request (no media loaded).
+                    &model_dir,
+                    "krea_realtime_14b",
+                    "mlx",
+                    loader,
+                ))
+        },
+    )
+    .expect("krea t2v generation runs through the funnel against the probe");
+
+    // The clip came back through the funnel — the generate path structurally ran the heartbeat loop.
+    assert!(!decoded.frames.is_empty());
+
+    let seen = probe.request.lock().unwrap();
+    let gen = seen.as_ref().expect("the arm reached the engine");
+    assert_eq!(gen.prompt, "aurora over a fjord");
+    assert_eq!(gen.steps, Some(6), "advanced steps map to the engine steps");
+    assert_eq!(gen.seed, Some(4242), "the explicit seed maps through");
+    assert_eq!(gen.fps, Some(16));
+    assert_eq!(gen.frames, Some(29), "frame count uses the Wan lattice");
+    assert_eq!(
+        gen.negative_prompt, None,
+        "CFG off — no negative prompt reaches the engine"
+    );
+    assert!(
+        gen.conditioning.is_empty(),
+        "a t2v request carries no conditioning"
+    );
+
+    drop(seen);
+    std::fs::remove_dir_all(&model_dir).ok();
 }
 
 /// The on-demand tier fetches are gated on the request's tier toggle — the "fetched on demand if
