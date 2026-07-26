@@ -1282,13 +1282,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetError("");
     setDatasetMessage("");
     try {
-      if (!activeDataset?.id) {
-        throw new Error("Create the empty dataset before importing Parquet metadata.");
+      if (!draftName.trim()) {
+        throw new Error("Name the dataset before importing Parquet metadata.");
       }
       if (memberAssets.length) {
         throw new Error("Parquet import currently requires an empty dataset.");
       }
-      const saved = await persistDataset([], activeDataset);
+      // A new draft has no server id yet. Persist the named empty destination as part
+      // of the import action so users do not need a placeholder image or a separate save.
+      const saved = await persistDataset([], activeDataset ?? undefined);
+      if (!saved?.id) {
+        throw new Error("The empty dataset could not be created.");
+      }
       const job = await createTrainingDatasetParquetImportJob(saved.id, settings);
       setDatasetMessage(
         `Parquet import queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue, then refresh this dataset when it finishes.`,

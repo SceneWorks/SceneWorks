@@ -169,7 +169,7 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
           <label>
             Images to import
             <input
-              max="25000"
+              max="100000"
               min="1"
               onChange={(event) => update("maxItems", event.target.value)}
               type="number"
@@ -200,7 +200,8 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
         </div>
         <p className="dataset-parquet-hint">
           Imports are resumable. Failed or undersized URLs are skipped, so the final count may be
-          lower when the candidate window is exhausted.
+          lower when the candidate window is exhausted. Large imports can take hours and use
+          substantial disk space.
         </p>
       </form>
 

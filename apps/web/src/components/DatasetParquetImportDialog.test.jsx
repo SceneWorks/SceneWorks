@@ -51,6 +51,8 @@ describe("DatasetParquetImportDialog", () => {
     change(fieldByLabel("Parquet file or folder"), "D:\\laion2B-en-aesthetic-metadata");
     change(fieldByLabel("Caption category preset", "select"), "faces");
     change(fieldByLabel("Exclude any caption term"), "logo, illustration");
+    expect(fieldByLabel("Images to import").max).toBe("100000");
+    change(fieldByLabel("Images to import"), "100000");
     await act(async () => {
       document.body.querySelector('button[type="submit"]').click();
     });
@@ -60,7 +62,7 @@ describe("DatasetParquetImportDialog", () => {
       sourcePath: "D:\\laion2B-en-aesthetic-metadata",
       urlColumn: "URL",
       captionColumn: "TEXT",
-      maxItems: 1000,
+      maxItems: 100000,
       minEdge: 512,
       concurrency: 16,
       captionIncludes: ["face", "facial", "portrait", "headshot", "selfie", "close-up", "close up"],

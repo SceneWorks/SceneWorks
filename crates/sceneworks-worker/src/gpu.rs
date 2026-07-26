@@ -1044,6 +1044,9 @@ pub(crate) fn worker_capabilities_with_utility(
             // Explicit built-in LoRA download (sc-5944): fetches the catalog LoRA's HF
             // repo/file into the shared HF cache, same as model_download.
             WorkerCapability::LoraDownload,
+            // LAION-style URL/caption Parquet materialization is local metadata scanning
+            // plus bounded public image downloads, so it belongs on the CPU utility lane.
+            WorkerCapability::DatasetParquetImport,
             // Procedural detection/tracking is a preview only. Real, model-backed
             // PersonDetect/PersonTrack run on the macOS MLX worker (native
             // YOLO11/SAM2, epic 3482) or the off-Mac candle worker (YOLO11/SAM3);

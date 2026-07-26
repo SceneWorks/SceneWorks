@@ -141,6 +141,7 @@ export function withTrainingDataSetsLibraryContext(p) {
       batchRenameTrainingDataset: p.batchRenameDataset,
       writeTrainingDatasetCaptionSidecars: p.writeCaptionSidecars,
       createTrainingDatasetCaptionJob: p.createCaptionJob,
+      createTrainingDatasetParquetImportJob: p.createParquetImportJob,
       createTrainingDatasetAnalysisJob: p.createAnalysisJob,
       createTrainingJob: p.createTrainingJob,
       trainingPresets: { presets: p.trainingPresets },

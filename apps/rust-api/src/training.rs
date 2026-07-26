@@ -488,7 +488,6 @@ pub(crate) async fn create_training_dataset_caption_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-const MAX_PARQUET_IMPORT_ITEMS: usize = 25_000;
 const MAX_PARQUET_IMPORT_CONCURRENCY: usize = 64;
 const MAX_PARQUET_FILTER_TERMS: usize = 32;
 const MAX_PARQUET_FILTER_TERM_CHARS: usize = 64;
@@ -496,9 +495,12 @@ const MAX_PARQUET_FILTER_TERM_CHARS: usize = 64;
 fn validate_parquet_import_request(
     payload: &DatasetParquetImportJobRequest,
 ) -> Result<std::path::PathBuf, ApiError> {
-    if payload.max_items == 0 || payload.max_items > MAX_PARQUET_IMPORT_ITEMS {
+    if payload.max_items == 0
+        || payload.max_items > sceneworks_core::contracts::MAX_DATASET_PARQUET_IMPORT_ITEMS
+    {
         return Err(ApiError::bad_request(format!(
-            "Parquet maxItems must be between 1 and {MAX_PARQUET_IMPORT_ITEMS}."
+            "Parquet maxItems must be between 1 and {}.",
+            sceneworks_core::contracts::MAX_DATASET_PARQUET_IMPORT_ITEMS
         )));
     }
     if payload.min_edge > 8192 {
@@ -653,7 +655,7 @@ pub(crate) async fn finalize_training_dataset_parquet_import(
             "Parquet import produced no usable images.",
         ));
     }
-    if payload.items.len() > MAX_PARQUET_IMPORT_ITEMS {
+    if payload.items.len() > sceneworks_core::contracts::MAX_DATASET_PARQUET_IMPORT_ITEMS {
         return Err(ApiError::bad_request(
             "Parquet import contains too many items.",
         ));
