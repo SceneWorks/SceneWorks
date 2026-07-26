@@ -48,8 +48,8 @@ export function useJobEvents({
   dismissNoticeKind,
   generatedAssetRefreshesRef,
   refreshAssetsRef,
-  refreshDataRef,
-  refreshDataWithLoraOverlayRef,
+  refreshModelsRef,
+  refreshModelAndLorasRef,
   refreshPersonTracksRef,
   activeProjectRef,
   enqueueTimelineGenerationApply,
@@ -201,23 +201,23 @@ export function useJobEvents({
         job.status === "completed" &&
         (job.type === "model_download" || job.type === "model_convert" || job.type === "model_import")
       ) {
-        refreshDataRef.current?.();
+        refreshModelsRef.current?.();
       }
       // A completed built-in LoRA download (sc-5944) flips the catalog entry to
       // installed; refresh models+loras so the Models row and any Studio gate update.
       if (job.status === "completed" && job.type === "lora_download") {
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+        refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_import") {
         dismissNoticeKind("lora-import");
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+        refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
         if (job.result?.loraRegistered === false) {
           pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
         } else {
           dismissNoticeKind("lora-train");
-          refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
+          refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
         }
       }
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
