@@ -1448,14 +1448,59 @@ pub(crate) async fn fetch_public_source_url_bytes(
     source_url: &str,
     max_bytes: usize,
 ) -> WorkerResult<Vec<u8>> {
+    fetch_public_source_url_bytes_with_options(
+        source_url,
+        &PublicSourceUrlFetchOptions {
+            max_bytes,
+            ..PublicSourceUrlFetchOptions::default()
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublicSourceUrlFetchOptions {
+    pub max_bytes: usize,
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    /// Total timeout for each redirect hop, including its response body.
+    pub hop_timeout: Duration,
+}
+
+impl Default for PublicSourceUrlFetchOptions {
+    fn default() -> Self {
+        Self {
+            max_bytes: 32 * 1024 * 1024,
+            connect_timeout: HTTP_CONNECT_TIMEOUT,
+            read_timeout: HTTP_READ_TIMEOUT,
+            hop_timeout: Duration::from_secs(90),
+        }
+    }
+}
+
+pub(crate) async fn fetch_public_source_url_bytes_with_options(
+    source_url: &str,
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<Vec<u8>> {
+    if options.max_bytes == 0
+        || options.connect_timeout.is_zero()
+        || options.read_timeout.is_zero()
+        || options.hop_timeout.is_zero()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image fetch limits and timeouts must be positive".to_owned(),
+        ));
+    }
     let mut current = parse_lora_source_url_with_private(source_url, false)
         .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-    let mut client = public_source_url_client(&current).await?;
+    let mut client = public_source_url_client(&current, options).await?;
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
-        let response =
-            client.get(current.clone()).send().await.map_err(|error| {
-                redact_reqwest_source_url_error("dataset image GET failed", error)
-            })?;
+        let response = client
+            .get(current.clone())
+            .timeout(options.hop_timeout)
+            .send()
+            .await
+            .map_err(|error| redact_reqwest_source_url_error("dataset image GET failed", error))?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -1479,49 +1524,59 @@ pub(crate) async fn fetch_public_source_url_bytes(
                     "dataset image redirect must not contain credentials".to_owned(),
                 ));
             }
-            client = public_source_url_client(&current).await?;
+            client = public_source_url_client(&current, options).await?;
             continue;
         }
         let mut response = response
             .error_for_status()
             .map_err(|error| redact_reqwest_source_url_error("dataset image GET failed", error))?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > max_bytes as u64)
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "dataset image exceeds the {} limit",
-                format_bytes(max_bytes as u64)
-            )));
-        }
-        let mut bytes = Vec::with_capacity(
-            response
-                .content_length()
-                .and_then(|length| usize::try_from(length).ok())
-                .unwrap_or(0)
-                .min(max_bytes),
-        );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| redact_reqwest_source_url_error("dataset image body failed", error))?
-        {
-            if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "dataset image exceeds the {} limit",
-                    format_bytes(max_bytes as u64)
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        return Ok(bytes);
+        return read_bounded_public_source_response(&mut response, options.max_bytes).await;
     }
     Err(WorkerError::InvalidPayload(
         "dataset image exceeded the redirect limit".to_owned(),
     ))
 }
 
-async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::Client> {
+async fn read_bounded_public_source_response(
+    response: &mut reqwest::Response,
+    max_bytes: usize,
+) -> WorkerResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "dataset image exceeds the {} limit",
+            format_bytes(max_bytes as u64)
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(max_bytes),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| redact_reqwest_source_url_error("dataset image body failed", error))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(WorkerError::InvalidPayload(format!(
+                "dataset image exceeds the {} limit",
+                format_bytes(max_bytes as u64)
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn public_source_url_client(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<reqwest::Client> {
     let Some(host) = url.host_str() else {
         return Err(WorkerError::InvalidPayload(
             "dataset image URL host is not allowed".to_owned(),
@@ -1546,7 +1601,98 @@ async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::C
         }
         resolved
     };
-    build_source_url_client(url, Some(&addrs))
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(options.connect_timeout)
+        .read_timeout(options.read_timeout);
+    builder = builder.resolve_to_addrs(host, &addrs);
+    Ok(builder.build()?)
+}
+
+#[cfg(test)]
+mod public_source_url_tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use axum::http::{header::CONTENT_LENGTH, Response};
+    use axum::routing::get;
+    use axum::Router;
+    use std::convert::Infallible;
+
+    #[tokio::test]
+    async fn dataset_fetch_rejects_private_targets_and_credentials() {
+        let options = PublicSourceUrlFetchOptions {
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
+            hop_timeout: Duration::from_millis(100),
+            ..PublicSourceUrlFetchOptions::default()
+        };
+        for url in [
+            "http://127.0.0.1/image.png",
+            "http://[::1]/image.png",
+            "http://user:secret@example.com/image.png",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                fetch_public_source_url_bytes_with_options(url, &options)
+                    .await
+                    .is_err(),
+                "{url} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_reader_enforces_declared_and_streamed_byte_caps() {
+        let app = Router::new()
+            .route(
+                "/declared",
+                get(|| async {
+                    Response::builder()
+                        .header(CONTENT_LENGTH, "1024")
+                        .body(Body::from(vec![0_u8; 1024]))
+                        .expect("response")
+                }),
+            )
+            .route(
+                "/chunked",
+                get(|| async {
+                    let chunks = futures_util::stream::iter([
+                        Ok::<_, Infallible>(Bytes::from_static(b"1234")),
+                        Ok::<_, Infallible>(Bytes::from_static(b"5678")),
+                    ]);
+                    Response::new(Body::from_stream(chunks))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+
+        let mut declared = client
+            .get(format!("http://{address}/declared"))
+            .send()
+            .await
+            .expect("declared response");
+        let error = read_bounded_public_source_response(&mut declared, 8)
+            .await
+            .expect_err("declared cap");
+        assert!(error.to_string().contains("limit"));
+
+        let mut chunked = client
+            .get(format!("http://{address}/chunked"))
+            .send()
+            .await
+            .expect("chunked response");
+        let error = read_bounded_public_source_response(&mut chunked, 6)
+            .await
+            .expect_err("streamed cap");
+        assert!(error.to_string().contains("limit"));
+        server.abort();
+    }
 }
 
 pub(crate) async fn lora_source_content_length(
