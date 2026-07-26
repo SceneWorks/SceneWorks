@@ -2875,23 +2875,6 @@ fn safe_hf_path_parts<'a>(value: &'a str, label: &str) -> WorkerResult<Vec<&'a s
     Ok(parts)
 }
 
-/// Locates the first `.safetensors` under `dir`, reads its header, and
-/// runs the architecture detector. Returns `Ok(None)` when no header is
-/// available or the signature is inconclusive. Returns the structured
-/// [`SafetensorsHeaderError`] when a file was found but its header is
-/// unreadable, malformed, or fronts a truncated/incomplete file — the caller
-/// turns it into a message via [`lora_family_detection_error`] and discards the
-/// bad file.
-pub(crate) fn detect_family_in_target_dir(
-    dir: &Path,
-) -> Result<Option<String>, SafetensorsHeaderError> {
-    let Some(safetensors_path) = first_safetensors_path(dir) else {
-        return Ok(None);
-    };
-    let header = read_safetensors_header(&safetensors_path)?;
-    Ok(detect_lora_family(&header))
-}
-
 /// Actionable failure message for a LoRA-import safetensors inspection error.
 pub(crate) fn lora_family_detection_error(error: &SafetensorsHeaderError) -> String {
     match error {
@@ -3082,8 +3065,11 @@ pub(crate) async fn run_lora_import_job(
         }
     }
 
-    let detected_family = match detect_family_in_target_dir(&target_dir) {
-        Ok(detected) => detected,
+    // One header read, two answers (sc-14057). The declared half matters most for the repo/URL
+    // routes: their file did not exist when the API queued the job, so this is the only point at
+    // which the adapter can describe itself.
+    let (detected_family, adapter_metadata) = match inspect_adapter_in_dir(&target_dir) {
+        Ok(inspected) => inspected,
         Err(error) => {
             // A truncated/corrupt file must not linger: `lora_is_installed` (API side)
             // treats any `*.safetensors` under the dir as installed, so a rejected
@@ -3137,6 +3123,12 @@ pub(crate) async fn run_lora_import_job(
                 .entry("family")
                 .or_insert(Value::String(family));
         }
+        // …and the same for what the file declares about itself (sc-14057). The API writes these
+        // through the identical `sceneworks_core` writer for a local/uploaded source; for a
+        // repo/URL import there was no file to read at queue time, so this is where an adapter
+        // ingested by URL stops being described more poorly than the same adapter dropped in as a
+        // file. `or_insert` semantics: anything already recorded wins.
+        apply_adapter_metadata_to_manifest_entry(&mut manifest_entry, &adapter_metadata);
         let manifest_path = lora_manifest_target(settings, &job.payload)?;
         upsert_manifest_entry(&manifest_path, "loras", manifest_entry).await?;
     }
@@ -3636,9 +3628,9 @@ mod tests {
     }
 
     /// sc-6072: a truncated `.safetensors` in the import target dir is rejected by the
-    /// import-time detector with an actionable, file-incompleteness message.
+    /// import-time inspector with an actionable, file-incompleteness message.
     #[test]
-    fn detect_family_in_target_dir_rejects_truncated_file() {
+    fn inspect_adapter_in_dir_rejects_truncated_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let header = json!({
             "__metadata__": { "format": "pt" },
@@ -3650,8 +3642,8 @@ mod tests {
         // Declares 512 bytes of tensor data but writes none — truncated download.
         std::fs::write(dir.path().join("lora.safetensors"), buffer).expect("write");
 
-        let error = detect_family_in_target_dir(dir.path())
-            .expect_err("a truncated file must not be accepted");
+        let error =
+            inspect_adapter_in_dir(dir.path()).expect_err("a truncated file must not be accepted");
         assert!(
             matches!(error, SafetensorsHeaderError::IncompleteData { .. }),
             "expected IncompleteData, got {error:?}"

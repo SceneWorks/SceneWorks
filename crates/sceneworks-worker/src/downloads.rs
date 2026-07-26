@@ -1,4 +1,5 @@
 use super::*;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -1448,14 +1449,58 @@ pub(crate) async fn fetch_public_source_url_bytes(
     source_url: &str,
     max_bytes: usize,
 ) -> WorkerResult<Vec<u8>> {
-    let mut current = parse_lora_source_url_with_private(source_url, false)
-        .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
-    let mut client = public_source_url_client(&current).await?;
+    fetch_public_source_url_bytes_with_options(
+        source_url,
+        &PublicSourceUrlFetchOptions {
+            max_bytes,
+            ..PublicSourceUrlFetchOptions::default()
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublicSourceUrlFetchOptions {
+    pub max_bytes: usize,
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    /// Total timeout for each redirect hop, including its response body.
+    pub hop_timeout: Duration,
+}
+
+impl Default for PublicSourceUrlFetchOptions {
+    fn default() -> Self {
+        Self {
+            max_bytes: 32 * 1024 * 1024,
+            connect_timeout: HTTP_CONNECT_TIMEOUT,
+            read_timeout: HTTP_READ_TIMEOUT,
+            hop_timeout: Duration::from_secs(90),
+        }
+    }
+}
+
+pub(crate) async fn fetch_public_source_url_bytes_with_options(
+    source_url: &str,
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<Vec<u8>> {
+    if options.max_bytes == 0
+        || options.connect_timeout.is_zero()
+        || options.read_timeout.is_zero()
+        || options.hop_timeout.is_zero()
+    {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image fetch limits and timeouts must be positive".to_owned(),
+        ));
+    }
+    let mut current = parse_public_dataset_url(source_url)?;
+    let mut client = bounded_public_source_url_client(&current, options).await?;
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
-        let response =
-            client.get(current.clone()).send().await.map_err(|error| {
-                redact_reqwest_source_url_error("dataset image GET failed", error)
-            })?;
+        let response = client
+            .get(current.clone())
+            .timeout(options.hop_timeout)
+            .send()
+            .await
+            .map_err(|error| redact_reqwest_source_url_error("dataset image GET failed", error))?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -1466,62 +1511,123 @@ pub(crate) async fn fetch_public_source_url_bytes(
                         "dataset image redirect was missing a Location header".to_owned(),
                     )
                 })?;
-            current = current.join(location).map_err(|_| {
+            let next = current.join(location).map_err(|_| {
                 WorkerError::InvalidPayload("dataset image redirect target was invalid".to_owned())
             })?;
-            if !matches!(current.scheme(), "http" | "https") {
-                return Err(WorkerError::InvalidPayload(
-                    "dataset image redirect must use http or https".to_owned(),
-                ));
-            }
-            if !current.username().is_empty() || current.password().is_some() {
-                return Err(WorkerError::InvalidPayload(
-                    "dataset image redirect must not contain credentials".to_owned(),
-                ));
-            }
-            client = public_source_url_client(&current).await?;
+            current = parse_public_dataset_url(next.as_str())?;
+            client = bounded_public_source_url_client(&current, options).await?;
             continue;
         }
         let mut response = response
             .error_for_status()
             .map_err(|error| redact_reqwest_source_url_error("dataset image GET failed", error))?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > max_bytes as u64)
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "dataset image exceeds the {} limit",
-                format_bytes(max_bytes as u64)
-            )));
-        }
-        let mut bytes = Vec::with_capacity(
-            response
-                .content_length()
-                .and_then(|length| usize::try_from(length).ok())
-                .unwrap_or(0)
-                .min(max_bytes),
-        );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| redact_reqwest_source_url_error("dataset image body failed", error))?
-        {
-            if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "dataset image exceeds the {} limit",
-                    format_bytes(max_bytes as u64)
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        return Ok(bytes);
+        return read_bounded_public_source_response(&mut response, options.max_bytes).await;
     }
     Err(WorkerError::InvalidPayload(
         "dataset image exceeded the redirect limit".to_owned(),
     ))
 }
 
-async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::Client> {
+/// Parses an untrusted metadata-dataset image endpoint.
+///
+/// Unlike LoRA downloads, dataset URLs do not need a filesystem-safe final
+/// filename: signed endpoints, percent-encoded object keys, and root/trailing
+/// slash paths are valid. The network safety contract remains identical:
+/// http(s) only, no credentials, a public host at parse time, followed by
+/// public-IP DNS validation and address pinning before every request.
+fn parse_public_dataset_url(source_url: &str) -> WorkerResult<reqwest::Url> {
+    let url = reqwest::Url::parse(source_url)
+        .map_err(|_| WorkerError::InvalidPayload("dataset image URL was invalid".to_owned()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image URL must use http or https".to_owned(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image URL must not contain credentials".to_owned(),
+        ));
+    }
+    validate_lora_url_host(&url).map_err(|_| {
+        WorkerError::InvalidPayload("dataset image URL host is not allowed".to_owned())
+    })?;
+    Ok(url)
+}
+
+async fn read_bounded_public_source_response(
+    response: &mut reqwest::Response,
+    max_bytes: usize,
+) -> WorkerResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "dataset image exceeds the {} limit",
+            format_bytes(max_bytes as u64)
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(max_bytes),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| redact_reqwest_source_url_error("dataset image body failed", error))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(WorkerError::InvalidPayload(format!(
+                "dataset image exceeds the {} limit",
+                format_bytes(max_bytes as u64)
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn bounded_public_source_url_client(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<reqwest::Client> {
+    bounded_public_source_url_client_with_resolver(url, options, |host, port| async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(|addresses| addresses.collect())
+    })
+    .await
+}
+
+async fn bounded_public_source_url_client_with_resolver<F, Fut>(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+    resolver: F,
+) -> WorkerResult<reqwest::Client>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    tokio::time::timeout(
+        options.connect_timeout,
+        public_source_url_client_with_resolver(url, options, resolver),
+    )
+    .await
+    .map_err(|_| WorkerError::InvalidPayload("dataset image DNS resolution timed out".to_owned()))?
+}
+
+async fn public_source_url_client_with_resolver<F, Fut>(
+    url: &reqwest::Url,
+    options: &PublicSourceUrlFetchOptions,
+    resolver: F,
+) -> WorkerResult<reqwest::Client>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
     let Some(host) = url.host_str() else {
         return Err(WorkerError::InvalidPayload(
             "dataset image URL host is not allowed".to_owned(),
@@ -1534,7 +1640,7 @@ async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::C
         vec![SocketAddr::new(address, port)]
     } else {
         let mut resolved = Vec::new();
-        for address in tokio::net::lookup_host((host, port)).await? {
+        for address in resolver(host.to_owned(), port).await? {
             validate_public_ip(address.ip())
                 .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
             resolved.push(address);
@@ -1546,7 +1652,398 @@ async fn public_source_url_client(url: &reqwest::Url) -> WorkerResult<reqwest::C
         }
         resolved
     };
-    build_source_url_client(url, Some(&addrs))
+    build_public_source_url_client(url, &addrs, options)
+}
+
+fn build_public_source_url_client(
+    url: &reqwest::Url,
+    addrs: &[SocketAddr],
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<reqwest::Client> {
+    let host = url.host_str().ok_or_else(|| {
+        WorkerError::InvalidPayload("dataset image URL host is not allowed".to_owned())
+    })?;
+    let mut builder = reqwest::Client::builder()
+        // A system HTTP(S)_PROXY would move DNS and connection control to the
+        // proxy, bypassing the validated/pinned address set below.
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(options.connect_timeout)
+        .read_timeout(options.read_timeout);
+    builder = builder.resolve_to_addrs(host, addrs);
+    Ok(builder.build()?)
+}
+
+#[cfg(test)]
+mod public_source_url_tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use axum::http::{header::CONTENT_LENGTH, Response};
+    use axum::routing::get;
+    use axum::Router;
+    use std::convert::Infallible;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    const SYSTEM_PROXY_CHILD_ENV: &str = "SCENEWORKS_DATASET_PROXY_CHILD";
+
+    #[test]
+    fn dataset_url_parser_accepts_endpoint_urls_without_safe_filenames() {
+        for url in [
+            "https://example.com",
+            "https://example.com/",
+            "https://example.com/images/",
+            "https://example.com/object%2Fkey?X-Amz-Signature=a%2Fb%2Bc",
+            "https://example.com/%E2%9C%93?token=signed",
+        ] {
+            assert_eq!(
+                parse_public_dataset_url(url)
+                    .expect("valid dataset endpoint")
+                    .as_str(),
+                reqwest::Url::parse(url).expect("fixture URL").as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn dataset_url_parser_and_redirects_reject_malicious_targets() {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/image",
+            "http://user:secret@example.com/",
+            "http://localhost/",
+            "http://catalog.local/",
+            "http://127.0.0.1/",
+            "http://[::ffff:10.0.0.1]/",
+            "https://",
+        ] {
+            assert!(parse_public_dataset_url(url).is_err(), "{url} must fail");
+        }
+        let base =
+            parse_public_dataset_url("https://example.com/start/").expect("public redirect base");
+        for location in [
+            "http://127.0.0.1/admin",
+            "http://[fec0::1]/admin",
+            "http://[2001:0000:0a00:0001:0000:0000:f5ff:fffe]/admin",
+            "http://[2001:0000:0808:0808:0000:0000:fefe:fefe]/admin",
+            "//user:secret@example.net/image",
+            "file:///etc/passwd",
+        ] {
+            let target = base.join(location).expect("syntactically valid redirect");
+            assert!(
+                parse_public_dataset_url(target.as_str()).is_err(),
+                "{location} redirect must fail"
+            );
+        }
+        let public_v6_redirect = base
+            .join("https://[2606:4700:4700::1111]/image")
+            .expect("global IPv6 redirect");
+        assert!(parse_public_dataset_url(public_v6_redirect.as_str()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dataset_fetch_rejects_private_targets_and_credentials() {
+        let options = PublicSourceUrlFetchOptions {
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
+            hop_timeout: Duration::from_millis(100),
+            ..PublicSourceUrlFetchOptions::default()
+        };
+        for url in [
+            "http://127.0.0.1/image.png",
+            "http://[::1]/image.png",
+            "http://user:secret@example.com/image.png",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                fetch_public_source_url_bytes_with_options(url, &options)
+                    .await
+                    .is_err(),
+                "{url} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_reader_enforces_declared_and_streamed_byte_caps() {
+        let app = Router::new()
+            .route(
+                "/declared",
+                get(|| async {
+                    Response::builder()
+                        .header(CONTENT_LENGTH, "1024")
+                        .body(Body::from(vec![0_u8; 1024]))
+                        .expect("response")
+                }),
+            )
+            .route(
+                "/chunked",
+                get(|| async {
+                    let chunks = futures_util::stream::iter([
+                        Ok::<_, Infallible>(Bytes::from_static(b"1234")),
+                        Ok::<_, Infallible>(Bytes::from_static(b"5678")),
+                    ]);
+                    Response::new(Body::from_stream(chunks))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = reqwest::Client::new();
+
+        let mut declared = client
+            .get(format!("http://{address}/declared"))
+            .send()
+            .await
+            .expect("declared response");
+        let error = read_bounded_public_source_response(&mut declared, 8)
+            .await
+            .expect_err("declared cap");
+        assert!(error.to_string().contains("limit"));
+
+        let mut chunked = client
+            .get(format!("http://{address}/chunked"))
+            .send()
+            .await
+            .expect("chunked response");
+        let error = read_bounded_public_source_response(&mut chunked, 6)
+            .await
+            .expect_err("streamed cap");
+        assert!(error.to_string().contains("limit"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dataset_client_pins_the_validated_address_set() {
+        let app = Router::new().route("/", get(|| async { "pinned" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let url = reqwest::Url::parse(&format!(
+            "http://catalog-source.invalid:{}/",
+            address.port()
+        ))
+        .expect("URL");
+        let options = PublicSourceUrlFetchOptions::default();
+        let client = build_public_source_url_client(&url, &[address], &options)
+            .expect("build pinned client");
+        let body = client
+            .get(url)
+            .send()
+            .await
+            .expect("pinned request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "pinned");
+        server.abort();
+    }
+
+    #[test]
+    fn dataset_client_ignores_system_proxy() {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "downloads::public_source_url_tests::dataset_client_ignores_system_proxy_child",
+                "--nocapture",
+            ])
+            .env(SYSTEM_PROXY_CHILD_ENV, "1")
+            .output()
+            .expect("run isolated proxy child");
+        assert!(
+            output.status.success(),
+            "isolated proxy child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn dataset_client_ignores_system_proxy_child() {
+        if std::env::var_os(SYSTEM_PROXY_CHILD_ENV).is_none() {
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let target_app = Router::new().route("/", get(|| async { "target" }));
+                let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("target bind");
+                let target_address = target_listener.local_addr().expect("target address");
+                let target_server = tokio::spawn(async move {
+                    axum::serve(target_listener, target_app)
+                        .await
+                        .expect("target serve");
+                });
+
+                let proxy_hits = Arc::new(AtomicU64::new(0));
+                let proxy_app = Router::new().fallback({
+                    let proxy_hits = Arc::clone(&proxy_hits);
+                    move || {
+                        let proxy_hits = Arc::clone(&proxy_hits);
+                        async move {
+                            proxy_hits.fetch_add(1, Ordering::SeqCst);
+                            "proxy"
+                        }
+                    }
+                });
+                let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("proxy bind");
+                let proxy_address = proxy_listener.local_addr().expect("proxy address");
+                let proxy_server = tokio::spawn(async move {
+                    axum::serve(proxy_listener, proxy_app)
+                        .await
+                        .expect("proxy serve");
+                });
+                let proxy_url = format!("http://{proxy_address}");
+                let _env = crate::test_env::EnvVars::set(&[
+                    ("ALL_PROXY", proxy_url.as_str()),
+                    ("all_proxy", proxy_url.as_str()),
+                    ("HTTPS_PROXY", proxy_url.as_str()),
+                    ("https_proxy", proxy_url.as_str()),
+                    ("HTTP_PROXY", proxy_url.as_str()),
+                    ("http_proxy", proxy_url.as_str()),
+                    ("NO_PROXY", ""),
+                    ("no_proxy", ""),
+                ]);
+
+                let url = reqwest::Url::parse(&format!(
+                    "http://catalog-source.invalid:{}/",
+                    target_address.port()
+                ))
+                .expect("URL");
+                let options = PublicSourceUrlFetchOptions {
+                    connect_timeout: Duration::from_millis(500),
+                    read_timeout: Duration::from_millis(500),
+                    hop_timeout: Duration::from_millis(500),
+                    ..PublicSourceUrlFetchOptions::default()
+                };
+
+                // Prove the child environment really routes an ordinary
+                // reqwest client through the local proxy.
+                let control = reqwest::Client::builder()
+                    .resolve_to_addrs(url.host_str().expect("host"), &[target_address])
+                    .build()
+                    .expect("control client");
+                assert_eq!(
+                    control
+                        .get(url.clone())
+                        .send()
+                        .await
+                        .expect("control request")
+                        .text()
+                        .await
+                        .expect("control body"),
+                    "proxy"
+                );
+                assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+
+                let pinned = build_public_source_url_client(&url, &[target_address], &options)
+                    .expect("pinned client");
+                assert_eq!(
+                    pinned
+                        .get(url)
+                        .send()
+                        .await
+                        .expect("pinned request")
+                        .text()
+                        .await
+                        .expect("pinned body"),
+                    "target"
+                );
+                assert_eq!(
+                    proxy_hits.load(Ordering::SeqCst),
+                    1,
+                    "no-proxy client must not contact the system proxy"
+                );
+                target_server.abort();
+                proxy_server.abort();
+            });
+    }
+
+    #[tokio::test]
+    async fn dataset_dns_resolution_is_bounded_by_connect_timeout() {
+        let url = reqwest::Url::parse("https://stalled-resolver.example/image").expect("URL");
+        let options = PublicSourceUrlFetchOptions {
+            connect_timeout: Duration::from_millis(10),
+            ..PublicSourceUrlFetchOptions::default()
+        };
+        let started = Instant::now();
+        let error =
+            bounded_public_source_url_client_with_resolver(&url, &options, |_host, _port| async {
+                std::future::pending::<std::io::Result<Vec<SocketAddr>>>().await
+            })
+            .await
+            .expect_err("resolver must time out");
+        assert!(error.to_string().contains("DNS resolution timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn dataset_resolver_blocks_non_global_ipv6_and_preserves_global_results() {
+        let url = reqwest::Url::parse("https://resolved-source.example/image.png").expect("URL");
+        let options = PublicSourceUrlFetchOptions::default();
+        for blocked in [
+            "::",
+            "::1",
+            "100::",
+            "64:ff9b:1::1",
+            "fc00::1",
+            "fe80::1",
+            "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ff00::1",
+            "2001:0000:0a00:0001:0000:0000:f5ff:fffe",
+            "2001:0000:0808:0808:0000:0000:fefe:fefe",
+            "2001:2::",
+            "2001:5::",
+            "2001:db8::1",
+            "3fff::1",
+        ] {
+            let address = blocked.parse::<IpAddr>().expect("blocked fixture");
+            let error = bounded_public_source_url_client_with_resolver(
+                &url,
+                &options,
+                move |_host, port| async move { Ok(vec![SocketAddr::new(address, port)]) },
+            )
+            .await
+            .expect_err("non-global resolver result must fail");
+            assert!(
+                error.to_string().contains("host is not allowed"),
+                "{blocked} must be rejected: {error}"
+            );
+        }
+
+        for public in [
+            "64:ff9b::101:101",
+            "2001:20::1",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+        ] {
+            let address = public.parse::<IpAddr>().expect("public fixture");
+            bounded_public_source_url_client_with_resolver(
+                &url,
+                &options,
+                move |_host, port| async move { Ok(vec![SocketAddr::new(address, port)]) },
+            )
+            .await
+            .expect("global resolver result must build a pinned client");
+        }
+    }
 }
 
 pub(crate) async fn lora_source_content_length(

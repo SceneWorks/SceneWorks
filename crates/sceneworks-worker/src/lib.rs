@@ -19,20 +19,25 @@ use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache
 use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
-    apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
-    read_safetensors_header, reconcile_detected_family, FamilyMismatch, SafetensorsHeaderError,
+    apply_adapter_metadata_to_manifest_entry, apply_model_manifest_defaults, detect_model_family,
+    first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family, FamilyMismatch,
+    SafetensorsHeaderError,
 };
-// Only the cfg-gated adapter resolvers (image `resolve_adapters`, video
-// `resolve_lora_file`) use this, so gate the import identically or the parity
+// Only the cfg-gated adapter resolvers (image `resolve_adapters` / `classify_adapter`, video
+// `resolve_lora_file`) use these, so gate the import identically or the parity
 // build (no `backend-candle`) trips `-D unused-imports` (sc-10221).
+//
+// `read_safetensors_header` joined this block in sc-14057: the LoRA-import path used to read the
+// header itself, and now delegates to `lora_family::inspect_adapter_in_dir`, leaving
+// `classify_adapter` as the only caller — which is gated.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use sceneworks_core::lora_family::resolve_adapter_in_dir;
+use sceneworks_core::lora_family::{read_safetensors_header, resolve_adapter_in_dir};
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
-    validate_public_ip,
+    validate_lora_url_host, validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use sceneworks_core::slug::slugify;
@@ -196,6 +201,7 @@ use caption_jobs::*;
 // ordinary SceneWorks dataset.
 mod dataset_parquet_jobs;
 use dataset_parquet_jobs::*;
+pub mod catalog_image_fetch;
 pub mod catalog_parquet_scanner;
 // The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
 // select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
