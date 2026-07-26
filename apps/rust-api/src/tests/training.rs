@@ -3137,14 +3137,19 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
     }
     let gemma = snapshot.join("gemma");
     std::fs::create_dir_all(&gemma).expect("Gemma co-requisite");
-    std::fs::write(gemma.join("config.json"), "{}").expect("Gemma config");
-    std::fs::write(gemma.join("tokenizer.json"), "{}").expect("Gemma tokenizer");
+    std::fs::write(gemma.join("config.json"), r#"{"model_type":"gemma3_text"}"#)
+        .expect("Gemma config");
+    std::fs::write(gemma.join("tokenizer.json"), r#"{"model":{"type":"BPE"}}"#)
+        .expect("Gemma tokenizer");
     std::fs::write(
         gemma.join("model.safetensors.index.json"),
         r#"{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}"#,
     )
     .expect("Gemma shard index");
-    std::fs::write(gemma.join("model-00001-of-00001.safetensors"), "x").expect("Gemma shard");
+    write_test_safetensors_with_keys(
+        &gemma.join("model-00001-of-00001.safetensors"),
+        &["model.embed_tokens.weight".to_owned()],
+    );
     // A bf16 tier existing beside q4 must not divert the packed QLoRA trainer.
     std::fs::create_dir_all(snapshot.join("bf16")).expect("bf16 tier");
     std::fs::create_dir_all(repo_root.join("refs")).expect("refs");
@@ -3157,6 +3162,41 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
     assert_eq!(
         resolve_base_model_path(&target, &data_dir),
         q4.display().to_string()
+    );
+
+    // API and worker share one readiness predicate. A shard index must not be able to escape the
+    // Gemma snapshot even when the referenced outside file is itself a valid safetensors file.
+    let outside = snapshot.join("outside.safetensors");
+    write_test_safetensors_with_keys(&outside, &["outside.weight".to_owned()]);
+    std::fs::write(
+        gemma.join("model.safetensors.index.json"),
+        r#"{"weight_map":{"model.embed_tokens.weight":"../outside.safetensors"}}"#,
+    )
+    .expect("traversal index");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing,
+        "an index traversal must never pass API readiness"
+    );
+    std::fs::write(
+        gemma.join("model.safetensors.index.json"),
+        r#"{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}"#,
+    )
+    .expect("restore safe index");
+
+    std::fs::write(
+        gemma.join("model-00001-of-00001.safetensors"),
+        b"filename-only placeholder",
+    )
+    .expect("corrupt Gemma shard");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing,
+        "a structurally invalid indexed shard must never pass API readiness"
+    );
+    write_test_safetensors_with_keys(
+        &gemma.join("model-00001-of-00001.safetensors"),
+        &["model.embed_tokens.weight".to_owned()],
     );
 
     std::fs::remove_file(q4.join("vae_encoder.safetensors")).expect("tear q4 training tier");

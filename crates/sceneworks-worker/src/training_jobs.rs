@@ -3789,10 +3789,11 @@ mod tests {
     /// Unlike the shared direct-trainer smoke, this starts from a resolved SceneWorks plan and uses
     /// `engine_trainer_id`, `map_training_config` + `finalize_training_config`, and
     /// `training_text_encoder` to build the exact `LoadSpec` the worker execution path uses. It then
-    /// trains one 64px step, requires cache + training progress, verifies a non-empty adapter, drops
-    /// the trainer, and loads the candle inference generator with that adapter applied. The final load
-    /// is the cross-repo usability proof: a training-only file with incompatible metadata/keys is
-    /// rejected by the inference adapter seam.
+    /// trains one 64px step, requires cache + training progress, inspects the saved PEFT A/B factors
+    /// and requires a non-zero trained B, then drops the trainer and renders the candle inference
+    /// generator with and without that adapter at the same seed. The unequal frames are the
+    /// cross-repo usability proof: the output is not merely a non-empty file accepted by the loader;
+    /// it carries a learned residual that changes production inference.
     ///
     /// Run on the RTX box:
     /// `SCENEWORKS_LTX_Q4_DIR=E:\huggingface\hub\models--SceneWorks--ltx-2.3-mlx\snapshots\<rev>\q4 \
@@ -3911,17 +3912,87 @@ mod tests {
             .len();
         assert!(bytes > 8, "adapter is non-empty: {bytes} bytes");
 
-        let inference_spec = LoadSpec {
-            text_encoder: Some(text_encoder),
-            ..LoadSpec::new(WeightsSource::Dir(q4)).with_adapters(vec![gen_core::AdapterSpec::new(
-                output.adapter_path,
-                1.0,
-                gen_core::AdapterKind::Lora,
-            )])
+        let tensors = runtime_cuda::media::candle_core::safetensors::load(
+            &output.adapter_path,
+            &runtime_cuda::media::candle_core::Device::Cpu,
+        )
+        .expect("saved adapter is valid safetensors");
+        let a_count = tensors
+            .keys()
+            .filter(|key| key.ends_with(".lora_A.weight"))
+            .count();
+        let b_factors: Vec<_> = tensors
+            .iter()
+            .filter(|(key, _)| key.ends_with(".lora_B.weight"))
+            .collect();
+        assert!(a_count > 0, "saved adapter must contain LoRA A factors");
+        assert_eq!(
+            a_count,
+            b_factors.len(),
+            "every saved LoRA A factor must have a matching B factor"
+        );
+        assert!(
+            b_factors.iter().any(|(_, tensor)| {
+                tensor
+                    .to_dtype(runtime_cuda::media::candle_core::DType::F32)
+                    .and_then(|tensor| tensor.abs())
+                    .and_then(|tensor| tensor.max_all())
+                    .and_then(|tensor| tensor.to_scalar::<f32>())
+                    .is_ok_and(|value| value > 0.0)
+            }),
+            "one optimizer step must update at least one LoRA B factor"
+        );
+
+        let render = |adapter: Option<std::path::PathBuf>| {
+            let adapters = adapter
+                .map(|path| {
+                    vec![gen_core::AdapterSpec::new(
+                        path,
+                        16.0,
+                        gen_core::AdapterKind::Lora,
+                    )]
+                })
+                .unwrap_or_default();
+            let inference_spec = LoadSpec {
+                text_encoder: Some(text_encoder.clone()),
+                ..LoadSpec::new(WeightsSource::Dir(q4.clone())).with_adapters(adapters)
+            };
+            assert!(
+                inference_spec.quantize.is_none(),
+                "the pre-packed q4 tier must reach the provider with quantize=None"
+            );
+            let generator = crate::inference_runtime::load("ltx_2_3_distilled", &inference_spec)
+                .expect("candle LTX inference load");
+            assert_eq!(generator.descriptor().id, "ltx_2_3_distilled");
+            let generation = gen_core::GenerationRequest {
+                prompt: "a colorful test swatch".to_owned(),
+                width: 256,
+                height: 256,
+                frames: Some(1),
+                steps: Some(8),
+                seed: Some(11),
+                ..Default::default()
+            };
+            let output = generator
+                .generate(&generation, &mut |_| {})
+                .expect("candle LTX inference render");
+            let gen_core::GenerationOutput::Video { frames, .. } = output else {
+                panic!("expected LTX video output");
+            };
+            assert_eq!(frames.len(), 1);
+            assert_eq!((frames[0].width, frames[0].height), (256, 256));
+            assert!(
+                frames[0].pixels.iter().any(|&value| value != 0),
+                "rendered frame must not be all black"
+            );
+            frames.into_iter().next().expect("one frame").pixels
         };
-        let generator = crate::inference_runtime::load("ltx_2_3_distilled", &inference_spec)
-            .expect("trained adapter applies at candle LTX inference load");
-        assert_eq!(generator.descriptor().id, "ltx_2_3_distilled");
+        let base_pixels = render(None);
+        let adapted_pixels = render(Some(output.adapter_path));
+        assert_ne!(
+            base_pixels, adapted_pixels,
+            "the trained adapter must have an observable production inference effect"
+        );
     }
 
     /// sc-10163 (epic 10159 B2) — the candle Krea pose-**ControlNet** training smoke. Drives the exact

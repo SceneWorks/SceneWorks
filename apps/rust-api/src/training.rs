@@ -1863,25 +1863,7 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
         return false;
     }
 
-    let gemma = snapshot.join("gemma");
-    if !gemma.join("config.json").is_file() || !gemma.join("tokenizer.json").is_file() {
-        return false;
-    }
-    let Ok(index) = std::fs::read_to_string(gemma.join("model.safetensors.index.json")) else {
-        return false;
-    };
-    let Ok(index) = serde_json::from_str::<Value>(&index) else {
-        return false;
-    };
-    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
-        return false;
-    };
-    !weight_map.is_empty()
-        && weight_map.values().all(|value| {
-            value
-                .as_str()
-                .is_some_and(|file| gemma.join(file).is_file())
-        })
+    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
 }
 
 fn training_tier_name(target: &TrainingTarget) -> &'static str {

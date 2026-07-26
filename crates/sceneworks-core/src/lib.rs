@@ -22,6 +22,7 @@ pub mod mlx_tier_completeness;
 pub mod observability;
 pub mod payload_util;
 pub mod project_store;
+pub mod safetensors;
 pub mod session_log;
 pub mod slug;
 pub mod store_util;

@@ -67,127 +67,18 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
-/// Cheap structural validation for one safetensors file. It reads only the bounded JSON header,
-/// verifies at least one tensor entry, and checks every declared byte range against the file length.
-/// This rejects placeholder/truncated files without reading multi-gigabyte tensor bodies.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn safetensors_file_is_structurally_valid(path: &Path) -> bool {
-    use std::io::Read;
-
-    const MAX_HEADER_BYTES: usize = 100_000_000;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
-        return false;
-    };
-    let mut header_len_bytes = [0_u8; 8];
-    if file.read_exact(&mut header_len_bytes).is_err() {
-        return false;
-    }
-    let Ok(header_len) = usize::try_from(u64::from_le_bytes(header_len_bytes)) else {
-        return false;
-    };
-    if header_len == 0 || header_len > MAX_HEADER_BYTES {
-        return false;
-    }
-    let Ok(header_and_prefix) = u64::try_from(header_len).map(|length| length + 8) else {
-        return false;
-    };
-    if header_and_prefix > file_len {
-        return false;
-    }
-    let mut header = vec![0_u8; header_len];
-    if file.read_exact(&mut header).is_err() {
-        return false;
-    }
-    let Ok(Value::Object(entries)) = serde_json::from_slice::<Value>(&header) else {
-        return false;
-    };
-    let data_len = file_len - header_and_prefix;
-    let mut tensor_count = 0_usize;
-    for (name, entry) in entries {
-        if name == "__metadata__" {
-            continue;
-        }
-        let Some(entry) = entry.as_object() else {
-            return false;
-        };
-        if entry.get("dtype").and_then(Value::as_str).is_none()
-            || entry.get("shape").and_then(Value::as_array).is_none()
-        {
-            return false;
-        }
-        let Some(offsets) = entry.get("data_offsets").and_then(Value::as_array) else {
-            return false;
-        };
-        let [start, end] = offsets.as_slice() else {
-            return false;
-        };
-        let (Some(start), Some(end)) = (start.as_u64(), end.as_u64()) else {
-            return false;
-        };
-        if start > end || end > data_len {
-            return false;
-        }
-        tensor_count += 1;
-    }
-    tensor_count > 0
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn json_object_file_satisfies(path: &Path, predicate: impl FnOnce(&JsonObject) -> bool) -> bool {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .is_some_and(|object| predicate(&object))
-}
-
 /// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: parseable,
 /// non-empty config and tokenizer JSON, plus a structurally valid single safetensors file or every
-/// structurally valid shard mapped by a non-empty index. Used so runtime option discovery and eros
-/// provisioning never accept filename-only placeholders or half-downloaded snapshots.
+/// structurally valid, safely-relative shard mapped by a non-empty index. The API readiness gate uses
+/// this same core predicate, so it cannot admit a snapshot the worker rejects. Used so runtime option
+/// discovery and eros provisioning never accept filename-only placeholders, path escapes, or
+/// half-downloaded snapshots.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
-    if !json_object_file_satisfies(&dir.join("config.json"), |object| !object.is_empty())
-        || !json_object_file_satisfies(&dir.join("tokenizer.json"), |object| {
-            object.get("model").is_some_and(Value::is_object)
-        })
-    {
-        return false;
-    }
-    let Ok(index_raw) = std::fs::read_to_string(dir.join("model.safetensors.index.json")) else {
-        return safetensors_file_is_structurally_valid(&dir.join("model.safetensors"));
-    };
-    let Ok(index) = serde_json::from_str::<Value>(&index_raw) else {
-        return false;
-    };
-    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
-        return false;
-    };
-    let Some(shards) = weight_map
-        .values()
-        .map(|value| value.as_str().map(str::to_owned))
-        .collect::<Option<std::collections::BTreeSet<String>>>()
-    else {
-        return false;
-    };
-    if shards.is_empty() {
-        return false;
-    }
-    shards
-        .iter()
-        .all(|shard| safetensors_file_is_structurally_valid(&dir.join(shard)))
+    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(dir)
 }
 
 /// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.

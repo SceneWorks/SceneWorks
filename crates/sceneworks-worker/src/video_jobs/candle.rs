@@ -281,8 +281,10 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
     }
 }
 
-/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. Eros remains on
-/// its dense standalone checkpoint, so the SceneWorks model id is part of the guard.
+/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
+/// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
+/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros remains
+/// on its dense standalone checkpoint, so the SceneWorks model id is part of the guard.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
@@ -294,7 +296,7 @@ pub(super) fn candle_ltx_tier_subdir(
     }
     let q4 = root.join("q4");
     (q4.join("transformer.safetensors").is_file() && q4.join("quantize_config.json").is_file())
-        .then_some((q4, Some(Quant::Q4)))
+        .then_some((q4, None))
 }
 
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
