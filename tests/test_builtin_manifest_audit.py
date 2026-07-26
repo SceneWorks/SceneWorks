@@ -1239,7 +1239,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     assert mlx["requiresConversion"] is True
     assert mlx["converter"] == "flux2_klein_diffusers"
     assert mlx["convertSourceRepo"] == "wikeeyang/Flux2-Klein-9B-True-V2"
-    assert mlx["convertBaseRepo"] == "black-forest-labs/FLUX.2-klein-9B"
+    # sc-14978: the convert borrows the base VAE/text-encoder/tokenizer from the ungated
+    # re-host the base klein card actually installs (NOT the gated upstream, which no card
+    # installs), reading them from its per-tier bf16/ subdir.
+    assert mlx["convertBaseRepo"] == "SceneWorks/flux2-klein-9b-mlx"
+    assert mlx["convertBaseSubdir"] == "bf16"
     assert mlx["quantize"] == 8
 
 

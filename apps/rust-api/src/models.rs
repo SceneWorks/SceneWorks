@@ -20,6 +20,94 @@ const MODEL_SIZE_NEGATIVE_TTL: Duration = Duration::from_secs(300);
 // without making ordinary warm catalog loads depend on Hugging Face.
 const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Generation-keyed, process-local snapshot of the model catalog after its
+/// filesystem install-state sweep.
+///
+/// A separate async serializer makes concurrent cold `/models`, global preset,
+/// project preset, and job-validation requests join one sweep without holding
+/// the short synchronous state lock across filesystem work. `invalidate`
+/// advances the generation and clears the snapshot in that same critical
+/// section. Publication validates its generation under the same lock, so a
+/// writer racing a cold build forces a rebuild instead of publishing or
+/// returning stale state. Errors are never cached.
+#[derive(Default)]
+pub(crate) struct ModelCatalogCache {
+    state: Mutex<ModelCatalogCacheState>,
+    build_serializer: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    before_publish_test_hook: Mutex<Option<ModelCatalogBeforePublishTestHook>>,
+}
+
+#[derive(Default)]
+struct ModelCatalogCacheState {
+    generation: u64,
+    snapshot: Option<(u64, Arc<Vec<Value>>)>,
+}
+
+impl ModelCatalogCache {
+    pub(crate) fn invalidate(&self) {
+        let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.lock().generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_publish_test_hook(&self, hook: ModelCatalogBeforePublishTestHook) {
+        *self.before_publish_test_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    async fn pause_before_publish_for_test(&self) {
+        let hook = self.before_publish_test_hook.lock().take();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ModelCatalogBeforePublishTestHook {
+    reached: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl ModelCatalogBeforePublishTestHook {
+    pub(crate) fn blocked() -> Self {
+        Self {
+            reached: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached
+            .acquire()
+            .await
+            .expect("model-catalog publish hook remains open")
+            .forget();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    async fn pause(&self) {
+        self.reached.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("model-catalog publish hook remains open")
+            .forget();
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ModelSizeEstimateTestHook {
@@ -679,6 +767,19 @@ pub(crate) async fn create_model_convert_job(
     {
         job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
     }
+    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978): the
+    // FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed VAE/text-encoder/tokenizer
+    // live under `<tier>/`, not the snapshot root. Absent for root-layout diffusers bases.
+    if let Some(base_subdir) = mlx
+        .get("convertBaseSubdir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "baseSubdir".to_owned(),
+            Value::String(base_subdir.to_owned()),
+        );
+    }
     if quantize_only {
         job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
     }
@@ -735,12 +836,30 @@ pub(crate) async fn delete_model(
         state.settings.data_dir.join("models"),
         huggingface_hub_cache_dir(&state.settings.data_dir),
     ];
-    let removal = remove_owned_artifacts(
+    let removal = match remove_owned_artifacts(
         model_artifact_paths(cleanup_source, &state.settings.data_dir),
         &allowed_roots,
         permanent,
     )
-    .await?;
+    .await
+    {
+        Ok(removal) => {
+            if !removal.removed_paths.is_empty() {
+                // Invalidate immediately after the filesystem mutation. Later
+                // trash-failure and manifest/error returns must not leave the
+                // warm install-state snapshot describing paths already moved.
+                state.model_catalog_cache.invalidate();
+            }
+            removal
+        }
+        Err(error) => {
+            // Artifact removal is intentionally incremental. An inspection or
+            // unlink error may follow successful earlier removals whose result
+            // cannot be recovered from the error, so conservatively refresh.
+            state.model_catalog_cache.invalidate();
+            return Err(error);
+        }
+    };
     // Some owned files could not reach the OS trash and nothing was permanently
     // deleted. Leave the registry entry in place and ask the client to confirm.
     if !permanent && !removal.trash_failed_paths.is_empty() {
@@ -813,7 +932,7 @@ pub(crate) async fn delete_model_variant(
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
-    let removal = if let Some(download) = model_download_for_variant(&model, &variant) {
+    let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
         let repo = download
             .get("repo")
             .and_then(Value::as_str)
@@ -858,7 +977,7 @@ pub(crate) async fn delete_model_variant(
             &allowed_roots,
             true,
         )
-        .await?
+        .await
     } else if model_has_convert_tier(&model, &variant) {
         // Convert-at-install: the tier is a real dir under the converted MLX tree. Prefer the
         // catalog's resolved `mlxConvertedPath`; fall back to the canonical convert output dir.
@@ -868,12 +987,25 @@ pub(crate) async fn delete_model_variant(
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("models").join("mlx").join(&model_id));
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
-        remove_converted_tier(converted.join(&variant), &allowed_roots, true).await?
+        remove_converted_tier(converted.join(&variant), &allowed_roots, true).await
     } else {
         return Err(ApiError::bad_request(format!(
             "Model does not advertise a '{variant}' quant tier"
         )));
     };
+    let removal = match removal_result {
+        Ok(removal) => removal,
+        Err(error) => {
+            // Tier removal is also incremental (snapshot links, blobs, then
+            // managed paths). Refresh conservatively if any later step errors.
+            state.model_catalog_cache.invalidate();
+            return Err(error);
+        }
+    };
+    // Invalidate before every post-removal early return. A successful removal
+    // may have changed installState/variantStates even when the route later
+    // decides there was no independently reclaimable logical tier.
+    state.model_catalog_cache.invalidate();
     let shared_logical_tier = removal.removed_paths.is_empty()
         && !removal.retained_paths.is_empty()
         && model_download_for_variant(&model, &variant).is_some();
@@ -1597,14 +1729,78 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    model_catalog_inner(state, false).await
+    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
 /// failure). Reserved for `GET /models`, the one surface that displays
 /// download sizes.
 pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    model_catalog_inner(state, true).await
+    // Preserve SC-14800's cold-path overlap: Hugging Face metadata estimation
+    // begins from the cheap manifest inputs while the shared install-state
+    // snapshot is being built (or joined) independently.
+    let size_estimates = estimate_current_model_catalog_sizes(state);
+    let snapshot = model_catalog_snapshot(state);
+    let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
+    let size_estimates = size_estimates?;
+    let mut models = snapshot?.as_ref().clone();
+    for model in &mut models {
+        let context = model_download_context(model)?;
+        let live_estimate = context.as_ref().and_then(|context| {
+            size_estimates
+                .get(&(context.repo.clone(), context.files.clone()))
+                .copied()
+                .flatten()
+        });
+        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+    }
+    Ok(models)
+}
+
+async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    {
+        let cache_state = state.model_catalog_cache.state.lock();
+        if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
+            if *snapshot_generation == cache_state.generation {
+                return Ok(snapshot.clone());
+            }
+        }
+    }
+
+    // Serialize only builders. The synchronous generation/snapshot state lock
+    // is never held across the expensive filesystem sweep.
+    let _build_guard = state.model_catalog_cache.build_serializer.lock().await;
+    loop {
+        let generation = {
+            // Another builder may have populated the cache while this caller
+            // waited for the async serializer.
+            let cache_state = state.model_catalog_cache.state.lock();
+            if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
+                if *snapshot_generation == cache_state.generation {
+                    return Ok(snapshot.clone());
+                }
+            }
+            cache_state.generation
+        };
+
+        let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
+
+        #[cfg(test)]
+        state
+            .model_catalog_cache
+            .pause_before_publish_for_test()
+            .await;
+
+        let mut cache_state = state.model_catalog_cache.state.lock();
+        if cache_state.generation == generation {
+            cache_state.snapshot = Some((generation, snapshot.clone()));
+            return Ok(snapshot);
+        }
+        drop(cache_state);
+        // A model writer completed while the filesystem sweep was running.
+        // Keep the async serializer and rebuild at the new generation. The
+        // stale result was never published or returned.
+    }
 }
 
 // sc-4205 (F-API-12): the per-model install/cache state, formerly threaded through a
@@ -3800,14 +3996,16 @@ async fn estimate_model_catalog_sizes(
     .collect()
 }
 
-async fn model_catalog_inner(
+async fn load_model_catalog_inputs(
     state: &AppState,
-    estimate_sizes: bool,
-) -> Result<Vec<Value>, ApiError> {
-    // sc-8819 (F-017): observe full-catalog assembly (the per-model FS install-state probe
-    // sweep) so a test can assert it runs once per job-create.
-    #[cfg(test)]
-    crate::test_note_model_catalog_build();
+) -> Result<
+    (
+        Vec<Value>,
+        Vec<Option<DownloadContext>>,
+        std::collections::HashSet<String>,
+    ),
+    ApiError,
+> {
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
@@ -3829,7 +4027,22 @@ async fn model_catalog_inner(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    let size_estimates = estimate_model_catalog_sizes(state, &download_contexts, estimate_sizes);
+    Ok((models, download_contexts, user_model_ids))
+}
+
+async fn estimate_current_model_catalog_sizes(
+    state: &AppState,
+) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
+    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
+}
+
+async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    // sc-8819 (F-017): observe full-catalog assembly (the per-model FS install-state probe
+    // sweep) so tests can assert request-scoped and process-shared reuse.
+    #[cfg(test)]
+    crate::test_note_model_catalog_build();
+    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
@@ -3867,18 +4080,14 @@ async fn model_catalog_inner(
         let mut cache = external_base_cache.lock();
         crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
     });
-    let (size_estimates, models, external) =
-        tokio::join!(size_estimates, catalog_sweep, external_scan);
+    let (models, external) = tokio::join!(catalog_sweep, external_scan);
     let mut models = models?.into_iter().flatten().collect::<Vec<_>>();
     for model in &mut models {
         let context = model_download_context(model)?;
-        let live_estimate = context.as_ref().and_then(|context| {
-            size_estimates
-                .get(&(context.repo.clone(), context.files.clone()))
-                .copied()
-                .flatten()
-        });
-        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+        // The shared snapshot carries deterministic manifest fallbacks only.
+        // `/models` overlays live estimates on its response clone; presets and
+        // job validation never wait on unrelated Hugging Face network calls.
+        apply_model_catalog_size_fields(model, context.as_ref(), None)?;
     }
     let external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
