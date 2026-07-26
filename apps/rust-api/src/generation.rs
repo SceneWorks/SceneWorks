@@ -229,14 +229,15 @@ pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<
 /// `validate_job_lora_compatibility`, each of which formerly re-assembled
 /// `model_catalog`/`lora_catalog` from scratch — re-running the per-model install-state
 /// probes (recursive HF-cache walks, `model_is_installed`, `mlx_catalog_status`) 2–3×
-/// over the whole catalog per submit. Threading one snapshot through those seams makes
-/// each catalog's filesystem probing run exactly once per job-create.
+/// over the whole catalog per submit. Threading one snapshot through those seams limits
+/// each request to one model value and one LoRA value; the model value may require no
+/// new filesystem probing when the process-shared generation is already warm.
 ///
-/// This is deliberately request-scoped rather than a shared TTL cache: the snapshot lives
-/// only for the duration of one job-create, so there is no staleness window and the
-/// catalog contents seen by preset expansion and by LoRA validation are guaranteed
-/// identical. It memoizes per `project_id` (constant within a single job-create), so both
-/// the `project_id`-scoped and the `None` (no-project) catalog reads are covered.
+/// The request-scoped layer still guarantees that preset expansion and LoRA validation
+/// see identical values within one job-create. Its model value is sourced from the
+/// process-shared, generation-keyed install-state cache (SC-14784), which coalesces cold
+/// callers and is invalidated by model lifecycle completion, model deletion, and model
+/// manifest writes. LoRAs remain memoized only per `(request, project_id)`.
 #[derive(Default)]
 pub(crate) struct JobCatalogSnapshot {
     models: tokio::sync::OnceCell<Vec<Value>>,
@@ -244,8 +245,8 @@ pub(crate) struct JobCatalogSnapshot {
 }
 
 impl JobCatalogSnapshot {
-    /// The model catalog, built once per request and reused thereafter. Identical output
-    /// to a direct `model_catalog(state)` call.
+    /// The model catalog, fetched once per request and reused thereafter. The direct
+    /// `model_catalog(state)` call may itself reuse the current process-shared generation.
     pub(crate) async fn models(&self, state: &AppState) -> Result<&[Value], ApiError> {
         let models = self
             .models

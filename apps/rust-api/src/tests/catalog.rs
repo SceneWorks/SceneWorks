@@ -699,6 +699,229 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 }
 
 #[tokio::test]
+async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "shared_model",
+                "name": "Shared Model",
+                "family": "shared-test",
+                "type": "image",
+                "capabilities": ["edit_image"],
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "shared/model",
+                    "files": ["*.safetensors"]
+                }],
+                "__testCatalogProbeDelayMs": 250
+            }]
+        }))
+        .expect("model manifest serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("builtin presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{
+            "schemaVersion": 1,
+            "presets": [{
+                "id": "legacy_edit",
+                "name": "Legacy Edit",
+                "modes": ["edit_image"],
+                "builtInLoras": []
+            }]
+        }"#,
+    )
+    .expect("user presets writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+    let marker_dir = temp_dir.path().join("data/models/shared__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    crate::test_reset_catalog_build_counters();
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let size_hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Preset Coalescing Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let models_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), size_hook.wait_for_call())
+        .await
+        .expect("live size estimation starts");
+    let global_task = tokio::spawn(request(
+        app.clone(),
+        "GET",
+        "/api/v1/recipe-presets",
+        Value::Null,
+    ));
+    let project_uri = format!("/api/v1/recipe-presets?projectId={project_id}");
+    let project_task =
+        tokio::spawn(async move { request(app, "GET", &project_uri, Value::Null).await });
+
+    let preset_started = std::time::Instant::now();
+    let (global, project) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(global_task, project_task)
+    })
+    .await
+    .expect("preset routes finish while unrelated live size lookup is blocked");
+    let global = global.expect("global preset task joins");
+    let project = project.expect("project preset task joins");
+    for (status, presets) in [global, project] {
+        assert_eq!(status, StatusCode::OK);
+        let preset = &presets.as_array().expect("preset array")[0];
+        assert_eq!(preset["workflow"], "edit_image");
+        assert_eq!(preset["model"], "shared_model");
+        assert_eq!(preset["modes"], json!(["edit_image"]));
+        assert_eq!(preset["loras"], json!([]));
+        assert_eq!(
+            preset["appliedDefaults"]["notes"],
+            json!([
+                "workflow inferred from legacy modes as edit_image",
+                "model defaulted to shared_model for legacy preset"
+            ])
+        );
+    }
+    assert!(
+        !models_task.is_finished(),
+        "/models remains blocked on its response-only size estimate"
+    );
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "concurrent /models, global preset, and project preset callers must join one install-state sweep"
+    );
+
+    let preset_elapsed = preset_started.elapsed();
+    let models_release_started = std::time::Instant::now();
+    size_hook.release_one();
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), models_task)
+        .await
+        .expect("models route completes after size release")
+        .expect("models task joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["downloadSizeBytes"], json!(1234));
+    eprintln!(
+        "SC-14784 local route timing: global+project presets={preset_elapsed:?}, /models after size release={:?}, install-state sweeps=1",
+        models_release_started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn model_catalog_invalidation_refreshes_install_state() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "refresh_model", "refresh/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+
+    let (status, cold) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cold[0]["installState"], "missing");
+    let marker_dir = temp_dir.path().join("data/models/refresh__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    let (_, still_cached) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(still_cached[0]["installState"], "missing");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    let before = state.model_catalog_cache.generation();
+    state.model_catalog_cache.invalidate();
+    assert_eq!(state.model_catalog_cache.generation(), before + 1);
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "installed");
+    assert_eq!(crate::test_model_catalog_builds(), 2);
+}
+
+#[tokio::test]
+async fn invalidation_before_snapshot_publication_forces_current_generation_rebuild() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "racing_model", "racing/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
+    state
+        .model_catalog_cache
+        .set_before_publish_test_hook(publish_hook.clone());
+
+    let request_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
+        .await
+        .expect("first-generation snapshot reaches pre-publication boundary");
+
+    // Change the install-state input and invalidate while generation 0 is
+    // built but not yet published. The request must discard that result,
+    // rebuild generation 1, and return only the installed state.
+    let marker_dir = temp_dir.path().join("data/models/racing__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+    state.model_catalog_cache.invalidate();
+    publish_hook.release();
+
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), request_task)
+        .await
+        .expect("racing request completes")
+        .expect("racing request joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(state.model_catalog_cache.generation(), 1);
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "generation 0 must be discarded and rebuilt after invalidation"
+    );
+
+    let (_, warm) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(warm[0]["installState"], "installed");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "the generation 1 result is the only published warm snapshot"
+    );
+}
+
+#[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -3391,6 +3614,109 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let (loras_status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
     assert_eq!(loras_status, StatusCode::OK);
     assert_eq!(loras.as_array().expect("loras array").len(), 0);
+}
+
+#[tokio::test]
+async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+            "schemaVersion": 1,
+            "models": [{
+                "id": "partial_model",
+                "name": "Partial Model",
+                "type": "image",
+                "family": "test",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "partial/model",
+                    "variant": "q4",
+                    "default": true,
+                    "files": ["q4/*"]
+                }],
+                "source": {
+                    "provider": "local",
+                    "path": "models/partial_trash_failure"
+                }
+            }]
+        }"#,
+    )
+    .expect("user models writes");
+    for (name, field) in [
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            config_dir.join(name),
+            format!(r#"{{ "schemaVersion": 1, "{field}": [] }}"#),
+        )
+        .expect("sibling manifest writes");
+    }
+
+    let managed_dir = temp_dir.path().join("data/models/partial__model");
+    std::fs::create_dir_all(managed_dir.join("q4")).expect("managed q4 creates");
+    std::fs::write(
+        managed_dir.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "partial/model" }"#,
+    )
+    .expect("managed completion marker writes");
+    std::fs::write(managed_dir.join("q4/model.safetensors"), "weights")
+        .expect("managed tier writes");
+    let failing_dir = temp_dir.path().join("data/models/partial_trash_failure");
+    std::fs::create_dir_all(&failing_dir).expect("failing source creates");
+    std::fs::write(failing_dir.join("weights.safetensors"), "weights")
+        .expect("failing source writes");
+
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(warm[0]["installState"], "installed");
+    assert_eq!(warm[0]["variants"][0]["variant"], "q4");
+    assert_eq!(warm[0]["variants"][0]["installState"], "installed");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    // The owned managed tier moves successfully, then the later source path
+    // fails to move. The route returns the recoverable confirmation response
+    // after a real mutation, rather than reaching manifest deletion.
+    let _trash =
+        crate::test_trash_outcomes([(managed_dir.clone(), true), (failing_dir.clone(), false)]);
+    let (status, partial) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/partial_model",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(partial["trashUnavailable"], true);
+    assert_eq!(partial["removedManifestEntry"], false);
+    assert_eq!(partial["removedLocalArtifacts"], true);
+    assert!(!managed_dir.exists(), "the first artifact was removed");
+    assert!(failing_dir.exists(), "the failed artifact remains");
+
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "missing");
+    assert_eq!(refreshed[0]["variants"][0]["variant"], "q4");
+    assert_eq!(refreshed[0]["variants"][0]["installState"], "missing");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "the partial-error early return must invalidate the warm snapshot"
+    );
 }
 
 #[test]

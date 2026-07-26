@@ -194,10 +194,11 @@ pub(crate) async fn recipe_preset_catalog(
     recipe_preset_catalog_with(state, project_id, None).await
 }
 
-/// `recipe_preset_catalog` with an optional caller-supplied model catalog snapshot
-/// (sc-8819). When `snapshot` is `Some`, the model catalog it exposes is reused instead
-/// of re-running the per-model filesystem install-state probes; the resulting presets are
-/// byte-for-byte identical to the `None` path.
+/// `recipe_preset_catalog` with an optional request-scoped model catalog snapshot
+/// (sc-8819). When present, it guarantees one consistent value across a job-create.
+/// Without it, `model_catalog` uses SC-14784's process-shared generation cache, whose
+/// cold callers coalesce and whose model lifecycle/manifest invalidations prevent stale
+/// install state from surviving a mutation. Both paths finalize identical presets.
 pub(crate) async fn recipe_preset_catalog_with(
     state: &AppState,
     project_id: Option<&str>,
@@ -216,8 +217,8 @@ pub(crate) async fn recipe_preset_catalog_with(
         .into_iter()
         .map(|preset| normalize_recipe_preset_entry(preset, "global", &user_manifest))
         .collect::<Result<Vec<_>, _>>()?;
-    // Reuse the request-scoped model catalog snapshot when the caller threaded one
-    // (sc-8819), else build a fresh catalog exactly as before.
+    // Reuse the request-scoped value when a job-create threaded one (sc-8819);
+    // ordinary route callers reuse/build the process-shared generation snapshot.
     let owned_models;
     let models: &[Value] = match snapshot {
         Some(snapshot) => snapshot.models(state).await?,

@@ -39,7 +39,7 @@ use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
 use crate::manifest::ManifestCache;
-use crate::models::ModelSizeCache;
+use crate::models::{ModelCatalogCache, ModelSizeCache};
 use crate::startup::{
     StartupCriticality, StartupMaintenance, StartupPhaseTimer, BACKGROUND_MAINTENANCE_TIMEOUT,
 };
@@ -290,6 +290,11 @@ pub struct AppState {
     pub(crate) auth_throttle: Arc<AuthThrottle>,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
+    /// One generation-keyed install-state snapshot shared by `/models`, recipe
+    /// preset reads, and request-scoped job validation. The cache serializes a
+    /// cold build so concurrent callers join the same filesystem sweep; model
+    /// lifecycle completion and model-manifest writes advance its generation.
+    pub(crate) model_catalog_cache: Arc<ModelCatalogCache>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
     #[cfg(test)]
     pub(crate) model_size_estimate_test_hook:

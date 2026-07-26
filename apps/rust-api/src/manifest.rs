@@ -143,6 +143,12 @@ where
     let entries = load_manifest_entries(state, path, field).await?;
     let (entries, result) = operation(entries)?;
     save_manifest_entries(path, field, entries).await?;
+    // A model-manifest mutation changes both catalog membership and the inputs
+    // to install-state resolution. Invalidate only after the atomic write
+    // succeeds so failed CRUD leaves the last known-good snapshot reusable.
+    if field == "models" {
+        state.model_catalog_cache.invalidate();
+    }
     Ok(result)
 }
 
