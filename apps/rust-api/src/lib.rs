@@ -304,7 +304,10 @@ const DEFAULT_API_HOST: &str = "127.0.0.1";
 // person-track corrections) while shrinking the per-request ceiling ~200x. The large
 // limit is re-attached per-route ONLY to the multipart/upload endpoints below.
 const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
-const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 64 * 1024 * 1024;
+// The trusted worker may finalize up to 100k URL/caption records in one atomic
+// dataset replacement. Captions are bounded separately, but the JSON envelope can
+// still exceed the ordinary API ceiling by hundreds of megabytes.
+const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;

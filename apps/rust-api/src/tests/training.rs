@@ -76,6 +76,23 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
     std::fs::write(source.join("part-00000.snappy.parquet"), b"PAR1")
         .expect("placeholder shard writes");
 
+    let (status, rejected) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-jobs"
+        ),
+        json!({
+            "sourcePath": source.clone(),
+            "maxItems": 100_001
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("100000")));
+
     let (status, job) = request(
         app.clone(),
         "POST",
@@ -84,7 +101,7 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
         ),
         json!({
             "sourcePath": source,
-            "maxItems": 25,
+            "maxItems": 100_000,
             "minEdge": 384,
             "concurrency": 8,
             "captionIncludes": ["portrait", "person"],
@@ -96,7 +113,7 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
     assert_eq!(job["type"], "dataset_parquet_import");
     assert_eq!(job["payload"]["urlColumn"], "URL");
     assert_eq!(job["payload"]["captionColumn"], "TEXT");
-    assert_eq!(job["payload"]["maxItems"], 25);
+    assert_eq!(job["payload"]["maxItems"], 100_000);
     assert_eq!(job["payload"]["minEdge"], 384);
     assert_eq!(job["payload"]["concurrency"], 8);
     assert_eq!(

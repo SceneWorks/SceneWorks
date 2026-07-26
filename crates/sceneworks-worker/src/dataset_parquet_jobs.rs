@@ -52,7 +52,10 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let url_column = required_payload_string(&job.payload, "urlColumn")?.to_owned();
     let caption_column = required_payload_string(&job.payload, "captionColumn")?.to_owned();
     let dataset_version = payload_u32(&job.payload, "datasetVersion", 0);
-    let max_items = payload_usize(&job.payload, "maxItems", 1_000).clamp(1, 25_000);
+    let max_items = payload_usize(&job.payload, "maxItems", 1_000).clamp(
+        1,
+        sceneworks_core::contracts::MAX_DATASET_PARQUET_IMPORT_ITEMS,
+    );
     let min_edge = payload_u32(&job.payload, "minEdge", 512).min(8_192);
     let concurrency = payload_usize(&job.payload, "concurrency", 16).clamp(1, 64);
     let caption_includes = normalized_filter_terms(&job.payload, "captionIncludes");

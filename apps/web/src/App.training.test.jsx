@@ -224,6 +224,56 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Dataset created");
   });
 
+  it("creates an empty dataset automatically when starting a Parquet import", async () => {
+    const createDataset = vi.fn(async (payload) => ({
+      id: "dataset-parquet",
+      name: payload.name,
+      version: 1,
+      items: payload.items,
+    }));
+    const createParquetImportJob = vi.fn(async () => ({ id: "job_parquet" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [],
+          createDataset,
+          createParquetImportJob,
+          datasets: [],
+        }),
+      );
+    });
+
+    await changeField(field(container, "Dataset name"), "LAION Control Set");
+    const importButton = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Import Parquet",
+    );
+    expect(importButton.disabled).toBe(false);
+    await act(async () => importButton.click());
+    await changeField(field(document.body, "Parquet file or folder"), "D:\\laion2B-en-aesthetic-metadata");
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start import").click();
+    });
+
+    expect(createDataset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "LAION Control Set",
+        modality: "image",
+        items: [],
+      }),
+    );
+    expect(createParquetImportJob).toHaveBeenCalledWith(
+      "dataset-parquet",
+      expect.objectContaining({
+        sourcePath: "D:\\laion2B-en-aesthetic-metadata",
+        maxItems: 1000,
+      }),
+    );
+    expect(container.textContent).toContain("Parquet import queued (job_parquet)");
+  });
+
   it("imports caption sidecars alongside images and bakes them into the saved dataset", async () => {
     const createDataset = vi.fn(async (payload) => ({
       id: "dataset-new",

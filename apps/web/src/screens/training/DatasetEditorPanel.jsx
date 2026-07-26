@@ -115,7 +115,7 @@ export function DatasetEditorPanel({
   const [captionFilter, setCaptionFilter] = React.useState("all");
   const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
   const [parquetImporting, setParquetImporting] = React.useState(false);
-  const parquetImportDisabled = !activeDataset?.id || memberAssets.length > 0 || parquetImporting;
+  const parquetImportDisabled = !draftName.trim() || memberAssets.length > 0 || parquetImporting;
 
   async function runParquetImport(settings) {
     if (typeof onImportParquet !== "function" || parquetImporting) return;
@@ -303,11 +303,13 @@ export function DatasetEditorPanel({
               disabled={parquetImportDisabled}
               onClick={() => setParquetDialogOpen(true)}
               title={
-                !activeDataset?.id
-                  ? "Create the empty dataset first"
+                !draftName.trim()
+                  ? "Name the dataset before importing"
                   : memberAssets.length
                     ? "Parquet import currently requires an empty dataset"
-                    : "Import URL/caption rows from local Parquet shards"
+                    : activeDataset?.id
+                      ? "Import URL/caption rows from local Parquet shards"
+                      : "Create this empty dataset and import URL/caption rows"
               }
               type="button"
             >

@@ -449,6 +449,9 @@ string_enum! {
         // Built-in LoRA explicit download capability (sc-5944), advertised by the CPU
         // utility worker alongside model_download / lora_import.
         LoraDownload => "lora_download",
+        // LAION-style URL/caption Parquet materialization. This is a CPU utility job:
+        // it scans local metadata and downloads public images without an inference backend.
+        DatasetParquetImport => "dataset_parquet_import",
         LoraTrain => "lora_train",
         TrainingCaption => "training_caption",
         // Dataset Doctor CLIP-embedding analysis (sc-6535). Advertised only when the MLX/candle
@@ -636,6 +639,12 @@ string_enum! {
         PersonReplace => "person_replace",
     }
 }
+
+/// Maximum number of images one Parquet materialization job may add.
+///
+/// Shared by API validation and the worker clamp so a newer client cannot create
+/// a job that is accepted at submission but silently truncated at execution.
+pub const MAX_DATASET_PARQUET_IMPORT_ITEMS: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

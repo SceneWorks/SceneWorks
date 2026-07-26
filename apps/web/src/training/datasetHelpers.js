@@ -134,19 +134,16 @@ export function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) 
 // so a chip would just repeat what the grid shows. This rule set carries only what
 // blocks Save.
 //
-// A missing name or empty selection is a `requirement` — the empty field speaks for
-// itself. `disabledItems` is the one real `error`: assets that got rejected, trashed, or
-// deleted after they were selected. Before this, that only dimmed Save and left the
-// health dot reading "Add image assets to build this dataset" — wrong, since the set is
-// full of the wrong images. The error says so.
+// A missing name is a `requirement` — the empty field speaks for itself. Empty datasets
+// are valid because Parquet import needs a persisted destination before it can materialize
+// images. `disabledItems` is the one real `error`: assets that went unavailable after
+// they were selected.
 export function datasetSaveValidation({ name, selectedAssetIds }, { health } = {}) {
   const issues = [];
   if (!name?.trim()) {
     issues.push(issue.requirement("datasetName", "Name the dataset"));
   }
-  if (!selectedAssetIds?.length) {
-    issues.push(issue.requirement("assets", "Add at least one image"));
-  } else if (health?.disabledItems > 0) {
+  if (selectedAssetIds?.length && health?.disabledItems > 0) {
     const n = health.disabledItems;
     issues.push(
       issue.error(

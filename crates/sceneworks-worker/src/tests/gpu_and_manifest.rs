@@ -187,6 +187,9 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
     assert!(cpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "timeline_export"));
+    assert!(cpu_capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "dataset_parquet_import"));
     // The CPU utility worker advertises only the procedural *preview*
     // capabilities; real detection/tracking route to the native MLX/candle worker.
     assert!(cpu_capabilities
@@ -218,6 +221,9 @@ fn rust_cpu_capabilities_do_not_claim_gpu_generation_jobs() {
     assert!(!gpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "model_download"));
+    assert!(!gpu_capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "dataset_parquet_import"));
     assert!(!gpu_capabilities
         .iter()
         .any(|capability| capability.as_str() == "image_generate"));
