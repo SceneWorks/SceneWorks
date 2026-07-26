@@ -635,6 +635,15 @@ pub(crate) async fn update_job_progress(
     let mut publish_job_update = accepted.applied;
     let mut job = accepted.job;
 
+    // Model workers mutate install receipts, imported manifests, or converted
+    // output directories before reporting a terminal status. Advance the
+    // shared catalog generation for every accepted terminal outcome (including
+    // failures/cancellation, which may leave an incomplete cache) so the next
+    // `/models`, preset, or job-validation caller observes the new filesystem.
+    if accepted.applied && terminal_model_job_changes_catalog(&job.job_type, &job.status) {
+        state.model_catalog_cache.invalidate();
+    }
+
     if terminal_side_effects_pending {
         // The request that accepted the terminal state gets the first chance to
         // drain its durable handoff. If it errors or the process dies, the
@@ -688,6 +697,16 @@ pub(crate) async fn update_job_progress(
         publish_queue(&state).await?;
     }
     Ok(Json(job))
+}
+
+pub(crate) fn terminal_model_job_changes_catalog(job_type: &JobType, status: &JobStatus) -> bool {
+    matches!(
+        job_type,
+        JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
+    ) && matches!(
+        status,
+        JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+    )
 }
 
 pub(crate) const PROGRESS_SIDE_EFFECT_RECOVERY_BATCH: usize = 128;

@@ -20,6 +20,33 @@ const MODEL_SIZE_NEGATIVE_TTL: Duration = Duration::from_secs(300);
 // without making ordinary warm catalog loads depend on Hugging Face.
 const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Generation-keyed, process-local snapshot of the model catalog after its
+/// filesystem install-state sweep.
+///
+/// A cold caller holds `snapshot` while building, so concurrent `/models`,
+/// global preset, project preset, and job-validation requests join that one
+/// sweep. `invalidate` is synchronous and advances `generation` before any
+/// model lifecycle/manifest writer returns. If a writer races a cold build,
+/// the builder observes the newer generation and rebuilds instead of publishing
+/// stale state. Errors are never cached.
+#[derive(Default)]
+pub(crate) struct ModelCatalogCache {
+    generation: std::sync::atomic::AtomicU64,
+    snapshot: tokio::sync::Mutex<Option<(u64, Arc<Vec<Value>>)>>,
+}
+
+impl ModelCatalogCache {
+    pub(crate) fn invalidate(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ModelSizeEstimateTestHook {
@@ -882,6 +909,9 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
+    // Tier deletion changes installState/variantStates without touching a
+    // manifest, so it must explicitly advance the shared snapshot generation.
+    state.model_catalog_cache.invalidate();
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,
@@ -1597,14 +1627,60 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    model_catalog_inner(state, false).await
+    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
 /// failure). Reserved for `GET /models`, the one surface that displays
 /// download sizes.
 pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    model_catalog_inner(state, true).await
+    // Preserve SC-14800's cold-path overlap: Hugging Face metadata estimation
+    // begins from the cheap manifest inputs while the shared install-state
+    // snapshot is being built (or joined) independently.
+    let size_estimates = estimate_current_model_catalog_sizes(state);
+    let snapshot = model_catalog_snapshot(state);
+    let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
+    let size_estimates = size_estimates?;
+    let mut models = snapshot?.as_ref().clone();
+    for model in &mut models {
+        let context = model_download_context(model)?;
+        let live_estimate = context.as_ref().and_then(|context| {
+            size_estimates
+                .get(&(context.repo.clone(), context.files.clone()))
+                .copied()
+                .flatten()
+        });
+        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+    }
+    Ok(models)
+}
+
+async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    let mut cached = state.model_catalog_cache.snapshot.lock().await;
+    loop {
+        let generation = state
+            .model_catalog_cache
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        if let Some((cached_generation, snapshot)) = cached.as_ref() {
+            if *cached_generation == generation {
+                return Ok(snapshot.clone());
+            }
+        }
+
+        let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
+        let current_generation = state
+            .model_catalog_cache
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        if current_generation == generation {
+            *cached = Some((generation, snapshot.clone()));
+            return Ok(snapshot);
+        }
+        // A model writer completed while the filesystem sweep was running.
+        // Keep the serializer and rebuild at the new generation so no waiter
+        // can observe the stale result.
+    }
 }
 
 // sc-4205 (F-API-12): the per-model install/cache state, formerly threaded through a
@@ -3800,14 +3876,16 @@ async fn estimate_model_catalog_sizes(
     .collect()
 }
 
-async fn model_catalog_inner(
+async fn load_model_catalog_inputs(
     state: &AppState,
-    estimate_sizes: bool,
-) -> Result<Vec<Value>, ApiError> {
-    // sc-8819 (F-017): observe full-catalog assembly (the per-model FS install-state probe
-    // sweep) so a test can assert it runs once per job-create.
-    #[cfg(test)]
-    crate::test_note_model_catalog_build();
+) -> Result<
+    (
+        Vec<Value>,
+        Vec<Option<DownloadContext>>,
+        std::collections::HashSet<String>,
+    ),
+    ApiError,
+> {
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
@@ -3829,7 +3907,22 @@ async fn model_catalog_inner(
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    let size_estimates = estimate_model_catalog_sizes(state, &download_contexts, estimate_sizes);
+    Ok((models, download_contexts, user_model_ids))
+}
+
+async fn estimate_current_model_catalog_sizes(
+    state: &AppState,
+) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
+    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
+}
+
+async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    // sc-8819 (F-017): observe full-catalog assembly (the per-model FS install-state probe
+    // sweep) so tests can assert request-scoped and process-shared reuse.
+    #[cfg(test)]
+    crate::test_note_model_catalog_build();
+    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
@@ -3867,18 +3960,14 @@ async fn model_catalog_inner(
         let mut cache = external_base_cache.lock();
         crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
     });
-    let (size_estimates, models, external) =
-        tokio::join!(size_estimates, catalog_sweep, external_scan);
+    let (models, external) = tokio::join!(catalog_sweep, external_scan);
     let mut models = models?.into_iter().flatten().collect::<Vec<_>>();
     for model in &mut models {
         let context = model_download_context(model)?;
-        let live_estimate = context.as_ref().and_then(|context| {
-            size_estimates
-                .get(&(context.repo.clone(), context.files.clone()))
-                .copied()
-                .flatten()
-        });
-        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+        // The shared snapshot carries deterministic manifest fallbacks only.
+        // `/models` overlays live estimates on its response clone; presets and
+        // job validation never wait on unrelated Hugging Face network calls.
+        apply_model_catalog_size_fields(model, context.as_ref(), None)?;
     }
     let external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))

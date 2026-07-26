@@ -1,6 +1,35 @@
 //! rust-api jobs tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[test]
+fn terminal_model_lifecycle_jobs_invalidate_catalog_snapshots() {
+    for job_type in [
+        crate::JobType::ModelDownload,
+        crate::JobType::ModelImport,
+        crate::JobType::ModelConvert,
+    ] {
+        for status in [
+            crate::JobStatus::Completed,
+            crate::JobStatus::Failed,
+            crate::JobStatus::Canceled,
+            crate::JobStatus::Interrupted,
+        ] {
+            assert!(
+                crate::jobs::terminal_model_job_changes_catalog(&job_type, &status),
+                "{job_type:?} {status:?} may change install state"
+            );
+        }
+        assert!(!crate::jobs::terminal_model_job_changes_catalog(
+            &job_type,
+            &crate::JobStatus::Running
+        ));
+    }
+    assert!(!crate::jobs::terminal_model_job_changes_catalog(
+        &crate::JobType::ImageGenerate,
+        &crate::JobStatus::Completed
+    ));
+}
+
 /// F-003 / sc-11159: a path-traversal `model` id is rejected at the POST boundary for BOTH
 /// the image and video enqueue lanes (before any job is created), closing the remote
 /// arbitrary-write primitive the worker filename builders would otherwise expose.

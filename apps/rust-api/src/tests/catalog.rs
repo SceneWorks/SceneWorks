@@ -699,6 +699,178 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 }
 
 #[tokio::test]
+async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "shared_model",
+                "name": "Shared Model",
+                "family": "shared-test",
+                "type": "image",
+                "capabilities": ["edit_image"],
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "shared/model",
+                    "files": ["*.safetensors"]
+                }],
+                "__testCatalogProbeDelayMs": 250
+            }]
+        }))
+        .expect("model manifest serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("builtin presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{
+            "schemaVersion": 1,
+            "presets": [{
+                "id": "legacy_edit",
+                "name": "Legacy Edit",
+                "modes": ["edit_image"],
+                "builtInLoras": []
+            }]
+        }"#,
+    )
+    .expect("user presets writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+    let marker_dir = temp_dir.path().join("data/models/shared__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    crate::test_reset_catalog_build_counters();
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let size_hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
+    *state.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Preset Coalescing Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let models_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), size_hook.wait_for_call())
+        .await
+        .expect("live size estimation starts");
+    let global_task = tokio::spawn(request(
+        app.clone(),
+        "GET",
+        "/api/v1/recipe-presets",
+        Value::Null,
+    ));
+    let project_uri = format!("/api/v1/recipe-presets?projectId={project_id}");
+    let project_task =
+        tokio::spawn(async move { request(app, "GET", &project_uri, Value::Null).await });
+
+    let preset_started = std::time::Instant::now();
+    let (global, project) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(global_task, project_task)
+    })
+    .await
+    .expect("preset routes finish while unrelated live size lookup is blocked");
+    let global = global.expect("global preset task joins");
+    let project = project.expect("project preset task joins");
+    for (status, presets) in [global, project] {
+        assert_eq!(status, StatusCode::OK);
+        let preset = &presets.as_array().expect("preset array")[0];
+        assert_eq!(preset["workflow"], "edit_image");
+        assert_eq!(preset["model"], "shared_model");
+        assert_eq!(preset["modes"], json!(["edit_image"]));
+        assert_eq!(preset["loras"], json!([]));
+        assert_eq!(
+            preset["appliedDefaults"]["notes"],
+            json!([
+                "workflow inferred from legacy modes as edit_image",
+                "model defaulted to shared_model for legacy preset"
+            ])
+        );
+    }
+    assert!(
+        !models_task.is_finished(),
+        "/models remains blocked on its response-only size estimate"
+    );
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "concurrent /models, global preset, and project preset callers must join one install-state sweep"
+    );
+
+    let preset_elapsed = preset_started.elapsed();
+    let models_release_started = std::time::Instant::now();
+    size_hook.release_one();
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), models_task)
+        .await
+        .expect("models route completes after size release")
+        .expect("models task joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["downloadSizeBytes"], json!(1234));
+    eprintln!(
+        "SC-14784 local route timing: global+project presets={preset_elapsed:?}, /models after size release={:?}, install-state sweeps=1",
+        models_release_started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn model_catalog_invalidation_refreshes_install_state() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "refresh_model", "refresh/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+
+    let (status, cold) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cold[0]["installState"], "missing");
+    let marker_dir = temp_dir.path().join("data/models/refresh__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    let (_, still_cached) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(still_cached[0]["installState"], "missing");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    let before = state.model_catalog_cache.generation();
+    state.model_catalog_cache.invalidate();
+    assert_eq!(state.model_catalog_cache.generation(), before + 1);
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "installed");
+    assert_eq!(crate::test_model_catalog_builds(), 2);
+}
+
+#[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
