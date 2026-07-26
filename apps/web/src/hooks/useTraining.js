@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { upsertJobNewest } from "../sorters.js";
 
 // Owns the project's training-dataset state plus dataset CRUD, caption sidecar/job,
@@ -30,7 +31,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       // current project's in-flight refresh. Accepted calls receive monotonically
       // increasing ownership so an older request for the *same* project cannot
       // overwrite a newer request or clear its loading state.
-      if (!isCurrentTrainingRequest(projectId)) return [];
+      if (!isCurrentTrainingRequest(projectId)) return refreshFailure("stale");
       const refreshId = ++trainingRefreshIdRef.current;
       const ownsCurrentRefresh = () =>
         refreshId === trainingRefreshIdRef.current &&
@@ -41,23 +42,23 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
         setTrainingDatasetsProjectId(null);
         setTrainingDatasetsError("");
         setLoadingTrainingDatasets(false);
-        return [];
+        return refreshFailure("missing-project");
       }
       setLoadingTrainingDatasets(true);
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, { signal });
-        if (!ownsCurrentRefresh()) return [];
+        if (!ownsCurrentRefresh()) return refreshFailure("stale");
         setTrainingDatasets(items);
         setTrainingDatasetsProjectId(projectId);
         setTrainingDatasetsError("");
-        return items;
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err)) return [];
-        if (!ownsCurrentRefresh()) return [];
+        if (!ownsCurrentRefresh()) return refreshFailure("stale", err);
+        if (isAbortError(err)) return refreshFailure("aborted", err);
         setTrainingDatasets([]);
         setTrainingDatasetsProjectId(projectId);
         setTrainingDatasetsError(err.message);
-        return [];
+        return refreshFailure("error", err);
       } finally {
         if (!signal?.aborted && ownsCurrentRefresh()) {
           setLoadingTrainingDatasets(false);

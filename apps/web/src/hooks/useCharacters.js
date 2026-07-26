@@ -1,5 +1,7 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // Owns the project's character roster plus every character CRUD/reference/look/LoRA
 // mutation. Extracted from App.jsx (sc-1651) to shrink the god module; behavior is
@@ -16,7 +18,10 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
   const refreshCharacters = useCallback(
     async (projectId = activeProject?.id, { signal } = {}) => {
       if (!projectId) {
-        return;
+        return refreshFailure("missing-project");
+      }
+      if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
+        return refreshFailure("stale");
       }
       try {
         const items = await apiFetch(`/api/v1/projects/${projectId}/characters`, token, { signal });
@@ -24,14 +29,19 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         // after the user switches away; committing then would clobber the new
         // project's roster with the old one's. Drop the stale response — mirrors
         // refreshTimelines' guard (useTimelines.js).
-        if (activeProjectRef?.current?.id && activeProjectRef.current.id !== projectId) {
-          return;
+        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
+          return refreshFailure("stale");
         }
         setCharacters(items);
         setError("");
+        return refreshSuccess(items);
       } catch (err) {
-        if (isAbortError(err)) return;
+        if (!isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)) {
+          return refreshFailure("stale", err);
+        }
+        if (isAbortError(err)) return refreshFailure("aborted", err);
         setError(err.message);
+        return refreshFailure("error", err);
       }
     },
     [token, activeProject, activeProjectRef, setError],

@@ -65,6 +65,7 @@ export function SimpleShell({
   simpleDefault,
   onSimpleDefaultChange,
   onModeChange,
+  onScreenChange,
   lockedToSimple,
 }) {
   const {
@@ -107,6 +108,9 @@ export function SimpleShell({
   const toastTimer = useRef(null);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
+  useEffect(() => {
+    onScreenChange?.(screen);
+  }, [onScreenChange, screen]);
 
   // Opening an asset. An audio asset also becomes the loaded take, so the grid rings it and
   // the viewer opens on its deck; `play` (the tile's play button) starts it immediately.

@@ -274,6 +274,64 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Parquet import queued (job_parquet)");
   });
 
+  it("reloads the open dataset when a Parquet import completes", async () => {
+    let imported = false;
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-parquet",
+      name: "LAION Control Set",
+      version: imported ? 2 : 1,
+      items: imported
+        ? [{
+            id: "pq_1",
+            path: "images/pq_1.jpg",
+            displayName: "pq_1.jpg",
+            caption: { text: "a portrait", source: "imported", triggerWords: [] },
+          }]
+        : [],
+    }));
+    const refreshDatasets = vi.fn(async () => []);
+    const context = (jobs) =>
+      withTrainingDataSetsLibraryContext({
+        activeProject: { id: "project-a", name: "Project A" },
+        assets: [],
+        datasets: [{ id: "dataset-parquet", name: "LAION Control Set", modality: "image", itemCount: imported ? 1 : 0 }],
+        jobs,
+        loadDataset,
+        onRefreshDatasets: refreshDatasets,
+      });
+
+    root = createRoot(container);
+    await act(async () => root.render(context([])));
+    await act(async () => document.body.querySelector(".compact-selector-pill").click());
+    await act(async () => {
+      [...document.body.querySelectorAll(".compact-selector-item")]
+        .find((button) => button.textContent.includes("LAION Control Set"))
+        .click();
+    });
+    await settle();
+    expect(document.body.querySelectorAll(".training-caption-card")).toHaveLength(0);
+
+    imported = true;
+    await act(async () => {
+      root.render(
+        context([{
+          id: "job_parquet",
+          type: "dataset_parquet_import",
+          status: "completed",
+          projectId: "project-a",
+          payload: { datasetId: "dataset-parquet" },
+          result: { datasetId: "dataset-parquet", importedItemCount: 1 },
+        }]),
+      );
+    });
+    await settle();
+
+    expect(refreshDatasets).toHaveBeenCalledWith();
+    expect(loadDataset).toHaveBeenCalledTimes(2);
+    expect(document.body.querySelectorAll(".training-caption-card")).toHaveLength(1);
+    expect(container.textContent).toContain("Parquet import completed with 1 image.");
+  });
+
   it("imports caption sidecars alongside images and bakes them into the saved dataset", async () => {
     const createDataset = vi.fn(async (payload) => ({
       id: "dataset-new",
