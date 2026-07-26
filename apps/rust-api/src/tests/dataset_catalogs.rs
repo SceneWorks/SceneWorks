@@ -655,7 +655,7 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 50_000);
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
 
     let (status, created) = request(
         app.clone(),
@@ -731,6 +731,12 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     }
     let paused = paused.expect("scanner cooperatively pauses at a bounded batch boundary");
     assert!(paused["processing"]["processedCount"].as_u64().unwrap() > 0);
+
+    // The driver publishes its terminal paused status before returning and
+    // releasing the catalog processing lease. Status is therefore not a
+    // quiescence signal: wait on the supervisor's event-driven teardown seam
+    // before issuing a new lifecycle mutation that must acquire that lease.
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
 
     let revision = paused["processingControl"]["revision"].as_u64().unwrap();
     let (resume_status, resumed) = request(
