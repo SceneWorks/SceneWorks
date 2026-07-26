@@ -1972,6 +1972,9 @@ fn parse_single_byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
 /// `embed-web` feature so default/server/test builds need no web build.
 #[cfg(feature = "embed-web")]
 mod web_assets {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+
     use axum::body::Body;
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
     use axum::response::{IntoResponse, Response};
@@ -2005,6 +2008,20 @@ mod web_assets {
             .into_owned()
     }
 
+    #[cfg(test)]
+    pub(super) fn first_uncompressed_static_asset_path() -> String {
+        WebAssets::iter()
+            .find(|path| {
+                !path.ends_with(".br")
+                    && !path.ends_with(".gz")
+                    && path.as_ref() != IMMUTABLE_ASSET_MANIFEST
+                    && WebAssets::get(&format!("{path}.br")).is_none()
+                    && WebAssets::get(&format!("{path}.gz")).is_none()
+            })
+            .expect("production web bundle contains an uncompressed static asset")
+            .into_owned()
+    }
+
     // The desktop shell navigates its privileged webview to this server, so the embedded
     // UI runs from this origin and its CSP must come from here (tauri.conf.json only
     // governs the bundled setup screen). Kept narrow: scripts only from this origin (the
@@ -2026,6 +2043,7 @@ form-action 'self'";
 
     const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
     const REVALIDATE_CACHE: &str = "no-cache";
+    const IMMUTABLE_ASSET_MANIFEST: &str = ".sceneworks-immutable-assets";
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Encoding {
@@ -2052,72 +2070,164 @@ form-action 'self'";
         }
     }
 
-    fn accepted_quality(headers: &HeaderMap, encoding: &str) -> f32 {
-        let mut explicit = None;
-        let mut wildcard = None;
-        for value in headers.get_all(header::ACCEPT_ENCODING) {
-            let Ok(value) = value.to_str() else {
-                continue;
-            };
-            for item in value.split(',') {
-                let mut parts = item.trim().split(';');
-                let name = parts.next().unwrap_or_default().trim();
-                let mut quality = 1.0;
-                for parameter in parts {
-                    let Some((key, value)) = parameter.trim().split_once('=') else {
+    #[derive(Default)]
+    struct EncodingPreferences {
+        header_present: bool,
+        brotli: Option<f32>,
+        gzip: Option<f32>,
+        identity: Option<f32>,
+        wildcard: Option<f32>,
+    }
+
+    impl EncodingPreferences {
+        fn parse(headers: &HeaderMap) -> Self {
+            let mut preferences = Self::default();
+            for value in headers.get_all(header::ACCEPT_ENCODING) {
+                preferences.header_present = true;
+                let Ok(value) = value.to_str() else {
+                    continue;
+                };
+                for item in value.split(',') {
+                    let mut parts = item.trim().split(';');
+                    let name = parts.next().unwrap_or_default().trim();
+                    if name.is_empty() {
                         continue;
-                    };
-                    if key.trim().eq_ignore_ascii_case("q") {
-                        quality = value
-                            .trim()
-                            .parse::<f32>()
-                            .ok()
-                            .filter(|quality| (0.0..=1.0).contains(quality))
-                            .unwrap_or(0.0);
+                    }
+                    let mut quality = 1.0;
+                    for parameter in parts {
+                        let Some((key, value)) = parameter.trim().split_once('=') else {
+                            continue;
+                        };
+                        if key.trim().eq_ignore_ascii_case("q") {
+                            quality = value
+                                .trim()
+                                .parse::<f32>()
+                                .ok()
+                                .filter(|quality| (0.0..=1.0).contains(quality))
+                                .unwrap_or(0.0);
+                        }
+                    }
+                    if name.eq_ignore_ascii_case("br") {
+                        preferences.brotli = Some(quality);
+                    } else if name.eq_ignore_ascii_case("gzip") {
+                        preferences.gzip = Some(quality);
+                    } else if name.eq_ignore_ascii_case("identity") {
+                        preferences.identity = Some(quality);
+                    } else if name == "*" {
+                        preferences.wildcard = Some(quality);
                     }
                 }
-                if name.eq_ignore_ascii_case(encoding) {
-                    explicit = Some(quality);
-                } else if name == "*" {
-                    wildcard = Some(quality);
-                }
+            }
+            preferences
+        }
+
+        fn quality(&self, encoding: Encoding) -> f32 {
+            if !self.header_present {
+                return if encoding == Encoding::Identity {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
+            match encoding {
+                Encoding::Brotli => self.brotli.or(self.wildcard).unwrap_or(0.0),
+                Encoding::Gzip => self.gzip.or(self.wildcard).unwrap_or(0.0),
+                // RFC 9110: identity is acceptable by default unless it is
+                // explicitly excluded, or a wildcard q=0 excludes every
+                // unlisted coding.
+                Encoding::Identity => match self.identity {
+                    Some(quality) => quality,
+                    None if self.wildcard == Some(0.0) => 0.0,
+                    None => 1.0,
+                },
             }
         }
-        explicit.or(wildcard).unwrap_or(0.0)
     }
 
-    fn select_encoding(headers: &HeaderMap, requested: &str) -> Encoding {
-        let br_quality = accepted_quality(headers, "br");
-        let gzip_quality = accepted_quality(headers, "gzip");
-        let has_br = br_quality > 0.0 && WebAssets::get(&format!("{requested}.br")).is_some();
-        let has_gzip = gzip_quality > 0.0 && WebAssets::get(&format!("{requested}.gz")).is_some();
-        if has_br && (!has_gzip || br_quality >= gzip_quality) {
-            Encoding::Brotli
-        } else if has_gzip {
-            Encoding::Gzip
-        } else {
-            Encoding::Identity
+    fn select_encoding(headers: &HeaderMap, requested: &str) -> Option<Encoding> {
+        let preferences = EncodingPreferences::parse(headers);
+        // Deterministic tie-break: Brotli, then gzip, then identity. A client
+        // advertising a coding at q=1 therefore receives compression rather
+        // than an equally acceptable identity response.
+        let candidates = [
+            (
+                Encoding::Brotli,
+                WebAssets::get(&format!("{requested}.br")).is_some(),
+            ),
+            (
+                Encoding::Gzip,
+                WebAssets::get(&format!("{requested}.gz")).is_some(),
+            ),
+            (Encoding::Identity, WebAssets::get(requested).is_some()),
+        ];
+        let mut selected = None;
+        for (encoding, available) in candidates {
+            let quality = preferences.quality(encoding);
+            let is_better = match selected {
+                Some((_, best_quality)) => quality > best_quality,
+                None => true,
+            };
+            if available && quality > 0.0 && is_better {
+                selected = Some((encoding, quality));
+            }
         }
+        selected.map(|(encoding, _)| encoding)
     }
 
-    fn is_hashed_asset(path: &str) -> bool {
-        if !path.starts_with("assets/") {
-            return false;
-        }
-        let Some(file_name) = path.rsplit('/').next() else {
-            return false;
-        };
-        let stem = file_name
-            .rsplit_once('.')
-            .map_or(file_name, |(stem, _)| stem);
-        let Some((_, hash)) = stem.rsplit_once('-') else {
-            return false;
-        };
-        hash.len() >= 8
-            && hash.len() <= 32
-            && hash
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    fn immutable_assets() -> &'static HashSet<String> {
+        static ASSETS: OnceLock<HashSet<String>> = OnceLock::new();
+        ASSETS.get_or_init(|| {
+            WebAssets::get(IMMUTABLE_ASSET_MANIFEST)
+                .map(|manifest| {
+                    String::from_utf8_lossy(&manifest.data)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    fn is_immutable_asset(path: &str) -> bool {
+        immutable_assets().contains(path)
+    }
+
+    #[cfg(test)]
+    pub(super) fn immutable_asset_manifest_path() -> &'static str {
+        IMMUTABLE_ASSET_MANIFEST
+    }
+
+    fn apply_common_headers(
+        response: &mut axum::http::response::Builder,
+        mime: &str,
+        cache_control: &'static str,
+    ) {
+        let headers = response
+            .headers_mut()
+            .expect("embedded response headers are available");
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(mime).expect("embedded MIME type is a valid header"),
+        );
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(cache_control),
+        );
+    }
+
+    fn not_acceptable_response(mime: &str, cache_control: &'static str) -> Response {
+        let mut response = Response::builder().status(StatusCode::NOT_ACCEPTABLE);
+        apply_common_headers(&mut response, mime, cache_control);
+        response
+            .body(Body::empty())
+            .expect("not-acceptable embedded response constructs")
     }
 
     fn etag(hash: [u8; 32]) -> String {
@@ -2154,37 +2264,27 @@ form-action 'self'";
         fallback: bool,
         request_headers: &HeaderMap,
     ) -> Option<Response> {
-        let encoding = select_encoding(request_headers, requested);
-        let representation_path = format!("{requested}{}", encoding.suffix());
-        let file = WebAssets::get(&representation_path)?;
-        let etag = etag(file.metadata.sha256_hash());
-        let cache_control = if !fallback && is_hashed_asset(requested) {
+        let cache_control = if !fallback && is_immutable_asset(requested) {
             IMMUTABLE_CACHE
         } else {
             REVALIDATE_CACHE
         };
+        let Some(encoding) = select_encoding(request_headers, requested) else {
+            return Some(not_acceptable_response(mime, cache_control));
+        };
+        let representation_path = format!("{requested}{}", encoding.suffix());
+        let file = WebAssets::get(&representation_path)?;
+        let etag = etag(file.metadata.sha256_hash());
         let status = if if_none_match(request_headers, &etag) {
             StatusCode::NOT_MODIFIED
         } else {
             StatusCode::OK
         };
         let mut response = Response::builder().status(status);
+        apply_common_headers(&mut response, mime, cache_control);
         let headers = response
             .headers_mut()
             .expect("embedded response headers are available");
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_str(mime).expect("embedded MIME type is a valid header"),
-        );
-        headers.insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-        );
-        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(cache_control),
-        );
         headers.insert(
             header::ETAG,
             HeaderValue::from_str(&etag).expect("SHA-256 ETag is a valid header"),
@@ -2214,9 +2314,11 @@ form-action 'self'";
         } else {
             requested
         };
-        // .br/.gz siblings are internal representations, never public paths.
+        // Encoded siblings and the cache allowlist are internal build
+        // metadata, never public paths.
         if !requested.ends_with(".br")
             && !requested.ends_with(".gz")
+            && requested != IMMUTABLE_ASSET_MANIFEST
             && WebAssets::get(requested).is_some()
         {
             let mime = mime_guess::from_path(requested).first_or_octet_stream();

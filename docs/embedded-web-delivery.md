@@ -11,6 +11,9 @@ siblings for compressible files of at least 256 bytes. The source, Brotli, and
 gzip representations are embedded into the API binary. The handler selects
 `br`, `gzip`, or identity from `Accept-Encoding`, adds
 `Vary: Accept-Encoding`, and uses a representation-specific ETag.
+Quality values, wildcard exclusions, and identity are honored; if a client
+rejects every available representation, the handler returns
+`406 Not Acceptable`.
 
 This is deliberately build-time precompression rather than response middleware:
 
@@ -34,6 +37,13 @@ routes and retain the original asset's content type when selected.
 - Every representation has a strong SHA-256 ETag. Conditional reloads can
   answer `304 Not Modified`, while a changed deployment cannot pin an old
   entrypoint to new hashed chunks.
+
+Vite writes an internal `.sceneworks-immutable-assets` allowlist from the
+current Rollup output. Only generated `/assets/` names matching Vite's exact
+eight-character base64url hash shape are listed; digits-only date/version
+suffixes are deliberately treated as mutable. Rust consumes that allowlist
+once and never grants immutable caching by guessing from the request filename.
+The allowlist and `.br`/`.gz` siblings are internal metadata, not public routes.
 
 The existing content type, content-security-policy, API access-control boundary,
 SPA fallback, and project media/range routes remain owned by their original

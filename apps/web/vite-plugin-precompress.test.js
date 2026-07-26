@@ -12,8 +12,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  IMMUTABLE_ASSET_MANIFEST,
   MINIMUM_PRECOMPRESS_BYTES,
   compressRepresentations,
+  immutableAssetPaths,
+  isViteHashedAssetPath,
   precompressDirectory,
   shouldPrecompress,
 } from "./vite-plugin-precompress.js";
@@ -35,6 +38,30 @@ describe("production precompression", () => {
     expect(shouldPrecompress("assets/poster-ABC12345.jpg", 50_000)).toBe(false);
     expect(shouldPrecompress("assets/font-ABC12345.woff2", 50_000)).toBe(false);
     expect(shouldPrecompress("assets/tiny-ABC12345.js", 20)).toBe(false);
+  });
+
+  it("recognizes Vite hashes without blessing date-like mutable filenames", () => {
+    expect(isViteHashedAssetPath("assets/index-ABC12345.js")).toBe(true);
+    expect(isViteHashedAssetPath("assets/index-aB-cD_12.js")).toBe(true);
+    expect(isViteHashedAssetPath("assets/index-20260725.js")).toBe(false);
+    expect(isViteHashedAssetPath("assets/bootstrap.js")).toBe(false);
+    expect(isViteHashedAssetPath("assets/index-ABC1234.js")).toBe(false);
+    expect(isViteHashedAssetPath("assets/index-ABC123456.js")).toBe(false);
+  });
+
+  it("builds an authoritative immutable allowlist from Vite outputs", () => {
+    const bundle = {
+      entry: { type: "chunk", fileName: "assets/index-aB-cD_12.js" },
+      css: { type: "asset", fileName: "assets/index-ABC12345.css" },
+      dated: { type: "asset", fileName: "assets/bootstrap-20260725.js" },
+      root: { type: "asset", fileName: "theme-init.js" },
+      manifest: { type: "asset", fileName: IMMUTABLE_ASSET_MANIFEST },
+    };
+
+    expect(immutableAssetPaths(bundle)).toEqual([
+      "assets/index-ABC12345.css",
+      "assets/index-aB-cD_12.js",
+    ]);
   });
 
   it("writes variants without recompressing media or generated variants", () => {

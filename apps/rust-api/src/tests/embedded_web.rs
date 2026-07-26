@@ -140,7 +140,7 @@ async fn embedded_assets_negotiate_precompressed_representations() {
     assert_eq!(disabled_body, identity_body);
 
     let (unsupported_status, unsupported_headers, unsupported_body) = request_raw(
-        app,
+        app.clone(),
         "GET",
         &asset_path,
         Body::empty(),
@@ -150,6 +150,95 @@ async fn embedded_assets_negotiate_precompressed_representations() {
     assert_eq!(unsupported_status, StatusCode::OK);
     assert!(!unsupported_headers.contains_key(CONTENT_ENCODING));
     assert_eq!(unsupported_body, identity_body);
+
+    let (identity_preferred_status, identity_preferred_headers, identity_preferred_body) =
+        request_raw(
+            app.clone(),
+            "GET",
+            &asset_path,
+            Body::empty(),
+            &[("accept-encoding", "gzip;q=0.4")],
+        )
+        .await;
+    assert_eq!(identity_preferred_status, StatusCode::OK);
+    assert!(!identity_preferred_headers.contains_key(CONTENT_ENCODING));
+    assert_eq!(identity_preferred_body, identity_body);
+
+    let (identity_rejected_status, identity_rejected_headers, _) = request_raw(
+        app.clone(),
+        "GET",
+        &asset_path,
+        Body::empty(),
+        &[("accept-encoding", "gzip;q=0.4, identity;q=0")],
+    )
+    .await;
+    assert_eq!(identity_rejected_status, StatusCode::OK);
+    assert_eq!(
+        identity_rejected_headers
+            .get(CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+
+    let (wildcard_status, wildcard_headers, _) = request_raw(
+        app.clone(),
+        "GET",
+        &asset_path,
+        Body::empty(),
+        &[("accept-encoding", "br;q=0, *;q=0.7, identity;q=0.1")],
+    )
+    .await;
+    assert_eq!(wildcard_status, StatusCode::OK);
+    assert_eq!(
+        wildcard_headers
+            .get(CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+
+    for rejected in [
+        "br;q=0, gzip;q=0, identity;q=0",
+        "*;q=0",
+        "zstd, identity;q=0",
+    ] {
+        let (status, headers, body) = request_raw(
+            app.clone(),
+            "GET",
+            &asset_path,
+            Body::empty(),
+            &[("accept-encoding", rejected)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_ACCEPTABLE,
+            "{rejected} rejects every available representation"
+        );
+        assert!(body.is_empty());
+        assert_eq!(
+            headers.get(VARY).and_then(|value| value.to_str().ok()),
+            Some("Accept-Encoding")
+        );
+    }
+
+    let uncompressed_path = format!(
+        "/{}",
+        crate::web_assets::first_uncompressed_static_asset_path()
+    );
+    let (unavailable_status, _, unavailable_body) = request_raw(
+        app,
+        "GET",
+        &uncompressed_path,
+        Body::empty(),
+        &[("accept-encoding", "gzip, identity;q=0")],
+    )
+    .await;
+    assert_eq!(
+        unavailable_status,
+        StatusCode::NOT_ACCEPTABLE,
+        "an advertised coding is not acceptable when that representation is unavailable"
+    );
+    assert!(unavailable_body.is_empty());
 }
 
 #[tokio::test]
@@ -273,4 +362,39 @@ async fn validators_are_representation_specific_and_spa_fallback_revalidates() {
             .and_then(|value| value.to_str().ok()),
         Some("no-cache")
     );
+}
+
+#[tokio::test]
+async fn internal_precompressed_siblings_and_cache_manifest_are_not_public_assets() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let asset_path = crate::web_assets::first_compressible_static_asset_path();
+    let (_, _, root_body) = request_raw(app.clone(), "GET", "/", Body::empty(), &[]).await;
+
+    for internal_path in [
+        format!("/{asset_path}.br"),
+        format!("/{asset_path}.gz"),
+        format!("/{}", crate::web_assets::immutable_asset_manifest_path()),
+    ] {
+        let (status, headers, body) =
+            request_raw(app.clone(), "GET", &internal_path, Body::empty(), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{internal_path} uses SPA fallback");
+        assert_eq!(
+            headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert!(!headers.contains_key(CONTENT_ENCODING));
+        assert_eq!(
+            headers
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache")
+        );
+        assert_eq!(
+            body, root_body,
+            "{internal_path} must not expose build representation bytes"
+        );
+    }
 }

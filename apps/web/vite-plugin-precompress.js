@@ -12,6 +12,8 @@ import {
 } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 
+export const IMMUTABLE_ASSET_MANIFEST = ".sceneworks-immutable-assets";
+
 const COMPRESSIBLE_EXTENSIONS = new Set([
   ".css",
   ".html",
@@ -45,6 +47,32 @@ export function compressRepresentations(source) {
     }),
     gzip: gzipSync(input, { level: 9, mtime: 0 }),
   };
+}
+
+export function isViteHashedAssetPath(filePath) {
+  const fileName = filePath.replaceAll("\\", "/").split("/").at(-1) ?? "";
+  const extensionIndex = fileName.lastIndexOf(".");
+  const stem = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  if (stem.length < 10 || stem.at(-9) !== "-") {
+    return false;
+  }
+  const hash = stem.slice(-8);
+  return (
+    /^[A-Za-z0-9_-]{8}$/.test(hash)
+    // A digits-only suffix can be a mutable date/version such as 20260725.
+    // Treat that safe false-negative as mutable rather than granting immutable caching.
+    && /[A-Za-z_-]/.test(hash)
+  );
+}
+
+export function immutableAssetPaths(bundle) {
+  return Object.values(bundle)
+    .map((output) => output.fileName.replaceAll("\\", "/"))
+    .filter((fileName) => (
+      fileName.startsWith("assets/")
+      && isViteHashedAssetPath(fileName)
+    ))
+    .sort();
 }
 
 function filesUnder(directory) {
@@ -96,14 +124,25 @@ export function precompressDirectory(directory) {
  */
 export default function precompressPlugin() {
   let outputDirectory = "dist";
+  let immutableAssets = [];
   return {
     name: "sceneworks-precompress",
     apply: "build",
     configResolved(config) {
       outputDirectory = resolve(config.root, config.build.outDir);
     },
+    generateBundle(_options, bundle) {
+      immutableAssets = immutableAssetPaths(bundle);
+    },
     closeBundle() {
       precompressDirectory(outputDirectory);
+      // This build-owned allowlist is embedded beside the bundle but is not a
+      // public route. Rust consumes it once and never guesses cacheability from
+      // a request path.
+      writeFileSync(
+        join(outputDirectory, IMMUTABLE_ASSET_MANIFEST),
+        `${immutableAssets.join("\n")}\n`,
+      );
     },
   };
 }
