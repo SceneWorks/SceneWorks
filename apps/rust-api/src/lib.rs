@@ -137,8 +137,8 @@ mod ideogram;
 mod jobs;
 use jobs::{
     cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
-    get_job, get_job_metrics, list_jobs, list_metrics, retry_job, update_job_progress,
-    upsert_job_metrics,
+    get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
+    retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -2135,21 +2135,22 @@ async fn queue_summary_snapshot_inner(
     state: AppState,
     skip_sweep: bool,
 ) -> Result<QueueSummary, ApiError> {
-    let (sweep, summary): (StaleSweep, QueueSummary) =
-        store_call(state.clone(), move |store, timeout| {
-            // When the caller already swept this request, don't pay for a second
-            // sweep — just read the summary. The empty StaleSweep means the
-            // job.updated fan-out below is a no-op (the caller emitted those
-            // events off its own sweep result).
-            let sweep = if skip_sweep {
-                StaleSweep::default()
-            } else {
-                store.mark_stale_workers_interrupted(timeout)?
-            };
-            let summary = store.queue_summary()?;
-            Ok((sweep, summary))
-        })
-        .await?;
+    let (sweep, summary) = store_call(state.clone(), move |store, timeout| {
+        // When the caller already swept this request, don't pay for a second
+        // sweep — just read the summary. The empty StaleSweep means the
+        // job.updated fan-out below is a no-op (the caller emitted those
+        // events off its own sweep result).
+        let sweep = if skip_sweep {
+            StaleSweep::default()
+        } else {
+            store.mark_stale_workers_interrupted(timeout)?
+        };
+        let summary = store.queue_summary();
+        Ok((sweep, summary))
+    })
+    .await?;
+    handle_stale_sweep(&state, &sweep);
+    let summary = summary?;
     // The stale-sweep mutates jobs to `interrupted` in the DB but — unlike a worker-reported
     // terminal status (`update_job_progress`) or the supervisor crash path (`worker_terminated`) —
     // emits no per-job event. Broadcast `job.updated` for each swept job so a live client's job card
@@ -2158,10 +2159,18 @@ async fn queue_summary_snapshot_inner(
     // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
     // a later sweep can't re-select it), so this neither spams nor double-fires. When skip_sweep is
     // set the sweep is empty, so nothing is broadcast here.
-    for job in &sweep.jobs {
-        publish(&state, "job.updated", job);
-    }
     Ok(summary)
+}
+
+/// Apply the API-visible consequences of a stale-worker sweep exactly once at
+/// every route that can trigger one. The store returns the terminal job
+/// snapshots so callers can invalidate model install state and notify live
+/// clients rather than silently discarding those transitions.
+fn handle_stale_sweep(state: &AppState, sweep: &StaleSweep) {
+    invalidate_model_catalog_for_terminal_jobs(state, &sweep.jobs);
+    for job in &sweep.jobs {
+        publish(state, "job.updated", job);
+    }
 }
 
 async fn create_generation_job(
@@ -2366,11 +2375,14 @@ async fn catalog_delete_warnings(
     }
 
     let item_id = id.to_owned();
-    let jobs = store_call(state.clone(), move |store, timeout| {
-        store.mark_stale_workers_interrupted(timeout)?;
-        store.list_jobs(None, None, 100)
+    let (sweep, jobs) = store_call(state.clone(), move |store, timeout| {
+        let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let jobs = store.list_jobs(None, None, 100);
+        Ok((sweep, jobs))
     })
     .await?;
+    handle_stale_sweep(state, &sweep);
+    let jobs = jobs?;
     let job_ids = jobs
         .iter()
         .filter(|job| job_references_catalog_item(job, kind, &item_id))

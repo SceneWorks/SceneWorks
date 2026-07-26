@@ -30,6 +30,172 @@ fn terminal_model_lifecycle_jobs_invalidate_catalog_snapshots() {
     ));
 }
 
+#[tokio::test]
+async fn worker_termination_refreshes_warm_model_catalog_after_artifact_mutation() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "crashed_model", "crashed/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+
+    let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(warm[0]["installState"], "missing");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "download-worker",
+            "gpuId": "cpu",
+            "gpuName": null,
+            "capabilities": ["model_download"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_download",
+            "payload": { "modelId": "crashed_model" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id is string");
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "download-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], job_id);
+
+    let marker_dir = temp_dir.path().join("data/models/crashed__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/download-worker/terminated",
+        json!({ "signal": 9, "exitCode": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(failed["status"], "failed");
+
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "installed");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "worker termination must invalidate a warm install-state snapshot"
+    );
+}
+
+#[tokio::test]
+async fn stale_worker_sweep_refreshes_warm_model_catalog_after_artifact_mutation() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "stale_model", "stale/model");
+    let mut settings = test_settings(&temp_dir);
+    settings.worker_timeout_seconds = 1;
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+
+    let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(warm[0]["installState"], "missing");
+    assert_eq!(crate::test_model_catalog_builds(), 1);
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "import-worker",
+            "gpuId": "cpu",
+            "gpuName": null,
+            "capabilities": ["model_import"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_import",
+            "payload": { "modelId": "stale_model" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id is string");
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "import-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claim["job"]["id"], job_id);
+
+    let marker_dir = temp_dir.path().join("data/models/stale__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let updated = connection
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            rusqlite::params!["import-worker"],
+        )
+        .expect("worker timestamp ages");
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let (status, _) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, interrupted) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(interrupted["status"], "interrupted");
+
+    let (status, refreshed) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refreshed[0]["installState"], "installed");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "stale-worker interruption must invalidate a warm install-state snapshot"
+    );
+}
+
 /// F-003 / sc-11159: a path-traversal `model` id is rejected at the POST boundary for BOTH
 /// the image and video enqueue lanes (before any job is created), closing the remote
 /// arbitrary-write primitive the worker filename builders would otherwise expose.

@@ -9,17 +9,19 @@ pub(crate) async fn list_jobs(
             return Err(ApiError::bad_request("Unsupported job status"));
         }
     }
-    Ok(Json(
-        store_call(state, move |store, timeout| {
-            store.mark_stale_workers_interrupted(timeout)?;
-            store.list_jobs(
-                query.project_id.as_deref(),
-                query.status.as_deref(),
-                query.limit.unwrap_or(100),
-            )
-        })
-        .await?,
-    ))
+    let (sweep, jobs) = store_call(state.clone(), move |store, timeout| {
+        let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let jobs = store.list_jobs(
+            query.project_id.as_deref(),
+            query.status.as_deref(),
+            query.limit.unwrap_or(100),
+        );
+        Ok((sweep, jobs))
+    })
+    .await?;
+    handle_stale_sweep(&state, &sweep);
+    let jobs = jobs?;
+    Ok(Json(jobs))
 }
 
 /// Worker → API write of a job's structured generation metrics (epic 10402).
@@ -118,9 +120,9 @@ pub(crate) async fn claim_job(
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
-    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
-        store_call(state.clone(), move |store, timeout| {
-            store.mark_stale_workers_interrupted(timeout)?;
+    let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
+        let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let claim_result = (|| {
             // macOS MLX-required (sc-3483): before claiming, fail any MLX-eligible job left
             // stranded because no live `mlx` worker took it within the grace window — reusing
             // the worker timeout as that window. No-op when the flag is off.
@@ -136,7 +138,7 @@ pub(crate) async fn claim_job(
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
             let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
-            Ok((
+            Ok::<_, JobsStoreError>((
                 job,
                 decision,
                 stranded,
@@ -144,8 +146,13 @@ pub(crate) async fn claim_job(
                 candle_stranded,
                 candle_unsupported,
             ))
-        })
-        .await?;
+        })();
+        Ok((stale_sweep, claim_result))
+    })
+    .await?;
+    handle_stale_sweep(&state, &stale_sweep);
+    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
+        claim_result?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -185,6 +192,8 @@ pub(crate) async fn claim_job(
         publish(&state, "job.updated", job);
     }
     if response.is_some()
+        || !stale_sweep.workers.is_empty()
+        || !stale_sweep.jobs.is_empty()
         || !stranded.is_empty()
         || !unsupported.is_empty()
         || !candle_stranded.is_empty()
@@ -707,6 +716,15 @@ pub(crate) fn terminal_model_job_changes_catalog(job_type: &JobType, status: &Jo
         status,
         JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
     )
+}
+
+pub(crate) fn invalidate_model_catalog_for_terminal_jobs(state: &AppState, jobs: &[JobSnapshot]) {
+    if jobs
+        .iter()
+        .any(|job| terminal_model_job_changes_catalog(&job.job_type, &job.status))
+    {
+        state.model_catalog_cache.invalidate();
+    }
 }
 
 pub(crate) const PROGRESS_SIDE_EFFECT_RECOVERY_BATCH: usize = 128;
