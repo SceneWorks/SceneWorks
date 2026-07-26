@@ -2673,24 +2673,27 @@ fn attach_required_components(
         &descriptor,
         &manifest_value,
         settings,
-        tier.as_deref(),
+        tier,
     )?;
     Ok(components
         .into_iter()
         .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
 }
 
-/// The tier a [`LoadSpec`]'s weights dir resolved to, when it is a standard `<tier>/` subdir.
+/// The tier a [`LoadSpec`]'s weights dir resolved to, for matching a per-tier `coRequisite`'s
+/// `variant` (sc-14980).
 ///
-/// `None` for a flat snapshot (whose final segment is a commit sha, not a tier), which is what keeps
-/// single-row co-requisites — every audio model, and Mage on a legacy flat install — on the
-/// tier-agnostic path.
-fn resolved_tier_name(spec: &LoadSpec) -> Option<String> {
+/// Delegates to [`tier_key_from_resolved_dir`] — the established "what tier is this dir" answer, so
+/// the co-requisite lookup cannot drift from the tier the backbone actually loads at. `None` for a
+/// flat snapshot (whose final segment is a commit sha), which keeps single-row co-requisites — every
+/// audio model, and Mage on a legacy flat install — on the tier-agnostic path. A `None` here against
+/// a model that DOES declare per-tier rows is refused loudly by `resolve_co_requisites_for_tier`
+/// rather than guessed, so an unrecognized layout can never silently pair mismatched weights.
+fn resolved_tier_name(spec: &LoadSpec) -> Option<&'static str> {
     let WeightsSource::Dir(dir) = &spec.weights else {
         return None;
     };
-    let name = dir.file_name()?.to_str()?;
-    matches!(name, "bf16" | "q8" | "q4" | "nvfp4").then(|| name.to_owned())
+    tier_key_from_resolved_dir(dir)
 }
 
 /// Resolve SDXL's three caller-staged components (`tokenizer_clip_l` / `tokenizer_clip_bigg` /
