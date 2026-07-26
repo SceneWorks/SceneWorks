@@ -1078,6 +1078,31 @@ pub(crate) async fn register_trained_lora(
     // name (not the first `.safetensors` on disk) means a step checkpoint sharing
     // the directory is never registered in place of the final adapter, while the
     // validation still rejects any `..`-traversing name a crafted payload injects.
+    // sc-14056 — a FULL base fine-tune does not produce an adapter file at all. It writes a
+    // diffusers-shaped `transformer/` DIRECTORY (a full fine-tuned base checkpoint, ~8 GB), which
+    // `trusted_adapter_files` correctly refuses (it requires `is_file()`), and which the LoRA
+    // registry has no shape for. Registering it as a LoRA would produce an entry the Studio offers
+    // and generation cannot load.
+    //
+    // Detect it up front and say exactly what happened instead of falling through to the generic
+    // "no declared trained adapter found", which reads like the run failed when the checkpoint is
+    // sitting on disk intact. Giving a fine-tuned base a catalog home and making it selectable at
+    // generation is tracked as sc-15036 — see its analysis for why that is a model-catalog /
+    // imported-loader change rather than a training-registry one.
+    if manifest_entry
+        .get("networkType")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("full"))
+    {
+        let checkpoint = output_dir.join("transformer");
+        return Err(ApiError::internal(format!(
+            "This run produced a full fine-tuned base checkpoint at {}, not a LoRA adapter, so \
+             there is nothing to register in the LoRA library. The checkpoint is on disk and loads \
+             with the Mage-Flow transformer loader; selecting a fine-tuned base at generation time \
+             is tracked as sc-15036.",
+            checkpoint.display()
+        )));
+    }
     let Some(files) = trusted_adapter_files(manifest_entry.get("files"), &output_dir) else {
         return Err(ApiError::internal(format!(
             "No declared trained adapter found under {}; skipping LoRA registration",

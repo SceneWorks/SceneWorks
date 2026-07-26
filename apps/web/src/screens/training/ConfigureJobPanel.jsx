@@ -66,6 +66,7 @@ export function ConfigureJobPanel({
   networkTypeOptions,
   macLokrOnWanBlocked,
   isLokrNetwork,
+  isFullFinetune,
   visibleOptimizerOptions,
   visibleLrSchedulerOptions,
   showTrainingAdapter,
@@ -304,7 +305,7 @@ export function ConfigureJobPanel({
                 />
               </label>
               {showNetworkType ? (
-                <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
+                <label title="What the run trains. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only); Full base fine-tune updates every base weight and writes a fine-tuned checkpoint instead of an adapter — far more memory, offered only where the engine supports it.">
                   Network type
                   <select
                     onChange={(event) => updateConfigDraft("networkType", event.target.value)}
@@ -471,14 +472,21 @@ export function ConfigureJobPanel({
             </label>
 
             <div className="training-advanced-toggles">
-              <label className="training-checkbox-field">
-                <input
-                  checked={Boolean(configDraft.gradientCheckpointing)}
-                  onChange={(event) => updateConfigDraft("gradientCheckpointing", event.target.checked)}
-                  type="checkbox"
-                />
-                Gradient checkpointing
-              </label>
+              {isFullFinetune ? (
+                <p className="training-field-hint">
+                  Gradient checkpointing is not available for a full base fine-tune yet, so it is not applied to this
+                  run. Lower the training resolution if the run does not fit.
+                </p>
+              ) : (
+                <label className="training-checkbox-field">
+                  <input
+                    checked={Boolean(configDraft.gradientCheckpointing)}
+                    onChange={(event) => updateConfigDraft("gradientCheckpointing", event.target.checked)}
+                    type="checkbox"
+                  />
+                  Gradient checkpointing
+                </label>
+              )}
             </div>
           </AdvancedSection>
 

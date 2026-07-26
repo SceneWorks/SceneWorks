@@ -1764,8 +1764,139 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
                 .flatten()
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
+        apply_runtime_text_encoder_options(model, &state.settings.data_dir)?;
     }
     Ok(models)
+}
+
+/// Add runtime-only text-encoder choices to the public model catalog. The worker owns enumeration so
+/// the API and generation resolver share one completeness predicate. This runs on the response clone,
+/// outside the cached catalog snapshot: an operator who stages a complete alternate and refreshes
+/// Models sees it without a server restart, while no repo/revision/download metadata is persisted.
+fn apply_runtime_text_encoder_options(
+    model: &mut Value,
+    data_dir: &FsPath,
+) -> Result<(), ApiError> {
+    let adapter = model
+        .get("adapter")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let options = sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir);
+    set_runtime_text_encoder_options(model, options)
+}
+
+fn set_runtime_text_encoder_options(
+    model: &mut Value,
+    options: Vec<sceneworks_worker::TextEncoderOption>,
+) -> Result<(), ApiError> {
+    let object = model
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    if options.is_empty() {
+        object.remove("textEncoderOptions");
+    } else {
+        object.insert("textEncoderOptions".to_owned(), json!(options));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runtime_text_encoder_option_tests {
+    use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::tests::support::isolate_hf_cache;
+
+    #[test]
+    fn catalog_field_is_generic_and_contains_no_distribution_metadata() {
+        let mut model = json!({ "id": "future_video", "adapter": "future_adapter" });
+        set_runtime_text_encoder_options(
+            &mut model,
+            vec![
+                sceneworks_worker::TextEncoderOption {
+                    id: "default",
+                    label: "Bundled encoder (default)",
+                    description: "Uses the installed encoder.",
+                    is_default: true,
+                },
+                sceneworks_worker::TextEncoderOption {
+                    id: "future_staged_encoder",
+                    label: "Staged alternate",
+                    description: "Uses a complete operator-staged alternate.",
+                    is_default: false,
+                },
+            ],
+        )
+        .unwrap();
+
+        let options = model["textEncoderOptions"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[1]["id"], "future_staged_encoder");
+        assert_eq!(options[1]["isDefault"], false);
+        for forbidden in ["repo", "revision", "files", "download"] {
+            assert!(
+                options.iter().all(|option| option.get(forbidden).is_none()),
+                "runtime options must not become distribution metadata: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn models_without_a_runtime_surface_emit_no_selector_field() {
+        let mut model = json!({
+            "id": "fixed_encoder_model",
+            "textEncoderOptions": [{ "id": "stale" }]
+        });
+        set_runtime_text_encoder_options(&mut model, Vec::new()).unwrap();
+        assert!(model.get("textEncoderOptions").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_tiny_safetensors(path: &FsPath) {
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.push(0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_options_refresh_when_alternate_becomes_valid_or_corrupt() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().unwrap();
+        let repo = sceneworks_core::hf_home::huggingface_repo_cache_path(
+            data_dir.path(),
+            "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
+        )
+        .unwrap();
+        let snapshot = repo.join("snapshots").join("test-revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("config.json"),
+            br#"{"model_type":"gemma3_text"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            snapshot.join("tokenizer.json"),
+            br#"{"model":{"type":"BPE"}}"#,
+        )
+        .unwrap();
+        write_tiny_safetensors(&snapshot.join("model.safetensors"));
+
+        let mut model = json!({ "id": "ltx_2_3", "adapter": "ltx_video" });
+        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 2);
+
+        std::fs::write(snapshot.join("model.safetensors"), b"truncated").unwrap();
+        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        let options = model["textEncoderOptions"].as_array().unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0]["id"], "default");
+
+        std::fs::remove_dir_all(&repo).unwrap();
+        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 1);
+    }
 }
 
 async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {

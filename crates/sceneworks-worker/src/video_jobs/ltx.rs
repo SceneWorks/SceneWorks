@@ -67,19 +67,98 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
-/// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: its
-/// `config.json`, `tokenizer.json`, the sharded `model.safetensors.index.json`, and every shard that
-/// a non-empty index maps (or a lone `model.safetensors` for a single-file checkpoint). Used so the
-/// eros gemma fetch ([`ensure_ltx_gemma_present`]) no-ops only when gemma is genuinely present and a
-/// half-downloaded dir never shadows a re-fetch ([`resolve_ltx_eros_gemma_dir`]).
+/// Cheap structural validation for one safetensors file. It reads only the bounded JSON header,
+/// verifies at least one tensor entry, and checks every declared byte range against the file length.
+/// This rejects placeholder/truncated files without reading multi-gigabyte tensor bodies.
+#[cfg(target_os = "macos")]
+fn safetensors_file_is_structurally_valid(path: &Path) -> bool {
+    use std::io::Read;
+
+    const MAX_HEADER_BYTES: usize = 100_000_000;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut header_len_bytes = [0_u8; 8];
+    if file.read_exact(&mut header_len_bytes).is_err() {
+        return false;
+    }
+    let Ok(header_len) = usize::try_from(u64::from_le_bytes(header_len_bytes)) else {
+        return false;
+    };
+    if header_len == 0 || header_len > MAX_HEADER_BYTES {
+        return false;
+    }
+    let Ok(header_and_prefix) = u64::try_from(header_len).map(|length| length + 8) else {
+        return false;
+    };
+    if header_and_prefix > file_len {
+        return false;
+    }
+    let mut header = vec![0_u8; header_len];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    let Ok(Value::Object(entries)) = serde_json::from_slice::<Value>(&header) else {
+        return false;
+    };
+    let data_len = file_len - header_and_prefix;
+    let mut tensor_count = 0_usize;
+    for (name, entry) in entries {
+        if name == "__metadata__" {
+            continue;
+        }
+        let Some(entry) = entry.as_object() else {
+            return false;
+        };
+        if entry.get("dtype").and_then(Value::as_str).is_none()
+            || entry.get("shape").and_then(Value::as_array).is_none()
+        {
+            return false;
+        }
+        let Some(offsets) = entry.get("data_offsets").and_then(Value::as_array) else {
+            return false;
+        };
+        let [start, end] = offsets.as_slice() else {
+            return false;
+        };
+        let (Some(start), Some(end)) = (start.as_u64(), end.as_u64()) else {
+            return false;
+        };
+        if start > end || end > data_len {
+            return false;
+        }
+        tensor_count += 1;
+    }
+    tensor_count > 0
+}
+
+#[cfg(target_os = "macos")]
+fn json_object_file_satisfies(path: &Path, predicate: impl FnOnce(&JsonObject) -> bool) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| predicate(&object))
+}
+
+/// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: parseable,
+/// non-empty config and tokenizer JSON, plus a structurally valid single safetensors file or every
+/// structurally valid shard mapped by a non-empty index. Used so runtime option discovery and eros
+/// provisioning never accept filename-only placeholders or half-downloaded snapshots.
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
-    if !dir.join("config.json").is_file() || !dir.join("tokenizer.json").is_file() {
+    if !json_object_file_satisfies(&dir.join("config.json"), |object| !object.is_empty())
+        || !json_object_file_satisfies(&dir.join("tokenizer.json"), |object| {
+            object.get("model").is_some_and(Value::is_object)
+        })
+    {
         return false;
     }
     let Ok(index_raw) = std::fs::read_to_string(dir.join("model.safetensors.index.json")) else {
-        // No shard index ⇒ a single-file checkpoint is complete once its lone weights file exists.
-        return dir.join("model.safetensors").is_file();
+        return safetensors_file_is_structurally_valid(&dir.join("model.safetensors"));
     };
     let Ok(index) = serde_json::from_str::<Value>(&index_raw) else {
         return false;
@@ -97,7 +176,9 @@ pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
     if shards.is_empty() {
         return false;
     }
-    shards.iter().all(|shard| dir.join(shard).is_file())
+    shards
+        .iter()
+        .all(|shard| safetensors_file_is_structurally_valid(&dir.join(shard)))
 }
 
 /// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
@@ -327,6 +408,63 @@ pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) 
 #[cfg(target_os = "macos")]
 const LTX_UNCENSORED_GEMMA_REPO: &str = "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit";
 
+/// Stable request selector for the shipped Gemma text-encoder backbone. The field is omitted by the
+/// web client for this default, so old jobs and recipes retain identical behavior.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_TEXT_ENCODER_ID: &str = "default";
+/// Stable request selector for LTX's operator-staged, alternate prompt-enhancement Gemma.
+#[cfg(target_os = "macos")]
+pub const AMORAL_TEXT_ENCODER_ID: &str = "ltx_amoral_gemma_3_12b";
+
+/// A selectable prompt text encoder surfaced by the model catalog. This is capability metadata only:
+/// it contains no repo, revision, files, or download action, so operator-staged models remain outside
+/// SceneWorks' distribution catalog.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEncoderOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub is_default: bool,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn ltx_text_encoder_options(alternate_staged: bool) -> Vec<TextEncoderOption> {
+    let mut options = vec![TextEncoderOption {
+        id: DEFAULT_TEXT_ENCODER_ID,
+        label: "Shipped Gemma 3 12B (default)",
+        description: "Uses the Gemma text encoder installed with LTX.",
+        is_default: true,
+    }];
+    if alternate_staged {
+        options.push(TextEncoderOption {
+            id: AMORAL_TEXT_ENCODER_ID,
+            label: "Amoral Gemma 3 12B (operator staged)",
+            description:
+                "Uses the complete alternate Gemma snapshot already staged by the operator.",
+            is_default: false,
+        });
+    }
+    options
+}
+
+/// Enumerate the complete text encoders this runtime can offer for a model adapter. The UI consumes
+/// this generic list instead of hard-coding LTX ids. LTX is currently the only provider with a
+/// swappable encoder, and that provider is MLX-only; future adapters can extend this registry without
+/// changing Video Studio.
+pub fn text_encoder_options_for_adapter(adapter: &str, data_dir: &Path) -> Vec<TextEncoderOption> {
+    #[cfg(target_os = "macos")]
+    {
+        if adapter == "ltx_video" {
+            return ltx_text_encoder_options(
+                resolve_ltx_uncensored_enhancer_dir(data_dir).is_some(),
+            );
+        }
+    }
+    let _ = (adapter, data_dir);
+    Vec::new()
+}
+
 /// Resolve the optional amoral 4-bit Gemma **enhancer** snapshot for a `useUncensoredEnhancer` LTX job
 /// (sc-2845), to be staged in `LoadSpec::components["uncensored_enhancer"]`. Mirrors the resolution the
 /// MLX LTX provider deleted at sc-13664 (moved into the worker): an operator `$LTX_UNCENSORED_GEMMA_DIR`
@@ -336,15 +474,94 @@ const LTX_UNCENSORED_GEMMA_REPO: &str = "TheCluster/amoral-gemma-3-12B-v2-mlx-4b
 /// [`ltx_gemma_dir_is_complete`] (an mlx_lm gemma snapshot is `config.json` + shards, same shape as the
 /// TE), so a partial/half-downloaded dir never wins.
 #[cfg(target_os = "macos")]
-fn resolve_ltx_uncensored_enhancer_dir(settings: &Settings) -> Option<PathBuf> {
+fn resolve_ltx_uncensored_enhancer_dir(data_dir: &Path) -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("LTX_UNCENSORED_GEMMA_DIR") {
         let dir = PathBuf::from(raw);
         if ltx_gemma_dir_is_complete(&dir) {
             return Some(dir);
         }
     }
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, LTX_UNCENSORED_GEMMA_REPO)?;
+    let snapshot = huggingface_snapshot_dir(data_dir, LTX_UNCENSORED_GEMMA_REPO)?;
     ltx_gemma_dir_is_complete(&snapshot).then_some(snapshot)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LtxTextEncoderSelection {
+    Default,
+    Amoral,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn selected_ltx_text_encoder(
+    advanced: &JsonObject,
+) -> WorkerResult<LtxTextEncoderSelection> {
+    let legacy = match advanced.get("useUncensoredEnhancer") {
+        None => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => {
+            return Err(WorkerError::InvalidPayload(
+                "advanced.useUncensoredEnhancer must be a boolean when present".to_owned(),
+            ));
+        }
+    };
+    let selected = match advanced.get("textEncoderModel") {
+        None => {
+            return Ok(if legacy == Some(true) {
+                LtxTextEncoderSelection::Amoral
+            } else {
+                LtxTextEncoderSelection::Default
+            });
+        }
+        Some(Value::String(id)) if id == DEFAULT_TEXT_ENCODER_ID => {
+            LtxTextEncoderSelection::Default
+        }
+        Some(Value::String(id)) if id == AMORAL_TEXT_ENCODER_ID => LtxTextEncoderSelection::Amoral,
+        Some(Value::String(id)) => Err(WorkerError::InvalidPayload(format!(
+            "unsupported LTX text encoder {id:?}; choose {DEFAULT_TEXT_ENCODER_ID:?} or an \
+             installed option returned by GET /api/v1/models"
+        )))?,
+        Some(_) => {
+            return Err(WorkerError::InvalidPayload(
+                "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models"
+                    .to_owned(),
+            ));
+        }
+    };
+    if legacy.is_some_and(|legacy| legacy != (selected == LtxTextEncoderSelection::Amoral)) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "advanced.textEncoderModel conflicts with advanced.useUncensoredEnhancer={}",
+            legacy.unwrap_or_default()
+        )));
+    }
+    Ok(selected)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_selected_ltx_text_encoder(
+    advanced: &JsonObject,
+    staged_alternate: Option<PathBuf>,
+) -> WorkerResult<(bool, Option<PathBuf>)> {
+    let selection = selected_ltx_text_encoder(advanced)?;
+    let use_alternate = selection == LtxTextEncoderSelection::Amoral;
+    if use_alternate && !advanced::bool(advanced, "enhancePrompt") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "text encoder {AMORAL_TEXT_ENCODER_ID:?} is selected but prompt enhancement is off; \
+             enable advanced.enhancePrompt or choose the default encoder"
+        )));
+    }
+    let dir = if use_alternate {
+        Some(staged_alternate.ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "text encoder {AMORAL_TEXT_ENCODER_ID:?} is selected but its complete weights are \
+                 not staged; set $LTX_UNCENSORED_GEMMA_DIR to a complete snapshot or pre-stage \
+                 TheCluster/amoral-gemma-3-12B-v2-mlx-4bit in the worker's Hugging Face cache"
+            ))
+        })?)
+    } else {
+        None
+    };
+    Ok((use_alternate, dir))
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -1072,6 +1289,13 @@ pub(super) async fn generate_ltx(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
+    // Validate and resolve an explicit encoder choice before any clip decoding, model download, or
+    // engine setup. A bad request must remain a cheap, actionable InvalidPayload.
+    let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_selected_ltx_text_encoder(
+        &request.advanced,
+        resolve_ltx_uncensored_enhancer_dir(&settings.data_dir),
+    )?;
+    let enhance_prompt = advanced::bool(&request.advanced, "enhancePrompt");
     let video_mode = advanced::bool(&request.advanced, "noAudio").then(|| "no_audio".to_owned());
     let enhance_max_tokens = request
         .advanced
@@ -1110,13 +1334,6 @@ pub(super) async fn generate_ltx(
     } else {
         resolve_bundled_ltx_gemma_dir(&model_dir)
     };
-    // Optional amoral 4-bit Gemma enhancer (sc-2845): when the request opts in, resolve the staged
-    // amoral snapshot so it rides `LoadSpec::components["uncensored_enhancer"]` (sc-13664 deleted the
-    // provider's own `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan). Off ⇒ `None`, no staging, no fetch.
-    let use_uncensored_enhancer = advanced::bool(&request.advanced, "useUncensoredEnhancer");
-    let uncensored_enhancer_dir = use_uncensored_enhancer
-        .then(|| resolve_ltx_uncensored_enhancer_dir(settings))
-        .flatten();
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -1136,7 +1353,7 @@ pub(super) async fn generate_ltx(
         seed: resolve_video_seed(request) as u64,
         control_scale: None,
         video_mode,
-        enhance_prompt: advanced::bool(&request.advanced, "enhancePrompt"),
+        enhance_prompt,
         use_uncensored_enhancer,
         enhance_max_tokens,
         enhance_temperature,
