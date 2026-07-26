@@ -335,7 +335,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
-  const onRefreshDatasets = () => refreshTrainingDatasets(activeProject?.id);
   const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file) => importAssetRaw(file, { throwOnError: true }));
   const loadDataset = loadTrainingDataset;
   const createDataset = createTrainingDataset;
@@ -360,6 +359,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
   const openDatasetRef = useRef(null);
+  const handledParquetImportJobsRef = useRef(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
@@ -479,6 +479,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
+  const completedParquetImport = useMemo(
+    () =>
+      jobs.find(
+        (job) =>
+          job.type === "dataset_parquet_import" &&
+          job.status === "completed" &&
+          job.payload?.datasetId === activeDataset?.id,
+      ) ?? null,
+    [jobs, activeDataset?.id],
+  );
+  const completedParquetImportId = completedParquetImport?.id ?? "";
+  const completedParquetImportCount = completedParquetImport?.result?.importedItemCount;
   // Unsaved work the destructive-transition guards protect (sc-11970): an edited saved
   // dataset (dirty) OR a brand-new dataset the user has started building (name / members /
   // character) but not yet saved. A new draft isn't "dirty" (no baseline), but discarding
@@ -940,13 +952,75 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setAssociatedCharacterId(dataset?.characterId ?? "");
       setSelectedDatasetId(dataset?.id ?? datasetId);
+      return dataset;
     } catch (err) {
       setDatasetError(err.message);
+      return null;
     } finally {
       setBusyDatasetId("");
     }
   }
   openDatasetRef.current = openDataset;
+
+  async function onRefreshDatasets() {
+    await refreshTrainingDatasets(activeProject?.id);
+    if (!activeDataset?.id || dirty) {
+      return;
+    }
+    await openDataset(activeDataset.id);
+  }
+
+  useEffect(() => {
+    if (
+      !datasetLibraryMode ||
+      !completedParquetImportId ||
+      !activeDataset?.id ||
+      dirty ||
+      handledParquetImportJobsRef.current.has(completedParquetImportId)
+    ) {
+      return undefined;
+    }
+    const jobId = completedParquetImportId;
+    const datasetId = activeDataset.id;
+    const handledJobs = handledParquetImportJobsRef.current;
+    handledJobs.add(jobId);
+    let canceled = false;
+    let settled = false;
+    void (async () => {
+      try {
+        await refreshTrainingDatasets(activeProject?.id);
+        const dataset = await openDatasetRef.current?.(datasetId);
+        if (canceled || !dataset) return;
+        const imported = completedParquetImportCount;
+        setDatasetMessage(
+          Number.isFinite(imported)
+            ? `Parquet import completed with ${imported} image${imported === 1 ? "" : "s"}.`
+            : "Parquet import completed.",
+        );
+        setDatasetError("");
+        settled = true;
+      } catch (err) {
+        if (!canceled) {
+          handledJobs.delete(jobId);
+          setDatasetError(`Parquet import completed, but the dataset could not be reloaded: ${err.message}`);
+        }
+      }
+    })();
+    return () => {
+      canceled = true;
+      if (!settled) {
+        handledJobs.delete(jobId);
+      }
+    };
+  }, [
+    activeDataset?.id,
+    activeProject?.id,
+    completedParquetImportCount,
+    completedParquetImportId,
+    datasetLibraryMode,
+    dirty,
+    refreshTrainingDatasets,
+  ]);
 
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {
