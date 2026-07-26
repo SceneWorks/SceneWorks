@@ -155,8 +155,10 @@ pub(crate) async fn create_catalog(
         let registry = CatalogRegistry::new(config_dir);
         let catalog = registry.create_catalog(&request.path, request.name)?;
         let attached = registry.get(&catalog.descriptor().id)?;
-        let mut contract_state = CatalogContractState::default();
-        contract_state.source_config = request.source_config;
+        let contract_state = CatalogContractState {
+            source_config: request.source_config,
+            ..CatalogContractState::default()
+        };
         if let Err(error) = catalog.set_contract_state(&contract_state) {
             let catalog_id = catalog.descriptor().id.clone();
             catalog.close();
@@ -324,8 +326,10 @@ fn catalog_response(
 }
 
 fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {
-    let mut processing = CatalogProcessingProgress::default();
-    processing.message = Some("Catalog files are unavailable or invalid".to_owned());
+    let processing = CatalogProcessingProgress {
+        message: Some("Catalog files are unavailable or invalid".to_owned()),
+        ..CatalogProcessingProgress::default()
+    };
     CatalogResponse {
         contract_version: CATALOG_API_CONTRACT_VERSION,
         id: attached.id,
