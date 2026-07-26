@@ -32,6 +32,7 @@ const MAX_QUERY_FILTERS: usize = 16;
 const MAX_FILTER_VALUES: usize = 64;
 const MAX_FACET_FIELDS: usize = 16;
 const MAX_FACET_VALUES: u32 = 200;
+const MAX_FACET_VALUE_BYTES: u32 = 512;
 
 const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
@@ -593,9 +594,16 @@ impl Catalog {
                 "select cast(json_extract(metadata_json, ?) as text) as facet_value,
                         count(*) as facet_count
                  from catalog_records
-                 where json_type(metadata_json, ?) is not null",
+                 where json_type(metadata_json, ?) is not null
+                   and length(cast(json_extract(metadata_json, ?) as blob))
+                       between 1 and ?",
             );
-            let mut bindings = vec![SqlValue::Text(json_path.clone()), SqlValue::Text(json_path)];
+            let mut bindings = vec![
+                SqlValue::Text(json_path.clone()),
+                SqlValue::Text(json_path.clone()),
+                SqlValue::Text(json_path),
+                SqlValue::Integer(i64::from(MAX_FACET_VALUE_BYTES)),
+            ];
             append_filter_sql(&mut sql, &mut bindings, filters);
             sql.push_str(
                 " group by facet_value
@@ -629,7 +637,10 @@ impl Catalog {
     pub fn contract_state(&self) -> CatalogResult<CatalogContractState> {
         let mut processing: CatalogProcessingProgress = self
             .read_contract_value(PROGRESS_METADATA_KEY)?
-            .unwrap_or_default();
+            .unwrap_or_else(|| CatalogProcessingProgress {
+                updated_at: self.descriptor.created_at.clone(),
+                ..CatalogProcessingProgress::default()
+            });
         if processing.updated_at.is_empty() {
             processing.updated_at = self.descriptor.created_at.clone();
         }
@@ -1292,7 +1303,10 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
-        .pragma_update(None, "temp_store", "memory")
+        // A facet may encounter millions of distinct values. Spill SQLite's
+        // transient GROUP BY sorter to disk instead of growing the API heap
+        // with catalog cardinality.
+        .pragma_update(None, "temp_store", "file")
         .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
         .pragma_update(None, "cache_size", -65_536)
@@ -1757,6 +1771,11 @@ mod tests {
         assert_eq!(writer.sqlite_setting("journal_mode").unwrap(), "wal");
         assert_eq!(writer.sqlite_setting("busy_timeout").unwrap(), "5000");
         assert_eq!(writer.sqlite_setting("foreign_keys").unwrap(), "1");
+        assert_eq!(
+            writer.sqlite_setting("temp_store").unwrap(),
+            "1",
+            "facet aggregation temp state must spill to files, not process memory"
+        );
 
         let records = (0..2_500)
             .map(|index| record(&format!("record-{index:04}")))
@@ -2119,5 +2138,69 @@ mod tests {
             registry.open_attached("00000000000000000000000000000000"),
             Err(CatalogError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn absent_processing_state_uses_the_stable_catalog_creation_time() {
+        let temporary = tempdir().expect("temp directory");
+        let catalog = Catalog::create(temporary.path().join("catalog"), "Legacy state").unwrap();
+        let created_at = catalog.descriptor().created_at.clone();
+
+        let first = catalog.contract_state().unwrap().processing;
+        let second = catalog.contract_state().unwrap().processing;
+        assert_eq!(first.updated_at, created_at);
+        assert_eq!(second.updated_at, created_at);
+        assert_eq!(first, second, "repeated status reads must be stable");
+    }
+
+    #[test]
+    fn high_cardinality_facets_are_disk_backed_and_exclude_oversized_keys() {
+        let temporary = tempdir().expect("temp directory");
+        let mut catalog =
+            Catalog::create(temporary.path().join("catalog"), "Bounded facets").unwrap();
+        let mut records = (0..2_048)
+            .map(|index| {
+                let mut item = record(&format!("record-{index:04}"));
+                item.metadata = serde_json::json!({"unique": format!("value-{index:04}")});
+                item
+            })
+            .collect::<Vec<_>>();
+        let mut oversized = record("oversized");
+        oversized.metadata =
+            serde_json::json!({"unique": "x".repeat(MAX_FACET_VALUE_BYTES as usize + 1)});
+        records.push(oversized);
+        catalog.append_records(&records).unwrap();
+
+        assert_eq!(catalog.sqlite_setting("temp_store").unwrap(), "1");
+        let facets = catalog
+            .facet_counts(&["unique".to_owned()], &[], 7)
+            .unwrap();
+        assert_eq!(
+            facets[0].values.len(),
+            7,
+            "high-cardinality output is capped"
+        );
+        assert!(facets[0]
+            .values
+            .iter()
+            .all(|bucket| bucket.value.len() <= MAX_FACET_VALUE_BYTES as usize));
+
+        let mut oversized_only = Catalog::create(
+            temporary.path().join("oversized-catalog"),
+            "Oversized facets",
+        )
+        .unwrap();
+        let mut oversized_record = record("only");
+        oversized_record.metadata =
+            serde_json::json!({"unique": "x".repeat(MAX_FACET_VALUE_BYTES as usize + 1)});
+        oversized_only.append_records(&[oversized_record]).unwrap();
+        assert!(
+            oversized_only
+                .facet_counts(&["unique".to_owned()], &[], 10)
+                .unwrap()[0]
+                .values
+                .is_empty(),
+            "oversized facet keys are excluded before grouping"
+        );
     }
 }
