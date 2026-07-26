@@ -6389,6 +6389,7 @@ dependencies = [
  "mime_guess",
  "nix",
  "parking_lot",
+ "parquet",
  "reqwest 0.12.28",
  "rmcp",
  "rusqlite",

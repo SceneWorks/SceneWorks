@@ -192,6 +192,42 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.querySelector("[role='progressbar']").getAttribute("aria-valuenow")).toBe("54");
   });
 
+  it("offers an API-backed restart for failed schedulable Parquet processing", async () => {
+    catalogs = [catalog({
+      sourceConfig: {
+        kind: "parquet",
+        paths: ["C:\\data\\source.parquet"],
+        options: {},
+      },
+      processing: {
+        ...catalog().processing,
+        state: "failed",
+        message: "Catalog processing was interrupted; restart it to continue",
+      },
+    })];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ token: "token" }}>
+          <DatasetCatalogsScreen />
+          <ConfirmHost />
+        </AppContext.Provider>,
+      );
+    });
+    await flush();
+
+    const restart = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Restart"));
+    expect(restart).toBeTruthy();
+    expect(restart.disabled).toBe(false);
+    await act(async () => restart.click());
+    await flush();
+    expect(requests.find((item) => item.path.endsWith("/resume"))?.body).toEqual({
+      expectedRevision: 0,
+    });
+  });
+
   it("creates and attaches catalogs from typed absolute browser-safe paths", async () => {
     const set = (input, value) => {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);

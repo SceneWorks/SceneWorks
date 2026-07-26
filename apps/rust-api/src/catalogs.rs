@@ -17,6 +17,9 @@ use sceneworks_core::catalog_store::{
     CatalogProcessingProgress, CatalogRecord, CatalogRecordFilter, CatalogRegistry,
     CatalogSourceConfig, CatalogStorageAccounting,
 };
+use sceneworks_worker::catalog_parquet_scanner::{
+    scan_attached_parquet_catalog, CatalogParquetScanError, CatalogParquetScanOptions,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,6 +30,7 @@ const DEFAULT_QUERY_LIMIT: u32 = 50;
 const MAX_QUERY_LIMIT: u32 = 200;
 const DEFAULT_FACET_LIMIT: u32 = 50;
 const MAX_FACET_LIMIT: u32 = 100;
+const SCHEDULED_SCAN_PASS_ROWS: u64 = 25_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -134,6 +138,12 @@ pub(crate) struct CatalogLifecycleResponse {
     deleted_on_disk: bool,
 }
 
+#[derive(Clone)]
+struct CatalogScanPlan {
+    source: PathBuf,
+    options: CatalogParquetScanOptions,
+}
+
 pub(crate) async fn list_catalogs(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CatalogResponse>>, ApiError> {
@@ -158,8 +168,10 @@ pub(crate) async fn create_catalog(
     ApiJson(request): ApiJson<CreateCatalogRequest>,
 ) -> Result<(StatusCode, Json<CatalogResponse>), ApiError> {
     require_absolute_catalog_path(&request.path)?;
+    validate_source_config_for_scheduling(request.source_config.as_ref())?;
     let config_dir = state.settings.config_dir.clone();
-    let response = catalog_call(move || {
+    let scheduling_config_dir = config_dir.clone();
+    let (response, scan_plan) = catalog_call(move || {
         let registry = CatalogRegistry::new(config_dir);
         let catalog = registry.create_catalog(&request.path, request.name)?;
         let attached = registry.get(&catalog.descriptor().id)?;
@@ -173,9 +185,14 @@ pub(crate) async fn create_catalog(
             let _ = registry.delete_on_disk(&catalog_id);
             return Err(error);
         }
-        catalog_response(&attached, &catalog)
+        let contract_state = catalog.contract_state()?;
+        let scan_plan = scan_plan(contract_state.source_config.as_ref())?;
+        Ok((catalog_response(&attached, &catalog)?, scan_plan))
     })
     .await?;
+    if let Some(scan_plan) = scan_plan {
+        schedule_catalog_scan(scheduling_config_dir, response.id.clone(), scan_plan);
+    }
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -330,11 +347,35 @@ async fn request_processing_state(
     require_active_processor: bool,
 ) -> Result<Json<CatalogResponse>, ApiError> {
     let config_dir = state.settings.config_dir.clone();
-    let response = catalog_call(move || {
+    let scan_plan = if desired_state == CatalogProcessingDesiredState::Running {
+        let plan_config_dir = config_dir.clone();
+        let plan_catalog_id = catalog_id.clone();
+        let source_config = catalog_call(move || {
+            CatalogRegistry::new(plan_config_dir)
+                .open_attached(&plan_catalog_id)?
+                .contract_state()
+                .map(|state| state.source_config)
+        })
+        .await?;
+        scan_plan(source_config.as_ref()).map_err(actionable_scan_plan_error)?
+    } else {
+        None
+    };
+    let scheduling_config_dir = config_dir.clone();
+    let response_scan_plan = scan_plan.clone();
+    let (response, scan_plan) = catalog_call(move || {
         let registry = CatalogRegistry::new(config_dir);
         let attached = registry.get(&catalog_id)?;
         let catalog = registry.open_attached(&catalog_id)?;
-        let active = CatalogProcessingLease::is_active(&catalog)?;
+        let inactive_lease = match CatalogProcessingLease::try_acquire(&catalog) {
+            Ok(lease) => {
+                lease.reconcile_interrupted(&catalog)?;
+                Some(lease)
+            }
+            Err(CatalogError::Conflict(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let active = inactive_lease.is_none();
         if active != require_active_processor {
             return Err(CatalogError::Conflict(if require_active_processor {
                 "Catalog has no active processor to pause".to_owned()
@@ -343,9 +384,12 @@ async fn request_processing_state(
             }));
         }
         catalog.request_processing_control(expected_revision, desired_state)?;
-        catalog_response(&attached, &catalog)
+        Ok((catalog_response(&attached, &catalog)?, response_scan_plan))
     })
     .await?;
+    if let Some(scan_plan) = scan_plan {
+        schedule_catalog_scan(scheduling_config_dir, response.id.clone(), scan_plan);
+    }
     Ok(Json(response))
 }
 
@@ -367,6 +411,13 @@ fn catalog_response(
     attached: &AttachedCatalog,
     catalog: &Catalog,
 ) -> Result<CatalogResponse, CatalogError> {
+    match CatalogProcessingLease::try_acquire(catalog) {
+        Ok(lease) => {
+            lease.reconcile_interrupted(catalog)?;
+        }
+        Err(CatalogError::Conflict(_)) => {}
+        Err(error) => return Err(error),
+    }
     let contract_state = catalog.contract_state()?;
     let storage = catalog.storage_accounting()?;
     Ok(CatalogResponse {
@@ -389,6 +440,110 @@ fn catalog_response(
         processing: contract_state.processing,
         processing_control: catalog.processing_control()?,
     })
+}
+
+fn validate_source_config_for_scheduling(
+    source_config: Option<&CatalogSourceConfig>,
+) -> Result<(), ApiError> {
+    scan_plan(source_config)
+        .map(|_| ())
+        .map_err(actionable_scan_plan_error)
+}
+
+fn actionable_scan_plan_error(error: CatalogError) -> ApiError {
+    ApiError::bad_request(match error {
+        CatalogError::InvalidCatalog(detail) => detail,
+        _ => "Catalog source configuration is invalid".to_owned(),
+    })
+}
+
+fn scan_plan(
+    source_config: Option<&CatalogSourceConfig>,
+) -> Result<Option<CatalogScanPlan>, CatalogError> {
+    let Some(source_config) = source_config else {
+        return Ok(None);
+    };
+    if source_config.kind != "parquet" {
+        return Err(CatalogError::InvalidCatalog(
+            "Automatic catalog processing currently supports Parquet sources only".to_owned(),
+        ));
+    }
+    let [source] = source_config.paths.as_slice() else {
+        return Err(CatalogError::InvalidCatalog(
+            "Parquet catalog processing requires exactly one source path".to_owned(),
+        ));
+    };
+    if !source.is_absolute() {
+        return Err(CatalogError::InvalidCatalog(
+            "Parquet catalog source path must be absolute".to_owned(),
+        ));
+    }
+    let options =
+        serde_json::from_value::<CatalogParquetScanOptions>(source_config.options.clone())
+            .map_err(|_| {
+                CatalogError::InvalidCatalog("Parquet catalog scan options are invalid".to_owned())
+            })?;
+    Ok(Some(CatalogScanPlan {
+        source: source.clone(),
+        options,
+    }))
+}
+
+/// Starts an idempotent bounded scanner loop without retaining AppState.
+///
+/// Every pass takes the catalog's cross-process lease. Concurrent create/resume
+/// requests therefore collapse naturally: one task processes and the others
+/// observe `Busy` and exit. The task owns only registry config, an attached
+/// catalog id, and the source path already persisted in that catalog. Each
+/// blocking call has a finite row budget so shutdown waits for at most one
+/// bounded pass; the async driver is cancelled with its runtime.
+fn schedule_catalog_scan(config_dir: PathBuf, catalog_id: String, mut plan: CatalogScanPlan) {
+    plan.options.max_rows = Some(
+        plan.options
+            .max_rows
+            .unwrap_or(SCHEDULED_SCAN_PASS_ROWS)
+            .min(SCHEDULED_SCAN_PASS_ROWS),
+    );
+    tokio::spawn(async move {
+        loop {
+            let pass_config_dir = config_dir.clone();
+            let pass_catalog_id = catalog_id.clone();
+            let pass_source = plan.source.clone();
+            let pass_options = plan.options.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                scan_attached_parquet_catalog(
+                    &CatalogRegistry::new(pass_config_dir),
+                    &pass_catalog_id,
+                    &pass_source,
+                    &pass_options,
+                )
+            })
+            .await;
+            match result {
+                Err(error) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_task_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner task stopped"
+                    );
+                    break;
+                }
+                Ok(Ok(report)) if report.paused || report.checkpoint.complete => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(CatalogParquetScanError::Busy(_))) => break,
+                Ok(Err(error)) => {
+                    tracing::error!(
+                        event = "catalog_parquet_scan_failed",
+                        catalog_id,
+                        error = %error,
+                        "catalog Parquet scanner stopped"
+                    );
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {

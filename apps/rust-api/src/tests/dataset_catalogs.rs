@@ -1,10 +1,16 @@
 //! Dataset Catalog lifecycle, query-contract, and path-confinement route tests.
 
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::sync::Arc;
 
+use parquet::data_type::{ByteArray, ByteArrayType, Int32Type};
+use parquet::file::properties::WriterProperties;
+use parquet::file::writer::SerializedFileWriter;
+use parquet::schema::parser::parse_message_type;
 use sceneworks_core::catalog_store::{
     catalog_timestamp_now, CatalogProcessingLease, CatalogProcessingProgress,
-    CatalogProcessingState, CatalogRegistry, NewCatalogRecord,
+    CatalogProcessingState, CatalogRegistry, CatalogSourceConfig, NewCatalogRecord,
 };
 
 use super::support::*;
@@ -22,6 +28,62 @@ fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord
             "analysis": { "fullBody": person_count == 1 }
         }),
     }
+}
+
+fn write_catalog_parquet(path: &std::path::Path, row_count: usize) {
+    let schema = Arc::new(
+        parse_message_type(
+            "message catalog {
+                REQUIRED BINARY URL (UTF8);
+                REQUIRED BINARY TEXT (UTF8);
+                REQUIRED INT32 WIDTH;
+                REQUIRED INT32 HEIGHT;
+            }",
+        )
+        .expect("test Parquet schema parses"),
+    );
+    let mut writer = SerializedFileWriter::new(
+        File::create(path).expect("test Parquet file creates"),
+        schema,
+        Arc::new(WriterProperties::builder().build()),
+    )
+    .expect("test Parquet writer creates");
+    let mut row_group = writer.next_row_group().expect("row group creates");
+    let urls = (0..row_count)
+        .map(|index| format!("https://example.test/{index}.jpg"))
+        .collect::<Vec<_>>();
+    let captions = (0..row_count)
+        .map(|index| format!("catalog row {index}"))
+        .collect::<Vec<_>>();
+    let mut column_index = 0;
+    while let Some(mut column) = row_group.next_column().expect("column advances") {
+        match column_index {
+            0 | 1 => {
+                let values = if column_index == 0 {
+                    urls.iter()
+                } else {
+                    captions.iter()
+                }
+                .map(|value| ByteArray::from(value.as_str()))
+                .collect::<Vec<_>>();
+                column
+                    .typed::<ByteArrayType>()
+                    .write_batch(&values, None, None)
+                    .expect("string column writes");
+            }
+            2 | 3 => {
+                column
+                    .typed::<Int32Type>()
+                    .write_batch(&vec![512; row_count], None, None)
+                    .expect("dimension column writes");
+            }
+            _ => unreachable!("fixture schema has four columns"),
+        }
+        column.close().expect("column closes");
+        column_index += 1;
+    }
+    row_group.close().expect("row group closes");
+    writer.close().expect("Parquet writer closes");
 }
 
 #[tokio::test]
@@ -361,4 +423,252 @@ async fn catalog_pause_and_resume_persist_desired_processing_state() {
     .await;
     assert_eq!(persisted["processing"]["state"], "paused");
     assert_eq!(persisted["processingControl"]["desiredState"], "running");
+}
+
+#[tokio::test]
+async fn stale_running_status_is_reconciled_and_lifecycle_recovers() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let app = create_app(settings).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Interrupted",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
+
+    let catalog = CatalogRegistry::new(config_dir).open_attached(id).unwrap();
+    catalog
+        .set_processing_progress(&CatalogProcessingProgress {
+            state: CatalogProcessingState::Running,
+            processed_count: 17,
+            updated_at: catalog_timestamp_now(),
+            ..CatalogProcessingProgress::default()
+        })
+        .unwrap();
+    catalog.close();
+
+    let (status, reconciled) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconciled["processing"]["state"], "failed");
+    assert_eq!(reconciled["processing"]["processedCount"], 17);
+    assert!(reconciled["processing"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("interrupted")));
+
+    let (status, detached) = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/catalogs/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detached}");
+    assert_eq!(detached["detached"], true);
+}
+
+#[tokio::test]
+async fn parquet_create_pause_resume_and_completion_run_through_public_api_scheduler() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 50_000);
+    let app = create_app(settings).expect("app creates");
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Scheduled",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {
+                    "batchSize": 25
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["processing"]["state"], "idle",
+        "create response must not claim the background task acquired its lease"
+    );
+    let id = created["id"].as_str().unwrap();
+
+    let mut paused_response = None;
+    for _ in 0..500 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "running" {
+            let revision = status_body["processingControl"]["revision"]
+                .as_u64()
+                .unwrap();
+            let (pause_status, pause_body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/catalogs/{id}/pause"),
+                json!({ "expectedRevision": revision }),
+            )
+            .await;
+            if pause_status == StatusCode::OK {
+                paused_response = Some(pause_body);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let pause_requested = paused_response.expect("active scan accepts pause through public API");
+    assert_eq!(
+        pause_requested["processingControl"]["desiredState"],
+        "paused"
+    );
+
+    let mut paused = None;
+    for _ in 0..500 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "paused" {
+            paused = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let paused = paused.expect("scanner cooperatively pauses at a bounded batch boundary");
+    assert!(paused["processing"]["processedCount"].as_u64().unwrap() > 0);
+
+    let revision = paused["processingControl"]["revision"].as_u64().unwrap();
+    let (resume_status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": revision }),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["processing"]["state"], "paused");
+    assert_eq!(resumed["processingControl"]["desiredState"], "running");
+
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            completed = Some(status_body);
+            break;
+        }
+        assert_ne!(
+            status_body["processing"]["state"], "failed",
+            "scheduler failure: {status_body}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let completed = completed.expect("resumed public API scan reaches completion");
+    assert_eq!(completed["counts"]["processedCount"], 50_000);
+    assert_eq!(completed["counts"]["recordCount"], 50_000);
+}
+
+#[tokio::test]
+async fn unsupported_automatic_catalog_source_is_actionable() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let source = temporary.path().join("images");
+    std::fs::create_dir(&source).unwrap();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Unsupported",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "filesystem",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("supports Parquet")));
+
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Attached unsupported",
+            "path": temporary.path().join("attached-catalog")
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let catalog = CatalogRegistry::new(config_dir).open_attached(id).unwrap();
+    let mut contract = catalog.contract_state().unwrap();
+    contract.source_config = Some(CatalogSourceConfig {
+        kind: "filesystem".to_owned(),
+        paths: vec![source],
+        options: json!({}),
+    });
+    contract.processing.state = CatalogProcessingState::Failed;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog.set_contract_state(&contract).unwrap();
+    catalog.close();
+
+    let (status, error) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": 0 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("supports Parquet")));
+    let control = CatalogRegistry::new(temporary.path().join("config"))
+        .open_attached(id)
+        .unwrap()
+        .processing_control()
+        .unwrap();
+    assert_eq!(
+        control.revision, 0,
+        "invalid resume does not advance intent"
+    );
 }

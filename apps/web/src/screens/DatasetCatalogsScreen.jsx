@@ -350,6 +350,8 @@ export function DatasetCatalogsScreen() {
   }
 
   const analyzerEntries = useMemo(() => Object.entries(selected?.analyzerVersions ?? {}), [selected]);
+  const selectedSourceIsSchedulable = selected?.sourceConfig?.kind === "parquet"
+    && selected.sourceConfig.paths?.length === 1;
 
   return (
     <div className="dataset-catalogs-screen">
@@ -509,6 +511,15 @@ export function DatasetCatalogsScreen() {
                       type="button"
                     >
                       <Icon.Play /> {selected.processingControl?.desiredState === "running" ? "Resume requested" : "Resume"}
+                    </button>
+                  ) : selected.processing?.state === "failed" ? (
+                    <button
+                      className="primary-action"
+                      disabled={Boolean(busy) || selected.availability !== "available" || !selectedSourceIsSchedulable}
+                      onClick={() => changeProcessing("resume")}
+                      type="button"
+                    >
+                      <Icon.Play /> Restart
                     </button>
                   ) : null}
                 </div>

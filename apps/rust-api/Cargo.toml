@@ -64,6 +64,7 @@ backend-candle = ["sceneworks-worker/backend-candle"]
 # Construct SQLite BUSY errors directly in the API error-contract test without
 # adding rusqlite to the production API dependency surface.
 rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { version = "53.4", default-features = false, features = ["snap"] }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
