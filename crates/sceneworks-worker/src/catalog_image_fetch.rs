@@ -248,6 +248,8 @@ enum PersistFaultPoint {
 #[serde(rename_all = "camelCase")]
 struct DiscardIntent {
     cache_path: String,
+    #[serde(default)]
+    content_hash: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -334,6 +336,7 @@ impl CacheReferenceIndex {
                  accepted integer not null,
                  status text not null,
                  availability text not null,
+                 content_hash text,
                  record_json text not null
              );
              create index cache_references_by_path
@@ -377,13 +380,14 @@ impl CacheReferenceIndex {
         };
         connection.execute(
             "insert into cache_references
-                 (record_id, cache_path, accepted, status, availability, record_json)
-             values (?1, ?2, ?3, ?4, ?5, ?6)
+                 (record_id, cache_path, accepted, status, availability, content_hash, record_json)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              on conflict(record_id) do update set
                  cache_path = excluded.cache_path,
                  accepted = excluded.accepted,
                  status = excluded.status,
                  availability = excluded.availability,
+                 content_hash = excluded.content_hash,
                  record_json = excluded.record_json",
             params![
                 record.id,
@@ -391,6 +395,7 @@ impl CacheReferenceIndex {
                 i64::from(record_is_accepted(record)),
                 state.status,
                 state.availability,
+                state.content_hash,
                 serde_json::to_string(record)?,
             ],
         )?;
@@ -432,6 +437,33 @@ impl CacheReferenceIndex {
             .unwrap_or(false))
     }
 
+    fn discard_intent_summary(
+        &self,
+        intent: &DiscardIntent,
+    ) -> CatalogImageFetchResult<DiscardIntentReferenceSummary> {
+        let (live, pending, rejected): (i64, i64, i64) = self.connection.query_row(
+            "select
+                 coalesce(sum(case when accepted = 1 and availability <> 'discarded'
+                                   then 1 else 0 end), 0),
+                 coalesce(sum(case when accepted = 0 and status <> 'rejected'
+                                        and availability <> 'discarded'
+                                   then 1 else 0 end), 0),
+                 coalesce(sum(case when accepted = 0 and status = 'rejected'
+                                        and availability <> 'discarded'
+                                   then 1 else 0 end), 0)
+             from cache_references
+             where cache_path = ?1
+               and (?2 is null or content_hash = ?2)",
+            params![intent.cache_path, intent.content_hash],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(DiscardIntentReferenceSummary {
+            live: live > 0,
+            pending: pending > 0,
+            rejected: rejected > 0,
+        })
+    }
+
     fn rejected_batch(
         &self,
         record_id: &str,
@@ -460,6 +492,12 @@ impl CacheReferenceIndex {
         }
         Ok(records)
     }
+}
+
+struct DiscardIntentReferenceSummary {
+    live: bool,
+    pending: bool,
+    rejected: bool,
 }
 
 impl CatalogFetchLease {
@@ -531,6 +569,7 @@ where
     cleanup_stale_temps(&catalog)?;
     let mut artifact_budget = ArtifactBudget::initialize(&catalog, options.max_cache_bytes)?;
     let reference_index = CacheReferenceIndex::build(&catalog)?;
+    reconcile_discard_intents(&catalog, &reference_index, &mut artifact_budget)?;
 
     let mut checkpoint = CatalogImageFetchCheckpoint {
         requested_accepted_target: options.accepted_target,
@@ -996,25 +1035,37 @@ where
     let thumbnail_path = if let Some(max_edge) = options.thumbnail_max_edge {
         let relative = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
         let path = safe_catalog_file(catalog, &relative, true)?;
-        if !path.exists() {
-            let thumbnail = fetched.image.thumbnail(max_edge, max_edge).to_rgb8();
-            let mut encoded = Vec::new();
-            JpegEncoder::new_with_quality(&mut encoded, 82).encode_image(&thumbnail)?;
+        let thumbnail = fetched.image.thumbnail(max_edge, max_edge).to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, 82).encode_image(&thumbnail)?;
+        let thumbnail_hash = hex_digest(&encoded);
+        if validate_cached_file(&path, &thumbnail_hash, encoded.len() as u64).is_err() {
+            let existing_bytes = std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
             if encoded.len() > options.max_thumbnail_bytes
                 || artifact_budget
-                    .ensure_replacement(0, encoded.len() as u64, "catalog thumbnail cache")
+                    .ensure_replacement(
+                        existing_bytes,
+                        encoded.len() as u64,
+                        "catalog thumbnail cache",
+                    )
                     .is_err()
             {
                 return Ok(base_marker);
             }
             base_marker.pending_thumbnail = Some(PendingThumbnail {
                 path: relative.clone(),
-                content_hash: hex_digest(&encoded),
+                content_hash: thumbnail_hash,
                 bytes: encoded.len() as u64,
             });
             persist_completion_marker(catalog, &base_marker, artifact_budget)?;
-            atomic_create(&path, &encoded)?;
-            artifact_budget.replaced(0, encoded.len() as u64);
+            if path.exists() {
+                atomic_replace(&path, &encoded)?;
+            } else {
+                atomic_create(&path, &encoded)?;
+            }
+            artifact_budget.replaced(existing_bytes, encoded.len() as u64);
             fault_hook(PersistFaultPoint::ThumbnailPublished)?;
         }
         Some(relative)
@@ -1197,7 +1248,13 @@ where
         let references = reference_index.summary(&record.id, path)?;
         if intent_pending || (!references.has_live_reference && !references.has_pending_reference) {
             if !intent_pending {
-                persist_discard_intent(catalog, path, artifact_budget)?;
+                persist_discard_intent(
+                    catalog,
+                    path,
+                    state.content_hash.as_deref(),
+                    Some(&record.id),
+                    artifact_budget,
+                )?;
             }
             let file = safe_catalog_file(catalog, path, false)?;
             if file.exists() {
@@ -1652,24 +1709,98 @@ fn discard_intent_exists(catalog: &Catalog, cache_path: &str) -> bool {
 fn persist_discard_intent(
     catalog: &Catalog,
     cache_path: &str,
+    content_hash: Option<&str>,
+    completion_record_id: Option<&str>,
     artifact_budget: &mut ArtifactBudget,
 ) -> CatalogImageFetchResult<()> {
     let path = discard_intent_path(catalog, cache_path)?;
+    let intent = DiscardIntent {
+        cache_path: cache_path.to_owned(),
+        content_hash: content_hash.map(str::to_owned),
+    };
+    let payload = serde_json::to_vec(&intent)?;
+    let existing_bytes = std::fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     if path.is_file() {
-        let intent: DiscardIntent = serde_json::from_slice(&std::fs::read(&path)?)?;
-        if intent.cache_path == cache_path {
+        let existing: DiscardIntent = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if existing == intent {
             return Ok(());
         }
-        return Err(CatalogImageFetchError::InvalidOptions(
-            "catalog discard intent does not match its content path".to_owned(),
-        ));
     }
-    let payload = serde_json::to_vec(&DiscardIntent {
-        cache_path: cache_path.to_owned(),
-    })?;
-    artifact_budget.ensure_replacement(0, payload.len() as u64, "catalog discard journal")?;
-    atomic_create(&path, &payload)?;
-    artifact_budget.replaced(0, payload.len() as u64);
+    let quota = artifact_budget.ensure_replacement(
+        existing_bytes,
+        payload.len() as u64,
+        "catalog discard journal",
+    );
+    if let Err(error) = quota {
+        let Some(record_id) = completion_record_id else {
+            return Err(error);
+        };
+        let completion = completion_marker_path(catalog, record_id)?;
+        if existing_bytes != 0 || !completion.is_file() {
+            return Err(error);
+        }
+        let completion_bytes = std::fs::metadata(&completion)?.len();
+        artifact_budget.ensure_replacement(
+            completion_bytes,
+            payload.len() as u64,
+            "catalog discard journal",
+        )?;
+        std::fs::rename(&completion, &path)?;
+        sync_parent_directory(&path);
+        atomic_replace(&path, &payload)?;
+        artifact_budget.replaced(completion_bytes, payload.len() as u64);
+        return Ok(());
+    }
+    if path.exists() {
+        atomic_replace(&path, &payload)?;
+    } else {
+        atomic_create(&path, &payload)?;
+    }
+    artifact_budget.replaced(existing_bytes, payload.len() as u64);
+    Ok(())
+}
+
+fn reconcile_discard_intents(
+    catalog: &Catalog,
+    reference_index: &CacheReferenceIndex,
+    artifact_budget: &mut ArtifactBudget,
+) -> CatalogImageFetchResult<()> {
+    let directory = safe_catalog_directory(catalog, "artifacts/discard-intents", false)?;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.metadata()?.is_file() || !entry.file_name().to_string_lossy().ends_with(".json") {
+            continue;
+        }
+        let payload = std::fs::read(entry.path())?;
+        let Ok(intent) = serde_json::from_slice::<DiscardIntent>(&payload) else {
+            remove_accounted_file(&entry.path(), artifact_budget)?;
+            continue;
+        };
+        let expected = discard_intent_path(catalog, &intent.cache_path)?;
+        if expected != entry.path() {
+            remove_accounted_file(&entry.path(), artifact_budget)?;
+            continue;
+        }
+        let references = reference_index.discard_intent_summary(&intent)?;
+        if references.live || (!references.pending && !references.rejected) {
+            remove_discard_intent(catalog, &intent.cache_path, artifact_budget)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_accounted_file(
+    path: &Path,
+    artifact_budget: &mut ArtifactBudget,
+) -> CatalogImageFetchResult<()> {
+    if path.is_file() {
+        let bytes = std::fs::metadata(path)?.len();
+        std::fs::remove_file(path)?;
+        sync_parent_directory(path);
+        artifact_budget.removed(bytes);
+    }
     Ok(())
 }
 
@@ -1774,6 +1905,11 @@ fn recover_completion_marker(
             let thumbnail = safe_catalog_file(catalog, &pending.path, false)?;
             if validate_cached_file(&thumbnail, &pending.content_hash, pending.bytes).is_ok() {
                 marker.thumbnail_path = Some(pending.path);
+            } else if thumbnail.exists() {
+                let bytes = std::fs::metadata(&thumbnail)?.len();
+                std::fs::remove_file(&thumbnail)?;
+                sync_parent_directory(&thumbnail);
+                artifact_budget.removed(bytes);
             }
             marker_changed = true;
         }
@@ -2288,6 +2424,78 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_pending_thumbnail_is_removed_and_duplicate_regenerates_it() {
+        let (_root, registry, id) = catalog_fixture();
+        let catalog = registry.open_attached(&id).expect("open");
+        prepare_cache_directories(&catalog).expect("prepare");
+        let record = catalog.page_records(0, 1).expect("record").remove(0);
+        let bytes = png(32, 24);
+        let hash = hex_digest(&bytes);
+        let cache_path = format!("images/sha256/{}/{}.png", &hash[..2], hash);
+        atomic_create(
+            &safe_catalog_file(&catalog, &cache_path, true).expect("cache"),
+            &bytes,
+        )
+        .expect("content");
+        let thumbnail_path = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
+        let thumbnail = safe_catalog_file(&catalog, &thumbnail_path, true).expect("thumbnail path");
+        atomic_create(&thumbnail, b"corrupt-thumbnail").expect("corrupt thumbnail");
+        let marker = CompletionMarker {
+            record_id: record.id.clone(),
+            content_hash: hash,
+            cache_path,
+            staged_cache_path: None,
+            thumbnail_path: None,
+            pending_thumbnail: Some(PendingThumbnail {
+                path: thumbnail_path,
+                content_hash: hex_digest(b"expected-thumbnail"),
+                bytes: b"expected-thumbnail".len() as u64,
+            }),
+            bytes: bytes.len() as u64,
+            width: 32,
+            height: 24,
+        };
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).expect("budget");
+        persist_completion_marker(&catalog, &marker, &mut budget).expect("marker");
+        let recovered = recover_completion_marker(&catalog, &record, &mut budget)
+            .expect("recover")
+            .expect("marker");
+        assert!(recovered.thumbnail_path.is_none());
+        assert!(recovered.pending_thumbnail.is_none());
+        assert!(!thumbnail.exists(), "corrupt quota orphan must be removed");
+
+        let options = CatalogImageFetchOptions {
+            thumbnail_max_edge: Some(16),
+            ..CatalogImageFetchOptions::default()
+        };
+        let permit = Arc::new(Semaphore::new(bytes.len()))
+            .try_acquire_many_owned(bytes.len() as u32)
+            .expect("permit");
+        let fetched = validate_image(bytes, &options, permit).expect("image");
+        let regenerated = persist_fetched(
+            &catalog,
+            &record,
+            &fetched,
+            &options,
+            &mut CatalogImageFetchCounts::default(),
+            &mut budget,
+        )
+        .expect("duplicate regeneration");
+        let regenerated_path = regenerated.thumbnail_path.expect("thumbnail");
+        let pending_hash = {
+            let payload =
+                std::fs::read(completion_marker_path(&catalog, &record.id).expect("marker path"))
+                    .expect("marker");
+            let marker: CompletionMarker =
+                serde_json::from_slice(&payload).expect("marker payload");
+            assert!(marker.pending_thumbnail.is_none());
+            marker.thumbnail_path.expect("thumbnail")
+        };
+        assert_eq!(pending_hash, regenerated_path);
+        assert!(catalog.root().join(regenerated_path).is_file());
+    }
+
+    #[test]
     fn tampered_cache_is_not_a_resume_hit() {
         let (_root, registry, id) = catalog_fixture();
         let mut catalog = registry.open_attached(&id).expect("open");
@@ -2775,7 +2983,7 @@ mod tests {
 
     #[tokio::test]
     async fn discard_intent_survives_unlink_and_partial_multi_record_updates() {
-        for interrupt_after_update in [false, true] {
+        for interrupt_point in [0, 1, 3] {
             let (_root, registry, id) = catalog_with_urls(&[
                 "https://example.com/discard-a",
                 "https://example.com/discard-b",
@@ -2846,12 +3054,12 @@ mod tests {
                 &reference_index,
                 &mut budget,
                 |point| match point {
-                    DiscardFaultPoint::AfterUnlink if !interrupt_after_update => Err(
+                    DiscardFaultPoint::AfterUnlink if interrupt_point == 0 => Err(
                         CatalogImageFetchError::InvalidOptions("injected unlink crash".to_owned()),
                     ),
-                    DiscardFaultPoint::AfterRecordUpdate if interrupt_after_update => {
+                    DiscardFaultPoint::AfterRecordUpdate if interrupt_point > 0 => {
                         updates_seen += 1;
-                        if updates_seen == 1 {
+                        if updates_seen == interrupt_point {
                             Err(CatalogImageFetchError::InvalidOptions(
                                 "injected partial update crash".to_owned(),
                             ))
@@ -2903,6 +3111,156 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stale_discard_intent_is_retired_before_live_shared_cleanup() {
+        let (_root, registry, id) = catalog_with_urls(&[
+            "https://example.com/stale-intent-a",
+            "https://example.com/stale-intent-b",
+        ]);
+        let bytes = png(11, 11);
+        let options = CatalogImageFetchOptions {
+            accepted_target: 2,
+            concurrency: 1,
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let bytes = bytes.clone();
+            move |_url, _options| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            }
+        })
+        .await
+        .expect("seed shared cache");
+        let (relative, hash, cache) = {
+            let catalog = registry.open_attached(&id).expect("open");
+            let record = catalog.page_records(0, 1).expect("record").remove(0);
+            let state = acquisition_state(&record);
+            let relative = state.cache_path.expect("path");
+            (
+                relative.clone(),
+                state.content_hash.expect("hash"),
+                catalog.root().join(relative),
+            )
+        };
+        {
+            let catalog = registry.open_attached(&id).expect("open");
+            let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).expect("budget");
+            persist_discard_intent(&catalog, &relative, Some(&hash), None, &mut budget)
+                .expect("stale intent");
+        }
+        set_analysis_acceptance(&registry, &id, &[false, true]);
+        let one_target = CatalogImageFetchOptions {
+            accepted_target: 1,
+            ..options
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &one_target, |_url, _options| async {
+            Err(WorkerError::InvalidPayload(
+                "live shared cleanup must not fetch".to_owned(),
+            ))
+        })
+        .await
+        .expect("retire stale intent");
+        let catalog = registry.open_attached(&id).expect("reopen");
+        assert!(cache.is_file());
+        assert!(!discard_intent_exists(&catalog, &relative));
+        let records = catalog.page_records(0, 2).expect("records");
+        assert_eq!(acquisition_state(&records[0]).availability, "shared");
+        assert_eq!(acquisition_state(&records[1]).availability, "available");
+    }
+
+    #[tokio::test]
+    async fn exact_cap_discard_reuses_completion_journal_and_makes_progress() {
+        let (_root, registry, id) = catalog_with_urls(&["https://example.com/exact-cap-rejected"]);
+        set_analysis_acceptance(&registry, &id, &[false]);
+        let mut catalog = registry.open_attached(&id).expect("open");
+        prepare_cache_directories(&catalog).expect("prepare");
+        let mut record = catalog.page_records(0, 1).expect("record").remove(0);
+        let bytes = png(10, 10);
+        let hash = hex_digest(&bytes);
+        let relative = format!("images/sha256/{}/{}.png", &hash[..2], hash);
+        let cache = safe_catalog_file(&catalog, &relative, true).expect("cache");
+        atomic_create(&cache, &bytes).expect("content");
+        let marker = CompletionMarker {
+            record_id: record.id.clone(),
+            content_hash: hash.clone(),
+            cache_path: relative.clone(),
+            staged_cache_path: None,
+            thumbnail_path: None,
+            pending_thumbnail: None,
+            bytes: bytes.len() as u64,
+            width: 10,
+            height: 10,
+        };
+        let mut unlimited = ArtifactBudget::initialize(&catalog, u64::MAX).expect("budget");
+        persist_completion_marker(&catalog, &marker, &mut unlimited).expect("marker");
+        let state = AcquisitionState {
+            status: "rejected".to_owned(),
+            availability: "available".to_owned(),
+            content_hash: Some(hash),
+            cache_path: Some(relative),
+            bytes: Some(bytes.len() as u64),
+            width: Some(10),
+            height: Some(10),
+            ..AcquisitionState::default()
+        };
+        set_acquisition_state(&mut record, &state).expect("state");
+        record.image_path = marker.cache_path.clone();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: record.id,
+                image_path: record.image_path,
+                thumbnail_path: record.thumbnail_path,
+                embedding_path: record.embedding_path,
+                artifact_path: record.artifact_path,
+                metadata: record.metadata,
+            }])
+            .expect("persist state");
+        let exact_cap = catalog
+            .storage_accounting()
+            .expect("accounting")
+            .artifact_bytes;
+        drop(catalog);
+
+        let calls = Arc::new(Mutex::new(0_u64));
+        let options = CatalogImageFetchOptions {
+            accepted_target: 1,
+            discard_rejected_originals: true,
+            thumbnail_max_edge: None,
+            max_cache_bytes: exact_cap,
+            ..CatalogImageFetchOptions::default()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let calls = Arc::clone(&calls);
+            move |_url, _options| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    *calls.lock().expect("calls") += 1;
+                    Err(WorkerError::InvalidPayload(
+                        "exact-cap discard must not fetch".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect("exact-cap discard");
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        assert!(!cache.exists());
+        let catalog = registry.open_attached(&id).expect("reopen");
+        assert_eq!(
+            acquisition_state(&catalog.page_records(0, 1).expect("record")[0]).availability,
+            "discarded"
+        );
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= exact_cap
+        );
     }
 
     #[tokio::test]
