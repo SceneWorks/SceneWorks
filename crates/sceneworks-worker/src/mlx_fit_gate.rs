@@ -783,6 +783,24 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
     if let Some(control) = &spec.control {
         total_bytes += weights_source_bytes(control);
     }
+    // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
+    // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
+    // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
+    // hosted once in a shared mirror — so an unstaged sum scored a q4 edit install at 2.17 GiB
+    // against a real 6.52 GiB, which both under-quoted the over-budget message and let the
+    // `weights_fit_floor` admit tiers that do not fit. A component resolved to a path INSIDE the
+    // weights dir is skipped, because the scan already counted it.
+    for source in spec.components.values() {
+        let inside = match source {
+            WeightsSource::Dir(path) | WeightsSource::File(path) => match &spec.weights {
+                WeightsSource::Dir(root) => path.starts_with(root),
+                WeightsSource::File(_) => false,
+            },
+        };
+        if !inside {
+            total_bytes = total_bytes.saturating_add(weights_source_bytes(source));
+        }
+    }
     (total_bytes, te_bytes, headroom_gb)
 }
 
@@ -812,17 +830,31 @@ pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> Res
     )
 }
 
-/// The residency outcome for a candidate tier's WEIGHTS DIR (sc-10733 capability downtier) — the
-/// Dir-only sibling of [`decide_residency_for_spec`] the base.rs MLX seam calls per candidate tier to
-/// pick the highest installed tier that fits. A bare `Dir` spec matches the generic image lane (no
-/// control branch; PiD/IP are activation-time, not weight-fit terms), so this agrees with the
-/// `apply_residency_policy` admission the cache runs on the chosen tier.
+/// The residency outcome for a candidate tier's WEIGHTS DIR — a bare-`Dir` convenience over
+/// [`decide_residency_for_spec`], kept for the live real-weights gate below.
+///
+/// The base.rs capability downtier (sc-10733) used to call this and now builds its probe spec with
+/// `tier_probe_spec` instead, because a bare `Dir` under-counts any model whose components are
+/// caller-staged from another snapshot (sc-15154).
+#[cfg(test)]
 pub(crate) fn residency_for_dir(
     engine_id: &str,
     weights_dir: &std::path::Path,
 ) -> ResidencyOutcome {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
     decide_residency_for_spec(engine_id, &spec)
+}
+
+/// The on-disk WEIGHT bytes (GiB) a `spec` loads — the weights half of the number
+/// [`decide_residency_for_spec`] rejects on (`Σweights + `[`HEADROOM_GB`]).
+///
+/// For the reject message (sc-15154). The peak alone cannot be read: on a small budget the flat
+/// headroom dominates it, so a tier whose real install is 7 GB is refused with a ~25 GB figure and
+/// the number reads like the wrong tier's total. Naming both makes the split legible — and makes a
+/// mis-scoped footprint visible instead of hiding inside a constant.
+#[cfg(target_os = "macos")]
+pub(crate) fn spec_weights_gb(engine_id: &str, spec: &LoadSpec) -> f64 {
+    spec_component_bytes(engine_id, spec).0 as f64 / BYTES_PER_GIB
 }
 
 /// Build the actionable over-budget rejection. `staged_gb` is `Some` when sequential residency was
@@ -1364,6 +1396,132 @@ mod tests {
         assert_eq!(sum_safetensors_bytes(&root.join("nope")), 0);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-15154 — a SPLIT-layout tier's staged co-requisites are part of what it loads.
+    ///
+    /// Mage-Flow's per-tier dir holds the DiT alone; the text encoder and VAE are bit-identical
+    /// across the six variants and staged from a shared mirror. Scanning only `spec.weights` scored a
+    /// q4 edit install at the DiT's bytes, so the over-budget message quoted a peak derived from a
+    /// third of the tier, and the permissive `weights_fit_floor` admitted budgets the tier does not
+    /// fit. The pre-fix number is asserted alongside the fixed one — a test that only checked the new
+    /// total could pass on a spec that stages nothing.
+    #[test]
+    fn a_staged_component_counts_toward_the_tier_that_loads_it() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_staged_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let write = |dir: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(&dir).expect("mk dir");
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("write");
+            dir
+        };
+        // The variant mirror's tier dir (DiT only) + the shared components mirror.
+        let tier = root.join("q4");
+        write(tier.join("transformer"), 3_000);
+        let te = write(root.join("shared/q4/text_encoder"), 5_000);
+        let vae = write(root.join("shared/q4/vae"), 1_000);
+
+        // Nothing staged — the pre-fix reading, and still correct for a flat snapshot.
+        let bare = LoadSpec::new(WeightsSource::Dir(tier.clone()));
+        assert_eq!(spec_component_bytes("mage_flow_edit", &bare).0, 3_000);
+
+        // Staged the way the load stages them.
+        let staged = bare
+            .clone()
+            .with_component("text_encoder", WeightsSource::Dir(te))
+            .with_component("vae", WeightsSource::Dir(vae));
+        let (total, te_bytes, _) = spec_component_bytes("mage_flow_edit", &staged);
+        println!(
+            "mage_flow_edit split tier: bare total={} staged total={total} staged te={te_bytes}",
+            spec_component_bytes("mage_flow_edit", &bare).0
+        );
+        assert_eq!(
+            total, 9_000,
+            "the staged text encoder and VAE are weights this tier holds resident"
+        );
+        // The TEXT-ENCODER split comes from the provider's own footprint at the pinned inference
+        // revision, which must likewise resolve the STAGED dir and not `<tier>/text_encoder`. A zero
+        // here would collapse the sequential schedule's `max(te, rest)` onto the whole model and
+        // silently over-reject, so it is asserted rather than inferred from the total.
+        //
+        // macOS ONLY: the MLX media registry — and therefore any provider footprint — is compiled in
+        // on macOS alone. Off-macOS `footprint()` yields `None`, `resolve_text_encoder_bytes` falls
+        // back to the diffusers `text_encoder*` subdir scan of the TIER dir, and that is correctly 0
+        // here. The `total` assertions above are registry-free and hold on every platform, which is
+        // what this test is really for.
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            te_bytes, 5_000,
+            "mage_flow's per-component footprint must follow the staged component dirs"
+        );
+
+        // A component that resolves INSIDE the weights dir was already counted by the scan, so it
+        // must not be added twice — the flat published layout, staged explicitly.
+        let flat_te = write(tier.join("text_encoder"), 700);
+        let flat = LoadSpec::new(WeightsSource::Dir(tier))
+            .with_component("text_encoder", WeightsSource::Dir(flat_te));
+        assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-15154 — the Mage q4 admit boundary, from the REAL published install sizes.
+    ///
+    /// The epic-14034 acceptance run found emulated caps of **both 6 GB and 7 GB admitting** a q4
+    /// edit job. That was not the memory model being wrong; it was this gate seeing 2.17 GiB of
+    /// weights (the DiT alone) where the tier installs 6.52 GiB, so the permissive weights-fit floor
+    /// (`Σstaged ≤ budget − OS_RESERVE_GB`) cleared caps the tier cannot hold.
+    ///
+    /// Bytes are the manifest's `estimatedSizeBytes` for `mage_flow_edit` q4:
+    /// DiT 2,326,294,167 + shared TE 4,331,077,508 + shared VAE 345,053,168 = 7,002,424,843
+    /// (7.00 GB decimal / 6.52 GiB), against inference's measured `calibration_peak_gb(Q4)` of
+    /// **7.868 GB** at 512² — the anchor sc-15071 re-derived and this branch's pin bump finally
+    /// brings into the app. The two gates are different instruments (this one bounds WIRED weights
+    /// under a staged schedule; mage's own `ensure_generation_fits` bounds the complete peak against
+    /// MLX's live limit), but they must not disagree about direction: a 6 GB machine cannot hold a
+    /// tier that peaks at 7.87 GB, and this gate must stop saying it can.
+    #[test]
+    fn the_mage_q4_admit_boundary_moves_with_the_real_install_size() {
+        const DIT: u64 = 2_326_294_167;
+        const TE: u64 = 4_331_077_508;
+        const VAE: u64 = 345_053_168;
+        let total = DIT + TE + VAE;
+        let budget = |gb: f64| Some(MemoryBudget { total_gb: gb });
+        for gb in [6.0, 7.0] {
+            println!(
+                "q4 @ {gb} GB cap: fixed={:?}  pre-fix(DiT-only)={:?}",
+                decide_residency(total, TE, budget(gb), true),
+                decide_residency(DIT, 0, budget(gb), true),
+            );
+        }
+
+        // 6 GB: below the 7.868 GB measured q4 peak ⇒ must refuse.
+        assert!(
+            matches!(
+                decide_residency(total, TE, budget(6.0), true),
+                ResidencyOutcome::Reject { .. }
+            ),
+            "a 6 GB Mac cannot hold a tier whose measured peak is 7.87 GB"
+        );
+        // 7 GB: the staged schedule's wired high-water is the text encoder (4.03 GiB), which fits
+        // 7 − OS_RESERVE_GB. Admitting here is the sc-12179 floor working as designed — a machine
+        // that can hold the weights runs, paging the activation transient.
+        assert_eq!(
+            decide_residency(total, TE, budget(7.0), true),
+            ResidencyOutcome::Sequential
+        );
+
+        // The pre-fix reading — the DiT alone, no text-encoder split — cleared BOTH caps. Asserted
+        // so the numbers above are visibly about the footprint and not about the thresholds.
+        assert_eq!(
+            decide_residency(DIT, 0, budget(6.0), true),
+            ResidencyOutcome::Sequential,
+            "this is the acceptance-run symptom: 6 GB admitted because the gate saw a third of the \
+             tier. If it now rejects, the floor moved and this test's premise must be re-derived."
+        );
     }
 
     #[test]

@@ -4232,13 +4232,14 @@ fn resolve_generic_lane_conditioning(
 }
 
 /// MLX per-tier capability fit for the downtier chooser (sc-10733): fold the MLX residency decision
-/// (resident-fits / staged-fits / won't-fit-even-staged) for a candidate tier's weights dir down to
-/// [`TierFit`]. `Resident`/`Sequential` ⇒ `Fits`; `Reject` ⇒ `TooBig` (carrying the resident need + the
-/// machine budget for the message). Uses the SAME `mlx_fit_gate` budget + footprint math the cold-load
-/// `apply_residency_policy` runs, so the seam's downtier and the cache's admission never disagree.
+/// (resident-fits / staged-fits / won't-fit-even-staged) for a candidate tier's probe [`LoadSpec`]
+/// down to [`TierFit`]. `Resident`/`Sequential` ⇒ `Fits`; `Reject` ⇒ `TooBig` (carrying the resident
+/// need + the machine budget for the message). Uses the SAME `mlx_fit_gate` budget + footprint math
+/// the cold-load `apply_residency_policy` runs, so the seam's downtier and the cache's admission
+/// never disagree — which is why it takes the spec [`tier_probe_spec`] builds rather than a bare dir.
 #[cfg(target_os = "macos")]
-fn mlx_tier_fit(engine_id: &str, weights_dir: &Path) -> TierFit {
-    match crate::mlx_fit_gate::residency_for_dir(engine_id, weights_dir) {
+fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
+    match crate::mlx_fit_gate::decide_residency_for_spec(engine_id, spec) {
         crate::mlx_fit_gate::ResidencyOutcome::Resident
         | crate::mlx_fit_gate::ResidencyOutcome::Sequential => TierFit::Fits,
         crate::mlx_fit_gate::ResidencyOutcome::Reject {
@@ -4250,6 +4251,35 @@ fn mlx_tier_fit(engine_id: &str, weights_dir: &Path) -> TierFit {
             available_gb,
         },
     }
+}
+
+/// The [`LoadSpec`] a candidate tier would be loaded with, for fit probing only — the tier's weights
+/// dir **plus whatever caller-provisioned components that tier stages** (sc-15154). Never loaded.
+///
+/// A bare `Dir` spec is right for every model whose components sit under its weights dir, but
+/// Mage-Flow's per-tier dir holds the DiT alone: its text encoder and VAE are bit-identical across
+/// the six variants and staged from a shared mirror. Probing the bare dir therefore scored a q4 edit
+/// install at 2.33 GB instead of 7.00 GB, which both under-quoted the over-budget message and let the
+/// permissive weights-fit floor admit budgets the tier does not fit.
+///
+/// Staging is best-effort: a co-requisite that cannot be resolved leaves the bare spec, and the real
+/// load's `attach_required_components` fails the job with its own actionable error rather than this
+/// probe guessing.
+#[cfg(target_os = "macos")]
+fn tier_probe_spec(
+    engine_id: &str,
+    weights_dir: &Path,
+    request: &ImageRequest,
+    settings: &Settings,
+) -> LoadSpec {
+    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
+    attach_required_components(
+        spec.clone(),
+        engine_id,
+        &request.model_manifest_entry,
+        settings,
+    )
+    .unwrap_or(spec)
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -4304,7 +4334,11 @@ async fn generate_stream(
                     .into_iter()
                     .filter_map(|cand| {
                         resolve_tier_dir(request, settings, cand)
-                            .map(|dir| (cand, mlx_tier_fit(engine_id, &dir)))
+                            .map(|dir| {
+                                let probe =
+                                    tier_probe_spec(engine_id, &dir, request, settings);
+                                (cand, mlx_tier_fit(engine_id, &probe))
+                            })
                     })
                     .collect();
             match choose_downtier(default_tier, &candidates) {
@@ -4326,10 +4360,30 @@ async fn generate_stream(
                     needed_gb,
                     available_gb,
                 } => {
+                    // Name the REJECTED TIER's own weight bytes next to the peak (sc-15154). The
+                    // peak is `Σweights + HEADROOM_GB`, and on a small budget the flat headroom
+                    // dominates it — a q4 install of 7 GB refused with a bare "~25 GB" reads like
+                    // the figure belongs to some other tier. Recomputed from the same probe spec
+                    // `mlx_tier_fit` scored, so the two numbers cannot drift apart.
+                    let weights_note = resolve_tier_dir(request, settings, tier)
+                        .map(|dir| {
+                            crate::mlx_fit_gate::spec_weights_gb(
+                                engine_id,
+                                &tier_probe_spec(engine_id, &dir, request, settings),
+                            )
+                        })
+                        .filter(|gb| *gb > 0.0)
+                        .map(|gb| {
+                            format!(
+                                " — ~{} GB of weights plus headroom for activations and the OS",
+                                gb.round() as i64
+                            )
+                        })
+                        .unwrap_or_default();
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} needs ~{needed} GB of unified memory even at the smallest installed \
-                         tier it can run ({tier}) but this machine has ~{available} GB. Lower the output \
-                         resolution or run on a Mac with more memory.",
+                         tier it can run ({tier}{weights_note}) but this machine has ~{available} GB. \
+                         Lower the output resolution or run on a Mac with more memory.",
                         model = request.model,
                         needed = needed_gb.round() as i64,
                         available = available_gb.round() as i64,
@@ -8651,8 +8705,9 @@ mod mlx_downtier_emulation_tests {
         let q4_dir = make_tier("q4", 1);
         // Unregistered engine ⇒ no footprint / not sequential-capable ⇒ resident-or-reject (te=0).
         let engine = "unregistered_downtier_probe";
-        let q8_fit = mlx_tier_fit(engine, &q8_dir);
-        let q4_fit = mlx_tier_fit(engine, &q4_dir);
+        let probe = |dir: &PathBuf| LoadSpec::new(WeightsSource::Dir(dir.clone()));
+        let q8_fit = mlx_tier_fit(engine, &probe(&q8_dir));
+        let q4_fit = mlx_tier_fit(engine, &probe(&q4_dir));
         assert!(
             matches!(q8_fit, TierFit::TooBig { .. }),
             "q8 (~23 GiB) must exceed the {cap} GB emulated budget: {q8_fit:?}"
