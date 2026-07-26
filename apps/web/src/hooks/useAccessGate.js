@@ -22,10 +22,24 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // otherwise they fire optimistically, 401, and bury the password prompt under a band
   // of "access token required" errors (epic 4484).
   const [accessResolved, setAccessResolved] = useState(false);
+  // Whether the probe has failed at least once. Drives the gate's "awaiting-host"
+  // state: we can't show a password prompt (we don't know one is needed) but we must
+  // not hand over a navigable, permanently empty shell either (sc-15102).
+  const [accessProbeFailed, setAccessProbeFailed] = useState(false);
   // The remote-access token (= host password). Storage key + threat-model note live in
   // accessToken.js (sc-8880); it is persisted verbatim in localStorage so it survives
   // reloads (a LAN remote-access requirement — see that module for the accepted XSS tradeoff).
   const [token, setToken] = useState(() => readAccessToken());
+  // Whether `token` has been PROVEN against the host: "none" (no token) / "pending"
+  // (restored from localStorage, not yet checked) / "accepted".
+  //
+  // sc-15102: a token restored from storage used to be trusted on sight, so a password
+  // the host has since changed or cleared flipped `authenticated` true and every
+  // protected request 401'd — with no code path anywhere in the client that re-prompts
+  // on a 401. The result was an app that looked broken instead of locked, escapable only
+  // by finding the topbar "Lock" button. Now the restored token is re-verified before it
+  // counts, and a rejected one is dropped back to the password prompt.
+  const [tokenStatus, setTokenStatus] = useState(() => (readAccessToken() ? "pending" : "none"));
   // What the user is typing into the login gate (sc-8808). Kept separate from the
   // live `token` so keystrokes never flip `authenticated` or churn the data/SSE
   // effects; `token` only changes once /api/v1/auth/verify accepts the draft.
@@ -41,9 +55,30 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   const authenticated = useMemo(
     () =>
       isDesktopShell ||
-      (accessResolved && (!access.authRequired || token.length > 0)),
-    [accessResolved, access, token],
+      (accessResolved && (!access.authRequired || tokenStatus === "accepted")),
+    [accessResolved, access, tokenStatus],
   );
+  // What the full-page blocker should show, if anything (sc-15102). "open" means the app
+  // shell may render; every other value blocks it. The policy lives here, next to the
+  // state it reads, so App only has to branch on `gateStatus !== "open"`.
+  const gateStatus = useMemo(() => {
+    if (isDesktopShell) {
+      // Loopback-trusted: the desktop shell is never gated (epic 4484).
+      return "open";
+    }
+    if (!accessResolved) {
+      // First probe still in flight: stay out of the way so a healthy host never flashes
+      // a blocker. Only a probe that has already FAILED blocks.
+      return accessProbeFailed ? "awaiting-host" : "open";
+    }
+    if (!access.authRequired) {
+      return "open";
+    }
+    if (tokenStatus === "accepted") {
+      return "open";
+    }
+    return tokenStatus === "pending" ? "unlocking" : "locked";
+  }, [access, accessProbeFailed, accessResolved, tokenStatus]);
   // sc-8810: whether media URLs are renderable yet. When auth is on, element-driven
   // requests (<img>/<video>) can't send the token header, so every media URL needs
   // the query-param ticket minted below. Data loads hold until the first ticket is
@@ -146,14 +181,18 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         setAccess(result);
         recordStartupMark("access-resolved");
         setAccessResolved(true);
+        setAccessProbeFailed(false);
         dismissNoticeKind("access-probe");
-      } catch (err) {
+      } catch {
         if (closed) {
           return;
         }
         // Keep accessResolved false (gate stays closed → no unauthenticated loads), tell
         // the user why, and schedule a backoff retry so recovery is automatic.
-        setError(err.message);
+        setAccessProbeFailed(true);
+        // No raw setError(err.message) here: the "access-probe" notice below says the same
+        // thing in human terms, and on the sc-15102 blocker the two stacked as a bare
+        // "Failed to fetch" above the readable one.
         pushNotice(
           "access-probe",
           "access check: couldn't reach the host to determine whether a password is required. Retrying in the background.",
@@ -175,6 +214,63 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     // once safely.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-verify a token restored from localStorage before trusting it (sc-15102). The host
+  // password can change (or be cleared, or the host can be a different machine at the same
+  // LAN address) between visits, and nothing in the client re-prompts on a 401 — so an
+  // unproven stored token has to clear this check before it counts as authentication.
+  // Ordering matters: this runs BEFORE `authenticated` flips, so it costs one POST ahead of
+  // the first protected load and never races it. A rejected token is dropped and the gate
+  // shows the password prompt; an unreachable host keeps the token and retries with
+  // backoff (mirroring the probe/mint loops) so a transient outage self-heals.
+  useEffect(() => {
+    if (isDesktopShell || !accessResolved || !access.authRequired) {
+      return undefined;
+    }
+    if (tokenStatus !== "pending" || !token) {
+      return undefined;
+    }
+    let closed = false;
+    let timer = null;
+    let attempt = 0;
+    async function verify() {
+      try {
+        const result = await apiFetch("/api/v1/auth/verify", token, { method: "POST" });
+        if (closed) {
+          return;
+        }
+        if (result?.ok) {
+          setTokenStatus("accepted");
+          dismissNoticeKind("access-verify");
+          return;
+        }
+        // Definitively rejected: forget it rather than 401 every request with it.
+        clearAccessToken();
+        setToken("");
+        setTokenStatus("none");
+        setAuthError("The saved password no longer works on this host. Enter the current one.");
+        dismissNoticeKind("access-verify");
+      } catch {
+        if (closed) {
+          return;
+        }
+        pushNotice(
+          "access-verify",
+          "access check: couldn't reach the host to confirm the saved password. Retrying in the background.",
+        );
+        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        attempt += 1;
+        timer = window.setTimeout(verify, delay);
+      }
+    }
+    verify();
+    return () => {
+      closed = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [access.authRequired, accessResolved, token, tokenStatus, pushNotice, dismissNoticeKind]);
 
   // Remote-browser login (epic 4484 story 7): the password IS the API access token.
   // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
@@ -204,11 +300,16 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
       }
       storeAccessToken(candidate);
       setToken(candidate);
+      // Just proven against the host — mark it accepted so the sc-15102 re-verify effect
+      // doesn't immediately check the same string again (which would double-POST and
+      // briefly re-block the shell).
+      setTokenStatus("accepted");
       setPasswordDraft("");
       setAuthError("");
       setError("");
+      dismissNoticeKind("access-verify");
     },
-    [passwordDraft, setError],
+    [passwordDraft, setError, dismissNoticeKind],
   );
 
   // Clear the stored password and re-show the login gate ("lock"/forget affordance,
@@ -217,9 +318,14 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   const lockRemote = useCallback(() => {
     clearAccessToken();
     setToken("");
+    setTokenStatus("none");
     setPasswordDraft("");
     setAuthError("");
-  }, []);
+    // The re-verify loop's cleanup just stopped its backoff timer, so its
+    // "retrying in the background" notice would be a lie on the lock screen
+    // (same reasoning as the media-ticket notice above).
+    dismissNoticeKind("access-verify");
+  }, [dismissNoticeKind]);
 
   return {
     access,
@@ -228,6 +334,7 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     setPasswordDraft,
     authError,
     authenticated,
+    gateStatus,
     ready,
     saveToken,
     lockRemote,

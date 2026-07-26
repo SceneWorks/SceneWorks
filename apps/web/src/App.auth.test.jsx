@@ -150,10 +150,68 @@ describe("SceneWorks app shell", () => {
 
     // Wrong password: inline error inside the gate, token never persisted,
     // no protected loads and no SSE connection attempted.
-    expect(document.body.querySelector(".auth-band")?.textContent).toContain("Incorrect password. Try again.");
+    expect(document.body.querySelector(".access-gate")?.textContent).toContain("Incorrect password. Try again.");
     expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
     expect(document.body.querySelector("#token")).not.toBeNull();
     expect(requests.filter((request) => request.path.endsWith("/auth/verify")).length).toBe(1);
+    expect(requests.every((request) => !request.path.endsWith("/projects"))).toBe(true);
+    expect(FakeEventSource.instances.length).toBe(0);
+  });
+
+  // sc-15102: the gate is a FULL-PAGE blocker, not the `.auth-band` banner it replaced.
+  // The banner rendered above a live sidebar/topbar whose screens were all empty (every
+  // protected load is held until `authenticated`), so a remote browser could tour the
+  // whole nav tree and conclude the app was broken while a nearly invisible password
+  // field sat at the top of the page.
+  it("replaces the entire shell — no sidebar, topbar, or nav — until the password verifies", async () => {
+    mockAuthRequiredFetch({ verifyOk: true });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(document.body.querySelector(".access-gate")).not.toBeNull();
+    // Nothing navigable exists behind the gate.
+    expect(document.body.querySelector(".sidebar")).toBeNull();
+    expect(document.body.querySelector(".topbar")).toBeNull();
+    expect(document.body.querySelector(".workspace")).toBeNull();
+    expect(document.body.querySelectorAll(".nav-item").length).toBe(0);
+
+    await changeField(document.body.querySelector("#token"), "correct-password");
+    await act(async () => {
+      buttonInside(document.body, "Unlock").click();
+    });
+    await settle();
+
+    // Verified: the gate is gone and the real shell is what replaced it.
+    expect(document.body.querySelector(".access-gate")).toBeNull();
+    expect(document.body.querySelector(".sidebar")).not.toBeNull();
+    expect(document.body.querySelectorAll(".nav-item").length).toBeGreaterThan(0);
+  });
+
+  // sc-15102: a password saved in localStorage is unproven — the host may have changed
+  // or cleared it. Before this, it was trusted on sight: `authenticated` flipped, every
+  // protected request 401'd, and no client path re-prompts on a 401, so the only exit was
+  // spotting the topbar "Lock" button.
+  it("drops a stored password the host rejects and blocks the shell with the gate", async () => {
+    window.localStorage.setItem("sceneworks-token", "stale-password");
+    const requests = [];
+    mockAuthRequiredFetch({ verifyOk: false, requests });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(requests.filter((request) => request.path.endsWith("/auth/verify")).length).toBe(1);
+    expect(window.localStorage.getItem("sceneworks-token")).toBeNull();
+    expect(document.body.querySelector(".access-gate")?.textContent).toContain("no longer works");
+    expect(document.body.querySelector("#token")).not.toBeNull();
+    expect(document.body.querySelector(".sidebar")).toBeNull();
+    // The rejected token never authenticated, so nothing protected was ever requested.
     expect(requests.every((request) => !request.path.endsWith("/projects"))).toBe(true);
     expect(FakeEventSource.instances.length).toBe(0);
   });
@@ -179,7 +237,7 @@ describe("SceneWorks app shell", () => {
     expect(window.localStorage.getItem("sceneworks-token")).toBe("correct-password");
     // The gate keys off the token state, so it drops after verification.
     expect(document.body.querySelector("#token")).toBeNull();
-    expect(document.body.querySelector(".auth-band")).toBeNull();
+    expect(document.body.querySelector(".access-gate")).toBeNull();
     // The [authenticated, token] effect performs the initial load exactly once
     // (no duplicate refresh from the submit handler), with the verified token.
     const projectLoads = requests
@@ -459,6 +517,11 @@ describe("SceneWorks app shell", () => {
       // And a notice names the unreachable host rather than silently authenticating.
       const noticeTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
       expect(noticeTexts.some((text) => text.includes("access check"))).toBe(true);
+      // sc-15102: an unknown auth requirement blocks the shell too — no password prompt
+      // (we don't know one is needed) but no navigable empty app either.
+      expect(document.body.querySelector(".access-gate")).not.toBeNull();
+      expect(document.body.querySelector(".sidebar")).toBeNull();
+      expect(document.body.querySelector("#token")).toBeNull();
     });
 
     it("recovers on a backoff retry: a later /access success resolves the gate and clears the notice", async () => {
