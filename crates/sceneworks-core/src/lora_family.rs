@@ -1463,6 +1463,10 @@ const MARGIN_DEN: usize = 2;
 /// blocks, and false hard rejections are worse than an inconclusive result.
 const QWEN_MIN_BLOCK_INDEX: usize = 39;
 
+/// Mage-Flow's published NR-MMDiT depth (`transformer/config.json` `depth: 12`, identical across
+/// all six repos) — block indices `0..=11` and nothing above. See [`disambiguate_mm_dit`].
+const MAGE_FLOW_BLOCK_COUNT: usize = 12;
+
 fn detect_bucket(keys: &[String]) -> Option<Bucket> {
     let mut scored: Vec<(Bucket, usize)> = SIGNATURES
         .iter()
@@ -1505,26 +1509,49 @@ fn score_signature(sig: &BucketSignature, keys: &[String]) -> usize {
     score
 }
 
+/// Splits the dual-stream MMDiT bucket by transformer **depth**, the only tensor-level signal that
+/// separates its members.
+///
+/// Qwen-Image (60 blocks) is claimed from [`QWEN_MIN_BLOCK_INDEX`] up. Mage-Flow (sc-14057) is the
+/// other end: its NR-MMDiT is a reparameterized Z-Image S3-DiT whose diffusers module names are
+/// spelled *identically* to Qwen-Image's — `transformer_blocks.<n>.attn.to_{q,k,v}` /
+/// `.attn.add_{q,k,v}_proj` / `.img_mlp.net.0.proj` / `.txt_mlp.net.2` / `.img_mod.1` /
+/// `.txt_mod.1` — at the same 3072 hidden size and 24 heads, so no key or shape tells them apart.
+/// What does is the published `depth: 12`: a full-coverage Mage adapter spans block indices
+/// `0..=11` exactly, where Qwen-Image spans `0..=59` and Z-Image `0..=29`.
+///
+/// The **whole contiguous span** is required, not just `max == 11`, and that is what keeps the
+/// signal honest: a sparse adapter that trains only a handful of early blocks stays inconclusive
+/// (`None`) rather than being confidently mislabelled, preserving the module's "a wrong family is
+/// worse than no family" contract. The residual overlap — a Qwen-Image adapter that trains exactly
+/// its first twelve blocks and no others — is not a convention any trainer ships, and every
+/// mainstream Qwen trainer stamps `ss_base_model_version` / `modelspec.architecture`, which
+/// [`detect_metadata_family`] resolves *before* this key path ever runs.
+///
+/// This mirrors the base-checkpoint classifier's Mage arm
+/// (`base_weights::detect_transformer_family`), which pins the same exact `0..12` index set. It
+/// does **not** additionally require `.img_mod.1.`/`.txt_mod.1.` the way that arm does: a base
+/// checkpoint always carries every module, whereas an adapter trains a chosen subset and most never
+/// touch the modulation projections.
 fn disambiguate_mm_dit(keys: &[String]) -> Option<String> {
-    let max_block = max_transformer_block_index(keys)?;
+    let blocks = transformer_block_indices(keys);
+    let max_block = *blocks.iter().next_back()?;
     if max_block >= QWEN_MIN_BLOCK_INDEX {
-        Some("qwen-image".to_owned())
-    } else {
-        None
+        return Some("qwen-image".to_owned());
     }
+    if max_block == MAGE_FLOW_BLOCK_COUNT - 1 && blocks.len() == MAGE_FLOW_BLOCK_COUNT {
+        return Some("mage-flow".to_owned());
+    }
+    None
 }
 
-/// Returns the highest `N` seen in keys matching
-/// `transformer.transformer_blocks.<N>.` (or just `transformer_blocks.<N>.`),
-/// or `None` if no such key exists.
-fn max_transformer_block_index(keys: &[String]) -> Option<usize> {
-    let mut max_index: Option<usize> = None;
-    for key in keys {
-        if let Some(index) = parse_block_index(key) {
-            max_index = Some(max_index.map_or(index, |current| current.max(index)));
-        }
-    }
-    max_index
+/// Every `N` seen in keys matching `transformer.transformer_blocks.<N>.` (or just
+/// `transformer_blocks.<N>.`, or the kohya-flattened `transformer_blocks_<N>_`), de-duplicated and
+/// ordered. Empty when no such key exists.
+fn transformer_block_indices(keys: &[String]) -> std::collections::BTreeSet<usize> {
+    keys.iter()
+        .filter_map(|key| parse_block_index(key))
+        .collect()
 }
 
 fn parse_block_index(key: &str) -> Option<usize> {
@@ -1630,6 +1657,25 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     {
         return Some("anima".to_owned());
     }
+    // Mage-Flow (epic 14034). Catalog/training-base ids are `mage_flow_base` / `mage_flow` /
+    // `mage_flow_turbo` (+ the `_edit_*` trio), repos `microsoft|SceneWorks/Mage-Flow*`, and the MLX
+    // trainer stamps `family: "mage_flow"`.
+    //
+    // 🔴 TRAP: "mage" is a SUBSTRING OF "image" — `z-image`, `qwen-image`, `qwen_image`,
+    // `ZImagePipeline` all contain it. A `contains("mage")` test (the shape used for `flux` /
+    // `krea` / `ideogram`) would therefore swallow every Z-Image and Qwen-Image adapter and reject
+    // it from its own model. Matched on a token boundary instead — the same defence the `anima`
+    // arm above needs against `animagine-xl` / `animatediff` — so only a genuine Mage id, repo
+    // name, or file name resolves here.
+    if normalized == "mage"
+        || normalized.starts_with("mage-")
+        || normalized.starts_with("mage_")
+        || normalized.contains("mage-flow")
+        || normalized.contains("mage_flow")
+        || normalized.contains("mageflow")
+    {
+        return Some("mage-flow".to_owned());
+    }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
     // match below would otherwise swallow them. FLUX.2 is a distinct family with
@@ -1677,6 +1723,132 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
         return Some("sd1.5".to_owned());
     }
     None
+}
+
+/// What an adapter file's `__metadata__` says about itself, beyond its family (sc-14057).
+///
+/// Every field is optional **on purpose**. A great many third-party adapters ship none of them, and
+/// the one thing this type must never do is invent a plausible-looking value: guessing `rank` from
+/// `alpha` (or either from a factor shape) would record a number the file never claimed, and a
+/// wrong rank is exactly the failure that makes an adapter apply at the wrong strength. Absent
+/// stays absent, and callers omit the field rather than defaulting it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdapterFileMetadata {
+    /// Declared network type, lower-cased — `lora` / `lokr` / `loha` / …. The worker's
+    /// `classify_adapter` keys the engine's adapter `kind` off the same `networkType` stamp.
+    pub network_type: Option<String>,
+    /// LoRA/LoKr rank (`r`). `None` when the file does not declare one.
+    pub rank: Option<u64>,
+    /// LoRA/LoKr alpha. `None` when the file does not declare one — **not** silently equal to
+    /// `rank`, which is only the *loader's* last-resort scaling fallback, never a recorded fact.
+    pub alpha: Option<f64>,
+}
+
+impl AdapterFileMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.network_type.is_none() && self.rank.is_none() && self.alpha.is_none()
+    }
+}
+
+/// Reads the rank / alpha / network-type an adapter file declares in its safetensors
+/// `__metadata__` (sc-14057).
+///
+/// Three conventions are accepted, in precedence order:
+///
+/// 1. **SceneWorks' own trainers** — `networkType` / `rank` / `alpha` (the epic-2193 reload
+///    contract; `save_lora_peft` and `save_lokr` in the inference workspace write these as
+///    *strings*, since the safetensors metadata map is string-valued).
+/// 2. **kohya / sd-scripts** — `ss_network_dim` / `ss_network_alpha` / `ss_network_module`.
+/// 3. **diffusers `save_lora_adapter` / raw PEFT** — no top-level keys at all; `r` and
+///    `lora_alpha` live inside the JSON blob at `lora_adapter_metadata` (sc-5513). Only the global
+///    values are read here: PEFT's per-module `rank_pattern` / `alpha_pattern` overrides are a
+///    *loader* concern (the inference `LoraAdapterMeta` resolves them per target) and have no
+///    single value to record.
+///
+/// Numbers are accepted as JSON numbers as well as strings, because a non-conforming writer can
+/// emit either. A non-positive or unparseable rank is treated as absent — it can only poison a
+/// scaling denominator. A zero *alpha* is kept: that is a legitimately scale-0 adapter.
+pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
+    let Some(metadata) = header.get("__metadata__").and_then(Value::as_object) else {
+        return AdapterFileMetadata::default();
+    };
+    // The PEFT blob is a JSON *string* under one key; parse it once and treat it as the last
+    // fallback for each field.
+    let peft_blob: Option<Map<String, Value>> = metadata
+        .get("lora_adapter_metadata")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned());
+    let lookup = |keys: &[&str]| -> Option<Value> {
+        for key in keys {
+            if let Some(value) = metadata.get(*key) {
+                return Some(value.clone());
+            }
+        }
+        let blob = peft_blob.as_ref()?;
+        for key in keys {
+            if let Some(value) = blob.get(*key) {
+                return Some(value.clone());
+            }
+        }
+        None
+    };
+
+    let network_type = lookup(&["networkType", "network_type"])
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            // LyCORIS under kohya sets `ss_network_module: "lycoris.kohya"` — which names no algo —
+            // and puts the real one in the `ss_network_args` JSON blob as `algo`.
+            let algo = metadata
+                .get("ss_network_args")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())?
+                .get("algo")?
+                .as_str()?
+                .trim()
+                .to_ascii_lowercase();
+            (!algo.is_empty()).then_some(algo)
+        })
+        .or_else(|| {
+            // Plain kohya records the *module path* (`networks.lora`). Only claim a type when the
+            // path names one outright — `lycoris.kohya` names none, and guessing would be worse
+            // than leaving it unstated.
+            let module = metadata
+                .get("ss_network_module")
+                .and_then(Value::as_str)?
+                .to_ascii_lowercase();
+            ["lokr", "loha", "lora"]
+                .into_iter()
+                .find(|token| module.contains(token))
+                .map(str::to_owned)
+        });
+    let rank = lookup(&["rank", "ss_network_dim", "r"])
+        .as_ref()
+        .and_then(number_from_metadata)
+        .filter(|value| *value > 0.0)
+        .map(|value| value as u64);
+    let alpha = lookup(&["alpha", "ss_network_alpha", "lora_alpha"])
+        .as_ref()
+        .and_then(number_from_metadata);
+    AdapterFileMetadata {
+        network_type,
+        rank,
+        alpha,
+    }
+}
+
+/// A safetensors `__metadata__` value as a number: the map is string-valued by spec (our trainers
+/// write `"16"`), but PEFT's embedded JSON blob carries real numbers.
+fn number_from_metadata(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|value| value.is_finite())
 }
 
 /// The safetensors header is a JSON object whose top-level keys are tensor
@@ -2422,6 +2594,357 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
+    }
+
+    // ---- Mage-Flow (epic 14034 / sc-14057) ---------------------------------------------------
+
+    /// A community "all-linear" Mage-Flow adapter with no metadata. Its module names are spelled
+    /// identically to Qwen-Image's, so the ONLY tensor-level evidence is the published `depth: 12`
+    /// — block indices `0..=11`, complete and with nothing above.
+    #[test]
+    fn detects_mage_flow_by_its_exact_twelve_block_span() {
+        let keys = diffusers_double_stream_keys("transformer", 12);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("mage-flow"));
+    }
+
+    /// The kohya / LyCORIS flattening of the same file (`lora_unet_transformer_blocks_0_…`) must
+    /// reach the same answer — the second MMDiT signature and `parse_block_index`'s `_` separator
+    /// both have to hold for a third-party export spelling.
+    #[test]
+    fn detects_mage_flow_in_the_kohya_flattened_spelling() {
+        let mut keys = Vec::new();
+        for block in 0..12 {
+            for module in [
+                "attn_to_q",
+                "attn_to_k",
+                "attn_to_v",
+                "attn_add_q_proj",
+                "img_mlp_net_0_proj",
+                "txt_mlp_net_2",
+            ] {
+                for role in ["lora_down.weight", "lora_up.weight"] {
+                    keys.push(format!(
+                        "lora_unet_transformer_blocks_{block}_{module}.{role}"
+                    ));
+                }
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("mage-flow"));
+    }
+
+    /// LoKr, not LoRA: the Mage trainer advertises `supports_lokr`, and a LoKr file carries
+    /// `lokr_w1`/`lokr_w2` at the same module paths. Detection keys on the module path, so the
+    /// adapter kind must not change the answer.
+    #[test]
+    fn detects_mage_flow_lokr() {
+        let mut keys = Vec::new();
+        for block in 0..12 {
+            for module in ["attn.to_q", "attn.add_k_proj", "img_mlp.net.0.proj"] {
+                for factor in ["lokr_w1", "lokr_w2"] {
+                    keys.push(format!(
+                        "transformer.transformer_blocks.{block}.{module}.{factor}"
+                    ));
+                }
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("mage-flow"));
+    }
+
+    /// The full-span requirement is what keeps the 12-block signal honest. A sparse adapter that
+    /// tops out at block 11 without covering every block below stays inconclusive rather than
+    /// claiming a family it cannot prove — drop the `blocks.len()` check and this goes green,
+    /// which is exactly the false-confidence this guards.
+    #[test]
+    fn a_partial_span_below_twelve_blocks_is_not_claimed_as_mage_flow() {
+        for present in [vec![0usize, 1, 2, 11], (0..7).collect::<Vec<_>>(), vec![11]] {
+            let mut keys = Vec::new();
+            for block in &present {
+                for module in ["attn.to_q", "attn.add_q_proj", "img_mlp.net.0.proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!(
+                            "transformer.transformer_blocks.{block}.{module}.{role}"
+                        ));
+                    }
+                }
+            }
+            let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+            assert_eq!(
+                detect_lora_family(&header),
+                None,
+                "a partial {present:?} span must stay inconclusive, not resolve to a family"
+            );
+        }
+    }
+
+    /// The other direction of the same boundary: the deeper MMDiT siblings must never land on
+    /// Mage. Qwen-Image (60 blocks) stays qwen; a 30-block Z-Image-shaped span stays inconclusive.
+    #[test]
+    fn deeper_mm_dit_siblings_are_never_mistaken_for_mage_flow() {
+        for depth in [30usize, 60] {
+            let keys = diffusers_double_stream_keys("transformer", depth);
+            let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_ne!(
+                detect_lora_family(&header).as_deref(),
+                Some("mage-flow"),
+                "a {depth}-block MMDiT adapter must not detect as mage-flow"
+            );
+        }
+        let qwen = diffusers_double_stream_keys("transformer", 60);
+        let header = header_from_keys(&qwen.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    /// Ideogram's LoKr is the family that has been mis-detected before (sc-4725 / the
+    /// `text_fusion` boundary regression). It must resolve to `ideogram`, never to Mage — its
+    /// `diffusion_model.layers.<n>.` blocks are a different grammar entirely, and its 34 layers
+    /// would be a 12-block miss anyway.
+    #[test]
+    fn an_ideogram_lokr_is_not_mistaken_for_mage_flow() {
+        let mut keys = Vec::new();
+        for layer in 0..34 {
+            for module in [
+                "attention.qkv",
+                "attention.out",
+                "adaln_modulation",
+                "feed_forward.w1",
+            ] {
+                for factor in ["lokr_w1", "lokr_w2"] {
+                    keys.push(format!("diffusion_model.layers.{layer}.{module}.{factor}"));
+                }
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let detected = detect_lora_family(&header);
+        assert_ne!(detected.as_deref(), Some("mage-flow"));
+        assert_eq!(detected.as_deref(), Some("ideogram"));
+    }
+
+    /// The metadata path: every spelling a Mage adapter's provenance can arrive in — our MLX
+    /// trainer's `family: "mage_flow"` stamp, the catalog/training-base ids, the upstream and
+    /// re-hosted repos, and a bare file stem.
+    #[test]
+    fn mage_flow_metadata_stamps_detect_without_tensor_evidence() {
+        for (key, value) in [
+            ("family", "mage_flow"),
+            ("baseModel", "mage_flow_base"),
+            ("baseModel", "mage_flow_edit_base"),
+            ("ss_base_model_version", "mage-flow"),
+            ("ss_base_model_version", "Mage"),
+            ("modelspec.architecture", "microsoft/Mage-Flow-Turbo"),
+            ("modelspec.implementation", "SceneWorks/Mage-Flow-Base"),
+        ] {
+            let mut object = serde_json::Map::new();
+            object.insert("__metadata__".to_owned(), json!({ key: value }));
+            object.insert(
+                "some.module.lora_A.weight".to_owned(),
+                json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+            );
+            assert_eq!(
+                detect_lora_family(&Value::Object(object)).as_deref(),
+                Some("mage-flow"),
+                "{key} = {value:?} should resolve to mage-flow"
+            );
+        }
+    }
+
+    /// 🔴 The trap that makes the Mage metadata arm dangerous: **"mage" is a substring of
+    /// "image"**. A `contains("mage")` test — the shape `flux` / `krea` / `ideogram` use — would
+    /// swallow every Z-Image and Qwen-Image adapter and hard-reject it from its own model. Loosen
+    /// the token-boundary match and this test goes red on the first case.
+    #[test]
+    fn image_family_metadata_is_not_swallowed_by_the_mage_substring() {
+        for (value, expected) in [
+            ("z-image", "z-image"),
+            ("zimage", "z-image"),
+            ("Z-Image-Turbo", "z-image"),
+            ("qwen-image", "qwen-image"),
+            ("Qwen-Image-Edit-2509", "qwen-image"),
+            ("Qwen/Qwen_Image", "qwen-image"),
+        ] {
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some(expected),
+                "{value:?} must stay {expected}, not be captured by the mage arm"
+            );
+        }
+        // And the same at the whole-header level, so ordering inside the arm chain is covered too.
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "__metadata__".to_owned(),
+            json!({ "ss_base_model_version": "z-image" }),
+        );
+        object.insert(
+            "transformer_blocks.0.attn.to_q.lora_A.weight".to_owned(),
+            json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+        );
+        assert_eq!(
+            detect_lora_family(&Value::Object(object)).as_deref(),
+            Some("z-image")
+        );
+    }
+
+    /// A Mage adapter is offered on Mage models and nowhere else: the detected token is the
+    /// verbatim `mage-flow` the catalog's `loraCompatibility.families` and the
+    /// `mage_flow_*_lora` training targets declare, it survives canonicalization unchanged, and
+    /// the compatibility gate accepts it on `mage-flow` while rejecting it everywhere else.
+    #[test]
+    fn a_mage_flow_lora_is_accepted_only_on_mage_flow_models() {
+        assert_eq!(canonical_lora_family("mage-flow"), "mage-flow");
+        assert_eq!(canonical_lora_family("mage_flow"), "mage-flow");
+        assert_eq!(accepted_lora_families("mage-flow"), vec!["mage-flow"]);
+
+        let lora = json!({ "id": "mage_style", "family": "mage-flow" });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora),
+            Some("mage-flow"),
+            "mage_style",
+            Some("mage_flow_base")
+        )
+        .is_ok());
+        for other in ["qwen-image", "z-image", "krea_2", "flux2"] {
+            assert!(
+                validate_lora_compatibility(
+                    std::slice::from_ref(&lora),
+                    Some(other),
+                    "mage_style",
+                    Some("some_model")
+                )
+                .is_err(),
+                "a mage-flow LoRA must be refused on a {other} model"
+            );
+        }
+        // …and the reverse: a sibling MMDiT family's LoRA is refused on a Mage model.
+        for other in ["qwen-image", "z-image"] {
+            let foreign = json!({ "id": "other", "family": other });
+            assert!(
+                validate_lora_compatibility(
+                    &[foreign],
+                    Some("mage-flow"),
+                    "other",
+                    Some("mage_flow_base")
+                )
+                .is_err(),
+                "a {other} LoRA must be refused on a mage-flow model"
+            );
+        }
+    }
+
+    // ---- adapter `__metadata__` rank / alpha (sc-14057) ---------------------------------------
+
+    fn header_with_metadata(metadata: Value) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert("__metadata__".to_owned(), metadata);
+        object.insert(
+            "transformer_blocks.0.attn.to_q.lora_A.weight".to_owned(),
+            json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+        );
+        Value::Object(object)
+    }
+
+    #[test]
+    fn reads_rank_and_alpha_from_the_sceneworks_trainer_stamp() {
+        // The MLX/candle trainers write string values (the safetensors metadata map is
+        // string-valued), and alpha may legitimately differ from rank.
+        let header = header_with_metadata(json!({
+            "networkType": "lokr",
+            "rank": "16",
+            "alpha": "32",
+        }));
+        let meta = read_adapter_metadata(&header);
+        assert_eq!(meta.network_type.as_deref(), Some("lokr"));
+        assert_eq!(meta.rank, Some(16));
+        assert_eq!(meta.alpha, Some(32.0));
+    }
+
+    #[test]
+    fn reads_rank_and_alpha_from_the_kohya_and_peft_conventions() {
+        let kohya = header_with_metadata(json!({
+            "ss_network_module": "networks.lora",
+            "ss_network_dim": "64",
+            "ss_network_alpha": "32",
+        }));
+        let meta = read_adapter_metadata(&kohya);
+        assert_eq!(meta.network_type.as_deref(), Some("lora"));
+        assert_eq!(meta.rank, Some(64));
+        assert_eq!(meta.alpha, Some(32.0));
+
+        // LyCORIS under kohya: `ss_network_module` names no algo (`lycoris.kohya`), so the type
+        // comes from the `ss_network_args` blob — this is how a third-party Mage **LoKr** arrives.
+        let lycoris = header_with_metadata(json!({
+            "ss_network_module": "lycoris.kohya",
+            "ss_network_args": "{\"algo\": \"lokr\", \"factor\": \"-1\"}",
+            "ss_network_dim": "16",
+        }));
+        let meta = read_adapter_metadata(&lycoris);
+        assert_eq!(meta.network_type.as_deref(), Some("lokr"));
+        assert_eq!(meta.rank, Some(16));
+        assert_eq!(meta.alpha, None);
+
+        // …and with no algo to read, nothing is guessed.
+        let bare_lycoris = header_with_metadata(json!({ "ss_network_module": "lycoris.kohya" }));
+        assert_eq!(read_adapter_metadata(&bare_lycoris).network_type, None);
+
+        // diffusers `save_lora_adapter` / raw PEFT: no top-level keys at all, real JSON numbers
+        // inside the `lora_adapter_metadata` blob (sc-5513).
+        let peft = header_with_metadata(json!({
+            "format": "pt",
+            "lora_adapter_metadata": "{\"r\": 8, \"lora_alpha\": 16, \"target_modules\": [\"to_q\"]}",
+        }));
+        let meta = read_adapter_metadata(&peft);
+        assert_eq!(meta.rank, Some(8));
+        assert_eq!(meta.alpha, Some(16.0));
+        assert_eq!(meta.network_type, None);
+    }
+
+    /// 🔴 The omitted case, handled explicitly: a file that declares no rank/alpha records NONE of
+    /// them. Nothing may back-fill `alpha` from `rank` (the loader's last-resort scaling fallback
+    /// is not a fact about the file) or invent a rank from a factor shape.
+    #[test]
+    fn an_adapter_that_declares_no_rank_or_alpha_records_neither() {
+        for metadata in [
+            json!({ "format": "pt" }),
+            json!({}),
+            // rank present, alpha absent — alpha must NOT inherit rank.
+            json!({ "networkType": "lora", "rank": "8" }),
+        ] {
+            let declares_rank = metadata.get("rank").is_some();
+            let meta = read_adapter_metadata(&header_with_metadata(metadata.clone()));
+            assert_eq!(meta.alpha, None, "alpha must stay absent for {metadata}");
+            if !declares_rank {
+                assert_eq!(meta.rank, None, "rank must stay absent for {metadata}");
+                assert!(meta.is_empty(), "{metadata} should read as no declaration");
+            } else {
+                assert_eq!(meta.rank, Some(8));
+            }
+        }
+        // A header with no `__metadata__` block at all.
+        let bare = header_from_keys(&["transformer_blocks.0.attn.to_q.lora_A.weight"]);
+        let mut object = bare.as_object().cloned().unwrap();
+        object.remove("__metadata__");
+        assert!(read_adapter_metadata(&Value::Object(object)).is_empty());
+    }
+
+    /// A non-positive or unparseable rank can only poison a scaling denominator, so it is treated
+    /// as absent. A zero *alpha* is a legitimate scale-0 adapter and is kept.
+    #[test]
+    fn a_degenerate_rank_is_dropped_but_a_zero_alpha_is_kept() {
+        let meta = read_adapter_metadata(&header_with_metadata(json!({
+            "rank": "0",
+            "alpha": "0",
+        })));
+        assert_eq!(meta.rank, None);
+        assert_eq!(meta.alpha, Some(0.0));
+
+        let meta = read_adapter_metadata(&header_with_metadata(json!({ "rank": "not-a-number" })));
+        assert_eq!(meta.rank, None);
     }
 
     #[test]

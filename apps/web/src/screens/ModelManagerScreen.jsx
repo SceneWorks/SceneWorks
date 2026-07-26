@@ -1515,11 +1515,20 @@ export function ModelManagerScreen() {
     // Built-in entries are read-only (their manifest is compiled in); the backend
     // rejects PATCH on them, so no Edit affordance is offered.
     const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
+    // What the adapter file itself declared in its safetensors `__metadata__` at import
+    // (sc-14057). Each part is shown only when the file stated it — a great many third-party
+    // adapters declare no rank/alpha, and showing an inferred value would be a lie about the
+    // file. `rank`/`alpha` are numbers; `== null` keeps a legitimate alpha of 0.
+    const declared = [
+      lora.networkType,
+      lora.rank == null ? null : `rank ${lora.rank}`,
+      lora.alpha == null ? null : `alpha ${lora.alpha}`,
+    ].filter(Boolean);
     return (
       <article className={rowClass} key={lora.id ?? lora.name}>
         <span>
           <strong>{lora.name ?? lora.id}</strong>
-          <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
+          <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible", ...declared].filter(Boolean).join(" | ")}</small>
         </span>
         {unusable ? (
           <span className="status-badge warning" title="This file's architecture family couldn't be identified, so it can't be applied to any model.">

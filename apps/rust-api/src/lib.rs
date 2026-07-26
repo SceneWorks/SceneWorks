@@ -39,8 +39,8 @@ use sceneworks_core::jobs_store::{
 };
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
-    first_safetensors_path, read_safetensors_header, reconcile_detected_family,
-    SafetensorsHeaderError,
+    first_safetensors_path, read_adapter_metadata, read_safetensors_header,
+    reconcile_detected_family, AdapterFileMetadata, SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url, LoraUrlError};
 use sceneworks_core::project_store::{

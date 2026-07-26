@@ -893,21 +893,24 @@ pub(crate) async fn queue_lora_import_job(
     } else {
         allowed_source_roots
     };
+    let mut adapter_metadata = AdapterFileMetadata::default();
     if let Some(local_source) = payload.source_path.clone() {
         let secondary_source = payload.secondary_source_path.clone();
-        let (local_source, detected) = tokio::task::spawn_blocking(move || {
+        let (local_source, detected, declared) = tokio::task::spawn_blocking(move || {
             validate_lora_import_source_path(&local_source, &source_roots)?;
             // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise
             // file; validate it against the same upload root.
             if let Some(secondary_source) = secondary_source.as_deref() {
                 validate_lora_import_source_path(secondary_source, &source_roots)?;
             }
-            detect_family_from_local_path(&local_source).map(|detected| (local_source, detected))
+            inspect_lora_source(&local_source)
+                .map(|(detected, declared)| (local_source, detected, declared))
         })
         .await
         .map_err(|error| {
             ApiError::internal(format!("LoRA import inspection task failed: {error}"))
         })??;
+        adapter_metadata = declared;
         payload.family = reconcile_lora_family(
             payload.family.take(),
             detected,
@@ -980,6 +983,23 @@ pub(crate) async fn queue_lora_import_job(
     if let Some(base_model) = payload.base_model.clone() {
         if let Some(object) = manifest_entry.as_object_mut() {
             object.insert("baseModel".to_owned(), Value::String(base_model));
+        }
+    }
+    // What the adapter file itself declares (sc-14057): the network type the worker's
+    // `classify_adapter` keys the engine adapter `kind` off, plus rank/alpha. Recorded so the
+    // imported entry describes the file rather than losing facts the header already carried.
+    // Each field is written ONLY when the file declares it — an adapter that omits `alpha` (very
+    // common outside our own trainers) records no alpha instead of inheriting `rank`, so nothing
+    // downstream can mistake a fallback for a stated value.
+    if let Some(object) = manifest_entry.as_object_mut() {
+        if let Some(network_type) = adapter_metadata.network_type.clone() {
+            object.insert("networkType".to_owned(), Value::String(network_type));
+        }
+        if let Some(rank) = adapter_metadata.rank {
+            object.insert("rank".to_owned(), json!(rank));
+        }
+        if let Some(alpha) = adapter_metadata.alpha {
+            object.insert("alpha".to_owned(), json!(alpha));
         }
     }
     let trimmed_notes = payload.notes.trim();
@@ -1453,9 +1473,22 @@ pub(crate) fn lora_url_error_message(error: LoraUrlError) -> &'static str {
 /// gives the user a clear "the file is broken" message instead of a
 /// silent acceptance.
 pub(crate) fn detect_family_from_local_path(source_path: &str) -> Result<Option<String>, ApiError> {
+    Ok(inspect_lora_source(source_path)?.0)
+}
+
+/// One header read, two answers: the detected architecture family **and** what the file declares
+/// about itself in `__metadata__` (network type / rank / alpha, sc-14057).
+///
+/// Kept together deliberately — the import path needs both, and the safetensors header is the same
+/// (up to 16 MiB) parse for each. Either half may legitimately be absent: a file with no
+/// recognizable architecture returns `None`, and one with a bare `{"format": "pt"}` metadata block
+/// returns an empty [`AdapterFileMetadata`] rather than invented defaults.
+pub(crate) fn inspect_lora_source(
+    source_path: &str,
+) -> Result<(Option<String>, AdapterFileMetadata), ApiError> {
     let path = FsPath::new(source_path);
     let Some(safetensors_path) = first_safetensors_path(path) else {
-        return Ok(None);
+        return Ok((None, AdapterFileMetadata::default()));
     };
     let header = read_safetensors_header(&safetensors_path).map_err(|error| match error {
         SafetensorsHeaderError::Io(io_error) => {
@@ -1472,7 +1505,7 @@ pub(crate) fn detect_family_from_local_path(source_path: &str) -> Result<Option<
         ))
         }
     })?;
-    Ok(detect_lora_family(&header))
+    Ok((detect_lora_family(&header), read_adapter_metadata(&header)))
 }
 
 /// Applies the import-time family policy: confident detection rejects a
@@ -2038,6 +2071,126 @@ mod base_model_gating_tests {
         assert_eq!(
             conflicting_folder_family(&tmp.path().join("does_not_exist"), "flux2").unwrap(),
             None
+        );
+    }
+
+    // ---- Mage-Flow import (sc-14057) -----------------------------------------------------
+
+    /// Write a minimal valid safetensors adapter with `keys` and the given `__metadata__`.
+    fn write_adapter(path: &std::path::Path, metadata: &str, keys: &[String]) {
+        use std::io::Write;
+        let tensors: Vec<String> = keys
+            .iter()
+            .map(|key| format!(r#""{key}":{{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#))
+            .collect();
+        let header = format!(r#"{{"__metadata__":{metadata},{}}}"#, tensors.join(","));
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::File::create(path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    /// A 12-block dual-stream Mage-Flow adapter, no family metadata (the community shape).
+    fn mage_lora_keys() -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..12 {
+            for module in ["attn.to_q", "attn.add_q_proj", "img_mlp.net.0.proj"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    keys.push(format!(
+                        "transformer.transformer_blocks.{block}.{module}.{role}"
+                    ));
+                }
+            }
+        }
+        keys
+    }
+
+    /// sc-14057 + sc-10214: a Mage adapter gets its own family-scoped folder, so a Mage and a
+    /// Qwen-Image LoRA sharing one display name can never co-mingle in a single record dir (the
+    /// collision that made the header inspector arbitrate non-deterministically).
+    #[test]
+    fn mage_flow_imports_into_a_family_scoped_folder() {
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("mage-flow")),
+            "mage_flow_realism_engine"
+        );
+        // The inference trainer's own `mage_flow` spelling canonicalizes to the same folder.
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("mage_flow")),
+            "mage_flow_realism_engine"
+        );
+        for sibling in ["qwen-image", "z-image", "krea_2"] {
+            assert_ne!(
+                derive_lora_id(None, "Realism Engine", Some("mage-flow")),
+                derive_lora_id(None, "Realism Engine", Some(sibling)),
+                "mage-flow must not share a folder with {sibling}"
+            );
+        }
+    }
+
+    /// The cross-family guard, exercised on the pair that actually looks alike: a Mage folder
+    /// rejects an incoming Qwen-Image import (and vice versa), while a same-family re-import is
+    /// still allowed.
+    #[test]
+    fn a_mage_folder_rejects_a_foreign_family_reimport() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_adapter(
+            &tmp.path().join("mage.safetensors"),
+            r#"{"format":"pt"}"#,
+            &mage_lora_keys(),
+        );
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "qwen-image")
+                .unwrap()
+                .as_deref(),
+            Some("mage-flow")
+        );
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "mage-flow").unwrap(),
+            None
+        );
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "mage_flow").unwrap(),
+            None
+        );
+    }
+
+    /// The import inspector returns the detected family AND what the file declares about itself,
+    /// from one header read — and declares nothing it was not told (sc-14057 trap: never default
+    /// alpha to rank).
+    #[test]
+    fn inspect_lora_source_reports_family_and_declared_rank_alpha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stamped = tmp.path().join("stamped");
+        std::fs::create_dir_all(&stamped).unwrap();
+        write_adapter(
+            &stamped.join("adapter.safetensors"),
+            r#"{"family":"mage_flow","networkType":"lokr","rank":"16","alpha":"32"}"#,
+            &["transformer_blocks.0.attn.to_q.lokr_w1".to_owned()],
+        );
+        let (family, meta) = inspect_lora_source(stamped.to_str().unwrap()).unwrap();
+        assert_eq!(family.as_deref(), Some("mage-flow"));
+        assert_eq!(meta.network_type.as_deref(), Some("lokr"));
+        assert_eq!(meta.rank, Some(16));
+        assert_eq!(meta.alpha, Some(32.0));
+
+        // A community file with neither a family stamp nor rank/alpha: the family still resolves
+        // from the 12-block geometry, and nothing is invented for the rest.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        write_adapter(
+            &bare.join("adapter.safetensors"),
+            r#"{"format":"pt"}"#,
+            &mage_lora_keys(),
+        );
+        let (family, meta) = inspect_lora_source(bare.to_str().unwrap()).unwrap();
+        assert_eq!(family.as_deref(), Some("mage-flow"));
+        assert!(
+            meta.is_empty(),
+            "an adapter that declares no rank/alpha/type must record none: {meta:?}"
         );
     }
 }
