@@ -52,3 +52,42 @@ export function putUiPreferences(patch) {
     body: JSON.stringify(patch),
   });
 }
+
+let pendingNavigationPatch = null;
+let navigationDrainPromise = null;
+let navigationDrainScheduled = false;
+
+async function drainNavigationPreferences() {
+  navigationDrainScheduled = false;
+  while (pendingNavigationPatch) {
+    const patch = pendingNavigationPatch;
+    pendingNavigationPatch = null;
+    // Read the access token when this request starts, not when the patch was
+    // enqueued. A token can be promoted or rotated while an earlier PUT is in flight.
+    await putUiPreferences(patch).catch(() => {});
+  }
+  navigationDrainPromise = null;
+}
+
+// Serialize durable navigation writes and coalesce intent that arrives before
+// the next request starts. With at most one PUT in flight, an older delayed
+// response cannot persist after a newer selection or destination.
+export function persistNavigationPreferences(patch) {
+  pendingNavigationPatch = { ...(pendingNavigationPatch ?? {}), ...patch };
+  if (!navigationDrainPromise) {
+    navigationDrainPromise = new Promise((resolve) => {
+      if (!navigationDrainScheduled) {
+        navigationDrainScheduled = true;
+        queueMicrotask(() => resolve(drainNavigationPreferences()));
+      }
+    });
+  }
+  return navigationDrainPromise;
+}
+
+export async function resetNavigationPreferenceQueueForTests() {
+  await navigationDrainPromise;
+  pendingNavigationPatch = null;
+  navigationDrainPromise = null;
+  navigationDrainScheduled = false;
+}

@@ -69,11 +69,12 @@ describe("ApiError (sc-15105)", () => {
   });
 
   it("carries the status on non-401 failures without claiming authRequired", async () => {
-    respondWith({ detail: "nope" }, 500);
+    respondWith({ detail: "nope", code: "catalog_scan_busy" }, 500);
 
     const err = await apiFetch("/api/v1/jobs", "").catch((caught) => caught);
 
     expect(err.status).toBe(500);
+    expect(err.code).toBe("catalog_scan_busy");
     expect(err.authRequired).toBe(false);
     expect(isUnauthorized(err)).toBe(false);
   });

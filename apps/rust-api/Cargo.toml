@@ -34,7 +34,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 # Move deleted LoRA/model artifacts to the OS trash (recoverable) rather than unlinking them.
 trash = { workspace = true }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors"] }
 tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1.11", features = ["v4"] }
@@ -64,6 +64,7 @@ backend-candle = ["sceneworks-worker/backend-candle"]
 # Construct SQLite BUSY errors directly in the API error-contract test without
 # adding rusqlite to the production API dependency surface.
 rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { version = "53.4", default-features = false, features = ["snap"] }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
