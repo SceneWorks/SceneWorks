@@ -70,8 +70,8 @@ struct FaceAnalysisRecord {
 }
 
 /// One SCRFD detection in original-frame pixel coordinates. Catalog analysis
-/// intentionally does not run ArcFace recognition on macOS; the candle
-/// `FaceEmbedder` surface currently returns detection and embedding together.
+/// intentionally uses detection-only entry points on both backends and never
+/// computes ArcFace embeddings for an objective face count.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -154,8 +154,8 @@ impl CatalogFaceDetector {
             }
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             CatalogFaceBackend::Candle(analysis) => analysis
-                .analyze(&image)
-                .map_err(|error| WorkerError::Engine(format!("face analyze: {error}")))?
+                .detect(&image)
+                .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?
                 .into_iter()
                 .map(|face| CatalogFaceDetection {
                     bbox: face.bbox,

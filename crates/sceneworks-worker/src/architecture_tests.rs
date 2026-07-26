@@ -135,6 +135,14 @@ fn catalog_face_adapter_uses_each_backends_actual_score_field() {
         candle_arm.contains("confidence: face.det_score"),
         "gen-core's candle face-analysis result exposes `det_score`"
     );
+    assert!(
+        candle_arm.contains(".detect(&image)"),
+        "catalog face counting must use the candle detection-only path"
+    );
+    assert!(
+        !candle_arm.contains(".analyze(&image)"),
+        "catalog face counting must not compute unused ArcFace embeddings"
+    );
 }
 
 /// Extract only `JobType` variants occurring in top-level patterns of
