@@ -601,19 +601,17 @@ describe("useAccessGate (sc-9750)", () => {
     });
 
     it("stops listening once the gate unmounts", async () => {
-      const { statuses } = await mountUnlocked();
+      await mountUnlocked();
       // Spy on the window, not on "did it throw": React 18 made setState on an unmounted
-      // component a silent no-op, so a leaked subscriber throws nothing — it just keeps the
-      // dead hook's closures alive for the life of the page. The detach is the only
-      // observable, and it only happens because the effect returns its unsubscribe.
+      // component a silent no-op, so a leaked subscriber throws nothing and changes nothing
+      // observable — it just keeps the dead hook's closures alive for the life of the page.
+      // The detach is the ONLY thing that can fail here, and it only happens because the
+      // effect returns its unsubscribe.
       const remove = vi.spyOn(window, "removeEventListener");
       act(() => root.unmount());
       root = null;
-      expect(remove.mock.calls.some((call) => call[0] === "storage")).toBe(true);
 
-      const rendersBefore = statuses.length;
-      act(() => otherTabSets(null));
-      expect(statuses.length).toBe(rendersBefore);
+      expect(remove.mock.calls.some((call) => call[0] === "storage")).toBe(true);
       remove.mockRestore();
     });
   });

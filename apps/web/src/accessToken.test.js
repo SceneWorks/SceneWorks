@@ -175,6 +175,24 @@ describe("accessToken (sc-8880)", () => {
       expect(listener).not.toHaveBeenCalled();
     });
 
+    it("ignores a whole-store sessionStorage clear", () => {
+      // The higher-consequence half of the same guard: `key === null` is the branch that
+      // CLEARS the gate, so a same-origin frame calling sessionStorage.clear() must not be
+      // able to lock this tab out.
+      storeAccessToken("shared-token");
+      const listener = vi.fn();
+      subscribe(listener);
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: null,
+          newValue: null,
+          storageArea: window.sessionStorage,
+        }),
+      );
+      expect(listener).not.toHaveBeenCalled();
+      expect(readAccessToken()).toBe("shared-token");
+    });
+
     it("stops notifying after unsubscribe", () => {
       const listener = vi.fn();
       const off = subscribe(listener);
@@ -248,17 +266,19 @@ describe("accessToken (sc-8880)", () => {
       // empty-token default. A subscriber must not be the one thing that blows up in a
       // private-mode / storage-disabled context.
       originalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-      const seen = [];
-      expect(() => subscribe((next) => seen.push(next))).not.toThrow();
       Object.defineProperty(globalThis, "localStorage", {
         configurable: true,
         get() {
           throw new Error("storage disabled");
         },
       });
+      // Subscribe AFTER breaking storage, so this covers what it claims to.
+      const seen = [];
+      expect(() => subscribe((next) => seen.push(next))).not.toThrow();
       expect(() =>
         window.dispatchEvent(new StorageEvent("storage", { key: ACCESS_TOKEN_KEY })),
       ).not.toThrow();
+      // The empty-token default, delivered rather than thrown.
       expect(seen).toEqual([""]);
     });
   });
