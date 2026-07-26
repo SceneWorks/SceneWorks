@@ -1125,8 +1125,32 @@ where
             }
             artifact_budget.replaced(existing_bytes, encoded.len() as u64);
             fault_hook(PersistFaultPoint::ThumbnailPublished)?;
+            Some(relative)
+        } else {
+            // Reusing a shared thumbnail is optional just like creating one.
+            // Ensure the per-record marker can name it before committing to
+            // that reference; at an exact cache cap, retain the base marker
+            // and let acquisition succeed without a thumbnail.
+            let marker_path = completion_marker_path(catalog, &record.id)?;
+            let existing_marker_bytes = std::fs::metadata(&marker_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let mut final_marker = base_marker.clone();
+            final_marker.thumbnail_path = Some(relative.clone());
+            let final_marker_bytes = serde_json::to_vec(&final_marker)?.len() as u64;
+            if artifact_budget
+                .ensure_replacement(
+                    existing_marker_bytes,
+                    final_marker_bytes,
+                    "catalog thumbnail reference",
+                )
+                .is_ok()
+            {
+                Some(relative)
+            } else {
+                None
+            }
         }
-        Some(relative)
     } else {
         None
     };
@@ -2559,6 +2583,137 @@ mod tests {
         );
         assert!(catalog.root().join(pending.path).is_file());
         assert!(!marker_path.exists());
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= exact_cap
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_cap_shared_thumbnail_reuse_omits_reference_and_recovers_without_network() {
+        let (_root, registry, id) = catalog_with_urls(&[
+            "https://example.com/shared-thumbnail-a",
+            "https://example.com/shared-thumbnail-b",
+        ]);
+        let mut catalog = registry.open_attached(&id).expect("open");
+        prepare_cache_directories(&catalog).expect("prepare");
+        let mut records = catalog.page_records(0, 2).expect("records");
+        let bytes = png(32, 24);
+        let options = CatalogImageFetchOptions {
+            accepted_target: 2,
+            concurrency: 1,
+            thumbnail_max_edge: Some(16),
+            ..CatalogImageFetchOptions::default()
+        };
+        let permit = Arc::new(Semaphore::new(bytes.len()))
+            .try_acquire_many_owned(bytes.len() as u32)
+            .expect("permit");
+        let fetched = validate_image(bytes, &options, permit).expect("image");
+        let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).expect("budget");
+        let mut counts = CatalogImageFetchCounts::default();
+        let first_marker = persist_fetched(
+            &catalog,
+            &records[0],
+            &fetched,
+            &options,
+            &mut counts,
+            &mut budget,
+        )
+        .expect("seed content and thumbnail");
+        assert!(first_marker.thumbnail_path.is_some());
+
+        let reference_index = CacheReferenceIndex::build(&catalog).expect("index");
+        let mut checkpoint = CatalogImageFetchCheckpoint {
+            requested_accepted_target: 2,
+            exhausted: true,
+            counts: CatalogImageFetchCounts::default(),
+            updated_at: utc_now(),
+        };
+        apply_available(
+            &mut catalog,
+            &mut records[0],
+            &first_marker,
+            1,
+            0,
+            &mut checkpoint,
+            &reference_index,
+        )
+        .expect("commit first record");
+        account_completed_record(
+            &mut catalog,
+            &mut records[0],
+            &options,
+            &mut checkpoint,
+            &reference_index,
+            &mut budget,
+        )
+        .expect("finish first record");
+        drop(reference_index);
+
+        let base_marker = CompletionMarker {
+            record_id: records[1].id.clone(),
+            content_hash: first_marker.content_hash.clone(),
+            cache_path: first_marker.cache_path.clone(),
+            staged_cache_path: None,
+            thumbnail_path: None,
+            pending_thumbnail: None,
+            bytes: first_marker.bytes,
+            width: first_marker.width,
+            height: first_marker.height,
+        };
+        let current = catalog
+            .storage_accounting()
+            .expect("accounting")
+            .artifact_bytes;
+        let exact_cap = current + serde_json::to_vec(&base_marker).expect("marker").len() as u64;
+        let exact_options = CatalogImageFetchOptions {
+            max_cache_bytes: exact_cap,
+            ..options
+        };
+        let mut exact_budget =
+            ArtifactBudget::initialize(&catalog, exact_cap).expect("exact budget");
+        let second_marker = persist_fetched(
+            &catalog,
+            &records[1],
+            &fetched,
+            &exact_options,
+            &mut counts,
+            &mut exact_budget,
+        )
+        .expect("optional shared thumbnail must not fail acquisition");
+        assert!(second_marker.thumbnail_path.is_none());
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= exact_cap
+        );
+        drop(catalog);
+
+        let calls = Arc::new(Mutex::new(0_u64));
+        let report = fetch_attached_catalog_images_with(&registry, &id, &exact_options, {
+            let calls = Arc::clone(&calls);
+            move |_url, _options| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    *calls.lock().expect("calls") += 1;
+                    Err(WorkerError::InvalidPayload(
+                        "shared thumbnail recovery must not fetch".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect("recover exact-cap base marker");
+        assert_eq!(report.checkpoint.counts.accepted, 2);
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        let catalog = registry.open_attached(&id).expect("reopen");
+        let records = catalog.page_records(0, 2).expect("records");
+        assert!(records[1].thumbnail_path.is_none());
         assert!(
             catalog
                 .storage_accounting()

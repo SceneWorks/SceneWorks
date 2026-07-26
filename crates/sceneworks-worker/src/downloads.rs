@@ -1682,6 +1682,11 @@ mod public_source_url_tests {
     use axum::routing::get;
     use axum::Router;
     use std::convert::Infallible;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    const SYSTEM_PROXY_CHILD_ENV: &str = "SCENEWORKS_DATASET_PROXY_CHILD";
 
     #[test]
     fn dataset_url_parser_accepts_endpoint_urls_without_safe_filenames() {
@@ -1834,6 +1839,132 @@ mod public_source_url_tests {
             .expect("body");
         assert_eq!(body, "pinned");
         server.abort();
+    }
+
+    #[test]
+    fn dataset_client_ignores_system_proxy() {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "downloads::public_source_url_tests::dataset_client_ignores_system_proxy_child",
+                "--nocapture",
+            ])
+            .env(SYSTEM_PROXY_CHILD_ENV, "1")
+            .output()
+            .expect("run isolated proxy child");
+        assert!(
+            output.status.success(),
+            "isolated proxy child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn dataset_client_ignores_system_proxy_child() {
+        if std::env::var_os(SYSTEM_PROXY_CHILD_ENV).is_none() {
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let target_app = Router::new().route("/", get(|| async { "target" }));
+                let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("target bind");
+                let target_address = target_listener.local_addr().expect("target address");
+                let target_server = tokio::spawn(async move {
+                    axum::serve(target_listener, target_app)
+                        .await
+                        .expect("target serve");
+                });
+
+                let proxy_hits = Arc::new(AtomicU64::new(0));
+                let proxy_app = Router::new().fallback({
+                    let proxy_hits = Arc::clone(&proxy_hits);
+                    move || {
+                        let proxy_hits = Arc::clone(&proxy_hits);
+                        async move {
+                            proxy_hits.fetch_add(1, Ordering::SeqCst);
+                            "proxy"
+                        }
+                    }
+                });
+                let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("proxy bind");
+                let proxy_address = proxy_listener.local_addr().expect("proxy address");
+                let proxy_server = tokio::spawn(async move {
+                    axum::serve(proxy_listener, proxy_app)
+                        .await
+                        .expect("proxy serve");
+                });
+                let proxy_url = format!("http://{proxy_address}");
+                let _env = crate::test_env::EnvVars::set(&[
+                    ("ALL_PROXY", proxy_url.as_str()),
+                    ("all_proxy", proxy_url.as_str()),
+                    ("HTTPS_PROXY", proxy_url.as_str()),
+                    ("https_proxy", proxy_url.as_str()),
+                    ("HTTP_PROXY", proxy_url.as_str()),
+                    ("http_proxy", proxy_url.as_str()),
+                    ("NO_PROXY", ""),
+                    ("no_proxy", ""),
+                ]);
+
+                let url = reqwest::Url::parse(&format!(
+                    "http://catalog-source.invalid:{}/",
+                    target_address.port()
+                ))
+                .expect("URL");
+                let options = PublicSourceUrlFetchOptions {
+                    connect_timeout: Duration::from_millis(500),
+                    read_timeout: Duration::from_millis(500),
+                    hop_timeout: Duration::from_millis(500),
+                    ..PublicSourceUrlFetchOptions::default()
+                };
+
+                // Prove the child environment really routes an ordinary
+                // reqwest client through the local proxy.
+                let control = reqwest::Client::builder()
+                    .resolve_to_addrs(url.host_str().expect("host"), &[target_address])
+                    .build()
+                    .expect("control client");
+                assert_eq!(
+                    control
+                        .get(url.clone())
+                        .send()
+                        .await
+                        .expect("control request")
+                        .text()
+                        .await
+                        .expect("control body"),
+                    "proxy"
+                );
+                assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+
+                let pinned = build_public_source_url_client(&url, &[target_address], &options)
+                    .expect("pinned client");
+                assert_eq!(
+                    pinned
+                        .get(url)
+                        .send()
+                        .await
+                        .expect("pinned request")
+                        .text()
+                        .await
+                        .expect("pinned body"),
+                    "target"
+                );
+                assert_eq!(
+                    proxy_hits.load(Ordering::SeqCst),
+                    1,
+                    "no-proxy client must not contact the system proxy"
+                );
+                target_server.abort();
+                proxy_server.abort();
+            });
     }
 
     #[tokio::test]
