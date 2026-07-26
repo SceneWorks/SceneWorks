@@ -370,6 +370,10 @@
               "converter": { "type": "string" },
               "convertSourceFile": { "type": "string" },
               "convertBaseRepo": { "type": "string" },
+              "convertBaseSubdir": {
+                "type": "string",
+                "description": "Quant-tier subdir under convertBaseRepo's snapshot whose (dense, tier-invariant) VAE/text-encoder/tokenizer the converter borrows — e.g. \"bf16\" for the FLUX.2-klein turnkey, whose components live under <tier>/ rather than the snapshot root. The worker prefers this tier and falls back to any installed tier. Omit when convertBaseRepo is a plain root-layout diffusers snapshot."
+              },
               "autoDistillLora": {
                 "type": "object",
                 "additionalProperties": false,
