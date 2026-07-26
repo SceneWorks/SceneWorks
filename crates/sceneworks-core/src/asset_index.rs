@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use image::{ImageFormat, ImageReader};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,8 @@ use crate::store_util::{
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
 const MAX_INDEXED_POSTER_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INDEXED_POSTER_DIMENSION: u32 = 16_384;
+const MAX_INDEXED_POSTER_DECODE_BYTES: u64 = 128 * 1024 * 1024;
 
 pub(crate) const ASSET_FOLDERS: &[&str] = &[
     "assets/images",
@@ -394,8 +397,10 @@ fn attach_indexed_poster_url(
 ///
 /// Every path component is inspected without following links, the resolved
 /// source must remain below the canonical project root, and the final open uses
-/// the platform's no-follow flag. Unsafe, missing, unreadable, or oversized
-/// posters are treated as absent so indexing atomically clears any prior blob.
+/// the platform's no-follow flag. The bounded payload must also fully decode as
+/// JPEG; the `.poster.jpg` filename is never treated as proof of MIME. Unsafe,
+/// missing, unreadable, malformed, or oversized posters are treated as absent
+/// so indexing atomically clears any prior blob.
 fn read_indexed_poster(
     project_path: &Path,
     asset: &Value,
@@ -497,6 +502,15 @@ fn read_indexed_poster(
     file.take(MAX_INDEXED_POSTER_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_INDEXED_POSTER_BYTES {
+        return Ok(None);
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), ImageFormat::Jpeg);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_INDEXED_POSTER_DIMENSION);
+    limits.max_image_height = Some(MAX_INDEXED_POSTER_DIMENSION);
+    limits.max_alloc = Some(MAX_INDEXED_POSTER_DECODE_BYTES);
+    reader.limits(limits);
+    if reader.decode().is_err() {
         return Ok(None);
     }
     let sha256 = format!("{:x}", Sha256::digest(&bytes));

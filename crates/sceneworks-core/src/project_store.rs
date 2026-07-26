@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -16,6 +15,7 @@ use parking_lot::{Mutex, ReentrantMutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use subtle::ConstantTimeEq;
 
 use crate::asset_index::{
     asset_origin, asset_sidecars, find_asset_sidecar_path_on_connection,
@@ -2922,25 +2922,38 @@ impl ProjectStore {
         let project_path = self.find_project_path(project_id)?;
         let _project_guard = lock_project_files(&project_path);
         let connection = connect_project_db_ready_locked(&project_path)?;
-        connection
+        let poster = connection
             .query_row(
                 "
                 select poster_bytes, poster_sha256
                   from assets
                  where id = ?1
-                   and poster_sha256 = ?2
                    and poster_bytes is not null
                 ",
-                params![asset_id, poster_sha256],
-                |row| {
-                    Ok(AssetPoster {
-                        bytes: row.get(0)?,
-                        sha256: row.get(1)?,
-                    })
-                },
+                params![asset_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?
-            .ok_or_else(|| ProjectStoreError::NotFound("Poster not found".to_owned()))
+            .ok_or_else(|| ProjectStoreError::NotFound("Poster not found".to_owned()))?;
+        let (bytes, Some(stored_sha256)) = poster else {
+            return Err(ProjectStoreError::NotFound("Poster not found".to_owned()));
+        };
+        let recomputed_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let stored_matches_bytes: bool = stored_sha256
+            .as_bytes()
+            .ct_eq(recomputed_sha256.as_bytes())
+            .into();
+        let request_matches_bytes: bool = poster_sha256
+            .as_bytes()
+            .ct_eq(recomputed_sha256.as_bytes())
+            .into();
+        if !stored_matches_bytes || !request_matches_bytes {
+            return Err(ProjectStoreError::NotFound("Poster not found".to_owned()));
+        }
+        Ok(AssetPoster {
+            bytes,
+            sha256: stored_sha256,
+        })
     }
 
     pub fn index_asset_sidecar(
@@ -5630,6 +5643,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+            .encode(&rgb, 1, 1, image::ExtendedColorType::Rgb8)
+            .expect("test JPEG encodes");
+        bytes
+    }
+
     #[cfg(unix)]
     fn create_file_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(source, destination)
@@ -7347,7 +7368,11 @@ mod tests {
             let media_rel = format!("assets/videos/{generation_set_id}/{asset_id}.mp4");
             let poster_path = project_path.join(&media_rel).with_extension("poster.jpg");
             std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
-            std::fs::write(&poster_path, b"poster").unwrap();
+            std::fs::write(
+                &poster_path,
+                jpeg_fixture([index as u8, (index * 2) as u8, (index * 3) as u8]),
+            )
+            .unwrap();
             let fact = json!({
                 "assetId": asset_id,
                 "mediaPath": media_rel,
@@ -8076,8 +8101,9 @@ mod tests {
         // The worker writes the media and best-effort poster before reporting the
         // completed asset fact. Only `withposter` has that sibling when indexed.
         let poster_path = project_path.join("assets/videos/genset/withposter.poster.jpg");
+        let poster_bytes = jpeg_fixture([12, 34, 56]);
         std::fs::create_dir_all(poster_path.parent().unwrap()).expect("video dir");
-        std::fs::write(&poster_path, b"jpg-bytes").expect("write poster");
+        std::fs::write(&poster_path, &poster_bytes).expect("write poster");
         std::fs::write(
             project_path.join("assets/videos/genset/withposter.mp4"),
             b"video",
@@ -8118,7 +8144,7 @@ mod tests {
                 .get_asset_poster(&project.id, "withposter", poster_sha256)
                 .expect("advertised poster resolves")
                 .bytes,
-            b"jpg-bytes"
+            poster_bytes
         );
         assert!(
             by_id("noposter").get("posterUrl").is_none(),
@@ -8146,7 +8172,7 @@ mod tests {
                 .get_asset_poster(&project.id, "withposter", poster_sha256)
                 .expect("DB-backed poster survives source deletion")
                 .bytes,
-            b"jpg-bytes"
+            poster_bytes
         );
 
         store
@@ -8170,6 +8196,116 @@ mod tests {
     }
 
     #[test]
+    fn indexed_poster_rejects_malformed_and_oversized_jpeg_payloads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster validation").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let fact = |id: &str| {
+            json!({
+                "assetId": id,
+                "mediaPath": format!("assets/videos/set/{id}.mp4"),
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            })
+        };
+
+        for id in ["malformed", "oversized"] {
+            let media = project_path.join(format!("assets/videos/set/{id}.mp4"));
+            std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+            std::fs::write(&media, b"video").unwrap();
+            let payload = if id == "malformed" {
+                vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F']
+            } else {
+                vec![0u8; 16 * 1024 * 1024 + 1]
+            };
+            std::fs::write(media.with_extension("poster.jpg"), payload).unwrap();
+            store
+                .persist_generated_asset(&project.id, "job", "set", &fact(id))
+                .unwrap();
+        }
+
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(
+            listed.iter().all(|asset| asset.get("posterUrl").is_none()),
+            "neither JPEG-looking malformed bytes nor an oversized file may be advertised"
+        );
+    }
+
+    #[test]
+    fn get_asset_poster_fails_closed_when_indexed_blob_or_digest_is_tampered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Poster integrity").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let media = project_path.join("assets/videos/set/integrity.mp4");
+        let original = jpeg_fixture([1, 2, 3]);
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        std::fs::write(&media, b"video").unwrap();
+        std::fs::write(media.with_extension("poster.jpg"), &original).unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job",
+                "set",
+                &json!({
+                    "assetId": "integrity",
+                    "mediaPath": "assets/videos/set/integrity.mp4",
+                    "mimeType": "video/mp4",
+                    "type": "video",
+                    "displayName": "Integrity",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "image_to_video",
+                    "model": "wan",
+                    "adapter": "wan",
+                    "prompt": "x",
+                }),
+            )
+            .unwrap();
+        let advertised_sha = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .unwrap()[0]["posterUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned();
+        let connection = Connection::open(project_path.join("project.db")).unwrap();
+
+        connection
+            .execute(
+                "update assets set poster_bytes = ?1 where id = 'integrity'",
+                params![jpeg_fixture([9, 8, 7])],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "integrity", &advertised_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+
+        connection
+            .execute(
+                "update assets set poster_bytes = ?1, poster_sha256 = ?2 where id = 'integrity'",
+                params![original, "0".repeat(64)],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get_asset_poster(&project.id, "integrity", &advertised_sha),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn indexed_poster_rejects_symlink_sources_and_never_writes_a_poster_destination() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
@@ -8179,7 +8315,8 @@ mod tests {
         std::fs::create_dir_all(&video_dir).unwrap();
         std::fs::write(video_dir.join("linked.mp4"), b"video").unwrap();
         let outside_poster = temp_dir.path().join("outside-secret.jpg");
-        std::fs::write(&outside_poster, b"outside-secret").unwrap();
+        let outside_bytes = jpeg_fixture([11, 22, 33]);
+        std::fs::write(&outside_poster, &outside_bytes).unwrap();
         let linked_poster = video_dir.join("linked.poster.jpg");
         if let Err(error) = create_file_symlink(&outside_poster, &linked_poster) {
             eprintln!("symlink privilege unavailable; skipping symlink fixture: {error}");
@@ -8206,7 +8343,7 @@ mod tests {
             .list_assets(&project.id, true, true, AssetScope::All)
             .unwrap();
         assert!(listed[0].get("posterUrl").is_none());
-        assert_eq!(std::fs::read(&outside_poster).unwrap(), b"outside-secret");
+        assert_eq!(std::fs::read(&outside_poster).unwrap(), outside_bytes);
 
         let outside_destination = temp_dir.path().join("outside-destination");
         std::fs::create_dir_all(&outside_destination).unwrap();
@@ -8218,7 +8355,8 @@ mod tests {
             return;
         }
         std::fs::write(video_dir.join("contained.mp4"), b"video").unwrap();
-        std::fs::write(video_dir.join("contained.poster.jpg"), b"contained").unwrap();
+        let contained_bytes = jpeg_fixture([44, 55, 66]);
+        std::fs::write(video_dir.join("contained.poster.jpg"), &contained_bytes).unwrap();
         store
             .persist_generated_asset(&project.id, "job", "set", &fact("contained"))
             .unwrap();
@@ -8245,7 +8383,7 @@ mod tests {
                 .get_asset_poster(&project.id, "contained", sha)
                 .unwrap()
                 .bytes,
-            b"contained"
+            contained_bytes
         );
     }
 
@@ -8257,9 +8395,11 @@ mod tests {
         let project_path = store.find_project_path(&project.id).unwrap();
         let media = project_path.join("assets/videos/set/reused.mp4");
         let poster = media.with_extension("poster.jpg");
+        let poster_a = jpeg_fixture([10, 20, 30]);
+        let poster_b = jpeg_fixture([40, 50, 60]);
         std::fs::create_dir_all(media.parent().unwrap()).unwrap();
         std::fs::write(&media, b"video-a").unwrap();
-        std::fs::write(&poster, b"poster-a").unwrap();
+        std::fs::write(&poster, &poster_a).unwrap();
         let fact = json!({
             "assetId": "reused",
             "mediaPath": "assets/videos/set/reused.mp4",
@@ -8298,7 +8438,7 @@ mod tests {
             Err(ProjectStoreError::NotFound(_))
         ));
 
-        std::fs::write(&poster, b"poster-b").unwrap();
+        std::fs::write(&poster, &poster_b).unwrap();
         store
             .persist_generated_asset(&project.id, "job", "set", &fact)
             .unwrap();
@@ -8317,7 +8457,7 @@ mod tests {
                 .get_asset_poster(&project.id, "reused", new_sha)
                 .unwrap()
                 .bytes,
-            b"poster-b"
+            poster_b
         );
     }
 
@@ -8347,7 +8487,7 @@ mod tests {
             let poster = media.with_extension("poster.jpg");
             std::fs::create_dir_all(media.parent().unwrap()).unwrap();
             std::fs::write(&media, b"old-video").unwrap();
-            std::fs::write(&poster, b"old-poster").unwrap();
+            std::fs::write(&poster, jpeg_fixture([70, 80, 90])).unwrap();
             store
                 .persist_generated_asset(&project.id, "job", "set", &fact(lifecycle))
                 .unwrap();
@@ -8398,15 +8538,15 @@ mod tests {
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("Duplicate ids").unwrap();
         let project_path = store.find_project_path(&project.id).unwrap();
-        for (folder, file, poster_bytes) in [
-            ("a", "first", b"poster-a".as_slice()),
-            ("b", "second", b"poster-b".as_slice()),
+        for (folder, file, poster_rgb) in [
+            ("a", "first", [101, 102, 103]),
+            ("b", "second", [201, 202, 203]),
         ] {
             let media_rel = format!("assets/videos/{folder}/{file}.mp4");
             let media = project_path.join(&media_rel);
             std::fs::create_dir_all(media.parent().unwrap()).unwrap();
             std::fs::write(&media, b"video").unwrap();
-            std::fs::write(media.with_extension("poster.jpg"), poster_bytes).unwrap();
+            std::fs::write(media.with_extension("poster.jpg"), jpeg_fixture(poster_rgb)).unwrap();
             let asset = build_generated_asset_sidecar(
                 &project.id,
                 "job",
@@ -8434,9 +8574,9 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let media_path = listed[0]["file"]["path"].as_str().unwrap();
         let expected = if media_path.contains("/a/") {
-            b"poster-a".as_slice()
+            jpeg_fixture([101, 102, 103])
         } else {
-            b"poster-b".as_slice()
+            jpeg_fixture([201, 202, 203])
         };
         let sha = listed[0]["posterUrl"]
             .as_str()
@@ -8462,9 +8602,11 @@ mod tests {
         let project_path = store.find_project_path(&project.id).unwrap();
         let media = project_path.join("assets/videos/set/repaired.mp4");
         let poster = media.with_extension("poster.jpg");
+        let before = jpeg_fixture([3, 4, 5]);
+        let after = jpeg_fixture([6, 7, 8]);
         std::fs::create_dir_all(media.parent().unwrap()).unwrap();
         std::fs::write(&media, b"video").unwrap();
-        std::fs::write(&poster, b"poster-before").unwrap();
+        std::fs::write(&poster, &before).unwrap();
         let fact = json!({
             "assetId": "repaired",
             "mediaPath": "assets/videos/set/repaired.mp4",
@@ -8490,7 +8632,7 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        std::fs::write(&poster, b"poster-after").unwrap();
+        std::fs::write(&poster, &after).unwrap();
         fail_next_asset_index_db_mutation();
         assert!(store
             .update_asset_status(
@@ -8519,7 +8661,7 @@ mod tests {
                 .get_asset_poster(&project.id, "repaired", new_sha)
                 .unwrap()
                 .bytes,
-            b"poster-after"
+            after
         );
         assert!(matches!(
             store.get_asset_poster(&project.id, "repaired", &old_sha),

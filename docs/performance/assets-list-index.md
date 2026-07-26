@@ -35,11 +35,15 @@ timestamps.
 At indexing time, a source sibling poster is accepted only when its relative
 path is safe, every component is non-symlink, canonical resolution remains
 inside the project, the final open uses the platform no-follow flag, and the
-file is at most 16 MiB. Its bytes and digest are committed atomically with the
-envelope. Missing or rejected sources commit a null blob and no URL, clearing
-any previous value for the same asset id. Adding, replacing, or deleting only
-the source sibling requires reindexing; until then the advertised DB-backed URL
-continues to resolve independently of that source file.
+file is at most 16 MiB. The bounded payload must fully decode as JPEG under
+dimension and allocation limits; its filename alone never determines MIME.
+Verified bytes and their digest are committed atomically with the envelope.
+Missing or rejected sources commit a null blob and no URL, clearing any previous
+value for the same asset id. Adding, replacing, or deleting only the source
+sibling requires reindexing; until then the advertised DB-backed URL continues
+to resolve independently of that source file. The serving path recomputes the
+blob digest and constant-time compares it with both the stored and requested
+digests, failing closed if a DB row is inconsistent.
 
 A corrupt sidecar is skipped during reindex; a corrupt indexed envelope is
 skipped during listing without preventing healthy assets from loading. Here
@@ -131,8 +135,8 @@ evicted cold-cache measurement:
 
 ```text
 storage=synthetic-local-distinct-video-sets path=<temporary local directory>
-first-call: assets=500 elapsed_ms=7.552 fs_total=10 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
-steady-state-average(10): assets=500 elapsed_ms=7.366 fs_total=7 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+first-call: assets=500 elapsed_ms=11.716 fs_total=10 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+steady-state-average(10): assets=500 elapsed_ms=11.533 fs_total=7 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 poster_reads=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
 ```
 
 The implementation environment had no mounted network volume or RunPod access,

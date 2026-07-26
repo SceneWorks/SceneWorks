@@ -4,6 +4,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sceneworks_core::project_store::{AssetListFilesystemOperations, AssetScope, ProjectStore};
 use serde_json::json;
 
+fn jpeg_fixture() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode(&[32, 64, 96], 1, 1, image::ExtendedColorType::Rgb8)
+        .expect("benchmark JPEG encodes");
+    bytes
+}
+
 fn list_once(
     store: &ProjectStore,
     project_id: &str,
@@ -135,7 +143,7 @@ fn synthetic(asset_count: usize, iterations: usize) {
         let poster_path = project_path.join(&media_path).with_extension("poster.jpg");
         std::fs::create_dir_all(poster_path.parent().expect("poster parent"))
             .expect("poster directory creates");
-        std::fs::write(&poster_path, b"benchmark-poster").expect("poster writes");
+        std::fs::write(&poster_path, jpeg_fixture()).expect("poster writes");
         store
             .persist_generated_asset(
                 &project.id,
