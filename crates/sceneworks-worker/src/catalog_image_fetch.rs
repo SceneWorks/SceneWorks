@@ -309,6 +309,29 @@ impl ArtifactBudget {
     fn removed(&mut self, bytes: u64) {
         self.bytes = self.bytes.saturating_sub(bytes);
     }
+
+    fn ensure_two_replacements(
+        &self,
+        first_existing: u64,
+        first_new: u64,
+        second_existing: u64,
+        second_new: u64,
+        detail: &str,
+    ) -> CatalogImageFetchResult<()> {
+        let projected = self
+            .bytes
+            .saturating_sub(first_existing)
+            .saturating_sub(second_existing)
+            .saturating_add(first_new)
+            .saturating_add(second_new);
+        if projected > self.max_bytes {
+            return Err(CatalogImageFetchError::InvalidOptions(format!(
+                "{detail} would exceed its {} byte artifact limit",
+                self.max_bytes
+            )));
+        }
+        Ok(())
+    }
 }
 
 struct CacheReferenceIndex {
@@ -1040,18 +1063,16 @@ where
         JpegEncoder::new_with_quality(&mut encoded, 82).encode_image(&thumbnail)?;
         let thumbnail_hash = hex_digest(&encoded);
         if validate_cached_file(&path, &thumbnail_hash, encoded.len() as u64).is_err() {
-            let existing_bytes = std::fs::metadata(&path)
+            let mut existing_bytes = std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            if encoded.len() > options.max_thumbnail_bytes
-                || artifact_budget
-                    .ensure_replacement(
-                        existing_bytes,
-                        encoded.len() as u64,
-                        "catalog thumbnail cache",
-                    )
-                    .is_err()
-            {
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+                sync_parent_directory(&path);
+                artifact_budget.removed(existing_bytes);
+                existing_bytes = 0;
+            }
+            if encoded.len() > options.max_thumbnail_bytes {
                 return Ok(base_marker);
             }
             base_marker.pending_thumbnail = Some(PendingThumbnail {
@@ -1059,6 +1080,43 @@ where
                 content_hash: thumbnail_hash,
                 bytes: encoded.len() as u64,
             });
+            let marker_path = completion_marker_path(catalog, &record.id)?;
+            let existing_marker_bytes = std::fs::metadata(&marker_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let pending_marker_bytes = serde_json::to_vec(&base_marker)?.len() as u64;
+            let mut final_marker = base_marker.clone();
+            final_marker.thumbnail_path = Some(relative.clone());
+            final_marker.pending_thumbnail = None;
+            let final_marker_bytes = serde_json::to_vec(&final_marker)?.len() as u64;
+            let fits = artifact_budget
+                .ensure_replacement(
+                    existing_marker_bytes,
+                    pending_marker_bytes,
+                    "catalog thumbnail transaction",
+                )
+                .and_then(|()| {
+                    artifact_budget.ensure_two_replacements(
+                        existing_marker_bytes,
+                        pending_marker_bytes,
+                        existing_bytes,
+                        encoded.len() as u64,
+                        "catalog thumbnail transaction",
+                    )
+                })
+                .and_then(|()| {
+                    artifact_budget.ensure_two_replacements(
+                        existing_marker_bytes,
+                        final_marker_bytes,
+                        existing_bytes,
+                        encoded.len() as u64,
+                        "catalog thumbnail transaction",
+                    )
+                });
+            if fits.is_err() {
+                base_marker.pending_thumbnail = None;
+                return Ok(base_marker);
+            }
             persist_completion_marker(catalog, &base_marker, artifact_budget)?;
             if path.exists() {
                 atomic_replace(&path, &encoded)?;
@@ -2366,9 +2424,82 @@ mod tests {
             .try_acquire_many_owned(bytes.len() as u32)
             .expect("permit");
         let fetched = validate_image(bytes, &options, permit).expect("image");
-        let mut budget =
-            ArtifactBudget::initialize(&catalog, options.max_cache_bytes).expect("budget");
+        let mut seed_budget = ArtifactBudget::initialize(&catalog, u64::MAX).expect("budget");
         let mut counts = CatalogImageFetchCounts::default();
+        let base = persist_fetched(
+            &catalog,
+            &record,
+            &fetched,
+            &CatalogImageFetchOptions {
+                thumbnail_max_edge: None,
+                ..options.clone()
+            },
+            &mut counts,
+            &mut seed_budget,
+        )
+        .expect("base");
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, 82)
+            .encode_image(&fetched.image.thumbnail(16, 16).to_rgb8())
+            .expect("thumbnail");
+        let relative = format!(
+            "thumbnails/sha256/{}/{}.jpg",
+            &base.content_hash[..2],
+            base.content_hash
+        );
+        let mut pending_marker = base.clone();
+        pending_marker.pending_thumbnail = Some(PendingThumbnail {
+            path: relative.clone(),
+            content_hash: hex_digest(&encoded),
+            bytes: encoded.len() as u64,
+        });
+        let mut final_marker = base;
+        final_marker.thumbnail_path = Some(relative);
+        let marker_path = completion_marker_path(&catalog, &record.id).expect("marker");
+        let old_marker_bytes = std::fs::metadata(&marker_path).expect("marker").len();
+        let current = catalog
+            .storage_accounting()
+            .expect("accounting")
+            .artifact_bytes;
+        let exact_cap = [
+            current - old_marker_bytes + serde_json::to_vec(&pending_marker).unwrap().len() as u64,
+            current - old_marker_bytes
+                + serde_json::to_vec(&pending_marker).unwrap().len() as u64
+                + encoded.len() as u64,
+            current - old_marker_bytes
+                + serde_json::to_vec(&final_marker).unwrap().len() as u64
+                + encoded.len() as u64,
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        let options = CatalogImageFetchOptions {
+            max_cache_bytes: exact_cap,
+            ..options
+        };
+        let mut too_small =
+            ArtifactBudget::initialize(&catalog, exact_cap - 1).expect("small budget");
+        let skipped = persist_fetched(
+            &catalog,
+            &record,
+            &fetched,
+            &CatalogImageFetchOptions {
+                max_cache_bytes: exact_cap - 1,
+                ..options.clone()
+            },
+            &mut counts,
+            &mut too_small,
+        )
+        .expect("thumbnail is optional");
+        assert!(skipped.thumbnail_path.is_none());
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                < exact_cap
+        );
+        let mut budget = ArtifactBudget::initialize(&catalog, exact_cap).expect("budget");
         let error = persist_fetched_with_hook(
             &catalog,
             &record,
@@ -2394,6 +2525,13 @@ mod tests {
                 .expect("marker payload");
         let pending = marker.pending_thumbnail.expect("pending thumbnail");
         assert!(catalog.root().join(&pending.path).is_file());
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= exact_cap
+        );
         drop(catalog);
 
         let calls = Arc::new(Mutex::new(0_u64));
@@ -2421,6 +2559,13 @@ mod tests {
         );
         assert!(catalog.root().join(pending.path).is_file());
         assert!(!marker_path.exists());
+        assert!(
+            catalog
+                .storage_accounting()
+                .expect("accounting")
+                .artifact_bytes
+                <= exact_cap
+        );
     }
 
     #[test]

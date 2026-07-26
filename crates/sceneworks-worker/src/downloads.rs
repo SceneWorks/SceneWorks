@@ -1664,6 +1664,9 @@ fn build_public_source_url_client(
         WorkerError::InvalidPayload("dataset image URL host is not allowed".to_owned())
     })?;
     let mut builder = reqwest::Client::builder()
+        // A system HTTP(S)_PROXY would move DNS and connection control to the
+        // proxy, bypassing the validated/pinned address set below.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(options.connect_timeout)
         .read_timeout(options.read_timeout);
