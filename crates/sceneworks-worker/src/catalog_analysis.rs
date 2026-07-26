@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use sceneworks_core::catalog_store::{
-    Catalog, CatalogError, CatalogRecord, CatalogRegistry, NewCatalogRecord,
+    Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -424,11 +424,20 @@ pub struct CatalogAnalysisReport {
 }
 
 struct CatalogAnalysisLease {
+    _processing: CatalogProcessingLease,
     _files: Vec<File>,
 }
 
 impl CatalogAnalysisLease {
     fn acquire(catalog: &Catalog) -> CatalogAnalysisResult<Self> {
+        let processing =
+            CatalogProcessingLease::try_acquire(catalog).map_err(|error| match error {
+                CatalogError::Conflict(_) => CatalogAnalysisError::Busy(format!(
+                    "Catalog {} already has active processing.",
+                    catalog.descriptor().id
+                )),
+                error => CatalogAnalysisError::Catalog(error),
+            })?;
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
@@ -450,7 +459,10 @@ impl CatalogAnalysisLease {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(Self { _files: files })
+        Ok(Self {
+            _processing: processing,
+            _files: files,
+        })
     }
 }
 
@@ -1929,6 +1941,28 @@ mod tests {
             ),
             Err(CatalogAnalysisError::InvalidConfig(_))
         ));
+        assert!(analyzers.calls.is_empty());
+        assert!(previous_structured_analysis(&fixture.record("qualified")).is_none());
+    }
+
+    #[test]
+    fn shared_processing_lease_blocks_analysis_before_inference_or_mutation() {
+        let fixture = Fixture::new("processing-contention", &["qualified"]);
+        let catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog opens");
+        let _processing =
+            CatalogProcessingLease::try_acquire(&catalog).expect("shared processing lease");
+        let mut analyzers = FakeAnalyzers::default();
+        let error = analyze_attached_catalog(
+            &fixture.registry,
+            &fixture.catalog_id,
+            &CatalogAnalysisConfig::default(),
+            &mut analyzers,
+        )
+        .expect_err("active scanner or fetch must block analysis");
+        assert!(matches!(error, CatalogAnalysisError::Busy(_)));
         assert!(analyzers.calls.is_empty());
         assert!(previous_structured_analysis(&fixture.record("qualified")).is_none());
     }
