@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { apiFetch, eventUrl } from "../api.js";
+import { apiFetch, eventUrl, isReauthenticating } from "../api.js";
 import {
   acceptsJobUpdate,
   jobRevision,
@@ -418,6 +418,14 @@ export function useJobEvents({
           ticket = response.ticket;
         }
       } catch (err) {
+        if (isReauthenticating(err)) {
+          // sc-15105: the token went stale mid-session and the access gate has claimed the
+          // session. Don't push the raw "SceneWorks access token required" into the error
+          // band and don't arm a reconnect that can only 401 again — `ready` drops with the
+          // gate, tearing this effect down, and it re-subscribes if the re-verify keeps the
+          // session. A 401 the gate did NOT claim stays an ordinary failure below.
+          return;
+        }
         setError(err.message);
         if (!closed) {
           const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);

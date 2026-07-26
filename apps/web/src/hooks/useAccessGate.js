@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, setMediaTicket } from "../api.js";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  apiFetch,
+  isReauthenticating,
+  isThrottled,
+  setMediaTicket,
+  setUnauthorizedHandler,
+} from "../api.js";
 import { isDesktop as isDesktopShell } from "../runtime.js";
 import { readAccessToken, storeAccessToken, clearAccessToken } from "../accessToken.js";
 import { recordStartupMark } from "../startupTiming.js";
@@ -46,6 +52,19 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   const [passwordDraft, setPasswordDraft] = useState("");
   // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
   const [authError, setAuthError] = useState("");
+  // sc-15105: mirrors of the two values the 401 handler below reads. It runs outside
+  // React's render cycle (inside `apiFetch`) and must decide before any state has
+  // flushed, so it cannot read `tokenStatus`/`access` directly. Synced in a bare
+  // useLayoutEffect (no dep array) rather than the render body — a discarded concurrent
+  // or StrictMode render must not be able to publish state that never committed, and
+  // must not clobber the eager write `handleUnauthorized` makes below (the same rule
+  // App.jsx follows for its own live-value refs, sc-8940 / sc-9641).
+  const tokenStatusRef = useRef(tokenStatus);
+  const authRequiredRef = useRef(false);
+  useLayoutEffect(() => {
+    tokenStatusRef.current = tokenStatus;
+    authRequiredRef.current = access.authRequired === true;
+  });
 
   // The desktop shell reaches its own API over loopback, which the API trusts
   // (SCENEWORKS_TRUST_LOOPBACK), so it's authenticated without a password — never prompt
@@ -131,8 +150,17 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         attempt = 0;
         const ttlMs = Math.max(15, Number(response.expiresInSeconds) || 0) * 1000;
         timer = window.setTimeout(acquire, Math.max(5000, Math.floor(ttlMs / 3)));
-      } catch {
+      } catch (err) {
         if (closed) {
+          return;
+        }
+        if (isReauthenticating(err)) {
+          // sc-15105: the token went stale under us and the gate has claimed the session.
+          // Surrender instead of arming a backoff that can only 401 again forever — and
+          // skip the "retrying in the background" notice, which would be a lie (nothing
+          // is retrying) on the blocker that is about to appear. The effect re-runs and
+          // mints afresh if the re-verify keeps the session. A 401 the gate did NOT claim
+          // falls through to the ordinary degraded-media path below.
           return;
         }
         recordStartupMark("media-authorization-settled");
@@ -215,6 +243,51 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // sc-15105: the same staleness can arrive MID-SESSION — the host rotates its password
+  // and restarts the API while the tab sits open — and sc-15102's re-verify only runs at
+  // startup, so nothing re-prompted. `apiFetch` now calls this on every 401.
+  //
+  // Deliberately NOT a logout: one unlucky endpoint must not evict a good session. We
+  // demote the token from "accepted" back to "pending", which drops `authenticated`
+  // (blocking the shell behind the gate's "unlocking" state and stopping the mint/SSE
+  // loops via their effect cleanups) and re-arms the re-verify effect below — the single
+  // place that decides between "the password really did change" (ok:false ⇒ drop it, show
+  // the prompt) and "route-specific 401" (ok:true ⇒ keep the session, resume).
+  //
+  // Only demote from "accepted". "none" means the gate is already locked with no token —
+  // flipping that to "pending" would show "unlocking" forever, because the re-verify
+  // effect below bails on an empty token and nothing would ever move it on. "pending"
+  // means a check is already in flight. Both are still the gate owning the failure, so
+  // they return true. The eager ref write is what makes a storm collapse: a page full of
+  // screens 401ing at once all land here before React flushes.
+  //
+  // Returns whether the gate claimed the session; `apiFetch` records that on the error as
+  // `reauthenticating` so the mint / SSE retry loops can tell "surrender, the gate has
+  // it" from "an ordinary failure I should keep handling myself".
+  const handleUnauthorized = useCallback(() => {
+    // A deployment with no password can't produce a 401 the gate could act on — a 401
+    // here means the host disagrees with its own /api/v1/access answer, which is not
+    // something a password prompt fixes.
+    if (!authRequiredRef.current) {
+      return false;
+    }
+    if (tokenStatusRef.current === "accepted") {
+      tokenStatusRef.current = "pending";
+      setTokenStatus("pending");
+    }
+    return true;
+  }, []);
+
+  useEffect(() => {
+    if (isDesktopShell) {
+      // The desktop shell reaches its own API over trusted loopback and is authenticated
+      // unconditionally (see `authenticated` above) — it must never be prompted, so it
+      // doesn't register a 401 reaction at all (epic 4484).
+      return undefined;
+    }
+    return setUnauthorizedHandler(handleUnauthorized);
+  }, [handleUnauthorized]);
+
   // Re-verify a token restored from localStorage before trusting it (sc-15102). The host
   // password can change (or be cleared, or the host can be a different machine at the same
   // LAN address) between visits, and nothing in the client re-prompts on a 401 — so an
@@ -223,6 +296,10 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // the first protected load and never races it. A rejected token is dropped and the gate
   // shows the password prompt; an unreachable host keeps the token and retries with
   // backoff (mirroring the probe/mint loops) so a transient outage self-heals.
+  //
+  // sc-15105 gave this effect a second entry point: `handleUnauthorized` above demotes an
+  // accepted token to "pending" on a 401, so the same check now adjudicates both "restored
+  // from storage, never proven" and "was proven, then the host rotated its password".
   useEffect(() => {
     if (isDesktopShell || !accessResolved || !access.authRequired) {
       return undefined;
@@ -250,13 +327,15 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
         setTokenStatus("none");
         setAuthError("The saved password no longer works on this host. Enter the current one.");
         dismissNoticeKind("access-verify");
-      } catch {
+      } catch (err) {
         if (closed) {
           return;
         }
         pushNotice(
           "access-verify",
-          "access check: couldn't reach the host to confirm the saved password. Retrying in the background.",
+          isThrottled(err)
+            ? "access check: the host is temporarily refusing password attempts from this device after too many failures. Retrying in the background."
+            : "access check: couldn't reach the host to confirm the saved password. Retrying in the background.",
         );
         const delay = Math.min(30000, 1000 * 2 ** attempt);
         attempt += 1;
@@ -294,8 +373,16 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
           setAuthError("Incorrect password. Try again.");
           return;
         }
-      } catch {
-        setAuthError("Couldn't reach the host to verify the password.");
+      } catch (err) {
+        // sc-15105: a rotation storm can trip the host's per-IP attempt throttle
+        // (`apps/rust-api/src/auth.rs`), which answers 429 — including for this public
+        // verify route. Reporting that as "couldn't reach the host" sends the user
+        // hunting a network fault instead of waiting out a lockout that clears itself.
+        setAuthError(
+          isThrottled(err)
+            ? "Too many password attempts from this device. Wait a minute, then try again."
+            : "Couldn't reach the host to verify the password.",
+        );
         return;
       }
       storeAccessToken(candidate);
