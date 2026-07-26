@@ -240,8 +240,8 @@
               "requiresDimensionsMultipleOf": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn dimension_multiple_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "let multiple = dimension_multiple_of(model_manifest_entry)" }],
-                "description": "Required render-dimension stride; core normalizes geometry to this value."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn dimension_multiple_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "let multiple = dimension_multiple_of(model_manifest_entry)" }, { "path": "apps/web/src/resolutionOverride.js", "anchor": "requiresDimensionsMultipleOf" }],
+                "description": "Required render-dimension stride; core normalizes video geometry to this value, and Image Studio enforces it as the free Width/Height override stride for native-resolution image models (Mage-Flow)."
               },
               "recommendedMaxDuration": {
                 "type": "number", "exclusiveMinimum": 0,

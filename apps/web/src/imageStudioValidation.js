@@ -56,6 +56,11 @@ export function imageGenerateValidation({
   // imageMultiPhase.multiPhaseIssues (an enabled-but-broken phase list blocks Generate with an
   // error). Empty when the editor is off or the model has no multi-phase lane.
   multiPhaseIssues = [],
+  // Free Width/Height override out of the selected model's native range or off its required stride
+  // (sc-14058, native-resolution families like Mage-Flow). A pre-computed, user-facing ERROR string
+  // (or null) — a value the user actively broke that nothing else on the form explains, so it blocks
+  // Generate AND is surfaced. Null/absent leaves the gate unchanged for every other model.
+  dimensionError = null,
 } = {}) {
   const issues = [];
   if (!activeProject) {
@@ -104,6 +109,11 @@ export function imageGenerateValidation({
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   // Multi-phase denoise problems (sc-13885) — already kinded (errors) by multiPhaseIssues.
   issues.push(...multiPhaseIssues);
+  // A broken free Width/Height override (sc-14058): an error, not a requirement — the two number boxes
+  // hold a value the user actively broke, and only this message explains the dead Generate button.
+  if (dimensionError) {
+    issues.push(issue.error(null, dimensionError));
+  }
   return issues;
 }
 

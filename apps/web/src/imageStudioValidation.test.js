@@ -59,6 +59,18 @@ describe("imageGenerateValidation", () => {
     );
   });
 
+  it("surfaces a broken Width/Height override as an error and stays silent when valid (sc-14058)", () => {
+    // No dimension error (valid or a non-native model) → nothing added, draft still ready.
+    expect(summarize(imageGenerateValidation({ ...whole, dimensionError: null })).ready).toBe(true);
+    // A native-resolution stride/range violation blocks Generate AND surfaces the exact message —
+    // an error, not a silent requirement (the two number boxes hold a value the user actively broke).
+    const msg = "Width and height must be between 512 and 2048 and a multiple of 16.";
+    const withError = imageGenerateValidation({ ...whole, dimensionError: msg });
+    const rolled = summarize(withError);
+    expect(rolled.ready).toBe(false);
+    expect(rolled.surfaced.map((i) => i.message)).toContain(msg);
+  });
+
   it("requires caption content on a structured model, silently", () => {
     const issues = imageGenerateValidation({ ...whole, structuredActive: true, captionHasContent: false, prompt: "" });
     expect(kinds(issues, "caption")).toEqual(["requirement"]);
