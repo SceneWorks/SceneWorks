@@ -143,8 +143,8 @@ mod ideogram;
 mod jobs;
 use jobs::{
     cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
-    get_job, get_job_metrics, list_jobs, list_metrics, retry_job, update_job_progress,
-    upsert_job_metrics,
+    get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
+    retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -186,7 +186,7 @@ mod models;
 use models::{
     create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
     delete_model_variant, list_models, model_catalog, model_is_installed,
-    resolve_model_manifest_entry, ModelSizeCache,
+    resolve_model_manifest_entry, ModelCatalogCache, ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -1178,6 +1178,7 @@ fn create_app_with_state_mode(
         auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
+        model_catalog_cache: Arc::new(ModelCatalogCache::default()),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
         #[cfg(test)]
         model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
@@ -2537,21 +2538,22 @@ async fn queue_summary_snapshot_inner(
     state: AppState,
     skip_sweep: bool,
 ) -> Result<QueueSummary, ApiError> {
-    let (sweep, summary): (StaleSweep, QueueSummary) =
-        store_call(state.clone(), move |store, timeout| {
-            // When the caller already swept this request, don't pay for a second
-            // sweep — just read the summary. The empty StaleSweep means the
-            // job.updated fan-out below is a no-op (the caller emitted those
-            // events off its own sweep result).
-            let sweep = if skip_sweep {
-                StaleSweep::default()
-            } else {
-                store.mark_stale_workers_interrupted(timeout)?
-            };
-            let summary = store.queue_summary()?;
-            Ok((sweep, summary))
-        })
-        .await?;
+    let (sweep, summary) = store_call(state.clone(), move |store, timeout| {
+        // When the caller already swept this request, don't pay for a second
+        // sweep — just read the summary. The empty StaleSweep means the
+        // job.updated fan-out below is a no-op (the caller emitted those
+        // events off its own sweep result).
+        let sweep = if skip_sweep {
+            StaleSweep::default()
+        } else {
+            store.mark_stale_workers_interrupted(timeout)?
+        };
+        let summary = store.queue_summary();
+        Ok((sweep, summary))
+    })
+    .await?;
+    handle_stale_sweep(&state, &sweep);
+    let summary = summary?;
     // The stale-sweep mutates jobs to `interrupted` in the DB but — unlike a worker-reported
     // terminal status (`update_job_progress`) or the supervisor crash path (`worker_terminated`) —
     // emits no per-job event. Broadcast `job.updated` for each swept job so a live client's job card
@@ -2560,10 +2562,18 @@ async fn queue_summary_snapshot_inner(
     // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
     // a later sweep can't re-select it), so this neither spams nor double-fires. When skip_sweep is
     // set the sweep is empty, so nothing is broadcast here.
-    for job in &sweep.jobs {
-        publish(&state, "job.updated", job);
-    }
     Ok(summary)
+}
+
+/// Apply the API-visible consequences of a stale-worker sweep exactly once at
+/// every route that can trigger one. The store returns the terminal job
+/// snapshots so callers can invalidate model install state and notify live
+/// clients rather than silently discarding those transitions.
+fn handle_stale_sweep(state: &AppState, sweep: &StaleSweep) {
+    invalidate_model_catalog_for_terminal_jobs(state, &sweep.jobs);
+    for job in &sweep.jobs {
+        publish(state, "job.updated", job);
+    }
 }
 
 async fn create_generation_job(
@@ -2768,11 +2778,14 @@ async fn catalog_delete_warnings(
     }
 
     let item_id = id.to_owned();
-    let jobs = store_call(state.clone(), move |store, timeout| {
-        store.mark_stale_workers_interrupted(timeout)?;
-        store.list_jobs(None, None, 100)
+    let (sweep, jobs) = store_call(state.clone(), move |store, timeout| {
+        let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let jobs = store.list_jobs(None, None, 100);
+        Ok((sweep, jobs))
     })
     .await?;
+    handle_stale_sweep(state, &sweep);
+    let jobs = jobs?;
     let job_ids = jobs
         .iter()
         .filter(|job| job_references_catalog_item(job, kind, &item_id))
@@ -3195,10 +3208,76 @@ struct ArtifactRemoval {
     trash_failed_paths: Vec<String>,
 }
 
+#[cfg(test)]
+static TEST_TRASH_OUTCOMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, bool>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct TestTrashOutcomesGuard {
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for TestTrashOutcomesGuard {
+    fn drop(&mut self) {
+        let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
+        for path in &self.paths {
+            outcomes.remove(path);
+        }
+    }
+}
+
+/// Install one-shot deterministic OS-trash outcomes for route tests. A `true`
+/// outcome removes the path as if the trash move succeeded; `false` leaves it
+/// in place and reports the same recoverable failure as `trash::delete`.
+#[cfg(test)]
+pub(crate) fn test_trash_outcomes(
+    entries: impl IntoIterator<Item = (PathBuf, bool)>,
+) -> TestTrashOutcomesGuard {
+    let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
+    let mut paths = Vec::new();
+    for (path, succeeds) in entries {
+        assert!(
+            outcomes.insert(path.clone(), succeeds).is_none(),
+            "test trash outcome already registered for {}",
+            path.display()
+        );
+        paths.push(path);
+    }
+    TestTrashOutcomesGuard { paths }
+}
+
 /// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
 /// Trash / Linux XDG trash). `trash::delete` is blocking, so it runs on the blocking
 /// pool to avoid stalling the async runtime.
 async fn move_path_to_os_trash(path: PathBuf) -> Result<(), String> {
+    #[cfg(test)]
+    let test_outcome = {
+        TEST_TRASH_OUTCOMES
+            .get_or_init(Default::default)
+            .lock()
+            .remove(&path)
+    };
+    #[cfg(test)]
+    if let Some(succeeds) = test_outcome {
+        if !succeeds {
+            return Err("injected OS-trash failure".to_owned());
+        }
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|error| format!("injected trash could not inspect path: {error}"))?;
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|error| format!("injected trash could not remove directory: {error}"))?;
+        } else {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| format!("injected trash could not remove file: {error}"))?;
+        }
+        return Ok(());
+    }
+
     tokio::task::spawn_blocking(move || trash::delete(&path))
         .await
         .map_err(|error| format!("trash task failed: {error}"))?

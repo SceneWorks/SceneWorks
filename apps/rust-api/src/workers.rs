@@ -9,13 +9,15 @@ pub(crate) async fn queue_summary(
 pub(crate) async fn list_workers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WorkerSnapshot>>, ApiError> {
-    Ok(Json(
-        store_call(state, move |store, timeout| {
-            store.mark_stale_workers_interrupted(timeout)?;
-            store.list_workers()
-        })
-        .await?,
-    ))
+    let (sweep, workers) = store_call(state.clone(), move |store, timeout| {
+        let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let workers = store.list_workers();
+        Ok((sweep, workers))
+    })
+    .await?;
+    handle_stale_sweep(&state, &sweep);
+    let workers = workers?;
+    Ok(Json(workers))
 }
 
 /// Person-workflow readiness derived from the live (non-offline) workers: a
@@ -51,11 +53,14 @@ pub(crate) fn person_readiness_from_workers(workers: &[WorkerSnapshot]) -> Value
 pub(crate) async fn person_capability_readiness(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let workers = store_call(state, move |store, timeout| {
-        store.mark_stale_workers_interrupted(timeout)?;
-        store.list_workers()
+    let (sweep, workers) = store_call(state.clone(), move |store, timeout| {
+        let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        let workers = store.list_workers();
+        Ok((sweep, workers))
     })
     .await?;
+    handle_stale_sweep(&state, &sweep);
+    let workers = workers?;
     Ok(Json(
         json!({ "person": person_readiness_from_workers(&workers) }),
     ))
@@ -188,6 +193,7 @@ pub(crate) async fn worker_terminated(
     })
     .await?;
     if let Some(job) = &failed {
+        invalidate_model_catalog_for_terminal_jobs(&state, std::slice::from_ref(job));
         publish(&state, "job.updated", job);
         publish_queue(&state).await?;
     }

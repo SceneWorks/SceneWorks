@@ -92,7 +92,7 @@ export function DatasetEditorPanel({
     setAddDialogOpen, renamePrefix, setRenamePrefix, renaming, memberAssets,
     applyOrderedNames, setCaptionDialog, health, canSave, saveValidity, saveDataset,
     savingDataset, unavailableAssetIds, removeUnavailableAsset,
-    onImportParquet,
+    onImportParquet, onDeleteDataset, deletingDataset,
   } = datasetSession;
   const {
     captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
@@ -273,6 +273,19 @@ export function DatasetEditorPanel({
                 <Icon.Refresh size={14} />
                 {loadingDatasets ? "Refreshing" : "Refresh"}
               </button>
+              {activeDataset ? (
+                <button
+                  aria-label={`Delete dataset ${activeDataset.name}`}
+                  className="secondary-action danger"
+                  disabled={deletingDataset}
+                  onClick={onDeleteDataset}
+                  title="Permanently delete this dataset and all its images and captions"
+                  type="button"
+                >
+                  <Icon.Trash size={14} />
+                  {deletingDataset ? "Deleting" : "Delete"}
+                </button>
+              ) : null}
             </div>
             <button className="primary-action dataset-save" disabled={!canSave} onClick={saveDataset} type="button">
               {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
