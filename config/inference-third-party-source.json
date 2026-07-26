@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
   "inferenceRevision": "c7c14ad4ca44a6906a9c7f796b88adf9efec3886",
-  "auditDigest": "280e4f7ce31f21d5b6b95c16ebb156dbc0e5f4e6f2b6485feef853cd972e7a39",
+  "auditDigest": "fdbfeda7ad3f65b4e4db3ae9fbe663411ac1ff2b12549023215a1de22e04ff1d",
   "artifacts": [
     {
       "id": "cmudict",
@@ -441,9 +441,9 @@
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-krea-realtime",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-krea-realtime/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port — a native-MLX reimplementation of Krea Realtime 14B (krea-ai/realtime-video causal_model.py / causal_inference.py / checkpoint layout), not copied source. scheduler.rs additionally re-derives published flow-matching algebra (sigma schedule, time shift, Euler+renoise) validated against hand-computed literals, which is a formula reimplementation and folds into this area rather than needing separate attribution.",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "New at this pin (inference sc-15138 / #277, which made the crate's already-honest port descriptions match the scanner's marker vocabulary so it could not ship UNCLASSIFIED). Disposition per that change: the Krea AI model terms already mapped in the About manifest for the sibling `mlx-gen-krea` area, with no per-file exception. SceneWorks' catalog ships no Krea Realtime row yet (epic 8431 is gated), so the crate downloads no weights at this pin; the About component must be added with the model row, and the candidate inventory pins the exact source blob and normalized provenance markers meanwhile."
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest (Krea Realtime 14B is Wan 2.1 T2V 14B weight-for-weight); the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-lens",
@@ -458,16 +458,6 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
-    },
-    {
-      "id": "architecture:crates/media/mlx-gen/mlx-gen-mage",
-      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mage/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are mapped in the About manifest (the microsoft/Mage MIT component); the candidate inventory pins the exact source blob and normalized provenance markers.",
-      "excludePaths": [
-        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
-      ]
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -580,15 +570,6 @@
       "component": "candle-transformers-source"
     },
     {
-      "id": "cephes-source",
-      "paths": [
-        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
-      ],
-      "provenance": "The Mage latent module transcribes the Cephes ndtri/erf/erfc routines and coefficient tables (Stephen L. Moshier, BSD-3-Clause).",
-      "disposition": "about-license",
-      "component": "cephes"
-    },
-    {
       "id": "cfgpp-formula",
       "paths": [
         "crates/contracts/gen-core/src/sampling/cfgpp.rs"
@@ -624,6 +605,25 @@
       "provenance": "InstantID keypoint rasterizers faithfully port OpenCV drawing primitives and the literal SinTable.",
       "disposition": "about-license",
       "component": "opencv-source"
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-mage",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mage/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are mapped in the About manifest (the microsoft/Mage MIT component); the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ]
+    },
+    {
+      "id": "cephes-source",
+      "paths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ],
+      "provenance": "The Mage latent module transcribes the Cephes ndtri/erf/erfc routines and coefficient tables (Stephen L. Moshier, BSD-3-Clause).",
+      "disposition": "about-license",
+      "component": "cephes"
     }
   ],
   "includeSites": [
