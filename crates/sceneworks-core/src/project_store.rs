@@ -9602,7 +9602,10 @@ mod tests {
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("Convert").expect("project creates");
 
-        // A valid 1×1 24-bit BMP — not in the worker's png/jpeg/webp `image` build.
+        // A valid 1×1 24-bit BMP. The transcode decision here comes from
+        // `ImageKind::is_natively_supported` (a fixed png/jpeg/webp list), NOT from what the
+        // compiled `image` build can decode — so this fixture is unaffected by the workspace
+        // feature union, which does include `bmp` (sc-15052).
         let mut bmp = Vec::new();
         bmp.extend_from_slice(b"BM");
         bmp.extend_from_slice(&58u32.to_le_bytes());
