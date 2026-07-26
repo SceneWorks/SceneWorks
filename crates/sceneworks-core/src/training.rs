@@ -1326,7 +1326,14 @@ fn mage_flow_lora_target(
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            "networkTypes": ["lora"],
+            // sc-14056: `full` is the **full base fine-tune** — the `mlx-gen-mage` trainer updates
+            // every DiT weight and writes a fine-tuned checkpoint instead of an adapter. Mage-Flow is
+            // the only family with that path today, so this is the only target that advertises it.
+            // The Training Studio builds its network-type picker straight from this list, so without
+            // the entry the capability is unreachable from the product no matter what the engine can
+            // do. A full run is additionally admission-gated at submit by the unified-memory
+            // pre-flight (`full_finetune_memory_error`), which refuses machines that cannot hold it.
+            "networkTypes": ["lora", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
         })),

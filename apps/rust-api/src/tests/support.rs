@@ -9,8 +9,8 @@ pub(crate) use crate::events::{EventHub, EventMessage};
 
 pub(crate) use crate::training::{
     insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
-    training_base_model_status, training_base_unavailable_message, training_is_full_finetune,
-    TrainingBaseStatus,
+    training_base_model_label, training_base_model_status, training_base_unavailable_message,
+    training_is_full_finetune, TrainingBaseStatus,
 };
 
 pub(crate) use crate::workers::person_readiness_from_workers;

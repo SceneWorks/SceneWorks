@@ -417,6 +417,17 @@ fn normalize_train_dtype(value: &str) -> String {
 ))]
 fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
     let advanced = &config.advanced;
+    // sc-14056 — the FULL base fine-tune selector. `networkType` carries three values on the product
+    // surface (`lora` / `lokr` / `full`), but the engine models the third one as a separate boolean
+    // rather than a `NetworkType` variant (gen-core deliberately kept the enum closed). So `full` maps
+    // to `full_finetune: true` here, and `NetworkType::parse` — which maps every unknown string,
+    // including "full", to `Lora` — is left to describe the *adapter* parameterization it always did.
+    // Without this the flag never reaches the engine and a user asking for a full tune silently gets a
+    // LoRA (the F-055 class; gen-core's `validate_full_finetune_request` floor is the engine-side twin
+    // of this mapping).
+    let full_finetune = advanced_str(advanced, "networkType", "lora")
+        .trim()
+        .eq_ignore_ascii_case("full");
     let lora_target_modules = advanced
         .get("loraTargetModules")
         .and_then(Value::as_array)
@@ -463,7 +474,18 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // extra lever for smaller machines / higher resolution on top of the bf16 fix.
         // Previously dropped here, so the engine always ran at its `false` default. Absent
         // (legacy payloads) preserves that default.
-        gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
+        //
+        // ...EXCEPT on a full base fine-tune (sc-14056). No family has a full-tune activation
+        // checkpointing path yet (sc-14989), and the Mage engine trainer now HARD-ERRORS on
+        // `full_finetune + gradient_checkpointing` rather than silently ignoring the flag. The
+        // Mage-Flow training target's own defaults set `gradientCheckpointing: true`, so mapping it
+        // through verbatim would 400 every full run submitted from the app with the stock config —
+        // the capability would be unreachable by construction. Clear it for the full path instead.
+        // This is not "silently ignoring a user request": the Training Studio hides the checkbox
+        // whenever `networkType == "full"` and says why, so what the user sees is what runs.
+        gradient_checkpointing: !full_finetune
+            && advanced_bool(advanced, "gradientCheckpointing", false),
+        full_finetune,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
         // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
@@ -768,25 +790,15 @@ pub(crate) async fn run_training_execution(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    // Guard the full base fine-tune signal (sc-14056) until its execution path is wired end to end.
-    // The engine `TrainingConfig.full_finetune` flag ships with a newer sceneworks-gen-core than this
-    // worker pins, and `mage_flow_lora` is not yet in the MLX-routed training set, so
-    // `map_training_config` would otherwise silently map `networkType == "full"` to a LoRA adapter
-    // (`NetworkType::parse("full") == Lora`) and train the WRONG thing. Reject it explicitly instead —
-    // the API submit gate already sizes the full-tune memory envelope; this closes the execution-path
-    // footgun until the engine wiring + routing cutover land (sc-14056 follow-up).
-    if advanced_str(&plan.config.advanced, "networkType", "lora")
-        .trim()
-        .eq_ignore_ascii_case("full")
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Full base fine-tune (networkType \"full\") is not yet available through the training \
-             worker — it needs the mage_flow full-fine-tune engine wiring and MLX routing cutover \
-             (sc-14056 follow-up). Train a LoRA/LoKr adapter, or run the full fine-tune via the \
-             engine trainer directly."
-                .to_owned(),
-        ));
-    }
+    // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
+    // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
+    // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
+    // onto a LoRA adapter and trained the WRONG thing. Both causes are fixed in this change (the pin
+    // advanced past the full-tune engine wiring, and the kernel joined `MLX_ROUTED_TRAINING_KERNELS`),
+    // and `map_training_config` now threads `full_finetune` through explicitly. A trainer that cannot
+    // serve a full request rejects it itself, typed, via gen-core's `validate_full_finetune_request`
+    // floor — so the guard is no longer this layer's job.
+    //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
     // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.
@@ -2213,6 +2225,71 @@ mod tests {
         assert_eq!(cfg.trigger_word, None);
     }
 
+    /// sc-14056 — the full-base-fine-tune signal must actually REACH the engine, and the target's own
+    /// `gradientCheckpointing: true` default must not 400 the run.
+    ///
+    /// `map_training_config` builds the engine config field-by-field with no `..Default`, so a
+    /// dropped field is silent. And `NetworkType::parse("full")` returns `Lora` — it maps every
+    /// unknown string to Lora — so a `"full"` plan whose `full_finetune` is not threaded would train
+    /// a LoRA adapter AND REPORT SUCCESS. That is the F-055 class this test exists to catch.
+    ///
+    /// It discriminates in both directions: the LoRA plan must map to `full_finetune == false` with
+    /// the checkpointing flag honored, and the full plan — differing ONLY in `networkType` — must map
+    /// to `full_finetune == true` with checkpointing cleared.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_threads_the_full_finetune_flag_and_clears_checkpointing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mapped = |network_type: &str| {
+            let mut value = plan_json(
+                dir.path(),
+                "mage_flow_lora",
+                "mage_flow_base",
+                network_type,
+                &[&image.display().to_string()],
+            );
+            // The Mage training target ships this ON by default (sceneworks-core training.rs), which
+            // is exactly why the full path has to clear it: the engine HARD-ERRORS on
+            // `full_finetune + gradient_checkpointing` (no full-tune checkpointing yet, sc-14989),
+            // so passing the stock default through would 400 every full run submitted from the app.
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
+            map_training_config(&parse(value).config)
+        };
+
+        let lora = mapped("lora");
+        assert!(
+            !lora.full_finetune,
+            "an adapter plan must NOT set full_finetune"
+        );
+        assert!(
+            lora.gradient_checkpointing,
+            "the LoRA path still honors the checkbox — this change must not regress it"
+        );
+
+        let full = mapped("full");
+        assert!(
+            full.full_finetune,
+            "networkType \"full\" must reach the engine as full_finetune — NetworkType::parse maps \
+             it to Lora, so without this the run silently trains an adapter and reports success"
+        );
+        assert!(
+            !full.gradient_checkpointing,
+            "a full run must clear gradientCheckpointing or the engine rejects the target's own \
+             defaults"
+        );
+        // The adapter parameterization stays Lora — `full` is not a NetworkType variant (gen-core
+        // deliberately kept that enum closed), so the two signals are independent by design.
+        assert!(matches!(full.network_type, NetworkType::Lora));
+
+        // Case/whitespace tolerance, matching the rust-api submit predicate.
+        assert!(mapped("  FULL ").full_finetune);
+        assert!(!mapped("lokr").full_finetune);
+    }
+
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -2551,6 +2628,8 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 512,
             save_every: 0,
@@ -2660,6 +2739,8 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 64,
             save_every: 0,
@@ -2772,6 +2853,8 @@ mod tests {
             gradient_accumulation: 1,
             // The fix under test: bf16 forward, checkpointing OFF — bf16 alone must suffice.
             gradient_checkpointing: false,
+            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution: 1024,
             save_every: 0,
@@ -2921,6 +3004,9 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing,
+            // sc-14056: candle-lane LoRA harness — there is no candle full-fine-tune trainer, and
+            // gen-core's `validate_full_finetune_request` floor would reject one.
+            full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution,
             save_every: 0,

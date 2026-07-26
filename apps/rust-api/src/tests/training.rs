@@ -3342,12 +3342,14 @@ fn mage_flow_foundation_targets_resolve_the_installed_flat_mirrors() {
 
 #[test]
 fn mage_flow_foundation_targets_are_missing_when_not_installed() {
-    // sc-14056: the counterpart to the "installed ⇒ Ready" case above. Because Mage's mirror is a FLAT
-    // all-platform snapshot (q4/q8/bf16 are load-time quant over the same dense files, sc-14054), its
-    // reachable states are Ready ↔ Missing on every platform — there is no separate dense training tier
-    // to be absent, so `TrainingTierMissing` (a tiered-turnkey / macOS-Wan state) is correctly
-    // unreachable for Mage and no platform-aware override is needed. An uninstalled mirror is `Missing`,
-    // and a real run is blocked with the "install it" message.
+    // sc-14056: the counterpart to the "installed ⇒ Ready" case above. While Mage's mirror is a FLAT
+    // all-platform snapshot (q4/q8/bf16 are load-time quant over the same dense files, sc-14054), an
+    // absent install is `Missing` — the generic "install it" message, not the tier-specific one.
+    //
+    // This case is NOT evidence that a tiered layout would be handled: an empty data dir yields
+    // `Missing` under either layout, so it does not discriminate. The layout-sensitivity proof is
+    // `mage_flow_training_base_status_discriminates_flat_from_tiered_layouts` below, which fabricates
+    // a real tiered snapshot — relevant because sc-14980 is re-hosting Mage to exactly that shape.
     for base_model in ["mage_flow_base", "mage_flow_edit_base"] {
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3376,6 +3378,126 @@ fn mage_flow_foundation_targets_are_missing_when_not_installed() {
     }
 }
 
+/// sc-14056 / sc-14980 — the "a future tiered re-host fails loudly" guard, made DISCRIMINATING.
+///
+/// The first cut of this coverage asserted `Missing` against an EMPTY data dir. That outcome is
+/// identical whether the resolver understands tiered layouts or not, so the test could not have
+/// failed if the tiered guard were deleted — it proved nothing about the claim it was cited for.
+/// sc-14980 is concurrently re-hosting Mage to a tiered layout, so this is a live risk, not a
+/// hypothetical: a tiered snapshot whose dense `bf16/` tier was never downloaded must be reported as
+/// `TrainingTierMissing`, not silently green-lit and then discovered mid-run.
+///
+/// Fabricate the three reachable on-disk shapes and assert they land on THREE distinct outcomes.
+/// Delete the `snapshot_is_tiered_turnkey` branch in `training_base_model_status` and the third case
+/// flips to `Ready`; break the flat path and the first flips.
+#[test]
+fn mage_flow_training_base_status_discriminates_flat_from_tiered_layouts() {
+    for (base_model, repo) in [
+        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
+        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
+    ] {
+        let target = crate::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} target present"));
+
+        // Materialize one HF snapshot for `repo` whose layout the closure builds, and report the
+        // status + the path training would load from.
+        let status_for = |layout: &dyn Fn(&std::path::Path)| {
+            let _env = isolate_hf_cache();
+            let temp = tempfile::tempdir().expect("tempdir");
+            let data_dir = temp.path().join("data");
+            let repo_root = huggingface_repo_cache_path(&data_dir, repo).expect("repo cache path");
+            let revision = "rev14980";
+            let snapshot = repo_root.join("snapshots").join(revision);
+            std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+            std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+            std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+            layout(&snapshot);
+            (
+                training_base_model_status(&data_dir, &target),
+                resolve_base_model_path(&target, &data_dir),
+                snapshot,
+            )
+        };
+
+        // 1. TODAY'S mirror: a flat dense diffusers snapshot. Ready, resolved at the snapshot root.
+        let (status, path, snapshot) = status_for(&|snapshot: &std::path::Path| {
+            std::fs::write(snapshot.join("config.json"), "{}").expect("flat config");
+            for component in ["transformer", "text_encoder", "vae"] {
+                std::fs::create_dir_all(snapshot.join(component)).expect("flat component");
+            }
+        });
+        assert_eq!(
+            status,
+            TrainingBaseStatus::Ready,
+            "{base_model}: a flat dense snapshot is training-ready"
+        );
+        assert_eq!(
+            path,
+            snapshot.display().to_string(),
+            "{base_model}: a flat snapshot resolves at its root, never a bf16 tier"
+        );
+
+        // 2. A tiered re-host (sc-14980) WITH the dense tier installed. Still Ready — but now the
+        //    trainer must be pointed INTO `bf16/`, which is the other half of the guard.
+        let (status, path, snapshot) = status_for(&|snapshot: &std::path::Path| {
+            for tier in ["q4", "q8", "bf16"] {
+                std::fs::create_dir_all(snapshot.join(tier)).expect("tier dir");
+            }
+            for component in ["transformer", "text_encoder", "vae"] {
+                std::fs::create_dir_all(snapshot.join("bf16").join(component))
+                    .expect("bf16 component");
+            }
+        });
+        assert_eq!(
+            status,
+            TrainingBaseStatus::Ready,
+            "{base_model}: a tiered re-host with a complete bf16/ tier is training-ready"
+        );
+        assert_eq!(
+            path,
+            snapshot.join("bf16").display().to_string(),
+            "{base_model}: a tiered re-host must train from the dense bf16/ tier"
+        );
+
+        // 3. The failure this guard exists for: a tiered re-host where only the quantized generation
+        //    tiers were downloaded. There ARE weights on disk and the repo-level completion marker
+        //    would say "installed" — but none of them are dense, so training must refuse LOUDLY with
+        //    the tier-specific status rather than the generic Missing (or, worse, Ready).
+        let (status, _, _) = status_for(&|snapshot: &std::path::Path| {
+            for tier in ["q4", "q8"] {
+                for component in ["transformer", "text_encoder", "vae"] {
+                    std::fs::create_dir_all(snapshot.join(tier).join(component))
+                        .expect("quant component");
+                }
+            }
+        });
+        assert_eq!(
+            status,
+            TrainingBaseStatus::TrainingTierMissing,
+            "{base_model}: a tiered re-host without the dense bf16/ tier must fail loudly as \
+             TrainingTierMissing — NOT Ready, and not the generic Missing"
+        );
+        let message = training_base_unavailable_message(status, &target.base_model)
+            .unwrap_or_else(|| panic!("{base_model}: TrainingTierMissing must block a real run"));
+        // It must be the TIER message, not the generic "install the model" one: the repo IS
+        // installed, just not with dense weights, and the actionable step is different.
+        assert!(
+            message.contains("training tier") || message.contains("bf16"),
+            "{base_model}: TrainingTierMissing must produce the tier-specific message naming the \
+             dense tier, not the generic install prompt: {message}"
+        );
+        assert_ne!(
+            message,
+            training_base_unavailable_message(TrainingBaseStatus::Missing, &target.base_model)
+                .expect("Missing blocks too"),
+            "{base_model}: the tier message must differ from the plain not-installed message"
+        );
+    }
+}
+
 #[test]
 fn training_is_full_finetune_reads_the_network_type() {
     // sc-14056: the submit-gate predicate that routes a run to the full base fine-tune memory envelope.
@@ -3397,6 +3519,64 @@ fn training_is_full_finetune_reads_the_network_type() {
         .advanced
         .insert("networkType".to_owned(), serde_json::json!("  Full "));
     assert!(training_is_full_finetune(&config));
+}
+
+/// sc-14056 review — the full-tune rejection named the TARGET ("Mage-Flow Base LoRA"), producing
+/// "A full base fine-tune of Mage-Flow Base LoRA at 1024px…". A target is named for the artifact it
+/// normally produces, which is exactly the wrong noun in a message about fine-tuning the base itself.
+#[test]
+fn training_base_model_label_strips_the_output_kind_suffix() {
+    let registry = crate::builtin_training_targets();
+    let label_of = |base_model: &str| {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.base_model == base_model)
+            .unwrap_or_else(|| panic!("{base_model} target present"));
+        (target.name.clone(), training_base_model_label(target))
+    };
+
+    let (name, label) = label_of("mage_flow_base");
+    assert_eq!(name, "Mage-Flow Base LoRA", "the target name is unchanged");
+    assert_eq!(
+        label, "Mage-Flow Base",
+        "the rejection must name the base model, not the LoRA target"
+    );
+    assert_eq!(label_of("mage_flow_edit_base").1, "Mage-Flow Edit-Base");
+
+    // The rule is the trailing output-kind word ONLY — never more. Across the whole built-in
+    // registry, every label must be its target name minus exactly that suffix.
+    assert_eq!(label_of("sdxl").1, "Stable Diffusion XL");
+    assert_eq!(label_of("z_image_turbo").1, "Z-Image-Turbo");
+    for target in &registry.targets {
+        let label = training_base_model_label(target);
+        assert!(
+            target.name.starts_with(&label) && !label.is_empty(),
+            "label {label:?} must be a non-empty prefix of target name {:?}",
+            target.name
+        );
+        assert!(
+            target.name.len() - label.len() <= " ControlNet".len(),
+            "label {label:?} dropped more than one trailing word from {:?}",
+            target.name
+        );
+    }
+
+    // Degenerate inputs stay safe rather than producing an empty label.
+    let mut bare = registry
+        .targets
+        .iter()
+        .find(|target| target.base_model == "mage_flow_base")
+        .expect("target")
+        .clone();
+    bare.name = "LoRA".to_owned();
+    assert_eq!(
+        training_base_model_label(&bare),
+        "LoRA",
+        "a name that is ONLY the suffix must not strip to empty"
+    );
+    bare.name = "Anima".to_owned();
+    assert_eq!(training_base_model_label(&bare), "Anima");
 }
 
 #[test]

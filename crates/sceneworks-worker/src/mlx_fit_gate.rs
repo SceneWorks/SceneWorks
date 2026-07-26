@@ -873,8 +873,12 @@ fn too_big_error(
 //
 // The envelope is deliberately CONSERVATIVE (it errs toward rejection): under-predicting is the
 // dangerous direction — it would advertise a production-resolution full-tune as fitting when it will
-// not, exactly the failure sc-14056 calls out. The state multiplier is exact arithmetic; the
-// activation terms are a documented pre-grad-checkpointing estimate pending on-device calibration.
+// not, exactly the failure sc-14056 calls out. The state multiplier is exact arithmetic *given the
+// configuration* — it is 8× at `gradient_accumulation == 1` and 10× above it, because the engine's
+// accumulator holds one more full f32 gradient map for the length of the window. The activation terms
+// are a documented pre-grad-checkpointing ESTIMATE, uncalibrated in both directions against MLX's
+// fast-SDPA vjp; sc-15038 tracks measuring them on-device with `mlx::get_peak_memory` the way
+// sc-14053 calibrated the quant envelopes.
 
 /// Peak resident training state as a multiple of the dense DiT's **bf16 on-disk** bytes: f32 master
 /// weights (2×) + AdamW first/second moments in f32 (4×) + f32 gradients (2×). The in-trace bf16
@@ -882,7 +886,27 @@ fn too_big_error(
 /// dominates. This term is resolution-independent and is exact arithmetic (a 4B-parameter model needs
 /// ~8× its bf16 bytes of state regardless of resolution), so it alone gates full fine-tunes off Macs
 /// that are simply too small for the optimizer state.
+///
+/// It is the **`gradient_accumulation == 1`** figure — see
+/// [`FULL_FINETUNE_ACCUM_MULTIPLIER`] for the extra map an accumulation window holds.
 const FULL_FINETUNE_STATE_MULTIPLIER: f64 = 8.0;
+
+/// Extra peak state, again as a multiple of the bf16 on-disk DiT bytes, held **only** when
+/// `gradient_accumulation > 1`.
+///
+/// The engine's `accumulate_grads` (mlx-gen `train/lora.rs`) keeps a running accumulator that is a
+/// FULL f32 gradient map (2× the bf16 bytes) alive for the whole window, *in addition to* the
+/// per-micro-step gradient map already counted in [`FULL_FINETUNE_STATE_MULTIPLIER`] — both are live
+/// simultaneously inside the summing loop. So the real step peak is 10×, not 8×, and it is the
+/// accumulator that pushes a 4B full tune from ~61 GiB of state to ~77 GiB.
+///
+/// This was the omission that made the "exact arithmetic" claim wrong in the first cut of this gate
+/// (sc-14056 review): `gradient_accumulation` is a user-exposed knob (Training Studio "Gradient
+/// accumulation"), so a 64–80 GB Mac was predicted at ~63 GiB, admitted, and then hard-killed —
+/// an MLX overcommit is a SIGKILL the worker cannot catch, which is the whole reason this gate is
+/// pre-flight. `average_grads` afterwards holds at most the same two full maps (its input and its
+/// output), so it needs no term of its own; 10× bounds both phases.
+const FULL_FINETUNE_ACCUM_MULTIPLIER: f64 = 2.0;
 
 /// Retained attention bytes per (query,key) token pair, summed over all heads and blocks, that the
 /// dense backward keeps WITHOUT gradient checkpointing (sc-14989): Mage's `num_heads = 24` × `depth =
@@ -905,15 +929,27 @@ fn full_finetune_tokens(resolution: u32) -> f64 {
 }
 
 /// Predicted unified-memory peak (GiB) of a full base fine-tune of a `dit_bytes` (bf16 on-disk) DiT at
-/// `resolution`, WITHOUT gradient checkpointing. `None` when `dit_bytes == 0` (nothing installed → no
-/// signal → never block), mirroring [`predicted_peak_gb`].
-fn full_finetune_peak_gb(dit_bytes: u64, resolution: u32) -> Option<f64> {
+/// `resolution` with `gradient_accumulation` micro-steps per optimizer update, WITHOUT gradient
+/// checkpointing. `None` when `dit_bytes == 0` (nothing installed → no signal → never block),
+/// mirroring [`predicted_peak_gb`].
+fn full_finetune_peak_gb(
+    dit_bytes: u64,
+    resolution: u32,
+    gradient_accumulation: u32,
+) -> Option<f64> {
     if dit_bytes == 0 {
         return None;
     }
     let dit_gb = dit_bytes as f64 / BYTES_PER_GIB;
     let tokens = full_finetune_tokens(resolution);
-    let state = dit_gb * FULL_FINETUNE_STATE_MULTIPLIER;
+    // The accumulator map exists only when the window is longer than one micro-step; `0` and `1` both
+    // mean "step every micro-step" to the engine, so neither pays the term.
+    let state_multiplier = if gradient_accumulation > 1 {
+        FULL_FINETUNE_STATE_MULTIPLIER + FULL_FINETUNE_ACCUM_MULTIPLIER
+    } else {
+        FULL_FINETUNE_STATE_MULTIPLIER
+    };
+    let state = dit_gb * state_multiplier;
     let attention = tokens * tokens * FULL_FINETUNE_ATTN_BYTES_PER_TOKEN_PAIR / BYTES_PER_GIB;
     let feature = tokens * FULL_FINETUNE_FEATURE_BYTES_PER_TOKEN / BYTES_PER_GIB;
     Some(state + attention + feature + OS_RESERVE_GB)
@@ -926,11 +962,22 @@ fn full_finetune_fit_message(
     model_label: &str,
     dit_bytes: u64,
     resolution: u32,
+    gradient_accumulation: u32,
     budget: Option<MemoryBudget>,
 ) -> Option<String> {
-    let (needed_gb, budget) = (full_finetune_peak_gb(dit_bytes, resolution)?, budget?);
-    (budget.total_gb + f64::EPSILON < needed_gb)
-        .then(|| full_finetune_too_big_message(model_label, needed_gb, budget.total_gb, resolution))
+    let (needed_gb, budget) = (
+        full_finetune_peak_gb(dit_bytes, resolution, gradient_accumulation)?,
+        budget?,
+    );
+    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+        full_finetune_too_big_message(
+            model_label,
+            needed_gb,
+            budget.total_gb,
+            resolution,
+            gradient_accumulation,
+        )
+    })
 }
 
 /// The actionable over-budget rejection for a full base fine-tune — names the model, the constraint
@@ -943,14 +990,25 @@ fn full_finetune_too_big_message(
     needed_gb: f64,
     available_gb: f64,
     resolution: u32,
+    gradient_accumulation: u32,
 ) -> String {
+    // Naming gradient accumulation only when it is actually costing memory keeps the advice
+    // actionable: at accumulation 1 there is no accumulator map and "lower it" would be noise.
+    let accum_lever = if gradient_accumulation > 1 {
+        format!(
+            " Gradient accumulation is {gradient_accumulation}, which holds an extra full-size \
+             gradient buffer for the whole window — setting it to 1 removes that buffer."
+        )
+    } else {
+        String::new()
+    };
     format!(
         "A full base fine-tune of {model_label} at {resolution}px needs ~{needed} GB of unified \
          memory (the full-precision master weights, the optimizer state, and — without gradient \
          checkpointing — the whole retained backward graph) but this machine has ~{available} GB. \
          Lower the training resolution, train a LoRA adapter instead of a full fine-tune, or run on \
-         a Mac with more memory. A production-resolution full fine-tune needs gradient (activation) \
-         checkpointing (sc-14989), which is not yet available.",
+         a Mac with more memory.{accum_lever} A production-resolution full fine-tune needs gradient \
+         (activation) checkpointing (sc-14989), which is not yet available.",
         needed = needed_gb.round() as i64,
         available = available_gb.round() as i64,
     )
@@ -960,7 +1018,10 @@ fn full_finetune_too_big_message(
 /// (sc-14056). Sums the base model's dense DiT bytes (`<base_model_dir>/transformer`), resolves this
 /// machine's unified-memory budget with the same `sysctl hw.memsize` probe + `SCENEWORKS_MLX_MEMORY_
 /// CAP_GB` emulation the generation fit gate uses, and returns a clear rejection message when a full
-/// fine-tune at `resolution` won't fit — or `None` to permit. Permits (returns `None`) whenever there
+/// fine-tune at `resolution` with `gradient_accumulation` micro-steps per update won't fit — or
+/// `None` to permit. `gradient_accumulation` is load-bearing, not cosmetic: a window longer than one
+/// micro-step keeps an extra full-size f32 gradient buffer resident, which is the difference between
+/// admitting and refusing a 4B full tune on a 64–80 GB Mac. Permits (returns `None`) whenever there
 /// is no signal: the base isn't installed (`transformer/` sums to 0 bytes — the base-installed gate
 /// covers that case), or the platform probe yields no budget (off-macOS, where a full-tune would run
 /// on a different backend with its own envelope). Only the full-fine-tune path needs this; a LoRA run
@@ -972,11 +1033,18 @@ fn full_finetune_too_big_message(
 pub fn full_finetune_memory_error(
     base_model_dir: &Path,
     resolution: u32,
+    gradient_accumulation: u32,
     model_label: &str,
 ) -> Option<String> {
     let dit_bytes = sum_safetensors_bytes(&base_model_dir.join("transformer"));
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    full_finetune_fit_message(model_label, dit_bytes, resolution, budget)
+    full_finetune_fit_message(
+        model_label,
+        dit_bytes,
+        resolution,
+        gradient_accumulation,
+        budget,
+    )
 }
 
 #[cfg(test)]
@@ -999,8 +1067,8 @@ mod tests {
     #[test]
     fn full_finetune_peak_is_no_signal_without_weights() {
         // Nothing installed ⇒ no signal ⇒ never block (the fit-gate invariant).
-        assert_eq!(full_finetune_peak_gb(0, 1024), None);
-        assert!(full_finetune_peak_gb(MAGE_DIT_BYTES, 1024).is_some());
+        assert_eq!(full_finetune_peak_gb(0, 1024, 1), None);
+        assert!(full_finetune_peak_gb(MAGE_DIT_BYTES, 1024, 1).is_some());
     }
 
     #[test]
@@ -1011,6 +1079,7 @@ mod tests {
             "Mage-Flow Base",
             MAGE_DIT_BYTES,
             1024,
+            1,
             Some(MemoryBudget { total_gb: 128.0 }),
         )
         .expect("1024² full-tune must be rejected on 128 GB");
@@ -1040,6 +1109,7 @@ mod tests {
                 "Mage-Flow Base",
                 MAGE_DIT_BYTES,
                 64,
+                1,
                 Some(MemoryBudget { total_gb: 128.0 }),
             ),
             None
@@ -1054,9 +1124,81 @@ mod tests {
             "Mage-Flow Base",
             MAGE_DIT_BYTES,
             64,
+            1,
             Some(MemoryBudget { total_gb: 32.0 }),
         )
         .is_some());
+    }
+
+    /// sc-14056 review — the gradient-accumulation term. The first cut of this gate called the 8×
+    /// state multiplier "exact" while omitting the accumulator map `accumulate_grads` holds across
+    /// the whole window whenever `gradient_accumulation > 1` (a user-exposed Training Studio knob).
+    /// That under-prediction is the dangerous direction: a 64–80 GB Mac was predicted at ~63 GiB,
+    /// ADMITTED, and then hard-killed — an MLX overcommit is a SIGKILL nothing downstream can catch.
+    ///
+    /// This test is written to DISCRIMINATE rather than to restate the formula: it pins a budget in
+    /// the exact band where the two multipliers disagree, and asserts the accumulation-1 run is still
+    /// permitted there while the accumulation-4 run — identical in every other respect — is refused.
+    /// Delete the accumulation term and the second half fails; make the term unconditional and the
+    /// first half fails.
+    #[test]
+    fn full_finetune_accumulation_window_rejects_where_a_single_step_run_fits() {
+        // 8× the 7.665 GiB bf16 DiT ≈ 61.3 GiB of state; 10× ≈ 76.7 GiB. At a tiny resolution the
+        // activation terms are negligible, so a 72 GB budget sits squarely between them — the band a
+        // 64–80 GB Mac lands in, and the band the old formula got wrong.
+        const BUDGET: Option<MemoryBudget> = Some(MemoryBudget { total_gb: 72.0 });
+
+        let single = full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 1).expect("weights present");
+        let windowed = full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 4).expect("weights present");
+        assert!(
+            windowed > single,
+            "an accumulation window must cost MORE than a single-step run ({windowed} vs {single})"
+        );
+
+        assert_eq!(
+            full_finetune_fit_message("Mage-Flow Base", MAGE_DIT_BYTES, 64, 1, BUDGET),
+            None,
+            "accumulation 1 still fits a 72 GB Mac at a tiny resolution — the gate must not become \
+             unconditionally stricter"
+        );
+        let msg = full_finetune_fit_message("Mage-Flow Base", MAGE_DIT_BYTES, 64, 4, BUDGET)
+            .expect(
+                "accumulation 4 holds an extra full f32 gradient map and must now be REFUSED on a \
+                 72 GB Mac — this is the run that previously got an uncatchable SIGKILL",
+            );
+        assert!(
+            msg.contains("Gradient accumulation is 4"),
+            "the rejection must name the accumulation lever it can actually act on: {msg}"
+        );
+        // …and must NOT mention it when accumulation is not what is costing the memory.
+        let single_step_reject = full_finetune_fit_message(
+            "Mage-Flow Base",
+            MAGE_DIT_BYTES,
+            64,
+            1,
+            Some(MemoryBudget { total_gb: 32.0 }),
+        )
+        .expect("32 GB cannot hold the optimizer state at any resolution");
+        assert!(
+            !single_step_reject.contains("Gradient accumulation"),
+            "at accumulation 1 there is no accumulator buffer, so the advice would be noise: \
+             {single_step_reject}"
+        );
+    }
+
+    /// `0` and `1` both mean "step every micro-step" to the engine, so neither may pay the
+    /// accumulator term — a legacy payload that omits the key must not be gated more strictly than
+    /// one that sets it to 1.
+    #[test]
+    fn full_finetune_accumulation_zero_and_one_are_the_same_envelope() {
+        assert_eq!(
+            full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 0),
+            full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 1)
+        );
+        assert_ne!(
+            full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 1),
+            full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 2)
+        );
     }
 
     #[test]
@@ -1064,7 +1206,7 @@ mod tests {
         // No platform budget (off-macOS, or an unreadable probe) ⇒ never block, exactly like the
         // generation gate's `Unknown`.
         assert_eq!(
-            full_finetune_fit_message("Mage-Flow Base", MAGE_DIT_BYTES, 1024, None),
+            full_finetune_fit_message("Mage-Flow Base", MAGE_DIT_BYTES, 1024, 1, None),
             None
         );
     }
@@ -1077,7 +1219,7 @@ mod tests {
             std::env::temp_dir().join(format!("mage_full_gate_{}_{}", std::process::id(), line!()));
         std::fs::create_dir_all(&empty).expect("mk dir");
         assert_eq!(
-            full_finetune_memory_error(&empty, 1024, "Mage-Flow Base"),
+            full_finetune_memory_error(&empty, 1024, 1, "Mage-Flow Base"),
             None
         );
         std::fs::remove_dir_all(&empty).ok();

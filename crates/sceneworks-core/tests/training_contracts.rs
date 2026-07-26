@@ -282,11 +282,39 @@ fn builtin_registry_exposes_both_mage_flow_foundation_targets() {
         assert_eq!(target.base_model_repo.as_deref(), Some(repo));
         assert_eq!(target.kernel, "mage_flow_lora");
         assert_eq!(target.defaults.resolution, 1024);
+        // sc-14056: Mage-Flow is the only family with a full-base-fine-tune trainer, so it is the
+        // only target that offers `full` beside `lora`. The Training Studio's network-type picker is
+        // built from exactly this list, so this assertion is what keeps the capability offerable.
         assert_eq!(
             target.limits.get("networkTypes"),
-            Some(&serde_json::json!(["lora"]))
+            Some(&serde_json::json!(["lora", "full"]))
         );
     }
+}
+
+/// sc-14056: `full` is a Mage-Flow-only network type. Every other built-in target must keep
+/// advertising only adapter networks — a stray `full` on a family whose trainer has no full path
+/// would offer the user a run the engine rejects (gen-core's `validate_full_finetune_request` floor).
+#[test]
+fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
+    let registry = builtin_training_targets();
+    let full_targets: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| {
+            target
+                .limits
+                .get("networkTypes")
+                .and_then(Value::as_array)
+                .is_some_and(|types| types.iter().any(|entry| entry.as_str() == Some("full")))
+        })
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        full_targets,
+        vec!["mage_flow_base_lora", "mage_flow_edit_base_lora"],
+        "only the Mage-Flow targets may advertise the full base fine-tune network type"
+    );
 }
 
 #[test]

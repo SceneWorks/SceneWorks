@@ -1543,7 +1543,14 @@ pub(crate) async fn create_training_job(
             if let Some(message) = sceneworks_worker::full_finetune_memory_error(
                 FsPath::new(&base_model_dir),
                 payload.config.resolution,
-                &target.name,
+                // The accumulator buffer is a real term in the envelope, not a detail — see
+                // `FULL_FINETUNE_ACCUM_MULTIPLIER`. Passing the configured window is what keeps a
+                // 64–80 GB Mac out of an uncatchable SIGKILL.
+                payload.config.gradient_accumulation,
+                // The BASE MODEL's label, not the target's: a training target is named for what it
+                // normally produces ("Mage-Flow Base LoRA"), which reads as nonsense in a full-tune
+                // rejection ("A full base fine-tune of Mage-Flow Base LoRA at 1024px…").
+                &training_base_model_label(target),
             ) {
                 return Err(ApiError::bad_request(message));
             }
@@ -1934,6 +1941,34 @@ fn macos_wan_base_path(data_dir: &FsPath, target: &TrainingTarget) -> Option<Str
 /// submit gate ([`full_finetune_memory_error`](sceneworks_worker::full_finetune_memory_error)). A
 /// missing / other value (`"lora"`, `"lokr"`) is the adapter path, so this is additive: existing LoRA
 /// submissions are unaffected.
+/// The **base model's** display label for a training target, derived from the target's name by
+/// dropping the trailing output-kind word.
+///
+/// A training target is named for the artifact it normally produces — "Mage-Flow Base LoRA",
+/// "SDXL LoRA" — which is exactly wrong in a message about fine-tuning the base itself: the sc-14056
+/// full-tune rejection read "A full base fine-tune of Mage-Flow Base LoRA at 1024px…". The target
+/// carries no separate base-model display name (`base_model` is an id like `mage_flow_base`), so
+/// strip the suffix. Names without a recognized suffix are returned unchanged.
+pub(crate) fn training_base_model_label(
+    target: &sceneworks_core::training::TrainingTarget,
+) -> String {
+    const OUTPUT_KIND_SUFFIXES: [&str; 4] = ["lora", "lokr", "control", "controlnet"];
+    let name = target.name.trim();
+    let Some((head, last)) = name.rsplit_once(char::is_whitespace) else {
+        return name.to_owned();
+    };
+    if OUTPUT_KIND_SUFFIXES
+        .iter()
+        .any(|suffix| last.eq_ignore_ascii_case(suffix))
+    {
+        let head = head.trim_end();
+        if !head.is_empty() {
+            return head.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
 pub(crate) fn training_is_full_finetune(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> bool {

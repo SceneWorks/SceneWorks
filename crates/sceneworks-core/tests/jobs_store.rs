@@ -5096,6 +5096,75 @@ fn candle_worker_refuses_torch_served_training_kernels() {
     }
 }
 
+/// sc-14056 — THE CUTOVER PROOF. Before this change `mage_flow_lora` sat in
+/// `MLX_ONLY_TRAINING_KERNELS` (so every generic/candle worker refused it) but in NO routed set (so
+/// the mlx worker refused it too). The net effect was that a Mage training job — LoRA *or* full base
+/// fine-tune — was claimable by nobody and queued forever, which also stranded the already-merged
+/// sc-14055 LoRA trainer.
+///
+/// This drives the real store: create the job, then claim it, for BOTH network types. It fails if the
+/// kernel is dropped from `MLX_ROUTED_TRAINING_KERNELS` (mlx stops claiming) and it fails if the
+/// kernel is dropped from `MLX_ONLY_TRAINING_KERNELS` (a generic worker starts claiming a job it has
+/// no trainer for and would fail terminally). Both halves are asserted per network type.
+#[test]
+fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
+    for (base_model, network_type) in [
+        ("mage_flow_base", "lora"),
+        ("mage_flow_base", "full"),
+        ("mage_flow_edit_base", "lora"),
+        ("mage_flow_edit_base", "full"),
+    ] {
+        let store = store(&format!("mage-training-{base_model}-{network_type}"));
+
+        // A generic (non-Rust) training descriptor must still defer: there is no torch Mage trainer,
+        // so claiming would fail the job terminally instead of leaving it for the mlx worker.
+        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+        // Nor a candle worker: `mlx-gen-mage` has no candle twin.
+        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+
+        let job = store
+            .create_job(mlx_training_job(
+                "mage_flow_lora",
+                base_model,
+                network_type,
+                false,
+                "auto",
+            ))
+            .expect("job creates");
+
+        assert!(
+            store
+                .claim_next_job("worker-torch")
+                .expect("torch claim ok")
+                .is_none(),
+            "a generic worker must defer mage_flow_lora ({base_model}/{network_type}) — it has no \
+             Mage trainer"
+        );
+        assert!(
+            store
+                .claim_next_job("worker-candle")
+                .expect("candle claim ok")
+                .is_none(),
+            "a candle worker must defer mage_flow_lora ({base_model}/{network_type}) — mlx-gen-mage \
+             has no candle twin"
+        );
+
+        // …and the mlx worker DOES claim it. This is the half that was broken: without
+        // `mage_flow_lora` in `MLX_ROUTED_TRAINING_KERNELS` the job queues forever.
+        register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the mlx worker must claim mage_flow_lora ({base_model}/{network_type}) — a \
+                     kernel that is MLX-only but not MLX-routed is claimable by nobody"
+                )
+            });
+        assert_eq!(claimed.id, job.id, "{base_model}/{network_type}");
+    }
+}
+
 #[test]
 fn candle_worker_refuses_ltx_mlx_only_training() {
     // ltx_mlx_lora is native-MLX-only (MLX_ONLY_TRAINING_KERNELS) and has no candle trainer, so off-Mac
