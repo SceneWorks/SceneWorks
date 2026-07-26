@@ -242,8 +242,22 @@ impl Catalog {
     }
 
     pub fn append_records(&mut self, records: &[NewCatalogRecord]) -> CatalogResult<usize> {
+        self.append_records_and_metadata(records, &[])
+    }
+
+    /// Appends a bounded record batch and advances scanner metadata in the same
+    /// SQLite transaction. A process crash can therefore only leave both the
+    /// records and checkpoint committed, or neither committed.
+    pub fn append_records_and_metadata(
+        &mut self,
+        records: &[NewCatalogRecord],
+        metadata: &[(&str, &str)],
+    ) -> CatalogResult<usize> {
         for record in records {
             validate_record(record)?;
+        }
+        for (key, value) in metadata {
+            validate_metadata_entry(key, value)?;
         }
         let database_path = self.database_path();
         let transaction = self
@@ -281,10 +295,50 @@ impl Catalog {
                     .map_err(|error| map_sqlite_error(&database_path, error))?;
             }
         }
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "insert into catalog_metadata(key, value) values (?1, ?2)
+                     on conflict(key) do update set value = excluded.value",
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            for (key, value) in metadata {
+                statement
+                    .execute(params![key, value])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         Ok(records.len())
+    }
+
+    pub fn metadata(&self, key: &str) -> CatalogResult<Option<String>> {
+        validate_metadata_key(key)?;
+        self.connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    pub fn contains_record_id(&self, record_id: &str) -> CatalogResult<bool> {
+        if record_id.trim().is_empty() || record_id.len() > 512 || record_id.contains('\0') {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
+            ));
+        }
+        self.connection
+            .query_row(
+                "select exists(select 1 from catalog_records where id = ?1)",
+                [record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))
     }
 
     pub fn page_records(&self, offset: u64, limit: u32) -> CatalogResult<Vec<CatalogRecord>> {
@@ -508,6 +562,27 @@ impl CatalogRegistry {
 
     pub fn open_catalog(&self, root: impl AsRef<Path>) -> CatalogResult<Catalog> {
         Catalog::open(root)
+    }
+
+    /// Resolves an attached catalog by its stable identity. Callers that operate
+    /// on catalog IDs use this instead of accepting a root path from a request.
+    pub fn open_attached(&self, catalog_id: &str) -> CatalogResult<Catalog> {
+        let attached = self
+            .load()?
+            .catalogs
+            .into_iter()
+            .find(|catalog| catalog.id == catalog_id)
+            .ok_or_else(|| {
+                CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
+            })?;
+        let catalog = Catalog::open(&attached.path)?;
+        if catalog.descriptor().id != catalog_id {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Attached catalog identity changed at {}",
+                attached.path.display()
+            )));
+        }
+        Ok(catalog)
     }
 
     pub fn attach(&self, root: impl AsRef<Path>) -> CatalogResult<AttachedCatalog> {
@@ -739,6 +814,30 @@ fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
                 "Catalog artifact paths cannot be blank or contain NUL".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_metadata_key(key: &str) -> CatalogResult<()> {
+    if key.trim().is_empty() || key.len() > 256 || key.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata keys must contain 1 to 256 non-NUL bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_metadata_entry(key: &str, value: &str) -> CatalogResult<()> {
+    validate_metadata_key(key)?;
+    if matches!(key, "catalogId" | "schemaVersion") {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog identity metadata is read-only".to_owned(),
+        ));
+    }
+    if value.len() > 1024 * 1024 || value.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog metadata values cannot exceed 1 MiB or contain NUL".to_owned(),
+        ));
     }
     Ok(())
 }
