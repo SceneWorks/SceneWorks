@@ -1617,9 +1617,17 @@ mod tests {
         let (tier, gemma) = (root.join("q4"), root.join("gemma"));
         std::fs::create_dir_all(&tier).unwrap();
         std::fs::create_dir_all(&gemma).unwrap();
-        std::fs::write(gemma.join("config.json"), b"{}").unwrap();
-        std::fs::write(gemma.join("tokenizer.json"), b"{}").unwrap();
-        std::fs::write(gemma.join("model.safetensors"), b"x").unwrap();
+        std::fs::write(
+            gemma.join("config.json"),
+            br#"{"model_type":"gemma3_text"}"#,
+        )
+        .unwrap();
+        std::fs::write(gemma.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(header);
+        weights.push(0);
+        std::fs::write(gemma.join("model.safetensors"), weights).unwrap();
 
         // Non-LTX engines never resolve an external TE (theirs lives inside the weights dir).
         assert!(training_text_encoder("kolors", &tier).is_none());
