@@ -37,7 +37,7 @@ use sceneworks_core::lora_family::{
 use sceneworks_core::lora_family::{read_safetensors_header, resolve_adapter_in_dir};
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
-    validate_public_ip,
+    validate_lora_url_host, validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use sceneworks_core::slug::slugify;
@@ -201,6 +201,7 @@ use caption_jobs::*;
 // ordinary SceneWorks dataset.
 mod dataset_parquet_jobs;
 use dataset_parquet_jobs::*;
+pub mod catalog_image_fetch;
 pub mod catalog_parquet_scanner;
 // The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
 // select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.

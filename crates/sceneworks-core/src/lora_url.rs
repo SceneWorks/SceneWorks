@@ -99,19 +99,16 @@ pub fn validate_lora_url_host(url: &Url) -> Result<(), LoraUrlError> {
 pub fn validate_public_ip(address: IpAddr) -> Result<(), LoraUrlError> {
     let blocked = match address {
         IpAddr::V4(address) => blocked_ipv4(address),
-        IpAddr::V6(address) => {
+        IpAddr::V6(address) => match address.to_ipv4_mapped().or_else(|| address.to_ipv4()) {
             // An IPv4-mapped (`::ffff:a.b.c.d`) or IPv4-compatible (`::a.b.c.d`)
             // IPv6 address reaches the very same IPv4 endpoint, so re-run the v4
-            // blocklist on the embedded address before the v6 checks. Without
+            // blocklist on the embedded address instead of the native-v6 checks. Without
             // this, `http://[::ffff:127.0.0.1]/x.safetensors` (or a DNS AAAA of
             // `::ffff:10.0.0.1`) slips past both the URL-time host check and the
             // connect-time re-validation (sc-4210 / F-CORE-6 SSRF bypass).
-            address
-                .to_ipv4_mapped()
-                .or_else(|| address.to_ipv4())
-                .is_some_and(blocked_ipv4)
-                || blocked_ipv6(address)
-        }
+            Some(embedded) => blocked_ipv4(embedded),
+            None => blocked_ipv6(address),
+        },
     };
     if blocked {
         Err(LoraUrlError::BlockedHost)
@@ -139,13 +136,74 @@ fn blocked_ipv4(address: Ipv4Addr) -> bool {
 }
 
 fn blocked_ipv6(address: Ipv6Addr) -> bool {
-    let first_segment = address.segments()[0];
-    address.is_loopback()
-        || address.is_unspecified()
-        || (first_segment & 0xfe00) == 0xfc00
-        || (first_segment & 0xffc0) == 0xfe80
-        || (first_segment == 0x2001 && address.segments()[1] == 0x0db8)
-        || address.is_multicast()
+    let segments = address.segments();
+    let first = segments[0];
+
+    // The well-known NAT64 prefix is globally reachable even though it sits
+    // outside today's 2000::/3 global-unicast allocation. Preserve it only
+    // when its embedded IPv4 destination is itself public.
+    if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        let embedded = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return blocked_ipv4(embedded);
+    }
+
+    // Native globally routable unicast currently occupies 2000::/3. This
+    // explicit allocation check rejects unspecified/loopback, multicast,
+    // link-local, unique-local, deprecated site-local (fec0::/10), discard,
+    // local-use translation, and other reserved space without relying on the
+    // unstable std `is_global` classification.
+    if (first & 0xe000) != 0x2000 {
+        return true;
+    }
+
+    // 2001::/23 is IANA's protocol-assignment block and is non-global unless
+    // a more-specific allocation says otherwise. Keep the globally usable
+    // assignments explicit so unallocated/reserved holes cannot become SSRF
+    // bypasses.
+    if first == 0x2001 && segments[1] <= 0x01ff {
+        // Teredo (2001:0000::/32) is intentionally absent: its server and
+        // obfuscated client IPv4 fields can route through an overlay, and
+        // IANA does not guarantee that prefix as globally reachable.
+        let globally_usable_assignment =
+            // PCP, TURN, and DNS-SD anycast singleton addresses.
+            (segments[1] == 1
+                && segments[2..7] == [0, 0, 0, 0, 0]
+                && matches!(segments[7], 1..=3))
+            // AMT.
+            || segments[1] == 3
+            // AS112-v6.
+            || (segments[1] == 4 && segments[2] == 0x0112)
+            // ORCHIDv2 and Drone Remote ID DETs are marked globally
+            // reachable in the IANA special-purpose registry.
+            || (segments[1] & 0xfff0) == 0x0020
+            || (segments[1] & 0xfff0) == 0x0030;
+        if !globally_usable_assignment {
+            return true;
+        }
+    }
+
+    // Special-purpose ranges carved out of 2000::/3 that are not globally
+    // routable unicast.
+    // Documentation prefixes.
+    (first == 0x2001 && segments[1] == 0x0db8)
+        || (first == 0x3fff && (segments[1] & 0xf000) == 0)
+        // Returned/deprecated 6bone space.
+        || first == 0x3ffe
+        // 6to4 embeds an IPv4 destination in segments 1-2. A private or
+        // otherwise special embedded address must not tunnel around the v4
+        // policy; genuinely public 6to4 destinations remain allowed.
+        || (first == 0x2002
+            && blocked_ipv4(Ipv4Addr::new(
+                (segments[1] >> 8) as u8,
+                segments[1] as u8,
+                (segments[2] >> 8) as u8,
+                segments[2] as u8,
+            )))
 }
 
 #[cfg(test)]
@@ -193,6 +251,83 @@ mod tests {
             parse_lora_source_url("http://[::ffff:127.0.0.1]/style.safetensors").unwrap_err(),
             LoraUrlError::BlockedHost
         );
+    }
+
+    #[test]
+    fn ipv6_literal_parser_blocks_non_global_ranges_and_preserves_global_unicast() {
+        for blocked in [
+            "::",
+            "::1",
+            "100::",
+            "64:ff9b:1::1",
+            "fc00::1",
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fe80::1",
+            "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ff00::",
+            // Teredo with private server/client fields and with
+            // public-looking fields are both denied by policy.
+            "2001:0000:0a00:0001:0000:0000:f5ff:fffe",
+            "2001:0000:0808:0808:0000:0000:fefe:fefe",
+            "2001:2::",
+            "2001:1::4",
+            "2001:5::",
+            "2001:10::",
+            "2001:db8::1",
+            "2002:0a00:0001::",
+            "3ffe::1",
+            "3fff::1",
+            "4000::1",
+        ] {
+            assert_eq!(
+                parse_lora_source_url(&format!("https://[{blocked}]/style.safetensors")),
+                Err(LoraUrlError::BlockedHost),
+                "{blocked} must be blocked"
+            );
+        }
+
+        for public in [
+            "::ffff:1.1.1.1",
+            "64:ff9b::101:101",
+            "2001:1::1",
+            "2001:3::1",
+            "2001:4:112::1",
+            "2001:20::1",
+            "2001:30::1",
+            "2001:4860:4860::8888",
+            "2002:0101:0101::",
+            "2606:4700:4700::1111",
+        ] {
+            assert!(
+                parse_lora_source_url(&format!("https://[{public}]/style.safetensors")).is_ok(),
+                "{public} must remain allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_public_ip_blocks_site_local_fec0_boundaries() {
+        for blocked in [
+            "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "ff00::",
+        ] {
+            assert_eq!(
+                validate_public_ip(v6(blocked)),
+                Err(LoraUrlError::BlockedHost),
+                "{blocked} must be blocked"
+            );
+        }
+        for public in ["2001:4860:4860::8888", "2606:4700:4700::1111"] {
+            assert!(
+                validate_public_ip(v6(public)).is_ok(),
+                "{public} must remain allowed"
+            );
+        }
     }
 
     #[test]
