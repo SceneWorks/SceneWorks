@@ -20,7 +20,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -100,6 +100,14 @@
       "mlx": {
         "quantize": 4
       },
+      // Shared across all six Mage rows. Physical CUDA run 30194676028 measured the per-process
+      // nvidia-smi high-water at q4 14.67 / q8 16.95 / bf16 20.41 GB for the registered 1024²,
+      // 20-step RL path; the admission gate adds its standard transient headroom separately.
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow Edit-Base",
         "description": "Foundation Mage-Flow instruction editor with true classifier-free guidance.",
@@ -124,7 +132,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -204,6 +212,11 @@
       "mlx": {
         "quantize": 4
       },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow Edit",
         "description": "Reward-optimized Mage-Flow instruction editor with true classifier-free guidance.",
@@ -228,7 +241,7 @@
       "capabilities": [
         "edit_image"
       ],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -308,6 +321,11 @@
       "mlx": {
         "quantize": 4
       },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
         "description": "Distilled four-step Mage-Flow instruction editor for fast local edits.",
@@ -334,7 +352,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -379,6 +397,11 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow Base",
         "description": "Undistilled Mage-Flow foundation model with true classifier-free guidance.",
@@ -399,7 +422,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -444,6 +467,11 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow RL",
         "description": "Reward-optimized Mage-Flow model with true classifier-free guidance.",
@@ -464,7 +492,7 @@
       "type": "image",
       "adapter": "mlx_mage",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "downloads": [
         {
           "provider": "huggingface",
@@ -509,6 +537,11 @@
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
       "mlx": { "quantize": 4 },
+      "candle": {
+        "minMemoryGb": 17,
+        "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "measured": true
+      },
       "ui": {
         "label": "Mage-Flow Turbo",
         "description": "Distilled four-step Mage-Flow model for fast local generation.",

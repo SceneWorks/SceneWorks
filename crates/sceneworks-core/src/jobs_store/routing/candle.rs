@@ -53,6 +53,7 @@ pub(crate) enum CandleImageLane {
     IdeogramEdit,
     IdeogramImg2Img,
     BooguEdit,
+    MageEdit,
     BooguImg2Img,
     KreaEdit,
     BerniniEdit,
@@ -143,6 +144,15 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::BooguEdit,
         models: ModelMatch::Any(&["boogu_image_edit"]),
         shape: boogu_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::MageEdit,
+        models: ModelMatch::Any(&[
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ]),
+        shape: mage_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguImg2Img,
@@ -811,6 +821,19 @@ pub(crate) fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
     has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string_array(payload, "referenceAssetIds")
+}
+
+/// Mage-Flow instruction-edit routing conditions (sc-14053). Every edit checkpoint accepts one
+/// required primary `sourceAssetId` followed by optional ordered `referenceAssetIds`; the worker
+/// turns that exact list into `Reference` / `MultiReference` conditioning for the registry generator.
+pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic

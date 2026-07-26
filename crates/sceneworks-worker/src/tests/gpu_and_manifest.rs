@@ -688,6 +688,59 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
     }
 }
 
+/// sc-14053: every Mage variant is now a Candle/CUDA model and carries the same physically measured
+/// dense-snapshot, load-time quant tier peak. Pin all six rows and prove the generic gate rejects an
+/// oversized tier while admitting the lower one on the same emulated card.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn mage_cuda_catalog_rows_drive_tier_specific_vram_rejection() {
+    use crate::vram_gate::{fit_decision, predicted_peak_gb, FitDecision, VramBudget};
+
+    let budget = Some(VramBudget {
+        total_gb: 18.0,
+        free_gb: 18.0,
+    });
+    for id in [
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+    ] {
+        let entry = builtin_model_entry(id);
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(false));
+        let object = entry.as_object().expect("manifest model object");
+        assert_eq!(
+            entry
+                .get("candle")
+                .and_then(|candle| candle.get("measured"))
+                .and_then(Value::as_bool),
+            Some(true),
+            "{id}: published Mage peaks must be physical measurements"
+        );
+        let q4_peak = predicted_peak_gb(object, "q4").expect("q4 peak plus headroom");
+        assert!(
+            (q4_peak - 16.67).abs() < f64::EPSILON * 8.0,
+            "{id}: expected measured 14.67 GB q4 peak plus headroom, got {q4_peak}"
+        );
+        let bf16_peak = predicted_peak_gb(object, "bf16").expect("bf16 peak plus headroom");
+        assert!(
+            (bf16_peak - 22.41).abs() < f64::EPSILON * 8.0,
+            "{id}: expected measured 20.41 GB bf16 peak plus headroom, got {bf16_peak}"
+        );
+        assert_eq!(
+            fit_decision(Some(q4_peak), budget),
+            FitDecision::Fits,
+            "{id}: q4 must fit the emulated card"
+        );
+        assert!(matches!(
+            fit_decision(Some(bf16_peak), budget),
+            FitDecision::TooBig { .. }
+        ));
+    }
+}
+
 /// The tier key a no-pick request derives for `model` from `mlx.quantize` alone — a lane-independent
 /// mirror of `vram_gate::requested_tier_key`'s bits map (`None`/`> 4` ⇒ q8, `<= 0` ⇒ bf16, `<= 4` ⇒
 /// q4) with `advanced` empty and `nvfp4` false. See the lint above for why this is a mirror and not a

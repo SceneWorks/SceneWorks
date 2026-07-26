@@ -568,14 +568,15 @@ impl VideoModelCaps {
 /// Legend for the [`ModelCaps::new`] positional args:
 /// `new(id, mlx_routed, candle_routed, candle_quant, candle_lora, candle_quant_lora)`.
 pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
-    // Mage-Flow Base / RL / Turbo (sc-14047): macOS-only native MLX generation. Their q4/q8/bf16
-    // choices are load-time quantization over complete dense snapshots, not candle tier artifacts.
-    ModelCaps::new("mage_flow_base", true, false, false, false, false),
-    ModelCaps::new("mage_flow", true, false, false, false, false),
-    ModelCaps::new("mage_flow_turbo", true, false, false, false, false),
-    ModelCaps::new("mage_flow_edit_base", true, false, false, false, false),
-    ModelCaps::new("mage_flow_edit", true, false, false, false, false),
-    ModelCaps::new("mage_flow_edit_turbo", true, false, false, false, false),
+    // Mage-Flow generation + instruction-edit (sc-14053): all six registry descriptors are linked by
+    // runtime-cuda and advertise Q4/Q8 over the same complete dense snapshots (load-time DiT fold;
+    // BF16 stays dense). No inference LoRA surface.
+    ModelCaps::new("mage_flow_base", true, true, true, false, false),
+    ModelCaps::new("mage_flow", true, true, true, false, false),
+    ModelCaps::new("mage_flow_turbo", true, true, true, false, false),
+    ModelCaps::new("mage_flow_edit_base", true, true, true, false, false),
+    ModelCaps::new("mage_flow_edit", true, true, true, false, false),
+    ModelCaps::new("mage_flow_edit_turbo", true, true, true, false, false),
     // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
@@ -1194,13 +1195,16 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while a generic worker is refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
-/// 7982), so — like LTX — only an mlx worker runs it today.
+/// 7982), so — like LTX — only an mlx worker runs it today. `mage_flow_lora` is registered as a
+/// training-target contract in sc-14054 ahead of its native trainer (sc-14055); keeping it here makes
+/// every worker refuse it until that worker explicitly adds the kernel to its routed set.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "ltx_mlx_lora",
     "krea_lora",
     "sd3_lora",
     "anima_lora",
     "krea_control",
+    "mage_flow_lora",
 ];
 
 #[cfg(test)]
@@ -1308,6 +1312,12 @@ mod tests {
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
@@ -1382,6 +1392,12 @@ mod tests {
     // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
     // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
@@ -1475,6 +1491,7 @@ mod tests {
         "sd3_lora",
         "anima_lora",
         "krea_control",
+        "mage_flow_lora",
     ];
 
     #[test]

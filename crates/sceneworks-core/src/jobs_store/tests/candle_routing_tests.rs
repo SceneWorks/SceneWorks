@@ -118,6 +118,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramEdit,
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
+            CandleImageLane::MageEdit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
@@ -193,6 +194,9 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
         ),
         (edit("boogu_image_edit"), CandleImageLane::BooguEdit),
+        (edit("mage_flow_edit_base"), CandleImageLane::MageEdit),
+        (edit("mage_flow_edit"), CandleImageLane::MageEdit),
+        (edit("mage_flow_edit_turbo"), CandleImageLane::MageEdit),
         (reference("boogu_image"), CandleImageLane::BooguImg2Img),
         (
             reference("boogu_image_turbo"),
