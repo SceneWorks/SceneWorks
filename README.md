@@ -330,6 +330,11 @@ For a public-image deployment with a reusable RunPod template, network volume,
 HTTPS proxy, and token login, follow the
 [turnkey RunPod deployment guide](docs/deploy-runpod.md).
 
+The embedded bundle's build-time Brotli/gzip negotiation, immutable hashed-asset
+cache policy, mutable-entrypoint revalidation, and dynamic-compression extension
+point are documented in
+[Embedded production web delivery](docs/embedded-web-delivery.md).
+
 ```powershell
 docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
   --file docker/rust.Dockerfile `

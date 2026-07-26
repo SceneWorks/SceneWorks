@@ -4310,14 +4310,27 @@ fn huggingface_filtered_cache_health(
         let Some(tier) = whole_subdir_glob_tier(pattern) else {
             continue;
         };
-        let Some(tier_dir) = snapshots
+        // Evaluate the MOST-COMPLETE cached revision for this tier, not merely the one
+        // `huggingface_snapshot_dirs` happens to rank first. A quant-matrix repo keeps every
+        // revision's tiers in ONE shared cache, so after a manifest revision bump a freshly
+        // re-downloaded complete tier coexists with the older torn snapshot it replaced. Picking
+        // the first snapshot (which `refs/main` or a higher file count can front) let that stale
+        // torn revision mask the complete one and report a permanent false "incomplete" — e.g. the
+        // FLUX.2 MLX re-hosts whose old snapshots predated the `scheduler/` config (GH #1858): even
+        // after re-download the card stayed incomplete because the old snapshot was fronted. Take the
+        // fewest-missing tier across cached revisions — the SAME `min_by_key` the flat-diffusers and
+        // unfiltered paths already use — so "is this tier complete in ANY cached revision?" is the
+        // question, matching that a single valid install makes the model usable.
+        let Some(health) = snapshots
             .iter()
             .map(|snapshot| snapshot.join(tier))
-            .find(|dir| path_is_readable_file(&dir.join("model_index.json")))
+            .filter(|dir| path_is_readable_file(&dir.join("model_index.json")))
+            .map(|dir| diffusers_snapshot_health(&dir))
+            .min_by_key(|health| health.missing_files.len())
         else {
             continue;
         };
-        for component in diffusers_snapshot_health(&tier_dir).missing_files {
+        for component in health.missing_files {
             let scoped = format!("{tier}/{component}");
             if !missing.contains(&scoped) {
                 missing.push(scoped);
@@ -5267,8 +5280,18 @@ mod variant_install_tests {
     /// `complete`. A `complete: false` tier mirrors a torn download (interrupted, or weights pruned)
     /// — its files satisfy the coarse `<tier>/*` glob but it cannot load.
     fn seed_diffusers_tier(data_dir: &FsPath, repo: &str, tier: &str, complete: bool) {
+        seed_diffusers_tier_rev(data_dir, repo, "abc123", tier, complete);
+    }
+
+    fn seed_diffusers_tier_rev(
+        data_dir: &FsPath,
+        repo: &str,
+        rev: &str,
+        tier: &str,
+        complete: bool,
+    ) {
         let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
-        let root = cache.join("snapshots").join("abc123").join(tier);
+        let root = cache.join("snapshots").join(rev).join(tier);
         let write = |rel: &str, body: &str| {
             let path = root.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -5403,6 +5426,52 @@ mod variant_install_tests {
             );
             assert!(state.missing_required_files.is_empty());
         }
+    }
+
+    /// GH #1858: a manifest revision bump re-hosts a tier to add a previously-absent component (the
+    /// FLUX.2 MLX re-hosts' `scheduler/`, whose `model_index.json` had always declared it). The freshly
+    /// re-downloaded COMPLETE snapshot then coexists with the older torn snapshot it replaced — a
+    /// quant-matrix repo keeps every revision in ONE shared cache, and repair just re-runs the download
+    /// (nothing evicts the old snapshot). `huggingface_snapshot_dirs` can rank the OLD snapshot first
+    /// (fronted by `refs/main`, or by a higher file count), so a per-tier check that reads only the
+    /// first-ranked snapshot kept reporting the tier incomplete even after re-downloading. The tier
+    /// completeness must instead ask "is this tier complete in ANY cached revision?".
+    #[test]
+    fn a_complete_revision_rescues_a_torn_older_snapshot_of_the_same_tier() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "SceneWorks/matrix";
+        let model = quant_matrix_model(repo);
+
+        // Old revision: every weight present but NO `scheduler/` folder — exactly the pre-#1858 FLUX.2
+        // re-host (its `model_index.json` declares `scheduler`, so it reads torn/incomplete).
+        seed_diffusers_tier_rev(data_dir, repo, "oldrev", "bf16", true);
+        let cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        std::fs::remove_dir_all(
+            cache
+                .join("snapshots")
+                .join("oldrev")
+                .join("bf16")
+                .join("scheduler"),
+        )
+        .unwrap();
+        // New revision: the re-host with the scheduler config added — a complete tier.
+        seed_diffusers_tier_rev(data_dir, repo, "newrev", "bf16", true);
+        // Reproduce the worst-case ranking: front the OLD (torn) snapshot via refs/main.
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs").join("main"), "oldrev").unwrap();
+
+        let states = model_variant_states(&model, data_dir);
+        let bf16 = states.iter().find(|s| s.variant == "bf16").unwrap();
+        assert!(
+            bf16.installed && !bf16.cache_incomplete,
+            "a complete cached revision must make the tier read installed even when a torn older \
+             snapshot is fronted by refs/main — got installed={} incomplete={} missing={:?}",
+            bf16.installed,
+            bf16.cache_incomplete,
+            bf16.missing_required_files
+        );
     }
 
     /// A SANA quant-matrix turnkey (family `sana`). Ships NO `model_index.json`, so the diffusers
