@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const CONTRACTS: &str = include_str!("../../sceneworks-core/src/contracts.rs");
 const WORKER: &str = include_str!("lib.rs");
 const ARCHITECTURE: &str = include_str!("../ARCHITECTURE.md");
+const FACE_ANALYSIS_JOBS: &str = include_str!("face_analysis_jobs.rs");
 
 fn known_job_types() -> BTreeMap<String, String> {
     let body = CONTRACTS
@@ -102,6 +103,38 @@ fn code_without_comments_or_literals(source: &str) -> String {
     }
 
     String::from_utf8(output).expect("Rust source outside comments and literals remains UTF-8")
+}
+
+#[test]
+fn catalog_face_adapter_uses_each_backends_actual_score_field() {
+    let code = code_without_comments_or_literals(FACE_ANALYSIS_JOBS);
+    let mlx_arm = code
+        .split_once("CatalogFaceBackend::Mlx(analysis) => {")
+        .expect("catalog face adapter must keep an MLX conversion arm")
+        .1
+        .split_once("CatalogFaceBackend::Candle(analysis) =>")
+        .expect("MLX conversion must precede the candle conversion")
+        .0;
+    assert!(
+        mlx_arm.contains("confidence: face.score"),
+        "mlx-gen-face::Detection exposes `score`, not gen-core's `det_score`"
+    );
+    assert!(
+        !mlx_arm.contains("face.det_score"),
+        "the MLX conversion must not use the candle result field"
+    );
+
+    let candle_arm = code
+        .split_once("CatalogFaceBackend::Candle(analysis) =>")
+        .expect("catalog face adapter must keep a candle conversion arm")
+        .1
+        .split_once("Ok((image.width, image.height, detections))")
+        .expect("candle conversion must remain inside CatalogFaceDetector::detect")
+        .0;
+    assert!(
+        candle_arm.contains("confidence: face.det_score"),
+        "gen-core's candle face-analysis result exposes `det_score`"
+    );
 }
 
 /// Extract only `JobType` variants occurring in top-level patterns of

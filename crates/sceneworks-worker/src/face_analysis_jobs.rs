@@ -147,7 +147,8 @@ impl CatalogFaceDetector {
                     .into_iter()
                     .map(|face| CatalogFaceDetection {
                         bbox: face.bbox,
-                        confidence: face.det_score,
+                        // mlx-gen-face's raw SCRFD `Detection` names this field `score`.
+                        confidence: face.score,
                     })
                     .collect()
             }
@@ -158,6 +159,7 @@ impl CatalogFaceDetector {
                 .into_iter()
                 .map(|face| CatalogFaceDetection {
                     bbox: face.bbox,
+                    // gen-core's face-analysis result names the equivalent field `det_score`.
                     confidence: face.det_score,
                 })
                 .collect(),
