@@ -2986,21 +2986,13 @@ fn torn_tier_marker(files: &[String]) -> String {
         .unwrap_or_else(|| "incomplete: missing model components".to_owned())
 }
 
-// Build the per-variant install state for every supported download entry. A single-variant model
-// yields one entry keyed "default"; a quant-matrix model yields one per tier. Each entry's install
-// state is probed independently against the HF cache using that tier's own `files` filter, so the
-// catalog can advertise (e.g.) bf16 installed while q4 is missing.
-fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantState> {
+// Select the canonical source entry for each emitted variant. A single-variant model yields one
+// "default" entry; a quant matrix yields one per tier. Install probing and the later live-size
+// refresh share this selector so their response-array positions cannot drift.
+fn model_variant_downloads(model: &Value) -> Vec<&Value> {
     let Some(downloads) = model.get("downloads").and_then(Value::as_array) else {
         return Vec::new();
     };
-    // sc-13513: the manifest `family` selects the shared per-tier completeness predicate for the
-    // no-`model_index` MLX turnkeys (SANA/Boogu) so a torn tier reads `incomplete`, not `installed`.
-    let family = model
-        .get("family")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
     // Emitted variant keys must be unique: the single-variant case is exactly one "default", and a
     // quant matrix has one entry per distinct q4/q8/bf16 tier. Guard against a manifest that maps two
     // supported entries to the same key (unlabeled alternate sources both collapsing to "default", or
@@ -3020,6 +3012,22 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 .unwrap_or_else(|| "default".to_owned());
             seen_variants.insert(key)
         })
+        .collect()
+}
+
+// Build the per-variant install state for every selected download entry. Each entry is probed
+// independently against the HF cache using that tier's own `files` filter, so the catalog can
+// advertise (e.g.) bf16 installed while q4 is missing.
+fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantState> {
+    // sc-13513: the manifest `family` selects the shared per-tier completeness predicate for the
+    // no-`model_index` MLX turnkeys (SANA/Boogu) so a torn tier reads `incomplete`, not `installed`.
+    let family = model
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+    model_variant_downloads(model)
+        .into_iter()
         .map(|entry| {
             let repo = entry
                 .get("repo")
@@ -3190,6 +3198,38 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
         .collect::<Vec<_>>();
     object.insert("hasVariantMatrix".to_owned(), Value::Bool(has_matrix));
     object.insert("variants".to_owned(), Value::Array(variants));
+}
+
+fn refresh_variant_download_sizes(model: &mut Value) -> Result<(), ApiError> {
+    // `apply_variant_fields` runs in the blocking install-state sweep while live HF estimation runs
+    // concurrently. Refresh only the already-built response fields after both complete: rebuilding
+    // variants here would repeat filesystem probes serially and undo the intended overlap.
+    let sizes = model_variant_downloads(model)
+        .into_iter()
+        .map(|download| {
+            manifest_download_size_bytes(model, download)
+                .or_else(|| variant_footprint_disk_bytes(download))
+        })
+        .collect::<Vec<_>>();
+    let variants = model
+        .get_mut("variants")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ApiError::internal("Model catalog variants must be an array"))?;
+    if variants.len() != sizes.len() {
+        return Err(ApiError::internal(
+            "Model catalog variant count changed during size enrichment",
+        ));
+    }
+    for (variant, size) in variants.iter_mut().zip(sizes) {
+        let object = variant
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("Model catalog variant must be an object"))?;
+        object.insert(
+            "downloadSizeBytes".to_owned(),
+            size.map(|value| json!(value)).unwrap_or(Value::Null),
+        );
+    }
+    Ok(())
 }
 
 /// The convert-output quant tiers present under a converted MLX dir (sc-10730), highest-fidelity first.
@@ -3486,27 +3526,29 @@ fn apply_model_catalog_size_fields(
         None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
         None => None,
     };
-    let object = model
-        .as_object_mut()
-        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
-    object.insert(
-        "downloadSizeBytes".to_owned(),
-        effective_download_size_bytes
-            .map(|value| json!(value))
-            .unwrap_or(Value::Null),
-    );
-    object.insert(
-        "downloadSizeLabel".to_owned(),
-        effective_download_size_bytes
-            .map(format_bytes)
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    object.insert(
-        "downloadSizeEstimated".to_owned(),
-        Value::Bool(download_size_estimated),
-    );
-    Ok(())
+    {
+        let object = model
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+        object.insert(
+            "downloadSizeBytes".to_owned(),
+            effective_download_size_bytes
+                .map(|value| json!(value))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "downloadSizeLabel".to_owned(),
+            effective_download_size_bytes
+                .map(format_bytes)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "downloadSizeEstimated".to_owned(),
+            Value::Bool(download_size_estimated),
+        );
+    }
+    refresh_variant_download_sizes(model)
 }
 
 fn apply_model_catalog_entry(

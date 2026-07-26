@@ -396,7 +396,9 @@ async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
         .zip(pair[1]["name"].as_str())
         .is_some_and(|(left, right)| left < right)));
     assert!(first_models.iter().all(|model| {
-        model["downloadSizeBytes"] == json!(1234) && model["downloadSizeEstimated"] == json!(false)
+        model["downloadSizeBytes"] == json!(1234)
+            && model["downloadSizeEstimated"] == json!(false)
+            && model["variants"][0]["downloadSizeBytes"] == json!(1234)
     }));
     assert_eq!(
         hook.call_count(),
@@ -490,6 +492,73 @@ async fn concurrent_models_catalog_loads_share_one_estimate_per_distinct_key() {
         hook.call_count(),
         2,
         "completion must not trigger duplicate estimates"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_size_estimate_leader_wakes_follower_to_retry() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "single-flight-cancel",
+                "name": "Single Flight Cancel",
+                "family": "single-flight-test",
+                "type": "image",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "single-flight/cancel",
+                    "files": ["*.safetensors"]
+                }]
+            }]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(2468));
+    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+
+    let leader = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("leader estimate starts");
+    let follower = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_follower())
+        .await
+        .expect("second catalog load follows the leader");
+
+    leader.abort();
+    assert!(leader
+        .await
+        .expect_err("leader request is cancelled")
+        .is_cancelled());
+    tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
+        .await
+        .expect("follower retries as the new leader");
+    hook.release_one();
+    let response = tokio::time::timeout(Duration::from_secs(2), follower)
+        .await
+        .expect("retry completes without a deadlock")
+        .expect("follower request joins");
+
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(response.1[0]["downloadSizeBytes"], json!(2468));
+    assert_eq!(
+        response.1[0]["variants"][0]["downloadSizeBytes"],
+        json!(2468)
+    );
+    assert_eq!(
+        hook.call_count(),
+        2,
+        "cancelled work is retried exactly once"
     );
 }
 
