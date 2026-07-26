@@ -720,11 +720,11 @@ async fn resume_during_paused_task_teardown_is_handed_to_a_successor() {
 }
 
 #[tokio::test]
-async fn queued_successor_dropped_by_shutdown_is_restartable() {
+async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
-    write_catalog_parquet(&source, 30_000);
+    write_catalog_parquet(&source, 100_000);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let (status, created) = request(
         app.clone(),
@@ -744,7 +744,7 @@ async fn queued_successor_dropped_by_shutdown_is_restartable() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
-    let mut paused = None;
+    let mut running = None;
     for _ in 0..1_000 {
         let (_, current) = request(
             app.clone(),
@@ -754,34 +754,28 @@ async fn queued_successor_dropped_by_shutdown_is_restartable() {
         )
         .await;
         if current["processing"]["state"] == "running" {
-            state
-                .catalog_scan_before_terminal_exit_once
-                .store(true, Ordering::SeqCst);
-            let terminal = state.catalog_scan_terminal_exit_reached.notified();
-            let (pause_status, response) = request(
-                app.clone(),
-                "POST",
-                &format!("/api/v1/catalogs/{id}/pause"),
-                json!({
-                    "expectedRevision": current["processingControl"]["revision"]
-                }),
-            )
-            .await;
-            if pause_status == StatusCode::OK {
-                tokio::time::timeout(Duration::from_secs(5), terminal)
-                    .await
-                    .expect("paused generation reaches terminal handoff");
-                paused = Some(response);
-                break;
-            }
-            state
-                .catalog_scan_before_terminal_exit_once
-                .store(false, Ordering::SeqCst);
-            state.catalog_scan_terminal_exit_release.notify_waiters();
+            running = Some(current);
+            break;
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    let paused = paused.expect("pause wins before completion");
+    let running = running.expect("scan starts before completion");
+    let (cleanup_reached, cleanup_release) = state
+        .catalog_scan_supervisor
+        .install_wrapper_cleanup_barriers();
+    let (pause_status, paused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/pause"),
+        json!({
+            "expectedRevision": running["processingControl"]["revision"]
+        }),
+    )
+    .await;
+    assert_eq!(pause_status, StatusCode::OK, "{paused}");
+    tokio::time::timeout(Duration::from_secs(5), cleanup_reached.wait())
+        .await
+        .expect("scan closure returns before wrapper cleanup");
     let (resume_status, resumed) = request(
         app.clone(),
         "POST",
@@ -798,32 +792,46 @@ async fn queued_successor_dropped_by_shutdown_is_restartable() {
         "successor is queued behind the terminal generation"
     );
 
-    let shutdown = state.catalog_scan_supervisor.shutdown().await;
+    let (shutdown, _) = tokio::join!(
+        state.catalog_scan_supervisor.shutdown(),
+        cleanup_release.wait()
+    );
     assert_eq!(shutdown.requested, 1);
     assert_eq!(shutdown.joined, 1);
-    let (_, interrupted) = request(
-        app,
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let stranded = registry.open_attached(&id).expect("catalog opens");
+    assert_eq!(
+        stranded
+            .contract_state()
+            .expect("contract reads")
+            .processing
+            .state,
+        CatalogProcessingState::Paused
+    );
+    assert_eq!(
+        stranded
+            .processing_control()
+            .expect("control reads")
+            .desired_state,
+        sceneworks_core::catalog_store::CatalogProcessingDesiredState::Running
+    );
+    stranded.close();
+
+    let (restarted_app, restarted_state) =
+        create_app_with_state(settings).expect("restarted app creates");
+    let (_, recovering) = request(
+        restarted_app.clone(),
         "GET",
         &format!("/api/v1/catalogs/{id}/status"),
         Value::Null,
     )
     .await;
-    assert_eq!(interrupted["processing"]["state"], "failed");
-    assert!(interrupted["processing"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("restart")));
-
-    let restarted_app = create_app(settings).expect("restarted app creates");
-    let (resume_status, restarted) = request(
-        restarted_app.clone(),
-        "POST",
-        &format!("/api/v1/catalogs/{id}/resume"),
-        json!({
-            "expectedRevision": interrupted["processingControl"]["revision"]
-        }),
-    )
-    .await;
-    assert_eq!(resume_status, StatusCode::OK, "{restarted}");
+    assert_ne!(recovering["processing"]["state"], "failed");
+    assert_eq!(
+        restarted_state.catalog_scan_supervisor.active_count().await,
+        1,
+        "new AppState status discovery schedules the persisted successor"
+    );
     let mut completed = None;
     for _ in 0..2_000 {
         let (_, current) = request(
@@ -841,12 +849,12 @@ async fn queued_successor_dropped_by_shutdown_is_restartable() {
     }
     assert_eq!(
         completed.expect("public restart completes")["counts"]["recordCount"],
-        30_000
+        100_000
     );
 }
 
 #[tokio::test]
-async fn interrupted_bounded_driver_is_reconciled_and_public_restart_completes() {
+async fn interrupted_bounded_driver_is_automatically_recovered_from_its_checkpoint() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 30_000);
@@ -874,39 +882,7 @@ async fn interrupted_bounded_driver_is_reconciled_and_public_restart_completes()
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let id = created["id"].as_str().unwrap();
 
-    let mut failed = None;
-    for _ in 0..2_000 {
-        let (_, status_body) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/catalogs/{id}/status"),
-            Value::Null,
-        )
-        .await;
-        if status_body["processing"]["state"] == "failed" {
-            failed = Some(status_body);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    let failed = failed.expect("driver interruption between passes reconciles to failed");
-    assert_eq!(failed["processing"]["processedCount"], 25_000);
-    assert!(failed["processing"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("interrupted")));
-
-    let revision = failed["processingControl"]["revision"].as_u64().unwrap();
-    let (status, restarted) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/catalogs/{id}/resume"),
-        json!({ "expectedRevision": revision }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{restarted}");
-    assert_eq!(restarted["processing"]["state"], "failed");
-    assert_eq!(restarted["processingControl"]["desiredState"], "running");
-
+    let mut saw_durable_checkpoint = false;
     let mut completed = None;
     for _ in 0..2_000 {
         let (_, status_body) = request(
@@ -916,14 +892,122 @@ async fn interrupted_bounded_driver_is_reconciled_and_public_restart_completes()
             Value::Null,
         )
         .await;
+        saw_durable_checkpoint |= status_body["processing"]["processedCount"] == 25_000;
         if status_body["processing"]["state"] == "completed" {
             completed = Some(status_body);
             break;
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    let completed = completed.expect("public restart resumes the durable checkpoint");
+    let completed = completed.expect("status recovery resumes the durable checkpoint");
+    assert!(
+        saw_durable_checkpoint,
+        "the bounded pass checkpoint must be visible before completion"
+    );
     assert_eq!(completed["counts"]["recordCount"], 30_000);
+}
+
+#[tokio::test]
+async fn status_retries_after_a_recovered_generation_exits_incomplete() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 80_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_stop_after_pass_once
+        .store(true, Ordering::SeqCst);
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Repeated durable recovery",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 100 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+
+    for _ in 0..1_000 {
+        if state.catalog_scan_supervisor.tracked_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+
+    let before_recovered_start = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_before_driver_start_once.lock() = Some(Arc::clone(&before_recovered_start));
+    let (_, first_recovery) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(first_recovery["processing"]["processedCount"], 25_000);
+    assert_eq!(state.catalog_scan_supervisor.active_count().await, 1);
+    state
+        .catalog_scan_stop_after_pass_once
+        .store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), before_recovered_start.wait())
+        .await
+        .expect("recovered generation reaches its prestart barrier");
+
+    for _ in 0..1_000 {
+        if state.catalog_scan_supervisor.tracked_count().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(state.catalog_scan_supervisor.tracked_count().await, 0);
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let twice_interrupted = registry.open_attached(&id).expect("catalog opens");
+    assert_eq!(
+        twice_interrupted
+            .contract_state()
+            .expect("contract reads")
+            .processing
+            .processed_count,
+        50_000
+    );
+    twice_interrupted.close();
+
+    let (_, second_recovery) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(second_recovery["processing"]["processedCount"], 50_000);
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "completed" {
+            completed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        completed.expect("second recovery completes")["counts"]["recordCount"],
+        80_000
+    );
 }
 
 #[tokio::test]
@@ -1576,12 +1660,12 @@ async fn resume_after_busy_retry_terminal_decision_is_handed_to_a_successor() {
 }
 
 #[tokio::test]
-async fn supervisor_cancellation_does_not_fail_progress_owned_by_a_live_processor() {
+async fn new_appstate_recovers_after_shutdown_lease_contention_clears() {
     let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
     let source = temporary.path().join("source.parquet");
     write_catalog_parquet(&source, 100);
-    let (app, state) =
-        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let (_, created) = request(
         app.clone(),
         "POST",
@@ -1643,18 +1727,128 @@ async fn supervisor_cancellation_does_not_fail_progress_owned_by_a_live_processo
     .expect("cancellation interrupts the retry backoff");
     assert_eq!(shutdown.requested, 1);
     assert_eq!(shutdown.joined, 1);
-    drop(held_lease);
-    contended_catalog.close();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let (_, stable) = request(
-        app,
+    let (restarted_app, restarted_state) =
+        create_app_with_state(settings).expect("restarted app creates");
+    let (_, externally_owned) = request(
+        restarted_app.clone(),
         "GET",
         &format!("/api/v1/catalogs/{id}/status"),
         Value::Null,
     )
     .await;
-    assert_eq!(stable["counts"]["recordCount"], 0);
-    assert_eq!(stable["processing"]["state"], "paused");
+    assert_eq!(externally_owned["counts"]["recordCount"], 0);
+    assert_eq!(externally_owned["processing"]["state"], "paused");
+    assert_eq!(
+        restarted_state.catalog_scan_supervisor.active_count().await,
+        0,
+        "a live external lease must not start a duplicate processor"
+    );
+
+    drop(held_lease);
+    contended_catalog.close();
+    let (_, recovery_started) = request(
+        restarted_app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_ne!(recovery_started["processing"]["state"], "failed");
+    let mut completed = None;
+    for _ in 0..1_000 {
+        let (_, current) = request(
+            restarted_app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "completed" {
+            completed = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert_eq!(
+        completed.expect("status recovery completes")["counts"]["recordCount"],
+        100
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_missing_persisted_recovery_plan_fails_once_without_launch_loop() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let invalid_source = temporary.path().join("source.csv");
+    std::fs::File::create(&invalid_source).expect("invalid-kind source fixture");
+
+    for (name, source_config) in [
+        (
+            "Invalid recovery plan",
+            Some(CatalogSourceConfig {
+                kind: "csv".to_owned(),
+                paths: vec![invalid_source],
+                options: json!({}),
+            }),
+        ),
+        ("Missing recovery plan", None),
+    ] {
+        let (_, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/catalogs",
+            json!({
+                "name": name,
+                "path": temporary.path().join(name.replace(' ', "-"))
+            }),
+        )
+        .await;
+        let id = created["id"].as_str().expect("catalog id").to_owned();
+        let catalog = registry.open_attached(&id).expect("catalog opens");
+        let mut contract = catalog.contract_state().expect("contract reads");
+        contract.source_config = source_config;
+        if contract.source_config.is_none() {
+            contract.checkpoints.insert(
+                "scanner.parquet.checkpoint.v1".to_owned(),
+                json!({ "fixture": "interrupted scan with missing plan" }),
+            );
+        }
+        contract.processing.state = CatalogProcessingState::Paused;
+        contract.processing.updated_at = catalog_timestamp_now();
+        catalog
+            .set_contract_state(&contract)
+            .expect("recovery fixture persists");
+        catalog.close();
+
+        let (_, failed) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(failed["processing"]["state"], "failed", "{failed}");
+        let message = failed["processing"]["message"]
+            .as_str()
+            .expect("actionable failure")
+            .to_owned();
+        assert!(message.contains("repair") && message.contains("resume"));
+        let (_, repeated) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(repeated["processing"]["message"], message);
+        assert_eq!(
+            state.catalog_scan_supervisor.active_count().await,
+            0,
+            "invalid persisted plan must not launch repeatedly"
+        );
+    }
 }
 
 #[tokio::test]

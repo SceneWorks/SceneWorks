@@ -33,6 +33,9 @@ struct SupervisorState {
 struct CatalogScanSupervisorInner {
     state: Mutex<SupervisorState>,
     next_generation: AtomicU64,
+    #[cfg(test)]
+    wrapper_cleanup_barriers:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
 
 pub(crate) struct CatalogScanSupervisor {
@@ -45,6 +48,8 @@ impl Default for CatalogScanSupervisor {
             inner: Arc::new(CatalogScanSupervisorInner {
                 state: Mutex::new(SupervisorState::default()),
                 next_generation: AtomicU64::new(1),
+                #[cfg(test)]
+                wrapper_cleanup_barriers: parking_lot::Mutex::new(None),
             }),
         }
     }
@@ -94,6 +99,13 @@ impl CatalogScanSupervisor {
             let Some(inner) = weak_inner.upgrade() else {
                 return;
             };
+            #[cfg(test)]
+            let cleanup_barriers = inner.wrapper_cleanup_barriers.lock().take();
+            #[cfg(test)]
+            if let Some((reached, release)) = cleanup_barriers {
+                reached.wait().await;
+                release.wait().await;
+            }
             let mut state = inner.state.lock().await;
             let matching = state
                 .tasks
@@ -166,6 +178,17 @@ impl CatalogScanSupervisor {
     #[cfg(test)]
     pub(crate) async fn tracked_count(&self) -> usize {
         self.inner.state.lock().await.tasks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_wrapper_cleanup_barriers(
+        &self,
+    ) -> (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>) {
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        *self.inner.wrapper_cleanup_barriers.lock() =
+            Some((Arc::clone(&reached), Arc::clone(&release)));
+        (reached, release)
     }
 }
 

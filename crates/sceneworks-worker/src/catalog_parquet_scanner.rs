@@ -173,6 +173,8 @@ pub struct AttachedCatalogParquetScanDriver {
     _lease: CatalogProcessingLease,
     prepared: Option<PreparedCatalogParquetScan>,
     #[cfg(test)]
+    during_initial_source_snapshot: Option<TestPathHook>,
+    #[cfg(test)]
     after_initial_enumeration: Option<TestPathHook>,
     #[cfg(test)]
     before_shard_open: Option<TestPathHook>,
@@ -195,6 +197,8 @@ impl AttachedCatalogParquetScanDriver {
             catalog,
             _lease: lease,
             prepared: None,
+            #[cfg(test)]
+            during_initial_source_snapshot: None,
             #[cfg(test)]
             after_initial_enumeration: None,
             #[cfg(test)]
@@ -231,6 +235,8 @@ impl AttachedCatalogParquetScanDriver {
                         options,
                         &should_cancel,
                         #[cfg(test)]
+                        self.during_initial_source_snapshot.take(),
+                        #[cfg(test)]
                         self.after_initial_enumeration.take(),
                         #[cfg(test)]
                         self.before_shard_open.take(),
@@ -263,6 +269,11 @@ impl AttachedCatalogParquetScanDriver {
     #[cfg(test)]
     fn after_initial_enumeration_once(&mut self, hook: impl FnOnce(&Path) + Send + 'static) {
         self.after_initial_enumeration = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn during_initial_source_snapshot_once(&mut self, hook: impl FnOnce(&Path) + Send + 'static) {
+        self.during_initial_source_snapshot = Some(Box::new(hook));
     }
 
     #[cfg(test)]
@@ -326,14 +337,17 @@ impl PreparedCatalogParquetScan {
         source: &Path,
         options: &CatalogParquetScanOptions,
         should_cancel: &dyn Fn() -> bool,
+        #[cfg(test)] during_initial_source_snapshot: Option<TestPathHook>,
         #[cfg(test)] after_initial_enumeration: Option<TestPathHook>,
         #[cfg(test)] before_shard_open: Option<TestPathHook>,
     ) -> CatalogParquetScanResult<Self> {
         validate_options(options)?;
         let canonical_source = std::fs::canonicalize(source)?;
-        let source_metadata = std::fs::metadata(&canonical_source)?;
-        let source_is_directory = source_metadata.is_dir();
-        let source = snapshot_from_metadata(canonical_source, &source_metadata)?;
+        let (source, source_is_directory) = snapshot_path_with_hook(
+            canonical_source,
+            #[cfg(test)]
+            during_initial_source_snapshot,
+        )?;
         let paths = parquet_shards_with_cancel(&source.path, should_cancel)?;
         let mut shards = Vec::with_capacity(paths.len());
         for path in paths {
@@ -346,13 +360,11 @@ impl PreparedCatalogParquetScan {
         if let Some(hook) = after_initial_enumeration {
             hook(&source.path);
         }
-        let post_enumeration_metadata = std::fs::metadata(&source.path)?;
-        let post_enumeration =
-            snapshot_from_metadata(source.path.clone(), &post_enumeration_metadata)?;
+        let (post_enumeration, post_is_directory) = snapshot_path(source.path.clone())?;
         if post_enumeration.bytes != source.bytes
             || post_enumeration.modified_nanos != source.modified_nanos
             || post_enumeration.identity != source.identity
-            || post_enumeration_metadata.is_dir() != source_is_directory
+            || post_is_directory != source_is_directory
         {
             return Err(source_changed(
                 "Parquet source changed during initial shard enumeration",
@@ -393,12 +405,11 @@ impl PreparedCatalogParquetScan {
                 "Parquet source path changed during processing",
             ));
         }
-        let metadata = std::fs::metadata(&canonical)?;
-        let current = snapshot_from_metadata(canonical, &metadata)?;
+        let (current, current_is_directory) = snapshot_path(canonical)?;
         if current.bytes != self.source.bytes
             || current.modified_nanos != self.source.modified_nanos
             || current.identity != self.source.identity
-            || metadata.is_dir() != self.source_is_directory
+            || current_is_directory != self.source_is_directory
         {
             return Err(source_changed(
                 "Parquet source directory or file changed during processing",
@@ -422,9 +433,8 @@ impl PreparedCatalogParquetScan {
             self.shard_metadata_reads = self.shard_metadata_reads.saturating_add(1);
         }
         let expected = &self.shards[index];
-        let metadata = std::fs::metadata(&expected.path)?;
-        let current = snapshot_from_metadata(expected.path.clone(), &metadata)?;
-        if !metadata.is_file()
+        let (current, current_is_directory) = snapshot_path(expected.path.clone())?;
+        if current_is_directory
             || current.bytes != expected.bytes
             || current.modified_nanos != expected.modified_nanos
             || current.identity != expected.identity
@@ -478,12 +488,40 @@ fn snapshot_file(path: PathBuf) -> CatalogParquetScanResult<FileSnapshot> {
     snapshot_from_open_file(path, &file, &metadata)
 }
 
-fn snapshot_from_metadata(
+fn snapshot_path(path: PathBuf) -> CatalogParquetScanResult<(FileSnapshot, bool)> {
+    snapshot_path_with_hook(
+        path,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn snapshot_path_with_hook(
     path: PathBuf,
-    metadata: &std::fs::Metadata,
-) -> CatalogParquetScanResult<FileSnapshot> {
-    let identity = file_identity_from_path(&path)?;
-    Ok(snapshot_with_identity(path, metadata, identity))
+    #[cfg(test)] during_snapshot: Option<TestPathHook>,
+) -> CatalogParquetScanResult<(FileSnapshot, bool)> {
+    // `same-file` can open directory handles on Windows where `File::open`
+    // cannot. Take metadata and identity from the exact same middle handle,
+    // sandwiched between path handles so replacement fails closed.
+    let handle_before = same_file::Handle::from_path(&path)?;
+    #[cfg(test)]
+    if let Some(hook) = during_snapshot {
+        hook(&path);
+    }
+    let handle = same_file::Handle::from_path(&path)?;
+    let metadata = handle.as_file().metadata()?;
+    let handle_after = same_file::Handle::from_path(&path)?;
+    if handle_before != handle || handle != handle_after {
+        return Err(source_changed(
+            "Parquet source changed while its metadata was being verified",
+        ));
+    }
+    let is_directory = metadata.is_dir();
+    let identity = hash_file_handle(handle);
+    Ok((
+        snapshot_with_identity(path, &metadata, identity),
+        is_directory,
+    ))
 }
 
 fn snapshot_with_identity(
@@ -495,13 +533,17 @@ fn snapshot_with_identity(
         identity,
         path,
         bytes: metadata.len(),
-        modified_nanos: metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_nanos())
-            .unwrap_or_default(),
+        modified_nanos: modified_nanos(metadata),
     }
+}
+
+fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default()
 }
 
 fn snapshot_from_open_file(
@@ -511,10 +553,6 @@ fn snapshot_from_open_file(
 ) -> CatalogParquetScanResult<FileSnapshot> {
     let identity = file_identity_from_file(file)?;
     Ok(snapshot_with_identity(path, metadata, identity))
-}
-
-fn file_identity_from_path(path: &Path) -> std::io::Result<FileIdentity> {
-    same_file::Handle::from_path(path).map(hash_file_handle)
 }
 
 fn file_identity_from_file(file: &File) -> std::io::Result<FileIdentity> {
@@ -601,6 +639,8 @@ fn scan_parquet_catalog_under_lease(
         source,
         options,
         should_cancel,
+        #[cfg(test)]
+        None,
         #[cfg(test)]
         None,
         #[cfg(test)]
@@ -2320,6 +2360,57 @@ mod tests {
                 .record_count,
             0,
             "unstable enumeration cannot commit mixed rows"
+        );
+    }
+
+    #[test]
+    fn source_snapshot_rejects_replacement_between_identity_and_metadata() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source creates");
+        write_rows(
+            &source.join("part-00000.parquet"),
+            &[vec![row("https://example.com/original.jpg", "one person")]],
+        );
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Snapshot replacement")
+            .expect("catalog creates");
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let mut driver =
+            AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id).expect("driver");
+        let replaced = temporary.path().join("source-before-snapshot");
+        driver.during_initial_source_snapshot_once(move |path| {
+            std::fs::rename(path, &replaced).expect("original directory moves");
+            std::fs::create_dir(path).expect("replacement directory creates");
+            write_rows(
+                &path.join("part-00000.parquet"),
+                &[vec![row(
+                    "https://example.com/replacement.jpg",
+                    "one person",
+                )]],
+            );
+        });
+
+        let error = driver
+            .scan_pass(&source, &CatalogParquetScanOptions::default())
+            .expect_err("one snapshot cannot mix old metadata with a new identity");
+        assert!(matches!(error, CatalogParquetScanError::InvalidSource(_)));
+        drop(driver);
+        let untouched = registry
+            .open_attached(&catalog_id)
+            .expect("catalog reopens");
+        assert_eq!(
+            untouched.metadata(CHECKPOINT_KEY).expect("metadata reads"),
+            None
+        );
+        assert_eq!(
+            untouched
+                .storage_accounting()
+                .expect("accounting reads")
+                .record_count,
+            0
         );
     }
 

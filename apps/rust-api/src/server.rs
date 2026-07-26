@@ -325,6 +325,11 @@ pub struct AppState {
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
     /// Owns, deduplicates, cancels, and drains background catalog scans.
     pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
+    /// Catalog ids for which this AppState has already published an invalid
+    /// persisted recovery plan. Valid scheduled recoveries remain retryable if
+    /// their generation later exits incomplete.
+    pub(crate) catalog_scan_invalid_recovery_reported:
+        Arc<AsyncMutex<std::collections::HashSet<String>>>,
     /// Caps filesystem/Parquet metadata validation before it reaches Tokio's
     /// shared blocking pool, preserving capacity for catalog DB operations.
     pub(crate) catalog_scan_preflight_slots: Arc<Semaphore>,

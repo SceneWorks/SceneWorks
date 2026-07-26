@@ -35,6 +35,7 @@ const MAX_QUERY_LIMIT: u32 = 200;
 const DEFAULT_FACET_LIMIT: u32 = 50;
 const MAX_FACET_LIMIT: u32 = 100;
 const SCHEDULED_SCAN_PASS_ROWS: u64 = 25_000;
+const PARQUET_SCAN_CHECKPOINT_KEY: &str = "scanner.parquet.checkpoint.v1";
 const CATALOG_SCAN_START_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 const CATALOG_PREFLIGHT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const CATALOG_PREFLIGHT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -400,6 +401,13 @@ async fn request_processing_state(
         Ok((catalog_response(&attached, &catalog)?, response_scan_plan))
     })
     .await?;
+    if desired_state == CatalogProcessingDesiredState::Running {
+        state
+            .catalog_scan_invalid_recovery_reported
+            .lock()
+            .await
+            .remove(&response.id);
+    }
     if let Some(scan_plan) = scan_plan {
         schedule_catalog_scan(
             &state,
@@ -417,13 +425,37 @@ async fn load_catalog_response(
     catalog_id: String,
 ) -> Result<CatalogResponse, ApiError> {
     let config_dir = state.settings.config_dir.clone();
-    catalog_call(move || {
+    let mut invalid_reported = state.catalog_scan_invalid_recovery_reported.lock().await;
+    let recovery_allowed = !invalid_reported.contains(&catalog_id);
+    let recovery_catalog_id = catalog_id.clone();
+    let (response, recovery) = catalog_call(move || {
         let registry = CatalogRegistry::new(config_dir);
         let attached = registry.get(&catalog_id)?;
         let catalog = registry.open_attached(&catalog_id)?;
-        catalog_response(&attached, &catalog)
+        let recovery = if recovery_allowed {
+            persisted_scan_recovery(&catalog)?
+        } else {
+            PersistedScanRecovery::None
+        };
+        Ok((
+            catalog_response_unreconciled(&attached, &catalog)?,
+            recovery,
+        ))
     })
-    .await
+    .await?;
+    if matches!(recovery, PersistedScanRecovery::Invalid) {
+        invalid_reported.insert(recovery_catalog_id.clone());
+    }
+    if let PersistedScanRecovery::Schedule(plan) = recovery {
+        schedule_catalog_scan(
+            &state,
+            state.settings.config_dir.clone(),
+            recovery_catalog_id,
+            *plan,
+        )
+        .await;
+    }
+    Ok(response)
 }
 
 fn catalog_response(
@@ -437,6 +469,13 @@ fn catalog_response(
         Err(CatalogError::Conflict(_)) => {}
         Err(error) => return Err(error),
     }
+    catalog_response_unreconciled(attached, catalog)
+}
+
+fn catalog_response_unreconciled(
+    attached: &AttachedCatalog,
+    catalog: &Catalog,
+) -> Result<CatalogResponse, CatalogError> {
     let contract_state = catalog.contract_state()?;
     let storage = catalog.storage_accounting()?;
     Ok(CatalogResponse {
@@ -459,6 +498,82 @@ fn catalog_response(
         processing: contract_state.processing,
         processing_control: catalog.processing_control()?,
     })
+}
+
+enum PersistedScanRecovery {
+    None,
+    Schedule(Box<CatalogScanPlan>),
+    Invalid,
+}
+
+fn persisted_scan_recovery(catalog: &Catalog) -> Result<PersistedScanRecovery, CatalogError> {
+    let _lease = match CatalogProcessingLease::try_acquire(catalog) {
+        Ok(lease) => lease,
+        Err(CatalogError::Conflict(_)) => return Ok(PersistedScanRecovery::None),
+        Err(error) => return Err(error),
+    };
+    let control = catalog.processing_control()?;
+    let contract = catalog.contract_state()?;
+    if control.desired_state != CatalogProcessingDesiredState::Running {
+        _lease.reconcile_interrupted(catalog)?;
+        return Ok(PersistedScanRecovery::None);
+    }
+    if contract.processing.state == CatalogProcessingState::Completed {
+        return Ok(PersistedScanRecovery::None);
+    }
+    if contract.source_config.is_none()
+        && !contract
+            .checkpoints
+            .contains_key(PARQUET_SCAN_CHECKPOINT_KEY)
+    {
+        // Catalogs without scan provenance may be driven by another processor.
+        // A Parquet checkpoint is the durable evidence that a missing source
+        // configuration represents a broken persisted scan plan.
+        _lease.reconcile_interrupted(catalog)?;
+        return Ok(PersistedScanRecovery::None);
+    }
+    let plan = if contract
+        .source_config
+        .as_ref()
+        .is_some_and(|source| source.options.get("maxRows").is_some())
+    {
+        Err(CatalogError::InvalidCatalog(
+            "maxRows is scheduler-managed and cannot be supplied".to_owned(),
+        ))
+    } else {
+        scan_plan(contract.source_config.as_ref())
+    };
+    match plan {
+        Ok(Some(plan)) => Ok(PersistedScanRecovery::Schedule(Box::new(plan))),
+        Ok(None) => {
+            publish_invalid_persisted_scan(
+                catalog,
+                contract.processing,
+                "Catalog scan was interrupted and cannot restart because its source configuration is missing",
+            )?;
+            Ok(PersistedScanRecovery::Invalid)
+        }
+        Err(CatalogError::InvalidCatalog(detail)) => {
+            publish_invalid_persisted_scan(
+                catalog,
+                contract.processing,
+                &format!("Catalog scan cannot restart: {detail}"),
+            )?;
+            Ok(PersistedScanRecovery::Invalid)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn publish_invalid_persisted_scan(
+    catalog: &Catalog,
+    mut progress: CatalogProcessingProgress,
+    detail: &str,
+) -> Result<(), CatalogError> {
+    progress.state = CatalogProcessingState::Failed;
+    progress.message = Some(format!("{detail}; repair the catalog source and resume"));
+    progress.updated_at = sceneworks_core::catalog_store::catalog_timestamp_now();
+    catalog.set_processing_progress(&progress)
 }
 
 async fn validated_scan_plan(

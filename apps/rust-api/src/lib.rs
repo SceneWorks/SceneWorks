@@ -1203,6 +1203,9 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
+            std::collections::HashSet::new(),
+        )),
         catalog_scan_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         catalog_scan_work_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         #[cfg(test)]
