@@ -195,6 +195,7 @@ use caption_jobs::*;
 // ordinary SceneWorks dataset.
 mod dataset_parquet_jobs;
 use dataset_parquet_jobs::*;
+pub mod catalog_parquet_scanner;
 // The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
 // select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
 // Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);

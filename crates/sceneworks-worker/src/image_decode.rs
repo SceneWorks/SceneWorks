@@ -1,7 +1,10 @@
 //! Image-decode backstop (sc-6143).
 //!
-//! The worker's `image` crate is built `png`/`jpeg`/`webp`-only, so a valid AVIF/HEIC/HEIF/TIFF/
-//! BMP/GIF asset fails to decode (`The image format Avif is not supported`). Import-time
+//! The worker declares `image` as `png`/`jpeg`/`webp`, so a valid AVIF/HEIC/HEIF (and, in a build
+//! whose workspace-wide `image` feature union lacks them, TIFF/BMP/GIF) asset fails to decode
+//! (`The image format Avif is not supported`). Note the decodable set is the union across all
+//! workspace members, not this crate's own declaration — `apps/rust-api` enabling `bmp` makes BMP
+//! decodable here too. Import-time
 //! normalization ([`sceneworks_core::project_store`]) converts new uploads to PNG, but assets that
 //! predate that change — or arrive by a path that skips import normalization — would still fail at
 //! the ~dozen worker decode sites.
@@ -144,45 +147,48 @@ mod tests {
         assert!(decode_image_bytes_any(b"this is not an image").is_err());
     }
 
-    /// End-to-end backstop: a BMP (valid, but not in the worker's `image` build) decodes via the
-    /// transcode path. macOS-only because it relies on `sips`; the ffmpeg path is identical.
+    /// End-to-end backstop: a valid-but-unsupported source decodes via the transcode path.
+    /// macOS-only because it relies on `sips`; the ffmpeg path is identical.
+    ///
+    /// The fixture must be a format that [`sniff_image_kind`] recognizes (the transcode is gated on
+    /// a known kind) AND that the compiled `image` build cannot decode. This used to hand-build a
+    /// BMP, which passed under `cargo test -p sceneworks-worker` but FAILED under a workspace
+    /// `cargo test`: cargo unifies features for the shared `image` 0.25 across workspace members and
+    /// `apps/rust-api` enables `bmp`, so every real build decodes BMP natively and the precondition
+    /// stopped holding. HEIC is immune — `image` 0.25 ships no HEIC decoder at any feature level —
+    /// so this no longer depends on which crate enables what.
     #[cfg(target_os = "macos")]
     #[test]
-    fn decodes_unsupported_bmp_via_transcode() {
+    fn decodes_unsupported_heic_via_transcode() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("pixel.bmp");
-        std::fs::write(&path, super::tests_support::one_pixel_bmp()).expect("write bmp");
+        let seed = dir.path().join("seed.png");
+        image::RgbImage::from_raw(1, 1, vec![0x20, 0x40, 0x80])
+            .expect("1x1 rgb buffer")
+            .save_with_format(&seed, image::ImageFormat::Png)
+            .expect("seed png writes");
+        let path = dir.path().join("pixel.heic");
+        let converted = std::process::Command::new("sips")
+            .args(["-s", "format", "heic"])
+            .arg(&seed)
+            .arg("--out")
+            .arg(&path)
+            .output()
+            .expect("sips runs");
+        assert!(
+            converted.status.success() && path.exists(),
+            "sips must produce the HEIC fixture: {}",
+            String::from_utf8_lossy(&converted.stderr)
+        );
 
-        // The worker's image build can't decode BMP directly...
+        // The transcode is only reachable for a sniffed kind.
+        assert_eq!(
+            sniff_image_kind(&std::fs::read(&path).expect("read fixture")),
+            Some(sceneworks_core::media_convert::ImageKind::Heif)
+        );
+        // The worker's image build can't decode HEIC directly...
         assert!(image::open(&path).is_err());
         // ...but the backstop transcodes it.
-        let decoded = decode_image_any(&path).expect("BMP decodes via transcode");
+        let decoded = decode_image_any(&path).expect("HEIC decodes via transcode");
         assert_eq!(decoded.to_rgb8().dimensions(), (1, 1));
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests_support {
-    /// A valid 1×1 24-bit BMP.
-    pub(super) fn one_pixel_bmp() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"BM");
-        bytes.extend_from_slice(&58u32.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&54u32.to_le_bytes());
-        bytes.extend_from_slice(&40u32.to_le_bytes());
-        bytes.extend_from_slice(&1i32.to_le_bytes());
-        bytes.extend_from_slice(&1i32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&24u16.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&2835i32.to_le_bytes());
-        bytes.extend_from_slice(&2835i32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&[0x20, 0x40, 0x80, 0x00]);
-        bytes
     }
 }

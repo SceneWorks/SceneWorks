@@ -317,27 +317,8 @@ fn normalized_filter_terms(payload: &JsonObject, field: &str) -> Vec<String> {
 }
 
 fn parquet_files(source: &Path) -> WorkerResult<Vec<PathBuf>> {
-    if source.is_file() {
-        return Ok(vec![source.to_path_buf()]);
-    }
-    let mut files = std::fs::read_dir(source)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-    if files.is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Parquet source directory contains no .parquet files.".to_owned(),
-        ));
-    }
-    Ok(files)
+    crate::catalog_parquet_scanner::parquet_shards(source)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
 fn read_candidates(
@@ -393,12 +374,12 @@ fn read_candidates(
             if url.is_empty()
                 || caption.is_empty()
                 || (!caption_includes.is_empty()
-                    && !caption_includes
-                        .iter()
-                        .any(|term| caption_lower.contains(term)))
-                || caption_excludes
-                    .iter()
-                    .any(|term| caption_lower.contains(term))
+                    && !caption_includes.iter().any(|term| {
+                        crate::catalog_parquet_scanner::caption_matches_term(&caption_lower, term)
+                    }))
+                || caption_excludes.iter().any(|term| {
+                    crate::catalog_parquet_scanner::caption_matches_term(&caption_lower, term)
+                })
                 || width.zip(height).is_some_and(|(width, height)| {
                     width < min_edge
                         || height < min_edge
