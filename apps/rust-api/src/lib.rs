@@ -111,6 +111,7 @@ mod catalogs;
 use catalogs::{
     attach_catalog, catalog_facets, create_catalog, delete_catalog_on_disk, detach_catalog,
     get_catalog, get_catalog_status, list_catalogs, pause_catalog, query_catalog, resume_catalog,
+    update_catalog_analyzer_config,
 };
 mod assets;
 use assets::{
@@ -1296,6 +1297,10 @@ fn create_app_with_state_mode(
         )
         .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
         .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
+        .route(
+            "/api/v1/catalogs/:catalog_id/analyzer-config",
+            put(update_catalog_analyzer_config),
+        )
         .route("/api/v1/catalogs/:catalog_id/pause", post(pause_catalog))
         .route("/api/v1/catalogs/:catalog_id/resume", post(resume_catalog))
         .route(

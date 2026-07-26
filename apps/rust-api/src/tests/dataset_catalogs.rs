@@ -463,6 +463,94 @@ async fn catalog_pause_and_resume_persist_desired_processing_state() {
 }
 
 #[tokio::test]
+async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Analyzer settings",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    assert_eq!(created["analyzerConfig"]["revision"], 0);
+    assert_eq!(
+        created["analyzerConfig"]["settings"]["structuredAnalysisEnabled"],
+        true
+    );
+
+    let settings = json!({
+        "structuredAnalysisEnabled": true,
+        "visionAnalysisEnabled": true,
+        "semanticEmbeddingsEnabled": true,
+        "thresholds": {
+            "personMinConfidence": 0.4,
+            "faceMinConfidence": 0.7,
+            "poseMinKeypointConfidence": 0.35,
+            "prominentFrameFraction": 0.25,
+            "frameEdgeMargin": 0.02,
+            "minPoseCoverage": 0.8
+        }
+    });
+    let (status, updated) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({
+            "expectedRevision": 0,
+            "settings": settings
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["analyzerConfig"]["revision"], 1);
+    assert_eq!(updated["analyzerConfig"]["settings"], settings);
+
+    let (status, conflict) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({
+            "expectedRevision": 0,
+            "settings": settings
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["code"], "catalog_analyzer_config_conflict");
+
+    let mut invalid = settings.clone();
+    invalid["thresholds"]["frameEdgeMargin"] = json!(0.5);
+    let (status, invalid_response) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({
+            "expectedRevision": 1,
+            "settings": invalid
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_response}");
+    assert_eq!(invalid_response["code"], "catalog_invalid");
+
+    let (_, persisted) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(persisted["analyzerConfig"]["revision"], 1);
+    assert_eq!(persisted["analyzerConfig"]["settings"], settings);
+}
+
+#[tokio::test]
 async fn stale_running_status_is_reconciled_and_lifecycle_recovers() {
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
@@ -515,6 +603,50 @@ async fn stale_running_status_is_reconciled_and_lifecycle_recovers() {
     .await;
     assert_eq!(status, StatusCode::OK, "{detached}");
     assert_eq!(detached["detached"], true);
+}
+
+#[tokio::test]
+async fn unavailable_catalog_can_be_detached_without_touching_its_relocated_files() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let catalog_path = temporary.path().join("catalog");
+    let relocated_path = temporary.path().join("relocated-catalog");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Relocated",
+            "path": catalog_path
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    std::fs::rename(&catalog_path, &relocated_path).expect("catalog relocates outside registry");
+
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/catalogs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed[0]["id"], id);
+    assert_eq!(listed[0]["availability"], "unavailable");
+
+    let (status, detached) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/catalogs/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detached}");
+    assert_eq!(detached["detached"], true);
+    assert_eq!(detached["deletedOnDisk"], false);
+    assert!(
+        relocated_path.exists(),
+        "detach never deletes relocated data"
+    );
+
+    let (_, listed) = request(app, "GET", "/api/v1/catalogs", Value::Null).await;
+    assert_eq!(listed, json!([]));
 }
 
 #[tokio::test]

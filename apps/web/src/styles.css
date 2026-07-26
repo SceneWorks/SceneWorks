@@ -235,6 +235,46 @@
   transition: width var(--t-med) var(--ease-out);
 }
 
+.catalog-progress--indeterminate span {
+  animation: catalog-progress-indeterminate 1.4s ease-in-out infinite;
+  width: 35%;
+}
+
+.catalog-analyzer-form {
+  display: grid;
+  gap: var(--gap-4);
+}
+
+.catalog-analyzer-toggles,
+.catalog-analyzer-thresholds {
+  display: grid;
+  gap: var(--gap-3);
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.catalog-analyzer-toggles label {
+  align-items: center;
+  display: flex;
+  gap: var(--gap-2);
+}
+
+@keyframes catalog-progress-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .catalog-progress--indeterminate span {
+    animation: none;
+    transform: translateX(90%);
+  }
+}
+
 .catalog-metric-grid {
   display: grid;
   gap: var(--gap-2);

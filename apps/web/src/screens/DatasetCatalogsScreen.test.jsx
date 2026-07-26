@@ -72,6 +72,23 @@ function catalog(overrides = {}) {
       revision: 0,
       updatedAt: "2026-07-26T12:00:00Z",
     },
+    analyzerConfig: {
+      revision: 0,
+      updatedAt: "2026-07-26T12:00:00Z",
+      settings: {
+        structuredAnalysisEnabled: true,
+        visionAnalysisEnabled: false,
+        semanticEmbeddingsEnabled: false,
+        thresholds: {
+          personMinConfidence: 0.25,
+          faceMinConfidence: 0.65,
+          poseMinKeypointConfidence: 0.3,
+          prominentFrameFraction: 0.2,
+          frameEdgeMargin: 0.01,
+          minPoseCoverage: 0.72,
+        },
+      },
+    },
     ...overrides,
   };
 }
@@ -120,6 +137,16 @@ describe("DatasetCatalogsScreen", () => {
         return response(attached);
       }
       if (path.endsWith("/status")) return response(catalogs[0]);
+      if (path.endsWith("/analyzer-config") && options.method === "PUT") {
+        catalogs[0] = catalog({
+          analyzerConfig: {
+            revision: 1,
+            updatedAt: "2026-07-26T12:03:00Z",
+            settings: JSON.parse(options.body).settings,
+          },
+        });
+        return response(catalogs[0]);
+      }
       if (path.endsWith("/pause")) {
         catalogs[0] = catalog({
           processingControl: {
@@ -190,6 +217,57 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("Analyzing shard 7");
     expect(container.textContent).toContain("6.5 KiB");
     expect(container.querySelector("[role='progressbar']").getAttribute("aria-valuenow")).toBe("54");
+  });
+
+  it("renders running progress as indeterminate when the scanner has no total", async () => {
+    catalogs = [catalog({
+      processing: {
+        ...catalog().processing,
+        candidateCount: 25_000,
+        processedCount: 25_000,
+      },
+    })];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ token: "token" }}>
+          <DatasetCatalogsScreen />
+          <ConfirmHost />
+        </AppContext.Provider>,
+      );
+    });
+    await flush();
+
+    const progress = container.querySelector("[role='progressbar']");
+    expect(progress.getAttribute("aria-valuenow")).toBeNull();
+    expect(progress.getAttribute("aria-label")).toBe("25,000 processed; total unknown");
+    expect(progress.classList.contains("catalog-progress--indeterminate")).toBe(true);
+  });
+
+  it("persists typed analyzer settings with the current revision without starting processing", async () => {
+    const vision = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Vision classification"))
+      .querySelector("input");
+    const personThreshold = container.querySelector("input[aria-label='Person confidence']");
+    await act(async () => {
+      vision.click();
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(personThreshold, "0.4");
+      personThreshold.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Save analyzer settings"));
+    await act(async () => save.click());
+    await flush();
+
+    const update = requests.find((entry) => entry.path.endsWith("/analyzer-config"));
+    expect(update.options.method).toBe("PUT");
+    expect(update.body.expectedRevision).toBe(0);
+    expect(update.body.settings.visionAnalysisEnabled).toBe(true);
+    expect(update.body.settings.personMinConfidence).toBeUndefined();
+    expect(update.body.settings.thresholds.personMinConfidence).toBe(0.4);
+    expect(container.textContent).toContain("Changing settings does not start processing.");
   });
 
   it("offers an API-backed restart for failed schedulable Parquet processing", async () => {

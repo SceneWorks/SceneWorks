@@ -12,10 +12,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sceneworks_core::catalog_store::{
-    AttachedCatalog, Catalog, CatalogContractState, CatalogError, CatalogFacet,
-    CatalogProcessingControl, CatalogProcessingDesiredState, CatalogProcessingLease,
-    CatalogProcessingProgress, CatalogProcessingState, CatalogRecord, CatalogRecordFilter,
-    CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
+    AttachedCatalog, Catalog, CatalogAnalyzerConfig, CatalogAnalyzerSettings, CatalogContractState,
+    CatalogError, CatalogFacet, CatalogProcessingControl, CatalogProcessingDesiredState,
+    CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRecord,
+    CatalogRecordFilter, CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
 };
 use sceneworks_worker::catalog_parquet_scanner::{
     validate_catalog_parquet_scan_plan_with_cancel, AttachedCatalogParquetScanDriver,
@@ -82,6 +82,13 @@ pub(crate) struct CatalogControlRequest {
     expected_revision: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UpdateCatalogAnalyzerConfigRequest {
+    expected_revision: u64,
+    settings: CatalogAnalyzerSettings,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CatalogCountsResponse {
@@ -120,6 +127,7 @@ pub(crate) struct CatalogResponse {
     storage: Option<CatalogStorageResponse>,
     processing: CatalogProcessingProgress,
     processing_control: CatalogProcessingControl,
+    analyzer_config: CatalogAnalyzerConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,6 +331,42 @@ pub(crate) async fn delete_catalog_on_disk(
     }))
 }
 
+pub(crate) async fn update_catalog_analyzer_config(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<UpdateCatalogAnalyzerConfigRequest>,
+) -> Result<Json<CatalogResponse>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&catalog_id)?;
+        match catalog.request_analyzer_config(request.expected_revision, request.settings) {
+            Ok(_) => {}
+            Err(CatalogError::Conflict(_)) => {
+                return Err(CatalogError::Conflict(
+                    "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+        let attached = registry.get(&catalog_id)?;
+        catalog_response(&attached, &catalog)
+    })
+    .await
+    .map_err(|error| {
+        if error.status == StatusCode::CONFLICT {
+            ApiError {
+                status: StatusCode::CONFLICT,
+                detail: "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+                code: Some("catalog_analyzer_config_conflict"),
+            }
+        } else {
+            error
+        }
+    })?;
+    Ok(Json(response))
+}
+
 pub(crate) async fn pause_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
@@ -497,6 +541,7 @@ fn catalog_response_unreconciled(
         storage: Some(storage_response(storage)),
         processing: contract_state.processing,
         processing_control: catalog.processing_control()?,
+        analyzer_config: catalog.analyzer_config()?,
     })
 }
 
@@ -1128,6 +1173,7 @@ fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {
         storage: None,
         processing,
         processing_control: CatalogProcessingControl::default(),
+        analyzer_config: CatalogAnalyzerConfig::default(),
     }
 }
 

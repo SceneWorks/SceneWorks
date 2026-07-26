@@ -14,7 +14,44 @@ const EMPTY_CREATE = {
   sourcePath: "",
 };
 
+const DEFAULT_ANALYZER_SETTINGS = {
+  structuredAnalysisEnabled: true,
+  visionAnalysisEnabled: false,
+  semanticEmbeddingsEnabled: false,
+  thresholds: {
+    personMinConfidence: 0.25,
+    faceMinConfidence: 0.65,
+    poseMinKeypointConfidence: 0.3,
+    prominentFrameFraction: 0.2,
+    frameEdgeMargin: 0.01,
+    minPoseCoverage: 0.72,
+  },
+};
+
+const ANALYZER_THRESHOLD_FIELDS = [
+  ["personMinConfidence", "Person confidence", 1],
+  ["faceMinConfidence", "Face confidence", 1],
+  ["poseMinKeypointConfidence", "Pose keypoint confidence", null],
+  ["prominentFrameFraction", "Prominent frame fraction", 1],
+  ["frameEdgeMargin", "Frame edge margin", 0.25],
+  ["minPoseCoverage", "Minimum pose coverage", 1],
+];
+
+function analyzerSettings(value) {
+  return {
+    ...DEFAULT_ANALYZER_SETTINGS,
+    ...(value ?? {}),
+    thresholds: {
+      ...DEFAULT_ANALYZER_SETTINGS.thresholds,
+      ...(value?.thresholds ?? {}),
+    },
+  };
+}
+
 function safeCatalogError(error, action) {
+  if (error?.code === "catalog_analyzer_config_conflict") {
+    return "Analyzer settings changed in another session. Refresh and try again.";
+  }
   const message = String(error?.message ?? "").toLowerCase();
   if (message.includes("not found")) return "That catalog is no longer attached. Refresh the list and try again.";
   if (message.includes("already")) return "That folder is already attached as a catalog.";
@@ -72,7 +109,16 @@ function Progress({ catalog }) {
   const desiredState = catalog.processingControl?.desiredState ?? "running";
   const candidates = Number(processing.candidateCount ?? 0);
   const processed = Number(processing.processedCount ?? 0);
-  const percent = candidates > 0 ? Math.min(100, Math.round((processed / candidates) * 100)) : 0;
+  const percent =
+    processing.state === "completed"
+      ? 100
+      : candidates > processed
+        ? Math.min(100, Math.round((processed / candidates) * 100))
+        : processing.state === "idle" && processed === 0
+          ? 0
+          : null;
+  const progressLabel =
+    percent === null ? `${count(processed)} processed; total unknown` : `${percent}% processed`;
   return (
     <section className="catalog-detail-section" aria-labelledby="catalog-progress-title">
       <div className="catalog-section-heading">
@@ -82,14 +128,14 @@ function Progress({ catalog }) {
         </span>
       </div>
       <div
-        aria-label={`${percent}% processed`}
+        aria-label={progressLabel}
         aria-valuemax="100"
         aria-valuemin="0"
-        aria-valuenow={percent}
-        className="catalog-progress"
+        aria-valuenow={percent ?? undefined}
+        className={`catalog-progress${percent === null ? " catalog-progress--indeterminate" : ""}`}
         role="progressbar"
       >
-        <span style={{ width: `${percent}%` }} />
+        <span style={percent === null ? undefined : { width: `${percent}%` }} />
       </div>
       <div className="catalog-metric-grid">
         <span><strong>{count(processing.candidateCount)}</strong>Candidates</span>
@@ -126,10 +172,21 @@ export function DatasetCatalogsScreen() {
   const [error, setError] = useState("");
   const [createDraft, setCreateDraft] = useState(EMPTY_CREATE);
   const [attachPath, setAttachPath] = useState("");
+  const [analyzerDraft, setAnalyzerDraft] = useState(DEFAULT_ANALYZER_SETTINGS);
   const generationRef = useRef(0);
+  const analyzerDraftVersionRef = useRef("");
   const pollAbortRef = useRef(null);
   const mutationAbortRef = useRef(null);
   const selected = catalogs.find((catalog) => catalog.id === selectedId) ?? null;
+
+  useEffect(() => {
+    const version = selected
+      ? `${selected.id}:${selected.analyzerConfig?.revision ?? 0}`
+      : "";
+    if (analyzerDraftVersionRef.current === version) return;
+    analyzerDraftVersionRef.current = version;
+    setAnalyzerDraft(analyzerSettings(selected?.analyzerConfig?.settings));
+  }, [selected]);
 
   const persistSelection = useCallback((id) => {
     generationRef.current += 1;
@@ -313,6 +370,28 @@ export function DatasetCatalogsScreen() {
         signal,
       }),
       (updated) => setCatalogs((current) => current.map((item) => item.id === updated.id ? updated : item)),
+    );
+  }
+
+  async function saveAnalyzerConfig(event) {
+    event.preventDefault();
+    if (!selected) return;
+    await mutate(
+      "save analyzer settings",
+      (signal) => apiFetch(
+        `/api/v1/catalogs/${encodeURIComponent(selected.id)}/analyzer-config`,
+        token,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            expectedRevision: selected.analyzerConfig?.revision ?? 0,
+            settings: analyzerDraft,
+          }),
+          signal,
+        },
+      ),
+      (updated) => setCatalogs((current) =>
+        current.map((item) => item.id === updated.id ? updated : item)),
     );
   }
 
@@ -545,6 +624,63 @@ export function DatasetCatalogsScreen() {
 
               <section className="catalog-detail-section" aria-labelledby="catalog-analyzers-title">
                 <h3 id="catalog-analyzers-title">Analyzer configuration</h3>
+                <form className="catalog-analyzer-form" onSubmit={saveAnalyzerConfig}>
+                  <div className="catalog-analyzer-toggles">
+                    {[
+                      ["structuredAnalysisEnabled", "Structured person, face, and pose analysis"],
+                      ["visionAnalysisEnabled", "Vision classification and tags"],
+                      ["semanticEmbeddingsEnabled", "Semantic embeddings"],
+                    ].map(([field, label]) => (
+                      <label key={field}>
+                        <input
+                          checked={Boolean(analyzerDraft[field])}
+                          disabled={selected.availability !== "available"}
+                          onChange={(event) => setAnalyzerDraft((current) => ({
+                            ...current,
+                            [field]: event.target.checked,
+                          }))}
+                          type="checkbox"
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="catalog-analyzer-thresholds">
+                    {ANALYZER_THRESHOLD_FIELDS.map(([field, label, max]) => (
+                      <label className="settings-field" key={field}>
+                        <span>{label}</span>
+                        <input
+                          aria-label={label}
+                          disabled={selected.availability !== "available"}
+                          max={max ?? undefined}
+                          min="0"
+                          onChange={(event) => setAnalyzerDraft((current) => ({
+                            ...current,
+                            thresholds: {
+                              ...current.thresholds,
+                              [field]: Number(event.target.value),
+                            },
+                          }))}
+                          required
+                          step="0.01"
+                          type="number"
+                          value={analyzerDraft.thresholds[field]}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <p className="field-hint">
+                    Saved per catalog for the next analysis run. Changing settings does not start processing.
+                  </p>
+                  <button
+                    className="secondary-action strong"
+                    disabled={Boolean(busy) || selected.availability !== "available"}
+                    type="submit"
+                  >
+                    Save analyzer settings
+                  </button>
+                </form>
+                <h4>Recorded analyzer versions</h4>
                 {analyzerEntries.length ? (
                   <dl className="catalog-definition-list">
                     {analyzerEntries.map(([name, version]) => <div key={name}><dt>{name}</dt><dd><code>{version}</code></dd></div>)}

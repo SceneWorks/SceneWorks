@@ -43,6 +43,7 @@ const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
 const CHECKPOINTS_METADATA_KEY: &str = "checkpoints";
 const PROGRESS_METADATA_KEY: &str = "processing_progress";
 const PROCESSING_CONTROL_METADATA_KEY: &str = "processing_control";
+const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
 const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
 const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
 const CATALOG_NAME_METADATA_KEY: &str = "name";
@@ -58,6 +59,7 @@ const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
     CHECKPOINTS_METADATA_KEY,
     PROGRESS_METADATA_KEY,
     PROCESSING_CONTROL_METADATA_KEY,
+    ANALYZER_CONFIG_METADATA_KEY,
 ];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -221,6 +223,71 @@ impl Default for CatalogProcessingControl {
     fn default() -> Self {
         Self {
             desired_state: CatalogProcessingDesiredState::Running,
+            revision: 0,
+            updated_at: utc_now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerThresholds {
+    pub person_min_confidence: f64,
+    pub face_min_confidence: f64,
+    pub pose_min_keypoint_confidence: f64,
+    pub prominent_frame_fraction: f64,
+    pub frame_edge_margin: f64,
+    pub min_pose_coverage: f64,
+}
+
+impl Default for CatalogAnalyzerThresholds {
+    fn default() -> Self {
+        Self {
+            person_min_confidence: 0.25,
+            face_min_confidence: 0.65,
+            pose_min_keypoint_confidence: 0.3,
+            prominent_frame_fraction: 0.2,
+            frame_edge_margin: 0.01,
+            min_pose_coverage: 0.72,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerSettings {
+    pub structured_analysis_enabled: bool,
+    pub vision_analysis_enabled: bool,
+    pub semantic_embeddings_enabled: bool,
+    pub thresholds: CatalogAnalyzerThresholds,
+}
+
+impl Default for CatalogAnalyzerSettings {
+    fn default() -> Self {
+        Self {
+            structured_analysis_enabled: true,
+            vision_analysis_enabled: false,
+            semantic_embeddings_enabled: false,
+            thresholds: CatalogAnalyzerThresholds::default(),
+        }
+    }
+}
+
+/// Revisioned catalog-owned analyzer intent. Model versions and run results
+/// remain processor-owned; these settings are durable user choices that later
+/// orchestration can consume without racing scanner/analyzer checkpoints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalyzerConfig {
+    pub settings: CatalogAnalyzerSettings,
+    pub revision: u64,
+    pub updated_at: String,
+}
+
+impl Default for CatalogAnalyzerConfig {
+    fn default() -> Self {
+        Self {
+            settings: CatalogAnalyzerSettings::default(),
             revision: 0,
             updated_at: utc_now(),
         }
@@ -884,6 +951,78 @@ impl Catalog {
             })
     }
 
+    pub fn analyzer_config(&self) -> CatalogResult<CatalogAnalyzerConfig> {
+        self.read_contract_value(ANALYZER_CONFIG_METADATA_KEY)
+            .map(|config| {
+                config.unwrap_or_else(|| CatalogAnalyzerConfig {
+                    updated_at: self.descriptor.created_at.clone(),
+                    ..CatalogAnalyzerConfig::default()
+                })
+            })
+    }
+
+    /// Atomically advances user analyzer settings without rewriting processor
+    /// provenance, checkpoints, or progress.
+    pub fn request_analyzer_config(
+        &self,
+        expected_revision: u64,
+        settings: CatalogAnalyzerSettings,
+    ) -> CatalogResult<CatalogAnalyzerConfig> {
+        validate_analyzer_settings(&settings)?;
+        let database_path = self.database_path();
+        let default = CatalogAnalyzerConfig {
+            updated_at: self.descriptor.created_at.clone(),
+            ..CatalogAnalyzerConfig::default()
+        };
+        self.connection
+            .execute(
+                "insert or ignore into catalog_metadata(key, value) values (?1, ?2)",
+                params![
+                    ANALYZER_CONFIG_METADATA_KEY,
+                    serde_json::to_string(&default)?
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current_payload: String = self
+            .connection
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [ANALYZER_CONFIG_METADATA_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let current = serde_json::from_str::<CatalogAnalyzerConfig>(&current_payload)?;
+        if current.revision != expected_revision {
+            return Err(CatalogError::Conflict(
+                "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+            ));
+        }
+        let next = CatalogAnalyzerConfig {
+            settings,
+            revision: current.revision.checked_add(1).ok_or_else(|| {
+                CatalogError::Conflict("Catalog analyzer revision is exhausted".to_owned())
+            })?,
+            updated_at: utc_now(),
+        };
+        let changed = self
+            .connection
+            .execute(
+                "update catalog_metadata set value = ?1 where key = ?2 and value = ?3",
+                params![
+                    serde_json::to_string(&next)?,
+                    ANALYZER_CONFIG_METADATA_KEY,
+                    current_payload
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        if changed != 1 {
+            return Err(CatalogError::Conflict(
+                "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+            ));
+        }
+        Ok(next)
+    }
+
     /// Atomically advances user processing intent without reading or rewriting
     /// any other catalog contract field.
     pub fn request_processing_control(
@@ -1194,14 +1333,16 @@ impl CatalogRegistry {
                 CatalogError::NotFound(format!("Attached catalog not found: {catalog_id}"))
             })?;
         let attached = registry.catalogs[index].clone();
-        let catalog = Catalog::open(&attached.path)?;
-        if catalog.descriptor().id != catalog_id {
-            return Err(CatalogError::InvalidCatalog(
-                "Attached catalog identity does not match its registry entry".to_owned(),
-            ));
+        let catalog = Catalog::open(&attached.path)
+            .ok()
+            .filter(|catalog| catalog.descriptor().id == catalog_id);
+        let processing_lease = catalog
+            .as_ref()
+            .map(CatalogProcessingLease::try_acquire)
+            .transpose()?;
+        if let (Some(catalog), Some(processing_lease)) = (&catalog, &processing_lease) {
+            processing_lease.reconcile_interrupted(catalog)?;
         }
-        let processing_lease = CatalogProcessingLease::try_acquire(&catalog)?;
-        processing_lease.reconcile_interrupted(&catalog)?;
         let detached = registry.catalogs.remove(index);
         self.save(&registry)?;
         Ok(detached)
@@ -1629,6 +1770,39 @@ fn validate_contract_state(state: &CatalogContractState) -> CatalogResult<()> {
         return Err(CatalogError::InvalidCatalog(format!(
             "Catalog contract state exceeds {MAX_CONTRACT_STATE_BYTES} bytes"
         )));
+    }
+    Ok(())
+}
+
+fn validate_analyzer_settings(settings: &CatalogAnalyzerSettings) -> CatalogResult<()> {
+    let thresholds = &settings.thresholds;
+    for (name, value) in [
+        ("personMinConfidence", thresholds.person_min_confidence),
+        ("faceMinConfidence", thresholds.face_min_confidence),
+        (
+            "prominentFrameFraction",
+            thresholds.prominent_frame_fraction,
+        ),
+        ("frameEdgeMargin", thresholds.frame_edge_margin),
+        ("minPoseCoverage", thresholds.min_pose_coverage),
+    ] {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog analyzer {name} must be between 0 and 1"
+            )));
+        }
+    }
+    if thresholds.frame_edge_margin > 0.25 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer frameEdgeMargin must not exceed 0.25".to_owned(),
+        ));
+    }
+    if !thresholds.pose_min_keypoint_confidence.is_finite()
+        || thresholds.pose_min_keypoint_confidence < 0.0
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer poseMinKeypointConfidence must be finite and non-negative".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2743,6 +2917,42 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_configuration_is_durable_validated_and_revision_guarded() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let catalog = Catalog::create(&root, "Analyzers").unwrap();
+        let initial = catalog.analyzer_config().unwrap();
+        assert_eq!(initial.revision, 0);
+        assert!(initial.settings.structured_analysis_enabled);
+        assert!(!initial.settings.vision_analysis_enabled);
+
+        let mut settings = initial.settings;
+        settings.vision_analysis_enabled = true;
+        settings.semantic_embeddings_enabled = true;
+        settings.thresholds.person_min_confidence = 0.4;
+        let updated = catalog
+            .request_analyzer_config(0, settings.clone())
+            .expect("analyzer settings persist");
+        assert_eq!(updated.revision, 1);
+        assert_eq!(updated.settings, settings);
+        assert!(matches!(
+            catalog.request_analyzer_config(0, CatalogAnalyzerSettings::default()),
+            Err(CatalogError::Conflict(_))
+        ));
+
+        let mut invalid = settings;
+        invalid.thresholds.frame_edge_margin = 0.5;
+        assert!(matches!(
+            catalog.request_analyzer_config(1, invalid),
+            Err(CatalogError::InvalidCatalog(_))
+        ));
+        catalog.close();
+
+        let reopened = Catalog::open(root).unwrap();
+        assert_eq!(reopened.analyzer_config().unwrap(), updated);
+    }
+
+    #[test]
     fn detach_and_delete_are_blocked_by_the_shared_active_processing_lease() {
         let temporary = tempdir().expect("temp directory");
         let registry = CatalogRegistry::new(temporary.path().join("state"));
@@ -2798,5 +3008,42 @@ mod tests {
             .delete_on_disk(&id)
             .expect("reconciled catalog deletes safely");
         assert!(!detached.path.exists());
+    }
+
+    #[test]
+    fn unavailable_or_replaced_catalog_can_be_detached_without_touching_disk() {
+        let temporary = tempdir().expect("temp directory");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let missing = registry
+            .create_catalog(temporary.path().join("missing"), "Missing")
+            .unwrap();
+        let missing_id = missing.descriptor().id.clone();
+        let missing_path = missing.root().to_owned();
+        missing.close();
+        fs::remove_dir_all(&missing_path).expect("catalog becomes unavailable");
+
+        let detached_missing = registry
+            .detach(&missing_id)
+            .expect("missing catalog detaches from the registry");
+        assert_eq!(detached_missing.id, missing_id);
+        assert!(!missing_path.exists());
+
+        let original = registry
+            .create_catalog(temporary.path().join("replaced"), "Original")
+            .unwrap();
+        let original_id = original.descriptor().id.clone();
+        let original_path = original.root().to_owned();
+        original.close();
+        fs::remove_dir_all(&original_path).expect("original catalog removes");
+        let replacement = Catalog::create(&original_path, "Replacement").unwrap();
+        let replacement_id = replacement.descriptor().id.clone();
+        replacement.close();
+
+        let detached_replaced = registry
+            .detach(&original_id)
+            .expect("stale identity detaches from the registry");
+        assert_eq!(detached_replaced.id, original_id);
+        let replacement = Catalog::open(&original_path).expect("replacement remains untouched");
+        assert_eq!(replacement.descriptor().id, replacement_id);
     }
 }

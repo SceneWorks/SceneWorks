@@ -75,6 +75,31 @@ async fn access_token_is_enforced_on_protected_routes() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error["detail"], "SceneWorks access token required");
 
+    let (status, error) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/catalogs/example/analyzer-config",
+        json!({
+            "expectedRevision": 0,
+            "settings": {
+                "structuredAnalysisEnabled": true,
+                "visionAnalysisEnabled": false,
+                "semanticEmbeddingsEnabled": false,
+                "thresholds": {
+                    "personMinConfidence": 0.25,
+                    "faceMinConfidence": 0.65,
+                    "poseMinKeypointConfidence": 0.3,
+                    "prominentFrameFraction": 0.2,
+                    "frameEdgeMargin": 0.01,
+                    "minPoseCoverage": 0.72
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["detail"], "SceneWorks access token required");
+
     let (status, jobs) = request_with_headers(
         app,
         "GET",
