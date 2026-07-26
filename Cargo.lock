@@ -6436,6 +6436,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtime-cuda",
  "runtime-macos",
+ "rusqlite",
  "sceneworks-core",
  "sceneworks-gen-core",
  "sceneworks-image-quality",
