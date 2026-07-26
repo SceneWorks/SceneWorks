@@ -22,48 +22,119 @@
       ],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "5345fa8b0d41bdd612351f0933ef4cc9021281ab",
+          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
           "variant": "q4",
           "default": true,
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "5345fa8b0d41bdd612351f0933ef4cc9021281ab",
+          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
           "variant": "q8",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Base",
-          "revision": "5345fa8b0d41bdd612351f0933ef4cc9021281ab",
+          "revision": "199b4cae841403e8a1cca3c585a09f10fc70d3f1",
           "variant": "bf16",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": {
@@ -113,7 +184,13 @@
         "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
-        "quantize": 4
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
       },
       // Shared across all six Mage rows. Physical CUDA run 30194676028 measured the per-process
       // nvidia-smi high-water at q4 14.67 / q8 16.95 / bf16 20.41 GB for the registered 1024²,
@@ -149,48 +226,119 @@
       ],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "d668ecc8ce5addcb3c0bbe268227eb17f832aa9f",
+          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
           "variant": "q4",
           "default": true,
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "d668ecc8ce5addcb3c0bbe268227eb17f832aa9f",
+          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
           "variant": "q8",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit",
-          "revision": "d668ecc8ce5addcb3c0bbe268227eb17f832aa9f",
+          "revision": "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503",
           "variant": "bf16",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714677
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": {
@@ -240,7 +388,13 @@
         "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
-        "quantize": 4
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
       },
       "candle": {
         "minMemoryGb": 17,
@@ -273,48 +427,119 @@
       ],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "3e5ae67807083a25f3d344bc2c5ff16276415a14",
+          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
           "variant": "q4",
           "default": true,
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714653
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "3e5ae67807083a25f3d344bc2c5ff16276415a14",
+          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
           "variant": "q8",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714653
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Edit-Turbo",
-          "revision": "3e5ae67807083a25f3d344bc2c5ff16276415a14",
+          "revision": "c3437cbb91e565ab6373e3c7b8e9b8048d29831b",
           "variant": "bf16",
-          "files": [
-            "model_index.json",
-            "scheduler/*",
-            "text_encoder/*",
-            "transformer/*",
-            "vae/*"
-          ],
-          "estimatedSizeBytes": 17495714653
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": {
@@ -364,7 +589,13 @@
         "requiresDimensionsMultipleOf": 16
       },
       "mlx": {
-        "quantize": 4
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
       },
       "candle": {
         "minMemoryGb": 17,
@@ -399,30 +630,119 @@
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "a160c0a2c9d82106687d969d161c313c7e528550",
+          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
           "variant": "q4",
           "default": true,
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375789
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "a160c0a2c9d82106687d969d161c313c7e528550",
+          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
           "variant": "q8",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375789
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Base",
-          "revision": "a160c0a2c9d82106687d969d161c313c7e528550",
+          "revision": "2c0b473896ef87af5a0873a26ed62c319213ae36",
           "variant": "bf16",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375789
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": { "model": "${HF_CACHE}/SceneWorks/Mage-Flow-Base" },
@@ -452,7 +772,15 @@
         "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
-      "mlx": { "quantize": 4 },
+      "mlx": {
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
+      },
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
@@ -480,30 +808,119 @@
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "e6719fb1abb0d3fa83ecebbf31cbf431eb054ab8",
+          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
           "variant": "q4",
           "default": true,
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375766
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "e6719fb1abb0d3fa83ecebbf31cbf431eb054ab8",
+          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
           "variant": "q8",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375766
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow",
-          "revision": "e6719fb1abb0d3fa83ecebbf31cbf431eb054ab8",
+          "revision": "b9204c289b235bce9ade608f76a009f80a135bfd",
           "variant": "bf16",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375766
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": { "model": "${HF_CACHE}/SceneWorks/Mage-Flow" },
@@ -533,7 +950,15 @@
         "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
-      "mlx": { "quantize": 4 },
+      "mlx": {
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
+      },
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
@@ -561,30 +986,119 @@
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
+      // sc-14980 / sc-14979 — PHYSICAL per-tier artifacts with a SHARED text encoder + VAE.
+      //
+      // Each tier fetches only its own `<tier>/` DiT subdir, so a q4 user downloads 2.32 GB of
+      // transformer instead of the whole 17.5 GB dense snapshot, and a per-tier delete reclaims
+      // exactly that tier's bytes (the tiers no longer share one file predicate). The flat dense
+      // root is still HOSTED on the mirror so pre-existing installs keep loading, but no tier
+      // fetches it.
+      //
+      // `text_encoder/` and `vae/` are BIT-IDENTICAL across all six Mage variants (only the 8.232 GB
+      // DiT differs), so they are hosted ONCE in SceneWorks/Mage-Flow-Components-mlx and declared
+      // here as per-tier `coRequisite` rows carrying `componentId` + `subdir`. Being co-requisites
+      // makes them structurally exempt from per-variant/per-tier delete, so removing one variant or
+      // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
+      // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
+      //
+      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
+      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
+      // It costs 0.345 GB per tier and is quantized at load exactly as before.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "6fc43b7b586078997047acc9c39dbbd26044a035",
+          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
           "variant": "q4",
           "default": true,
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375767
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 2316856860,
+          "footprint": { "diskSizeBytes": 2316856860, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "6fc43b7b586078997047acc9c39dbbd26044a035",
+          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
           "variant": "q8",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375767
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 4374163324,
+          "footprint": { "diskSizeBytes": 4374163324, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Mage-Flow-Turbo",
-          "revision": "6fc43b7b586078997047acc9c39dbbd26044a035",
+          "revision": "dca431fa8dfb4b3411cf3986435540ed31a7e8b7",
           "variant": "bf16",
-          "files": ["model_index.json", "scheduler/*", "text_encoder/*", "transformer/*", "vae/*"],
-          "estimatedSizeBytes": 17507375767
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 8231571754,
+          "footprint": { "diskSizeBytes": 8231571754, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Shared Qwen3-VL-4B text encoder — one per tier, fetched only for the selected tier.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q4",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "estimatedSizeBytes": 2514418914
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "q8",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "estimatedSizeBytes": 4731076490
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "variant": "bf16",
+          "subdir": "bf16/text_encoder",
+          "files": ["bf16/text_encoder/*"],
+          "estimatedSizeBytes": 8887219239
+        },
+        // Shared Mage-VAE — dense in every tier (see the note above).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q4",
+          "subdir": "q4/vae",
+          "files": ["q4/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "q8",
+          "subdir": "q8/vae",
+          "files": ["q8/vae/*"],
+          "estimatedSizeBytes": 345053168
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Mage-Flow-Components-mlx",
+          "revision": "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62",
+          "coRequisite": true,
+          "componentId": "vae",
+          "variant": "bf16",
+          "subdir": "bf16/vae",
+          "files": ["bf16/vae/*"],
+          "estimatedSizeBytes": 345053168
         }
       ],
       "paths": { "model": "${HF_CACHE}/SceneWorks/Mage-Flow-Turbo" },
@@ -614,7 +1128,15 @@
         "requiresDimensionsMultipleOf": 16
       },
       "loraCompatibility": { "families": ["mage-flow"], "types": ["style", "enhance", "character"] },
-      "mlx": { "quantize": 4 },
+      "mlx": {
+        // The image-lane default tier. With physical artifacts this now also selects WHICH `<tier>/`
+        // subdir `standard_tier_subdir` descends into, not just a load-time quantize call.
+        "quantize": 4,
+        // sc-14980: the tiers are physically distinct `q4/ q8/ bf16/` subtrees now, so the worker
+        // must resolve the tier subdir rather than the snapshot root. This is what makes a per-tier
+        // delete reclaim real bytes.
+        "standardTierLayout": true
+      },
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },

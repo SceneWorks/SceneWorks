@@ -513,23 +513,13 @@ impl CandleImageRoute {
             CandleImageRoute::QwenControl => qwen_control::QWEN_CONTROL_ENGINE,
             CandleImageRoute::KolorsControl => kolors_control::KOLORS_CONTROL_ENGINE,
             CandleImageRoute::ZimageControl => zimage_control::ZIMAGE_CTRL_ENGINE,
-            CandleImageRoute::Flux2Control => {
-                flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE
-            }
-            CandleImageRoute::Flux1Control => {
-                flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE
-            }
+            CandleImageRoute::Flux2Control => flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE,
+            CandleImageRoute::Flux1Control => flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE,
             CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
             CandleImageRoute::PoseReject | CandleImageRoute::PoseControlBaseMissing => STUB_ADAPTER,
-            CandleImageRoute::ZimageComfyui => {
-                zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
-            }
-            CandleImageRoute::QwenImageComfyui => {
-                qwen_comfyui_candle::QWEN_COMFYUI_CANDLE_ENGINE
-            }
-            CandleImageRoute::Flux2Comfyui => {
-                flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
-            }
+            CandleImageRoute::ZimageComfyui => zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE,
+            CandleImageRoute::QwenImageComfyui => qwen_comfyui_candle::QWEN_COMFYUI_CANDLE_ENGINE,
+            CandleImageRoute::Flux2Comfyui => flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
             CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
                 candle_adapter_label(&request.model)
@@ -788,19 +778,21 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 /// intentionally excluded because each repo resolves its own receipt independently.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
-    if let Some(bits) = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.trim().parse().ok()))
-    {
-        return Some(if bits <= 0 {
-            "bf16"
-        } else if bits > 4 {
-            "q8"
-        } else {
-            "q4"
-        }
-        .to_owned());
+    if let Some(bits) = request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        return Some(
+            if bits <= 0 {
+                "bf16"
+            } else if bits > 4 {
+                "q8"
+            } else {
+                "q4"
+            }
+            .to_owned(),
+        );
     }
     let selectable = request
         .model_manifest_entry
@@ -851,11 +843,7 @@ const IDEOGRAM_MLX_TURNKEY_REVISION: &str = "a3095855b8819dc0d6b067cb1354aaa7da1
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn turnkey_tier_revision<'a>(
-    repo: &str,
-    default_repo: &str,
-    default_revision: &'a str,
-) -> &'a str {
+fn turnkey_tier_revision<'a>(repo: &str, default_repo: &str, default_revision: &'a str) -> &'a str {
     if repo == default_repo {
         default_revision
     } else {
@@ -877,8 +865,7 @@ fn pinned_turnkey_snapshot_for_request(
     if repo != default_repo {
         return None;
     }
-    let root =
-        crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
+    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
     let selected = match request.model.as_str() {
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => {
             boogu_model_subdir(&root, request)
@@ -987,9 +974,9 @@ pub(crate) fn resolve_weights_dir(
     // all load inputs on the receipt side of the all-receipt-or-all-current boundary.
     if !has_pinned_turnkey_snapshot
         && receipt_snapshot
-        .as_deref()
-        .and_then(tier_key_from_resolved_dir)
-        .is_some()
+            .as_deref()
+            .and_then(tier_key_from_resolved_dir)
+            .is_some()
     {
         return Ok(receipt_snapshot);
     }
@@ -1254,7 +1241,12 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
                 entries
                     .flatten()
                     .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
-                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"))
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".safetensors")
+                    })
             })
             .unwrap_or(false);
         has_dit.then_some(dir)
@@ -1282,7 +1274,7 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         &present,
         &sceneworks_core::mlx_tier_completeness::anima_tier_complete,
     )
-        .unwrap_or_else(|| root.to_path_buf())
+    .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The candle off-Mac Anima weights dir (sc-10676): the `split_files/` subdir of the HF snapshot `root`
@@ -1443,7 +1435,7 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         &present,
         &sceneworks_core::mlx_tier_completeness::boogu_tier_complete,
     )
-        .unwrap_or_else(|| root.to_path_buf())
+    .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
@@ -1508,8 +1500,12 @@ fn krea_model_subdir_gated(root: &Path, request: &ImageRequest, nvfp4_host: bool
     // whose `model_index.json` component tree is fully on disk, so Raw with a torn `q8/` and a
     // complete `bf16/` training-base tier now generates off bf16 instead of dying on the absent
     // `q8/tokenizer/` (issue #850's symptom).
-    pick_loadable_tier(&[preferred, "q8", "q4", "bf16"], &present, &tier_components_present)
-        .unwrap_or_else(|| root.to_path_buf())
+    pick_loadable_tier(
+        &[preferred, "q8", "q4", "bf16"],
+        &present,
+        &tier_components_present,
+    )
+    .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The private HF repo hosting the Krea 2 INT8-ConvRot DiT single-file checkpoint (sc-9300, epic
@@ -1548,10 +1544,7 @@ fn wants_krea_convrot(request: &ImageRequest) -> bool {
 /// is enforced ENGINE-side (`ensure_int8_floor` inside `load_components_convrot`) AND surfaced as the
 /// worker's `int8_convrot` capability, so an ineligible card never reaches here (the picker hides it).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_krea_convrot(
-    request: &ImageRequest,
-    settings: &Settings,
-) -> Option<(PathBuf, PathBuf)> {
+fn resolve_krea_convrot(request: &ImageRequest, settings: &Settings) -> Option<(PathBuf, PathBuf)> {
     if !wants_krea_convrot(request) {
         return None;
     }
@@ -1710,8 +1703,7 @@ async fn ensure_boogu_tier_present(
             || tier_dir
                 .join("transformer/diffusion_pytorch_model.safetensors.index.json")
                 .is_file()
-    })
-    {
+    }) {
         return Ok(());
     }
     // The tier subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
@@ -1720,11 +1712,10 @@ async fn ensure_boogu_tier_present(
         format!("{tier}/mllm/*"),
         format!("{tier}/vae/*"),
     ];
-    let revision =
-        turnkey_tier_revision(&repo, model.default_repo(), BOOGU_MLX_TURNKEY_REVISION);
+    let revision = turnkey_tier_revision(&repo, model.default_repo(), BOOGU_MLX_TURNKEY_REVISION);
     crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files)
-    .await
-    .map(|_| ())
+        .await
+        .map(|_| ())
 }
 
 /// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
@@ -1783,16 +1774,15 @@ async fn ensure_ideogram_tier_present(
         root.join(tier)
             .join("transformer/model.safetensors")
             .is_file()
-    })
-    {
+    }) {
         return Ok(());
     }
     let files = vec![format!("{tier}/*")];
     let revision =
         turnkey_tier_revision(&repo, model.default_repo(), IDEOGRAM_MLX_TURNKEY_REVISION);
     crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files)
-    .await
-    .map(|_| ())
+        .await
+        .map(|_| ())
 }
 
 #[cfg(any(
@@ -2673,10 +2663,34 @@ fn attach_required_components(
         return Ok(spec);
     }
     let manifest_value = Value::Object(manifest_entry.clone());
-    let components = resolve_co_requisites(&descriptor, &manifest_value, settings)?;
+    // Mage-Flow's shared text encoder / VAE are themselves per-tier (sc-14980), so the co-requisite
+    // must match the tier actually resolved for the BACKBONE — not the tier the request asked for,
+    // which `standard_tier_subdir`'s completeness fallback may have stepped away from. Reading it
+    // back off the resolved weights dir keeps the two in lockstep by construction: a q4 request that
+    // fell back to q8 gets the q8 text encoder, never a mixed pair.
+    let tier = resolved_tier_name(&spec);
+    let components = crate::model_jobs::resolve_co_requisites_for_tier(
+        &descriptor,
+        &manifest_value,
+        settings,
+        tier.as_deref(),
+    )?;
     Ok(components
         .into_iter()
         .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
+}
+
+/// The tier a [`LoadSpec`]'s weights dir resolved to, when it is a standard `<tier>/` subdir.
+///
+/// `None` for a flat snapshot (whose final segment is a commit sha, not a tier), which is what keeps
+/// single-row co-requisites — every audio model, and Mage on a legacy flat install — on the
+/// tier-agnostic path.
+fn resolved_tier_name(spec: &LoadSpec) -> Option<String> {
+    let WeightsSource::Dir(dir) = &spec.weights else {
+        return None;
+    };
+    let name = dir.file_name()?.to_str()?;
+    matches!(name, "bf16" | "q8" | "q4" | "nvfp4").then(|| name.to_owned())
 }
 
 /// Resolve SDXL's three caller-staged components (`tokenizer_clip_l` / `tokenizer_clip_bigg` /
@@ -2908,7 +2922,11 @@ pub(crate) fn read_advanced_sampling_knobs(
     let scheduler_shift = advanced
         .get("schedulerShift")
         .or_else(|| advanced.get("timestepShift"))
-        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
         .map(|value| value as f32);
     (name("sampler"), name("scheduler"), scheduler_shift)
 }
@@ -2999,7 +3017,8 @@ mod metrics_settings_tests {
                 "usePid": true, "pidTarget": "2k", "guidanceMethod": "cfgpp"
             }
         }));
-        let metrics = image_settings_metrics(&req, Some(30), None, Some("bf16".to_owned()), None, 1);
+        let metrics =
+            image_settings_metrics(&req, Some(30), None, Some("bf16".to_owned()), None, 1);
         assert_eq!(metrics.sampler.as_deref(), Some("dpmpp_2m"));
         assert_eq!(metrics.scheduler.as_deref(), Some("karras"));
         assert_eq!(
@@ -3104,9 +3123,14 @@ mod sampling_knob_tests {
     // engine default = the guaranteed no-op), exactly like the sampler/scheduler read.
     #[test]
     fn read_guidance_method_strips_default_and_blank() {
-        assert_eq!(read_advanced_guidance_method(&advanced(serde_json::json!({}))), None);
         assert_eq!(
-            read_advanced_guidance_method(&advanced(serde_json::json!({"guidanceMethod": "default"}))),
+            read_advanced_guidance_method(&advanced(serde_json::json!({}))),
+            None
+        );
+        assert_eq!(
+            read_advanced_guidance_method(&advanced(
+                serde_json::json!({"guidanceMethod": "default"})
+            )),
             None
         );
         assert_eq!(
@@ -3114,7 +3138,9 @@ mod sampling_knob_tests {
             None
         );
         assert_eq!(
-            read_advanced_guidance_method(&advanced(serde_json::json!({"guidanceMethod": "cfg_pp"}))),
+            read_advanced_guidance_method(&advanced(
+                serde_json::json!({"guidanceMethod": "cfg_pp"})
+            )),
             Some("cfg_pp".to_owned())
         );
     }
@@ -3143,7 +3169,9 @@ mod sampling_knob_tests {
         );
         // Blank / whitespace-only names are also treated as the default (no name).
         assert_eq!(
-            read_advanced_sampling_knobs(&advanced(serde_json::json!({"sampler": "  ", "scheduler": ""}))),
+            read_advanced_sampling_knobs(&advanced(
+                serde_json::json!({"sampler": "  ", "scheduler": ""})
+            )),
             (None, None, None)
         );
     }
@@ -3564,7 +3592,12 @@ pub(crate) fn resolve_control_identity_source(
         .map(str::trim)
         .filter(|id| !id.is_empty())?
         .to_owned();
-    match load_reference_image(&settings.data_dir, &request.project_id, &asset_id, project_path) {
+    match load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        &asset_id,
+        project_path,
+    ) {
         Ok(image) => Some((image, asset_id)),
         Err(error) => {
             tracing::warn!(
@@ -3756,7 +3789,8 @@ fn resolve_boogu_edit(
     let ids = boogu_edit_reference_ids(request);
     let mut references = Vec::with_capacity(ids.len());
     for id in &ids {
-        let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        let source =
+            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
         let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
         references.push(source);
     }
@@ -3775,7 +3809,8 @@ fn resolve_mage_edit(
     let ids = mage_edit_reference_ids(request);
     let mut references = Vec::with_capacity(ids.len());
     for id in &ids {
-        let source = load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
+        let source =
+            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
         references.push(fit_engine_image(
             source,
             request.width,
@@ -4715,9 +4750,7 @@ fn vram_reject_tail(installed_smaller: &[&str]) -> String {
 fn vram_reject_tail_for_tier(installed: Vec<&'static str>, rejected_tier: &str) -> String {
     let smaller: Vec<&'static str> = installed
         .into_iter()
-        .filter(|candidate| {
-            tier_quality_rank(candidate) < tier_quality_rank(rejected_tier)
-        })
+        .filter(|candidate| tier_quality_rank(candidate) < tier_quality_rank(rejected_tier))
         .collect();
     vram_reject_tail(&smaller)
 }
@@ -4739,14 +4772,13 @@ fn candle_tier_fit(
         crate::vram_gate::fit_decision(needed, budget),
         sequential_capable,
     ) {
-        crate::vram_gate::FitDecision::Fits | crate::vram_gate::FitDecision::Unknown => TierFit::Fits,
-        crate::vram_gate::FitDecision::Offload {
-            available_gb, ..
-        } => {
+        crate::vram_gate::FitDecision::Fits | crate::vram_gate::FitDecision::Unknown => {
+            TierFit::Fits
+        }
+        crate::vram_gate::FitDecision::Offload { available_gb, .. } => {
             // Resident won't fit but the provider stages — fits only if the MEASURED sequential peak
             // fits (unmeasured ⇒ best-effort run, so `sequential_overflow_gb` yields None ⇒ Fits).
-            let seq_needed =
-                crate::vram_gate::predicted_sequential_peak_gb(manifest_entry, tier);
+            let seq_needed = crate::vram_gate::predicted_sequential_peak_gb(manifest_entry, tier);
             match crate::vram_gate::sequential_overflow_gb(seq_needed, budget) {
                 Some(seq_gb) => TierFit::TooBig {
                     needed_gb: seq_gb,
@@ -4991,7 +5023,9 @@ async fn generate_candle_stream(
     let adapter_count = adapters.len();
 
     let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
     // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
@@ -5101,7 +5135,8 @@ async fn generate_candle_stream(
     // sc-9092) — the same `model_repo` the MLX path records.
     let repo = model_repo(request, &model);
     // `mut`: rebuilt with the corrected `quant_bits` if the sc-10733 downtier lands on a lower tier.
-    let mut raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let mut raw_settings =
+        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
     // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
     // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
@@ -5317,13 +5352,10 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
-                let installed_smaller: Vec<&'static str> =
-                    installed_tier_keys(request, settings)
-                        .into_iter()
-                        .filter(|candidate| {
-                            tier_quality_rank(candidate) < tier_quality_rank(tier)
-                        })
-                        .collect();
+                let installed_smaller: Vec<&'static str> = installed_tier_keys(request, settings)
+                    .into_iter()
+                    .filter(|candidate| tier_quality_rank(candidate) < tier_quality_rank(tier))
+                    .collect();
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
                      {gpu} has ~{available} GB available. {tail}",
@@ -5507,7 +5539,11 @@ fn image_settings_metrics(
     };
     let number_field = |key: &str| -> Option<serde_json::Number> {
         adv.get(key)
-            .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+            .and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_str()?.trim().parse().ok())
+            })
             .and_then(serde_json::Number::from_f64)
     };
     let loras: Vec<String> = request.loras.iter().filter_map(lora_label).collect();
@@ -5526,7 +5562,10 @@ fn image_settings_metrics(
         true_cfg_scale: number_field("trueCfgScale"),
         guidance_method: string_or("guidanceMethod", "cfg"),
         use_pid: Some(adv.get("usePid").and_then(Value::as_bool).unwrap_or(false)),
-        pid_target: adv.get("pidTarget").and_then(Value::as_str).map(str::to_owned),
+        pid_target: adv
+            .get("pidTarget")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         width: Some(request.width),
         height: Some(request.height),
         seed: request.seed.or_else(|| request.seeds.first().copied()),
@@ -6077,8 +6116,14 @@ mod candle_label_tests {
     fn vram_reject_tail_names_only_installed_smaller_tiers() {
         // Two smaller tiers installed → both offered, uppercased, highest-fidelity first.
         let tail = vram_reject_tail(&["q8", "q4"]);
-        assert!(tail.contains("Q8 / Q4"), "lists installed smaller tiers: {tail}");
-        assert!(!tail.contains("picker"), "never points at the picker: {tail}");
+        assert!(
+            tail.contains("Q8 / Q4"),
+            "lists installed smaller tiers: {tail}"
+        );
+        assert!(
+            !tail.contains("picker"),
+            "never points at the picker: {tail}"
+        );
         // One smaller tier installed.
         assert!(vram_reject_tail(&["q4"]).contains("(Q4)"));
         // None smaller installed (the single-tier / q4-only case) → says so, no tier list, no picker.
@@ -6098,9 +6143,18 @@ mod boogu_tier_tests {
         // download). 1..=4 → packed q4; <=0 → dense bf16. Consistent with krea/ideogram (sc-8513).
         assert_eq!(boogu_tier_subdir("base", None), None);
         assert_eq!(boogu_tier_subdir("base", Some(8)), None);
-        assert_eq!(boogu_tier_subdir("base", Some(4)), Some("base-q4".to_owned()));
-        assert_eq!(boogu_tier_subdir("turbo", Some(2)), Some("turbo-q4".to_owned()));
-        assert_eq!(boogu_tier_subdir("edit", Some(0)), Some("edit-bf16".to_owned()));
+        assert_eq!(
+            boogu_tier_subdir("base", Some(4)),
+            Some("base-q4".to_owned())
+        );
+        assert_eq!(
+            boogu_tier_subdir("turbo", Some(2)),
+            Some("turbo-q4".to_owned())
+        );
+        assert_eq!(
+            boogu_tier_subdir("edit", Some(0)),
+            Some("edit-bf16".to_owned())
+        );
         assert_eq!(
             boogu_tier_subdir("base", Some(-1)),
             Some("base-bf16".to_owned())
@@ -6249,7 +6303,11 @@ mod standard_tier_tests {
         // Packed q4/q8 single-file + dense sharded bf16 (only the index.json shape).
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        seed_tier(
+            root,
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
 
         // No selection → q8 default (epic 10721 / sc-10726), clamped to installed.
         assert_eq!(
@@ -6679,12 +6737,16 @@ mod standard_tier_tests {
     fn nvfp4_requested_reads_only_the_explicit_quant_tier_label() {
         // The explicit label, tolerant of surrounding whitespace / casing like the sibling parsers.
         assert!(nvfp4_requested(&request(json!({ "quantTier": "nvfp4" }))));
-        assert!(nvfp4_requested(&request(json!({ "quantTier": "  nvfp4 " }))));
+        assert!(nvfp4_requested(&request(
+            json!({ "quantTier": "  nvfp4 " })
+        )));
         assert!(nvfp4_requested(&request(json!({ "quantTier": "NVFP4" }))));
         // Nothing else asks for NVFP4: no label, another tier's label, a non-string, or ANY bits value.
         assert!(!nvfp4_requested(&request(json!({}))));
         assert!(!nvfp4_requested(&request(json!({ "quantTier": "q4" }))));
-        assert!(!nvfp4_requested(&request(json!({ "quantTier": "int8-convrot" }))));
+        assert!(!nvfp4_requested(&request(
+            json!({ "quantTier": "int8-convrot" })
+        )));
         assert!(!nvfp4_requested(&request(json!({ "quantTier": 4 }))));
         assert!(!nvfp4_requested(&request(json!({ "quantTier": true }))));
         for bits in [0, 4, 8] {
@@ -6704,7 +6766,11 @@ mod standard_tier_tests {
         let root = tmp.path();
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        seed_tier(
+            root,
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
         seed_tier(root, NVFP4_TIER, "diffusion_pytorch_model.safetensors");
 
         // The injected `true` says "the HOST is Blackwell-eligible" — the hardware gate is ON, but no
@@ -6745,7 +6811,10 @@ mod standard_tier_tests {
         );
         // NOT Blackwell (pre-sm_120 NVIDIA, macOS/MLX, or the neither build) → the label is ignored and
         // the request lands on an installed tier via the normal chain. A clean fallback, not an error.
-        assert_eq!(standard_tier_subdir_gated(root, &picked, false), root.join("q8"));
+        assert_eq!(
+            standard_tier_subdir_gated(root, &picked, false),
+            root.join("q8")
+        );
 
         // sm_120 but the tier ISN'T converted yet (sc-11043 owns the converter; the shipping case today)
         // → rejoins the same clean chain rather than failing the load.
@@ -6880,7 +6949,11 @@ mod standard_tier_tests {
         // The carve-out is not a general NVFP4 kill-switch: a NON-dense-TE model on the same terms
         // still selects the tier, so the fix can't be masking the arm entirely.
         assert_eq!(
-            resolve_quant_gated(&request(json!({ "quantTier": "nvfp4" })), true, Some(&nvfp4_dir)),
+            resolve_quant_gated(
+                &request(json!({ "quantTier": "nvfp4" })),
+                true,
+                Some(&nvfp4_dir)
+            ),
             (Some(Quant::Nvfp4), None)
         );
     }
@@ -6995,7 +7068,11 @@ mod standard_tier_tests {
         // Same host, same request, but the tier IS installed → the label is nvfp4. This is what proves
         // the fix pins the label to the DISK and isn't just disabling the tier.
         let converted = tempfile::tempdir().unwrap();
-        seed_tier(converted.path(), "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(
+            converted.path(),
+            "q8",
+            "diffusion_pytorch_model.safetensors",
+        );
         seed_tier(
             converted.path(),
             NVFP4_TIER,
@@ -7053,7 +7130,10 @@ mod standard_tier_tests {
             root.join(NVFP4_TIER)
         );
         // Off Blackwell → clean fallback to the shipped q8 default.
-        assert_eq!(krea_model_subdir_gated(root, &picked, false), root.join("q8"));
+        assert_eq!(
+            krea_model_subdir_gated(root, &picked, false),
+            root.join("q8")
+        );
         // SC#5: krea's existing tiers resolve exactly as before on a Blackwell host with an `nvfp4/`
         // dir present.
         for (advanced, expected) in [
@@ -7083,7 +7163,10 @@ mod standard_tier_tests {
             min_quality_floor(&with_floor(json!({ "minQualityTier": "q8" }))),
             Some("q8")
         );
-        assert_eq!(min_quality_floor(&with_floor(json!({ "quantize": 4 }))), None);
+        assert_eq!(
+            min_quality_floor(&with_floor(json!({ "quantize": 4 }))),
+            None
+        );
         assert_eq!(
             min_quality_floor(&with_floor(json!({ "minQualityTier": "q2" }))),
             None
@@ -7338,7 +7421,11 @@ mod standard_tier_tests {
                 .unwrap(),
         );
         let tier = standard_tier_subdir(&root, &req);
-        assert_eq!(tier, root.join("q4"), "worker must resolve the q4 tier subdir");
+        assert_eq!(
+            tier,
+            root.join("q4"),
+            "worker must resolve the q4 tier subdir"
+        );
         assert!(
             tier.join("model_index.json").is_file() && tier.join("unet").is_dir(),
             "q4 tier subdir missing turnkey layout (model_index.json + unet/): {}",
@@ -7348,7 +7435,8 @@ mod standard_tier_tests {
         // Load the packed q4 tier through the MLX `sdxl` engine (Quant::Q4 = harmless no-op on the
         // already-packed weights) and render a 768x768 image.
         let spec = LoadSpec::new(WeightsSource::Dir(tier.clone())).with_quant(Quant::Q4);
-        let generator = crate::inference_runtime::load("sdxl", &spec).expect("load MLX sdxl provider on q4 tier");
+        let generator = crate::inference_runtime::load("sdxl", &spec)
+            .expect("load MLX sdxl provider on q4 tier");
         let gen_req = GenerationRequest {
             prompt: "a photorealistic portrait of a red fox in a snowy forest, golden hour"
                 .to_owned(),
@@ -7371,9 +7459,21 @@ mod standard_tier_tests {
         let n = image.pixels.len() as f64;
         assert!(n > 0.0, "empty image buffer");
         let mean = image.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-        let std = (image.pixels.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
-        println!("[sc-8746 smoke] realvisxl q4 tier render {}x{} std {std:.2}", image.width, image.height);
-        assert!(std > 5.0, "render looks degenerate (std {std:.2}) — possible NaN / all-black decode");
+        let std = (image
+            .pixels
+            .iter()
+            .map(|&p| (p as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n)
+            .sqrt();
+        println!(
+            "[sc-8746 smoke] realvisxl q4 tier render {}x{} std {std:.2}",
+            image.width, image.height
+        );
+        assert!(
+            std > 5.0,
+            "render looks degenerate (std {std:.2}) — possible NaN / all-black decode"
+        );
     }
 
     /// A model built with a manifest entry so `uses_standard_tier_layout` / `is_dense_te_tier`
@@ -7415,7 +7515,10 @@ mod standard_tier_tests {
     #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     #[test]
     fn dense_te_tier_is_manifest_driven_with_registry_backcompat() {
-        assert!(is_dense_te_tier(&manifest_request("flux2_klein_9b", json!({}))));
+        assert!(is_dense_te_tier(&manifest_request(
+            "flux2_klein_9b",
+            json!({})
+        )));
         assert!(is_dense_te_tier(&manifest_request(
             "some_dense_te_model",
             json!({ "denseTextEncoderTier": true })
@@ -7488,7 +7591,11 @@ mod standard_tier_tests {
         // Krea turnkey: packed q4/q8 single-file transformer + dense sharded bf16 (index.json only).
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        seed_tier(
+            root,
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
 
         // q8-default (no selection) / q4 (bits<=4) / bf16 (bits<=0) each resolve to their tier subdir.
         assert_eq!(
@@ -7535,7 +7642,10 @@ mod standard_tier_tests {
         index.insert("patch_size".to_owned(), json!(2));
         index.insert("feature_extractor".to_owned(), json!([null, null]));
         for component in declared {
-            index.insert((*component).to_owned(), json!(["transformers", "SomeClass"]));
+            index.insert(
+                (*component).to_owned(),
+                json!(["transformers", "SomeClass"]),
+            );
         }
         std::fs::write(
             dir.join("model_index.json"),
@@ -7550,7 +7660,13 @@ mod standard_tier_tests {
     }
 
     /// The Krea tier component set, as the real `q8/model_index.json` declares it.
-    const KREA_COMPONENTS: &[&str] = &["transformer", "tokenizer", "text_encoder", "vae", "scheduler"];
+    const KREA_COMPONENTS: &[&str] = &[
+        "transformer",
+        "tokenizer",
+        "text_encoder",
+        "vae",
+        "scheduler",
+    ];
 
     /// sc-12279 (issue #850): a TORN tier — backbone landed, `tokenizer/` did not — must not
     /// short-circuit the fallback chain. Before this, `present()` accepted a tier on its transformer
@@ -7600,7 +7716,9 @@ mod standard_tier_tests {
     #[test]
     fn krea_tier_probe_still_returns_a_torn_tier_when_it_is_all_there_is() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "krea_2_raw", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "krea_2_raw", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         seed_diffusers_tier(
@@ -7636,7 +7754,12 @@ mod standard_tier_tests {
         assert!(tier_components_present(&root.join("q8")));
 
         // Torn: `tokenizer/` declared but absent.
-        seed_diffusers_tier(root, "q4", KREA_COMPONENTS, &["text_encoder", "vae", "scheduler"]);
+        seed_diffusers_tier(
+            root,
+            "q4",
+            KREA_COMPONENTS,
+            &["text_encoder", "vae", "scheduler"],
+        );
         assert!(!tier_components_present(&root.join("q4")));
 
         // A component dir holding ONLY an AppleDouble sidecar has no tokenizer (SceneWorks#1333).
@@ -7669,7 +7792,11 @@ mod standard_tier_tests {
     fn seed_sana_tier(root: &Path, tier: &str, complete: bool) {
         let dir = root.join(tier);
         std::fs::create_dir_all(dir.join("transformer")).unwrap();
-        std::fs::write(dir.join("transformer/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        std::fs::write(
+            dir.join("transformer/diffusion_pytorch_model.safetensors"),
+            b"x",
+        )
+        .unwrap();
         if complete {
             std::fs::create_dir_all(dir.join("vae")).unwrap();
             std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"x").unwrap();
@@ -7713,7 +7840,9 @@ mod standard_tier_tests {
     #[test]
     fn sana_torn_tier_is_returned_when_it_is_all_there_is() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "sana_1600m", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "sana_1600m", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         seed_sana_tier(tmp.path(), "q8", false);
@@ -7729,7 +7858,9 @@ mod standard_tier_tests {
     #[test]
     fn non_sana_standard_turnkey_ignores_the_sana_completeness_branch() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "flux_dev", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "flux_dev", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -7744,7 +7875,11 @@ mod standard_tier_tests {
     fn seed_boogu_tier(root: &Path, folder: &str, complete: bool) {
         let dir = root.join(folder);
         std::fs::create_dir_all(dir.join("transformer")).unwrap();
-        std::fs::write(dir.join("transformer/diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        std::fs::write(
+            dir.join("transformer/diffusion_pytorch_model.safetensors"),
+            b"x",
+        )
+        .unwrap();
         std::fs::write(dir.join("transformer/config.json"), b"{}").unwrap();
         if complete {
             std::fs::create_dir_all(dir.join("mllm")).unwrap();
@@ -7760,7 +7895,9 @@ mod standard_tier_tests {
     #[test]
     fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "boogu_image", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "boogu_image", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -7780,7 +7917,9 @@ mod standard_tier_tests {
     #[test]
     fn resolved_tier_is_complete_flags_a_torn_sana_tier() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "sana_1600m", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "sana_1600m", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -7798,7 +7937,9 @@ mod standard_tier_tests {
     fn resolved_tier_is_complete_flags_a_torn_sensenova_tier_and_a_fast_tier_missing_its_marker() {
         let sensenova = |model: &str| {
             ImageRequest::from_payload(
-                json!({ "model": model, "advanced": {} }).as_object().unwrap(),
+                json!({ "model": model, "advanced": {} })
+                    .as_object()
+                    .unwrap(),
             )
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -7833,7 +7974,11 @@ mod standard_tier_tests {
     fn seed_anima_tier(root: &Path, tier: &str, complete: bool) {
         let dir = root.join(tier);
         std::fs::create_dir_all(dir.join("diffusion_models")).unwrap();
-        std::fs::write(dir.join("diffusion_models/anima-base-v1.0.safetensors"), b"x").unwrap();
+        std::fs::write(
+            dir.join("diffusion_models/anima-base-v1.0.safetensors"),
+            b"x",
+        )
+        .unwrap();
         if complete {
             std::fs::create_dir_all(dir.join("text_encoders")).unwrap();
             std::fs::write(dir.join("text_encoders/qwen_3_06b_base.safetensors"), b"x").unwrap();
@@ -7848,7 +7993,9 @@ mod standard_tier_tests {
     #[test]
     fn anima_torn_tier_falls_through_to_a_complete_sibling() {
         let request = ImageRequest::from_payload(
-            json!({ "model": "anima_base", "advanced": {} }).as_object().unwrap(),
+            json!({ "model": "anima_base", "advanced": {} })
+                .as_object()
+                .unwrap(),
         );
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -7891,7 +8038,11 @@ mod standard_tier_tests {
         let root = tmp.path();
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        seed_tier(
+            root,
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
 
         // Floor bf16, no explicit pick → the dense bf16 (raised above the q8 default).
         assert_eq!(
@@ -7940,7 +8091,11 @@ mod standard_tier_tests {
         // A Lens turnkey ships packed per-tier subdirs (transformer + gpt-oss-20b MoE TE + FLUX.2 VAE).
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        seed_tier(
+            root,
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
 
         // A/B tier toggle: default (q8, sc-10726) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each
         // resolve to their tier subdir — the default now prefers the clean q8 tier (clamped to
@@ -8091,7 +8246,11 @@ mod standard_tier_tests {
         // Boogu floor capped by installed: bf16 floor but only the packed Q8 `base/` on disk → Q8.
         {
             let only_q8 = tempfile::tempdir().unwrap();
-            seed_tier(only_q8.path(), "base", "diffusion_pytorch_model.safetensors");
+            seed_tier(
+                only_q8.path(),
+                "base",
+                "diffusion_pytorch_model.safetensors",
+            );
             assert_eq!(
                 boogu_model_subdir(
                     only_q8.path(),
@@ -8292,9 +8451,8 @@ mod quant_tier_reconcile_tests {
                     .unwrap(),
             )
         };
-        let default = ImageRequest::from_payload(
-            json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
-        );
+        let default =
+            ImageRequest::from_payload(json!({ "model": "flux2_klein_9b" }).as_object().unwrap());
         // No selection → the q8 default (matches standard_tier_subdir's preferred, sc-10726).
         assert_eq!(dense_te_requested_tier_bits(&default), Some(8));
         assert_eq!(dense_te_requested_tier_bits(&req(json!(0))), None); // bf16 opt-out
@@ -8452,7 +8610,10 @@ mod capability_downtier_tests {
         assert_eq!(tier_key_from_resolved_dir(&root.join("q8")), Some("q8"));
         assert_eq!(tier_key_from_resolved_dir(&root.join("bf16")), Some("bf16"));
         // Boogu `<variant>-<tier>` suffix + the bare `<variant>` packed Q8 default.
-        assert_eq!(tier_key_from_resolved_dir(&root.join("base-q4")), Some("q4"));
+        assert_eq!(
+            tier_key_from_resolved_dir(&root.join("base-q4")),
+            Some("q4")
+        );
         assert_eq!(
             tier_key_from_resolved_dir(&root.join("turbo-bf16")),
             Some("bf16")
@@ -8621,7 +8782,8 @@ mod mlx_downtier_emulation_tests {
             let dir = root.join(tier).join("transformer");
             std::fs::create_dir_all(&dir).expect("mk tier dir");
             let file = std::fs::File::create(dir.join("model.safetensors")).expect("mk weights");
-            file.set_len(gib * 1024 * 1024 * 1024).expect("sparse weights");
+            file.set_len(gib * 1024 * 1024 * 1024)
+                .expect("sparse weights");
             root.join(tier)
         };
         let q8_dir = make_tier("q8", 5);
@@ -8665,8 +8827,9 @@ mod candle_downtier_emulation_tests {
     #[test]
     #[ignore = "sc-10733 AC#6 e2e; run with SCENEWORKS_CUDA_VRAM_CAP_GB=30"]
     fn candle_downtier_via_emulation_knob() {
-        let cap = crate::vram_gate::cuda_vram_cap_gb()
-            .expect("set SCENEWORKS_CUDA_VRAM_CAP_GB (e.g. 30) — between the q4 (~28) and q8 (~38) peaks");
+        let cap = crate::vram_gate::cuda_vram_cap_gb().expect(
+            "set SCENEWORKS_CUDA_VRAM_CAP_GB (e.g. 30) — between the q4 (~28) and q8 (~38) peaks",
+        );
         // The knob-emulated budget: no real reading + the cap ⇒ a synthetic `free = total = cap` budget,
         // so this exercises the whole chain without a CUDA card.
         let budget = crate::vram_gate::apply_vram_cap(None, crate::vram_gate::cuda_vram_cap_gb());

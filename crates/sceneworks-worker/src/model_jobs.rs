@@ -1739,6 +1739,27 @@ pub(crate) fn resolve_co_requisites(
     manifest_entry: &Value,
     settings: &Settings,
 ) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
+    resolve_co_requisites_for_tier(descriptor, manifest_entry, settings, None)
+}
+
+/// [`resolve_co_requisites`], for a model whose co-requisites are themselves **per-tier** (sc-14980).
+///
+/// Mage-Flow hosts its shared Qwen3-VL text encoder and Mage-VAE once, as `q4/`+`q8/`+`bf16/`
+/// subtrees of one components mirror, so a component id maps to THREE `coRequisite` rows that differ
+/// only by `variant`. `tier` selects among them, and each row's `subdir` addresses the component dir
+/// inside the shared snapshot (`resolve_co_requisites` otherwise resolves whole-snapshot dirs, which
+/// cannot express "the `q4/text_encoder/` subtree").
+///
+/// Behavior is unchanged wherever a component id maps to exactly ONE row — every audio co-requisite
+/// today — so this is additive. When a component id maps to several rows, a `tier` is REQUIRED: a
+/// first-wins pick would silently serve a bf16 text encoder to a q4 request, which is precisely the
+/// class of silent tier mismatch physical per-tier artifacts exist to eliminate.
+pub(crate) fn resolve_co_requisites_for_tier(
+    descriptor: &gen_core::ModelDescriptor,
+    manifest_entry: &Value,
+    settings: &Settings,
+    tier: Option<&str>,
+) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
     let mut components = BTreeMap::new();
     if descriptor.required_components.is_empty() {
         return Ok(components);
@@ -1750,21 +1771,51 @@ pub(crate) fn resolve_co_requisites(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     for &component_id in descriptor.required_components {
-        // The `coRequisite` download that PROVISIONS this component id — matched on the explicit
+        // The `coRequisite` download(s) that PROVISION this component id — matched on the explicit
         // `componentId` field the manifest sets (never inferred from repo names, sc-13679).
-        let download = downloads
+        let candidates: Vec<&Value> = downloads
             .iter()
-            .find(|download| {
+            .filter(|download| {
                 download.get("coRequisite").and_then(Value::as_bool) == Some(true)
                     && download.get("componentId").and_then(Value::as_str) == Some(component_id)
             })
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "{model_id} requires the model component '{component_id}', but its catalog entry \
+            .collect();
+        let download = match candidates.as_slice() {
+            [] => {
+                return Err(WorkerError::InvalidPayload(format!(
+                "{model_id} requires the model component '{component_id}', but its catalog entry \
                      declares no `coRequisite` download tagged `componentId: \"{component_id}\"` — \
                      the model manifest entry is misconfigured"
-                ))
-            })?;
+            )))
+            }
+            [only] => *only,
+            many => {
+                let tier = tier.ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{model_id}: the '{component_id}' component declares {} per-tier \
+                         `coRequisite` rows but no tier was resolved for this request — refusing to \
+                         guess, because picking the wrong one would silently serve another tier's \
+                         weights",
+                        many.len()
+                    ))
+                })?;
+                many.iter()
+                    .copied()
+                    .find(|download| {
+                        download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .is_some_and(|variant| variant.eq_ignore_ascii_case(tier))
+                    })
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{model_id}: the '{component_id}' component declares no `coRequisite` row \
+                             for the resolved {tier} tier — install {model_id}'s {tier} tier, or the \
+                             model manifest entry is misconfigured"
+                        ))
+                    })?
+            }
+        };
         let repo = download
             .get("repo")
             .and_then(Value::as_str)
@@ -1809,11 +1860,13 @@ pub(crate) fn resolve_co_requisites(
                 }
                 gen_core::WeightsSource::File(path)
             }
-            [] => gen_core::WeightsSource::Dir(snapshot),
+            [] => gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?),
             _ => {
                 // Multi-file components are staged as directories because providers join their own
                 // internal paths, but the pre-load all-or-nothing contract still requires every
-                // manifest-declared file or pattern to be present.
+                // manifest-declared file or pattern to be present. The declared patterns are
+                // SNAPSHOT-relative (they are what the downloader fetched), while `subdir` narrows
+                // what the provider is handed — so check against the snapshot, stage the subdir.
                 for file in &files {
                     if !snapshot_contains_declared_file(&snapshot, file)? {
                         return Err(WorkerError::InvalidPayload(format!(
@@ -1822,12 +1875,40 @@ pub(crate) fn resolve_co_requisites(
                         )));
                     }
                 }
-                gen_core::WeightsSource::Dir(snapshot)
+                gen_core::WeightsSource::Dir(component_dir(&snapshot, download, model_id)?)
             }
         };
         components.insert(component_id.to_owned(), source);
     }
     Ok(components)
+}
+
+/// The directory a co-requisite download stages: the cached snapshot, narrowed by an optional
+/// `subdir` (sc-14980).
+///
+/// A shared components mirror hosts several components AND several tiers in one repo
+/// (`<tier>/text_encoder/`, `<tier>/vae/`), so "the snapshot" is not the thing a provider should be
+/// handed. `subdir` names the exact component dir. It arrives from the payload `modelManifestEntry`
+/// — unvalidated over the LAN jobs API — so it is confined under the snapshot with [`safe_join`] for
+/// the same reason `files` and `revision` are (sc-13583 / sc-13842): a `..`/absolute entry would
+/// otherwise stage an arbitrary host directory as this component's weights.
+fn component_dir(snapshot: &Path, download: &Value, model_id: &str) -> WorkerResult<PathBuf> {
+    let Some(subdir) = download
+        .get("subdir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(snapshot.to_path_buf());
+    };
+    let dir = safe_join(snapshot, subdir)?;
+    if !dir.is_dir() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model_id}: the co-requisite subdirectory `{subdir}` is missing from the cached \
+             snapshot — reinstall {model_id} to repair it"
+        )));
+    }
+    Ok(dir)
 }
 
 fn snapshot_contains_declared_file(snapshot: &Path, declared: &str) -> WorkerResult<bool> {
