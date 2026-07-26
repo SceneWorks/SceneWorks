@@ -871,6 +871,57 @@ async fn model_catalog_invalidation_refreshes_install_state() {
 }
 
 #[tokio::test]
+async fn invalidation_before_snapshot_publication_forces_current_generation_rebuild() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "racing_model", "racing/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
+    state
+        .model_catalog_cache
+        .set_before_publish_test_hook(publish_hook.clone());
+
+    let request_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
+        .await
+        .expect("first-generation snapshot reaches pre-publication boundary");
+
+    // Change the install-state input and invalidate while generation 0 is
+    // built but not yet published. The request must discard that result,
+    // rebuild generation 1, and return only the installed state.
+    let marker_dir = temp_dir.path().join("data/models/racing__model");
+    std::fs::create_dir_all(&marker_dir).expect("model marker dir creates");
+    std::fs::write(marker_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+    state.model_catalog_cache.invalidate();
+    publish_hook.release();
+
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), request_task)
+        .await
+        .expect("racing request completes")
+        .expect("racing request joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(state.model_catalog_cache.generation(), 1);
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "generation 0 must be discarded and rebuilt after invalidation"
+    );
+
+    let (_, warm) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(warm[0]["installState"], "installed");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        2,
+        "the generation 1 result is the only published warm snapshot"
+    );
+}
+
+#[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

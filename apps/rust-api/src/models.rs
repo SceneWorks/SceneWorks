@@ -23,27 +23,88 @@ const MODEL_SIZE_POSITIVE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Generation-keyed, process-local snapshot of the model catalog after its
 /// filesystem install-state sweep.
 ///
-/// A cold caller holds `snapshot` while building, so concurrent `/models`,
-/// global preset, project preset, and job-validation requests join that one
-/// sweep. `invalidate` is synchronous and advances `generation` before any
-/// model lifecycle/manifest writer returns. If a writer races a cold build,
-/// the builder observes the newer generation and rebuilds instead of publishing
-/// stale state. Errors are never cached.
+/// A separate async serializer makes concurrent cold `/models`, global preset,
+/// project preset, and job-validation requests join one sweep without holding
+/// the short synchronous state lock across filesystem work. `invalidate`
+/// advances the generation and clears the snapshot in that same critical
+/// section. Publication validates its generation under the same lock, so a
+/// writer racing a cold build forces a rebuild instead of publishing or
+/// returning stale state. Errors are never cached.
 #[derive(Default)]
 pub(crate) struct ModelCatalogCache {
-    generation: std::sync::atomic::AtomicU64,
-    snapshot: tokio::sync::Mutex<Option<(u64, Arc<Vec<Value>>)>>,
+    state: Mutex<ModelCatalogCacheState>,
+    build_serializer: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    before_publish_test_hook: Mutex<Option<ModelCatalogBeforePublishTestHook>>,
+}
+
+#[derive(Default)]
+struct ModelCatalogCacheState {
+    generation: u64,
+    snapshot: Option<(u64, Arc<Vec<Value>>)>,
 }
 
 impl ModelCatalogCache {
     pub(crate) fn invalidate(&self) {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
     }
 
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(std::sync::atomic::Ordering::Acquire)
+        self.state.lock().generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_publish_test_hook(&self, hook: ModelCatalogBeforePublishTestHook) {
+        *self.before_publish_test_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    async fn pause_before_publish_for_test(&self) {
+        let hook = self.before_publish_test_hook.lock().take();
+        if let Some(hook) = hook {
+            hook.pause().await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ModelCatalogBeforePublishTestHook {
+    reached: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl ModelCatalogBeforePublishTestHook {
+    pub(crate) fn blocked() -> Self {
+        Self {
+            reached: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+
+    pub(crate) async fn wait_until_reached(&self) {
+        self.reached
+            .acquire()
+            .await
+            .expect("model-catalog publish hook remains open")
+            .forget();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    async fn pause(&self) {
+        self.reached.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("model-catalog publish hook remains open")
+            .forget();
     }
 }
 
@@ -1656,30 +1717,48 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
 }
 
 async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
-    let mut cached = state.model_catalog_cache.snapshot.lock().await;
-    loop {
-        let generation = state
-            .model_catalog_cache
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire);
-        if let Some((cached_generation, snapshot)) = cached.as_ref() {
-            if *cached_generation == generation {
+    {
+        let cache_state = state.model_catalog_cache.state.lock();
+        if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
+            if *snapshot_generation == cache_state.generation {
                 return Ok(snapshot.clone());
             }
         }
+    }
+
+    // Serialize only builders. The synchronous generation/snapshot state lock
+    // is never held across the expensive filesystem sweep.
+    let _build_guard = state.model_catalog_cache.build_serializer.lock().await;
+    loop {
+        let generation = {
+            // Another builder may have populated the cache while this caller
+            // waited for the async serializer.
+            let cache_state = state.model_catalog_cache.state.lock();
+            if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
+                if *snapshot_generation == cache_state.generation {
+                    return Ok(snapshot.clone());
+                }
+            }
+            cache_state.generation
+        };
 
         let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
-        let current_generation = state
+
+        #[cfg(test)]
+        state
             .model_catalog_cache
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire);
-        if current_generation == generation {
-            *cached = Some((generation, snapshot.clone()));
+            .pause_before_publish_for_test()
+            .await;
+
+        let mut cache_state = state.model_catalog_cache.state.lock();
+        if cache_state.generation == generation {
+            cache_state.snapshot = Some((generation, snapshot.clone()));
             return Ok(snapshot);
         }
+        drop(cache_state);
         // A model writer completed while the filesystem sweep was running.
-        // Keep the serializer and rebuild at the new generation so no waiter
-        // can observe the stale result.
+        // Keep the async serializer and rebuild at the new generation. The
+        // stale result was never published or returned.
     }
 }
 
