@@ -223,10 +223,10 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, mochi::*, svd::*, wan::*};")
+        test_imports.contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};")
             && !test_imports
-                .contains("use super::{bernini::*, mochi::*, svd::*, vace::*, wan::*};"),
-        "Candle tests must not import the unused VACE family glob"
+                .contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, vace::*, wan::*};"),
+        "Candle tests must import the LTX helpers without the unused VACE family glob"
     );
     for dispatch in [
         "generate_candle_video",
