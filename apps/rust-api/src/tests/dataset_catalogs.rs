@@ -282,3 +282,52 @@ async fn corrupt_attached_catalog_errors_are_typed_and_do_not_leak_paths() {
         "client error must not expose the attached filesystem path"
     );
 }
+
+#[tokio::test]
+async fn catalog_pause_and_resume_persist_desired_processing_state() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let app = create_app(settings).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Controllable",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap();
+
+    let (status, paused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/pause"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paused}");
+    assert_eq!(paused["processing"]["state"], "paused");
+    assert_eq!(paused["processing"]["message"], "Paused by user");
+
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["processing"]["state"], "running");
+
+    let (_, persisted) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(persisted["processing"]["state"], "running");
+}

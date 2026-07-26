@@ -462,6 +462,52 @@ async fn ui_preferences_simple_ui_round_trips_and_merges() {
     assert_eq!(prefs["simpleUi"], false);
 }
 
+#[tokio::test]
+async fn ui_preferences_catalog_navigation_round_trips_safely_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({
+            "activeView": "DatasetCatalogs",
+            "selectedCatalogId": "catalog_0123-abcd"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["activeView"], "DatasetCatalogs");
+    assert_eq!(saved["selectedCatalogId"], "catalog_0123-abcd");
+
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, persisted) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(persisted["activeView"], "DatasetCatalogs");
+    assert_eq!(persisted["selectedCatalogId"], "catalog_0123-abcd");
+
+    let (_, ignored) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({
+            "activeView": "../private/settings",
+            "selectedCatalogId": "bad catalog id"
+        }),
+    )
+    .await;
+    assert_eq!(ignored["activeView"], "DatasetCatalogs");
+    assert_eq!(ignored["selectedCatalogId"], "catalog_0123-abcd");
+}
+
 /// epic 10721 R1: the per-(screen, model) tier sticky persists server-side so a user's studio pick
 /// survives a desktop relaunch (localStorage alone is wiped by the shell's per-launch origin). A PUT
 /// carrying the map replaces it wholesale (the web sends the full merged map); a PUT without it merges.

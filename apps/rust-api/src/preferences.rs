@@ -59,6 +59,15 @@ pub(crate) struct UiPreferences {
     /// no server-side deep-merge is needed (and a PUT without the field leaves it untouched).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     per_model_tier: Option<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Last top-level advanced-shell destination. This deliberately excludes project
+    /// state; it lets global workspaces such as Dataset Catalogs reopen after the
+    /// desktop API chooses a new origin on restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_view: Option<String>,
+    /// Last selected attached Dataset Catalog. The web reconciles this id against the
+    /// registry on load, so a detached or relocated catalog degrades to another item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_catalog_id: Option<String>,
 }
 
 /// User-selectable accent palettes. Keep in sync with web/src/accents.js.
@@ -106,6 +115,16 @@ fn normalize_accent(input: Option<&str>) -> Option<String> {
         .iter()
         .find(|id| **id == value)
         .map(|id| (*id).to_owned())
+}
+
+fn normalize_preference_id(input: Option<&str>, max_len: usize) -> Option<String> {
+    let value = input.map(str::trim)?;
+    (!value.is_empty()
+        && value.len() <= max_len
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character)))
+    .then(|| value.to_owned())
 }
 
 /// The valid stored generation quality for `input`, falling back to the q8 default when
@@ -215,6 +234,18 @@ pub(crate) async fn set_ui_preferences(
         // the full merged map from its cache), so a theme/quality-only PUT never clobbers a stored map.
         if let Some(per_model_tier) = payload.per_model_tier {
             prefs.per_model_tier = Some(per_model_tier);
+        }
+        if let Some(active_view) = normalize_preference_id(payload.active_view.as_deref(), 48) {
+            prefs.active_view = Some(active_view);
+        }
+        if let Some(selected_catalog_id) = payload.selected_catalog_id {
+            if selected_catalog_id.trim().is_empty() {
+                prefs.selected_catalog_id = None;
+            } else if let Some(selected_catalog_id) =
+                normalize_preference_id(Some(&selected_catalog_id), 128)
+            {
+                prefs.selected_catalog_id = Some(selected_catalog_id);
+            }
         }
         let body = serde_json::to_string_pretty(&prefs)?;
         Ok((prefs, body))

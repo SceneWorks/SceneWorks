@@ -13,8 +13,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use sceneworks_core::catalog_store::{
     AttachedCatalog, Catalog, CatalogContractState, CatalogError, CatalogFacet,
-    CatalogProcessingProgress, CatalogRecord, CatalogRecordFilter, CatalogRegistry,
-    CatalogSourceConfig, CatalogStorageAccounting,
+    CatalogProcessingProgress, CatalogProcessingState, CatalogRecord, CatalogRecordFilter,
+    CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -282,6 +282,48 @@ pub(crate) async fn delete_catalog_on_disk(
         detached: true,
         deleted_on_disk: true,
     }))
+}
+
+pub(crate) async fn pause_catalog(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<CatalogResponse>, ApiError> {
+    set_processing_state(state, catalog_id, CatalogProcessingState::Paused).await
+}
+
+pub(crate) async fn resume_catalog(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<CatalogResponse>, ApiError> {
+    set_processing_state(state, catalog_id, CatalogProcessingState::Running).await
+}
+
+async fn set_processing_state(
+    state: AppState,
+    catalog_id: String,
+    processing_state: CatalogProcessingState,
+) -> Result<Json<CatalogResponse>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let attached = registry.get(&catalog_id)?;
+        let catalog = registry.open_attached(&catalog_id)?;
+        let mut contract = catalog.contract_state()?;
+        contract.processing.state = processing_state;
+        contract.processing.message = Some(
+            match processing_state {
+                CatalogProcessingState::Paused => "Paused by user",
+                CatalogProcessingState::Running => "Processing requested by user",
+                _ => unreachable!("pause/resume only set explicit desired states"),
+            }
+            .to_owned(),
+        );
+        contract.processing.updated_at = chrono::Utc::now().to_rfc3339();
+        catalog.set_contract_state(&contract)?;
+        catalog_response(&attached, &catalog)
+    })
+    .await?;
+    Ok(Json(response))
 }
 
 async fn load_catalog_response(

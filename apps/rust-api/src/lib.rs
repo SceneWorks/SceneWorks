@@ -108,7 +108,7 @@ use projects::{create_project, get_project, list_projects, reindex_project_endpo
 mod catalogs;
 use catalogs::{
     attach_catalog, catalog_facets, create_catalog, delete_catalog_on_disk, detach_catalog,
-    get_catalog, get_catalog_status, list_catalogs, query_catalog,
+    get_catalog, get_catalog_status, list_catalogs, pause_catalog, query_catalog, resume_catalog,
 };
 mod assets;
 use assets::{
@@ -1268,6 +1268,8 @@ fn create_app_with_state_mode(
         )
         .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
         .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
+        .route("/api/v1/catalogs/:catalog_id/pause", post(pause_catalog))
+        .route("/api/v1/catalogs/:catalog_id/resume", post(resume_catalog))
         .route(
             "/api/v1/catalogs/:catalog_id/on-disk",
             delete(delete_catalog_on_disk),
