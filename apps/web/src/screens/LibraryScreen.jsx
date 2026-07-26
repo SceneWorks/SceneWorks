@@ -26,6 +26,8 @@ export function LibraryScreen() {
     activeProject,
     assets,
     assetsReady = false,
+    assetsLoading = false,
+    assetsError = "",
     jobs = [],
     imageModels = [],
     createVqaJob,
@@ -243,37 +245,45 @@ export function LibraryScreen() {
 
       <AssetSelectionBar batch={batch} showDiscard={assetMode === "assets"} />
 
-      <div className="library-layout">
-        <AssetGrid
-          audioPlayer={audioPlayer}
-          assets={visibleAssets}
-          onPreview={onPreview}
-          selectedAsset={librarySelectedAsset}
-          setSelectedAssetId={setSelectedAssetId}
-          selectedIds={batch.selectedAssetIds}
-          onToggleSelect={batch.toggleSelect}
-        />
-        <AssetDetail
-          audioPlayer={audioPlayer}
-          asset={librarySelectedAsset}
-          deleteAsset={deleteAsset}
-          purgeAsset={purgeAsset}
-          onPreview={onPreview}
-          onSendImage={onSendImage}
-          onSendVideo={onSendVideo}
-          onSendEditor={onSendEditor}
-          characters={characters}
-          onMoveToCharacter={moveAssetToCharacter ?? null}
-          updateAssetStatus={updateAssetStatus}
-          updateAssetTags={updateAssetTags}
-          availableTags={availableTags}
-          vqaEnabled={vqaEnabled}
-          vqaEntries={vqaEntries}
-          vqaPending={vqaPending}
-          audioModels={audioModels}
-          createVqaJob={createVqaJob}
-        />
-      </div>
+      {assetsLoading ? (
+        <div className="empty-panel" role="status">Loading assets…</div>
+      ) : assetsError ? (
+        <div className="empty-panel error-text" role="alert">
+          Couldn&apos;t load assets: {assetsError}
+        </div>
+      ) : (
+        <div className="library-layout">
+          <AssetGrid
+            audioPlayer={audioPlayer}
+            assets={visibleAssets}
+            onPreview={onPreview}
+            selectedAsset={librarySelectedAsset}
+            setSelectedAssetId={setSelectedAssetId}
+            selectedIds={batch.selectedAssetIds}
+            onToggleSelect={batch.toggleSelect}
+          />
+          <AssetDetail
+            audioPlayer={audioPlayer}
+            asset={librarySelectedAsset}
+            deleteAsset={deleteAsset}
+            purgeAsset={purgeAsset}
+            onPreview={onPreview}
+            onSendImage={onSendImage}
+            onSendVideo={onSendVideo}
+            onSendEditor={onSendEditor}
+            characters={characters}
+            onMoveToCharacter={moveAssetToCharacter ?? null}
+            updateAssetStatus={updateAssetStatus}
+            updateAssetTags={updateAssetTags}
+            availableTags={availableTags}
+            vqaEnabled={vqaEnabled}
+            vqaEntries={vqaEntries}
+            vqaPending={vqaPending}
+            audioModels={audioModels}
+            createVqaJob={createVqaJob}
+          />
+        </div>
+      )}
 
       <AssetBatchModal batch={batch} />
     </section>

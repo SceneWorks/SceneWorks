@@ -441,6 +441,11 @@ export function App() {
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
   const [loadedAssets, setAssets] = useState([]);
   const [loadedAssetsProjectId, setLoadedAssetsProjectId] = useState(null);
+  const [assetLoadState, setAssetLoadState] = useState({
+    projectId: null,
+    status: "idle",
+    error: "",
+  });
   const [storedSelectedAssetId, setSelectedAssetId] = useState(null);
   // Scope project data during render, not in a passive effect. On A → B (or A
   // → no project), B's first render therefore cannot observe A's assets or raw
@@ -451,6 +456,20 @@ export function App() {
   );
   const selectedAssetId =
     loadedAssetsProjectId === activeProject?.id ? storedSelectedAssetId : null;
+  // A project switch renders before its passive refresh effect runs. Treat that
+  // first render as loading instead of briefly presenting the previous
+  // project's settled state (or a misleading empty catalog).
+  const activeAssetLoadState = useMemo(
+    () =>
+      activeProject && assetLoadState.projectId === activeProject.id
+        ? assetLoadState
+        : {
+            projectId: activeProject?.id ?? null,
+            status: activeProject ? "loading" : "idle",
+            error: "",
+          },
+    [activeProject, assetLoadState],
+  );
   const [projectFilter, setProjectFilter] = useState("all");
   const [requestedGpu, setRequestedGpu] = useState("auto");
   const [latestGenerationSetId, setLatestGenerationSetId] = useState(null);
@@ -1321,6 +1340,7 @@ export function App() {
     if (!activeProject || !ready) {
       setAssets([]);
       setLoadedAssetsProjectId(null);
+      setAssetLoadState({ projectId: null, status: "idle", error: "" });
       setCharacters([]);
       setSavedVoices([]);
       setPersonTracks([]);
@@ -1411,56 +1431,78 @@ export function App() {
         return { label, value: fallback, error: optional ? "" : `${label}: ${err.message}` };
       }
     };
-    const [
-      projectsResult,
-      jobsResult,
-      workersResult,
-      modelsResult,
-      lorasResult,
-      presetsResult,
-      trainingTargetsResult,
-      trainingPresetsResult,
-      promptBatchesResult,
-    ] =
-      await Promise.all([
-        fetchInitial("Projects", "/api/v1/projects", []),
-        fetchInitial("Jobs", "/api/v1/jobs", []),
-        fetchInitial("Workers", "/api/v1/workers", []),
-        fetchInitial("Models", "/api/v1/models", []),
-        fetchInitial("LoRAs", "/api/v1/loras", []),
-        fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
-        fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
-        fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
-        fetchInitial("Prompt batches", "/api/v1/prompt-batches", [], true),
-      ]);
+    const projectsPromise = fetchInitial("Projects", "/api/v1/projects", []).then((result) => {
+      applySuccessfulProjectRefresh(result, setProjects, setActiveProject);
+      setProjectsLoaded(true);
+      return result;
+    });
     // Mac UI gating (sc-3486): optional + non-fatal — a fetch failure leaves gating inert.
     fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
       .then((result) => setMacCapabilities(result.value ?? DEFAULT_MAC_CAPABILITIES))
       .catch(() => {});
-    applySuccessfulProjectRefresh(projectsResult, setProjects, setActiveProject);
-    setProjectsLoaded(true);
-    setJobs((current) => mergeFreshJobs(current, jobsResult.value));
-    setWorkers(workersResult.value.sort(sortWorkers));
-    setQueueSummary(null);
-    setModels(modelsResult.value);
-    setLoras(lorasResult.value);
-    setPresets(presetsResult.value);
-    setPromptBatches(promptBatchesResult.value);
-    setTrainingTargets(trainingTargetsResult.value);
-    setTrainingTargetsError(trainingTargetsResult.error);
-    setTrainingPresets(trainingPresetsResult.value);
-    setTrainingPresetsError(trainingPresetsResult.error);
+    // Projects are the critical path to Assets. The remaining domains commit
+    // independently so no slow catalog gates another domain's usable state.
+    const globalPromises = [
+      fetchInitial("Jobs", "/api/v1/jobs", []).then((result) => {
+        setJobs((current) => mergeFreshJobs(current, result.value));
+        setQueueSummary(null);
+        return result;
+      }),
+      fetchInitial("Workers", "/api/v1/workers", []).then((result) => {
+        setWorkers(result.value.sort(sortWorkers));
+        return result;
+      }),
+      fetchInitial("Models", "/api/v1/models", []).then((result) => {
+        setModels(result.value);
+        return result;
+      }),
+      fetchInitial("LoRAs", "/api/v1/loras", []).then((result) => {
+        // Once a project is active, its scoped refresh is authoritative. A
+        // slower global response must not overwrite project entries.
+        if (!activeProjectRef.current) {
+          setLoras(result.value);
+        }
+        return result;
+      }),
+      fetchInitial("Presets", "/api/v1/recipe-presets", [], true).then((result) => {
+        if (!activeProjectRef.current) {
+          setPresets(result.value);
+        }
+        return result;
+      }),
+      fetchInitial(
+        "Training targets",
+        "/api/v1/training/targets",
+        { schemaVersion: 1, targets: [] },
+      ).then((result) => {
+        setTrainingTargets(result.value);
+        setTrainingTargetsError(result.error);
+        return result;
+      }),
+      fetchInitial(
+        "Training presets",
+        "/api/v1/training/presets",
+        { schemaVersion: 1, presets: [] },
+      ).then((result) => {
+        setTrainingPresets(result.value);
+        setTrainingPresetsError(result.error);
+        return result;
+      }),
+      fetchInitial("Prompt batches", "/api/v1/prompt-batches", [], true).then((result) => {
+        if (!activeProjectRef.current) {
+          setPromptBatches(result.value);
+        }
+        return result;
+      }),
+    ];
+    // Awaiting all requests preserves refreshData's completion contract and its
+    // aggregate startup error while no longer gating any individual commit.
+    const [projectsResult, ...globalResults] = await Promise.all([
+      projectsPromise,
+      ...globalPromises,
+    ]);
     setError(
-      [
-        projectsResult,
-        jobsResult,
-        workersResult,
-        modelsResult,
-        lorasResult,
-        presetsResult,
-        trainingTargetsResult,
-        trainingPresetsResult,
-      ]
+      [projectsResult, ...globalResults]
         .map((result) => result.error)
         .filter(Boolean)
         .join("; "),
@@ -1478,6 +1520,13 @@ export function App() {
     if (!isCurrentProjectRequest(activeProject?.id ?? null, projectId)) {
       return;
     }
+    // Keep an already-settled grid usable during background/SSE refreshes.
+    // Initial loads, retries, and project switches still expose "loading".
+    setAssetLoadState((current) =>
+      loadedAssetsProjectId === projectId
+        ? { ...current, projectId, error: "" }
+        : { projectId, status: "loading", error: "" },
+    );
     const timingStartedAt = beginAssetRequest();
     try {
       const items = await apiFetch(`/api/v1/projects/${projectId}/assets?includeRejected=true&includeTrashed=true`, token, { signal });
@@ -1491,9 +1540,14 @@ export function App() {
       setAssets(items);
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
+      setAssetLoadState({ projectId, status: "ready", error: "" });
       setError("");
     } catch (err) {
       if (isAbortError(err)) return;
+      if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
+        return;
+      }
+      setAssetLoadState({ projectId, status: "error", error: err.message });
       setError(err.message);
     } finally {
       settleAssetRequest(timingStartedAt);
@@ -2376,8 +2430,12 @@ export function App() {
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
     assetsReady: Boolean(
-      activeProject && loadedAssetsProjectId === activeProject.id
+      activeProject &&
+      loadedAssetsProjectId === activeProject.id &&
+      activeAssetLoadState.status === "ready"
     ),
+    assetsLoading: activeAssetLoadState.status === "loading",
+    assetsError: activeAssetLoadState.error,
     selectedAsset,
     // The RAW selection id (null when nothing is explicitly selected). Studios need it
     // to tell an explicit user selection apart from `selectedAsset`'s assets[0] fallback
@@ -2538,7 +2596,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, loadedAssetsProjectId, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
+    assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
