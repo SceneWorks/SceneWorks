@@ -325,6 +325,9 @@ pub struct AppState {
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
     /// Owns, deduplicates, cancels, and drains background catalog scans.
     pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
+    /// Caps filesystem/Parquet metadata validation before it reaches Tokio's
+    /// shared blocking pool, preserving capacity for catalog DB operations.
+    pub(crate) catalog_scan_preflight_slots: Arc<Semaphore>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     #[cfg(test)]
@@ -335,6 +338,12 @@ pub struct AppState {
     pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
     #[cfg(test)]
     pub(crate) catalog_scan_preflight_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_admission_timeout_ms: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_execution_timeout_ms: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_test_ticks: Arc<AtomicU64>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
@@ -625,22 +634,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-const CATALOG_SCAN_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-
 async fn shutdown_catalog_scans(state: &AppState) {
-    let result = state
-        .catalog_scan_supervisor
-        .shutdown(CATALOG_SCAN_SHUTDOWN_GRACE)
-        .await;
-    if result.timed_out {
-        tracing::warn!(
-            event = "catalog_scan_shutdown_timeout",
-            requested = result.requested,
-            joined = result.joined,
-            grace_seconds = CATALOG_SCAN_SHUTDOWN_GRACE.as_secs(),
-            "catalog scans did not drain before the graceful-shutdown deadline"
-        );
-    } else if result.requested > 0 {
+    let result = state.catalog_scan_supervisor.shutdown().await;
+    if result.requested > 0 {
         tracing::info!(
             event = "catalog_scan_shutdown_complete",
             requested = result.requested,

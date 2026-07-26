@@ -63,6 +63,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn service_unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: detail.into(),
+            code: Some("catalog_preflight_unavailable"),
+        }
+    }
+
     pub(crate) fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

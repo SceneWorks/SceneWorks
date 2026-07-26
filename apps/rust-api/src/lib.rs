@@ -1203,6 +1203,7 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        catalog_scan_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         #[cfg(test)]
         catalog_scan_before_driver_start_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
@@ -1211,6 +1212,12 @@ fn create_app_with_state_mode(
         catalog_scan_preflight_delay_ms_once: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(test)]
         catalog_scan_preflight_started: Arc::new(tokio::sync::Notify::new()),
+        #[cfg(test)]
+        catalog_scan_preflight_admission_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_preflight_execution_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_preflight_test_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]

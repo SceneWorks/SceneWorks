@@ -296,8 +296,8 @@ fn scan_parquet_catalog_under_lease(
     should_cancel: &dyn Fn() -> bool,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
     validate_options(options)?;
-    let shards = parquet_shards(source)?;
-    let source_signature = source_signature(&shards)?;
+    let shards = parquet_shards_with_cancel(source, should_cancel)?;
+    let source_signature = source_signature(&shards, should_cancel)?;
     let options_signature = options_signature(options)?;
     let mut checkpoint = load_checkpoint(catalog, &source_signature, &options_signature)?;
     if checkpoint.complete {
@@ -500,6 +500,13 @@ pub(crate) fn caption_matches_term(caption: &str, term: &str) -> bool {
 }
 
 pub(crate) fn parquet_shards(source: &Path) -> CatalogParquetScanResult<Vec<PathBuf>> {
+    parquet_shards_with_cancel(source, &|| false)
+}
+
+fn parquet_shards_with_cancel(
+    source: &Path,
+    should_cancel: &dyn Fn() -> bool,
+) -> CatalogParquetScanResult<Vec<PathBuf>> {
     if !source.is_absolute() {
         return Err(CatalogParquetScanError::InvalidSource(
             "Parquet source path must be absolute.".to_owned(),
@@ -517,6 +524,9 @@ pub(crate) fn parquet_shards(source: &Path) -> CatalogParquetScanResult<Vec<Path
     } else if metadata.is_dir() {
         let mut discovered = Vec::new();
         for (entry_index, entry) in std::fs::read_dir(&canonical)?.enumerate() {
+            if should_cancel() {
+                return Err(preflight_interrupted());
+            }
             if entry_index >= MAX_PARQUET_DIRECTORY_ENTRIES {
                 return Err(CatalogParquetScanError::InvalidSource(format!(
                     "Parquet source directory exceeds the {MAX_PARQUET_DIRECTORY_ENTRIES}-entry \
@@ -557,9 +567,26 @@ pub fn validate_catalog_parquet_scan_plan(
     source: &Path,
     options: &CatalogParquetScanOptions,
 ) -> CatalogParquetScanResult<()> {
+    validate_catalog_parquet_scan_plan_with_cancel(source, options, || false)
+}
+
+/// Cancellation-aware variant used by request preflight. Cancellation is
+/// checked between directory entries and shard metadata reads so abandoned or
+/// timed-out requests stop consuming the bounded validation pool promptly.
+pub fn validate_catalog_parquet_scan_plan_with_cancel<F>(
+    source: &Path,
+    options: &CatalogParquetScanOptions,
+    should_cancel: F,
+) -> CatalogParquetScanResult<()>
+where
+    F: Fn() -> bool,
+{
     validate_options(options)?;
-    let shards = parquet_shards(source)?;
+    let shards = parquet_shards_with_cancel(source, &should_cancel)?;
     for shard in shards {
+        if should_cancel() {
+            return Err(preflight_interrupted());
+        }
         let reader = SerializedFileReader::new(File::open(shard)?)?;
         let available_columns = reader
             .metadata()
@@ -583,6 +610,12 @@ pub fn validate_catalog_parquet_scan_plan(
         }
     }
     Ok(())
+}
+
+fn preflight_interrupted() -> CatalogParquetScanError {
+    CatalogParquetScanError::Interrupted(
+        "Parquet validation was canceled before it completed.".to_owned(),
+    )
 }
 
 fn validate_options(options: &CatalogParquetScanOptions) -> CatalogParquetScanResult<()> {
@@ -1116,9 +1149,15 @@ fn has_parquet_extension(path: &Path) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
 }
 
-fn source_signature(shards: &[PathBuf]) -> CatalogParquetScanResult<String> {
+fn source_signature(
+    shards: &[PathBuf],
+    should_cancel: &dyn Fn() -> bool,
+) -> CatalogParquetScanResult<String> {
     let mut digest = Sha256::new();
     for shard in shards {
+        if should_cancel() {
+            return Err(preflight_interrupted());
+        }
         let metadata = std::fs::metadata(shard)?;
         let modified = metadata
             .modified()
@@ -1863,5 +1902,27 @@ mod tests {
             error,
             CatalogParquetScanError::CheckpointMismatch(_)
         ));
+    }
+
+    #[test]
+    fn validation_cancellation_stops_directory_enumeration() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source");
+        std::fs::create_dir(&source).expect("source creates");
+        for index in 0..20 {
+            File::create(source.join(format!("{index:02}.parquet"))).expect("shard creates");
+        }
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let error = validate_catalog_parquet_scan_plan_with_cancel(
+            &source,
+            &CatalogParquetScanOptions::default(),
+            || checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 3,
+        )
+        .expect_err("cancellation stops validation");
+        assert!(matches!(error, CatalogParquetScanError::Interrupted(_)));
+        assert!(
+            checks.load(std::sync::atomic::Ordering::SeqCst) <= 5,
+            "validation must stop promptly after cancellation"
+        );
     }
 }

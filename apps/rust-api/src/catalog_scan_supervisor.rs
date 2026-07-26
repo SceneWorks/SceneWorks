@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 struct CatalogScanTask {
+    generation: u64,
     cancellation: CancellationToken,
     handle: JoinHandle<()>,
 }
@@ -23,52 +25,82 @@ struct SupervisorState {
 ///
 /// Catalog ids are single-flight keys. Shutdown first closes the registry to
 /// new work, then cooperatively cancels and drains all registered tasks.
-pub(crate) struct CatalogScanSupervisor {
+struct CatalogScanSupervisorInner {
     state: Mutex<SupervisorState>,
+    next_generation: AtomicU64,
+}
+
+pub(crate) struct CatalogScanSupervisor {
+    inner: Arc<CatalogScanSupervisorInner>,
 }
 
 impl Default for CatalogScanSupervisor {
     fn default() -> Self {
         Self {
-            state: Mutex::new(SupervisorState::default()),
+            inner: Arc::new(CatalogScanSupervisorInner {
+                state: Mutex::new(SupervisorState::default()),
+                next_generation: AtomicU64::new(1),
+            }),
         }
     }
 }
 
 impl CatalogScanSupervisor {
-    pub(crate) async fn spawn<F, Fut>(&self, catalog_id: String, task: F) -> bool
+    pub(crate) async fn spawn<F, Fut>(&self, catalog_id: String, task: F) -> CatalogScanSpawn
     where
-        F: FnOnce(CancellationToken) -> Fut,
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut state = self.state.lock().await;
+        let mut state = self.inner.state.lock().await;
         if state.shutting_down {
-            return false;
+            return CatalogScanSpawn::ShuttingDown;
         }
         if state
             .tasks
             .get(&catalog_id)
             .is_some_and(|entry| !entry.handle.is_finished())
         {
-            return false;
+            return CatalogScanSpawn::AlreadyRunning;
         }
         state.tasks.remove(&catalog_id);
 
+        let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         let cancellation = CancellationToken::new();
-        let handle = tokio::spawn(task(cancellation.clone()));
+        let task_cancellation = cancellation.clone();
+        let weak_inner = Arc::downgrade(&self.inner);
+        let task_catalog_id = catalog_id.clone();
+        let handle = tokio::spawn(async move {
+            task(task_cancellation).await;
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+            let mut state = inner.state.lock().await;
+            if state
+                .tasks
+                .get(&task_catalog_id)
+                .is_some_and(|entry| entry.generation == generation)
+            {
+                state.tasks.remove(&task_catalog_id);
+            }
+        });
         state.tasks.insert(
             catalog_id,
             CatalogScanTask {
+                generation,
                 cancellation,
                 handle,
             },
         );
-        true
+        CatalogScanSpawn::Started
     }
 
-    pub(crate) async fn shutdown(&self, grace: Duration) -> CatalogScanShutdown {
+    /// Cancels every registered task and does not return until each async
+    /// wrapper—and therefore every awaited `spawn_blocking` scan pass—has
+    /// finished. Tokio cannot safely kill blocking work, so a timeout here would
+    /// falsely report quiescence while a detached scanner still held its lease.
+    pub(crate) async fn shutdown(&self) -> CatalogScanShutdown {
         let tasks = {
-            let mut state = self.state.lock().await;
+            let mut state = self.inner.state.lock().await;
             state.shutting_down = true;
             let tasks = state
                 .tasks
@@ -82,33 +114,18 @@ impl CatalogScanSupervisor {
         };
         let requested = tasks.len();
         let mut joined = 0;
-        let mut handles = tasks
-            .into_iter()
-            .map(|task| task.handle)
-            .collect::<Vec<_>>();
-        let drain = async {
-            for handle in &mut handles {
-                if handle.await.is_ok() {
-                    joined += 1;
-                }
-            }
-        };
-        let timed_out = tokio::time::timeout(grace, drain).await.is_err();
-        if timed_out {
-            for handle in handles {
-                handle.abort();
+        for task in tasks {
+            if task.handle.await.is_ok() {
+                joined += 1;
             }
         }
-        CatalogScanShutdown {
-            requested,
-            joined,
-            timed_out,
-        }
+        CatalogScanShutdown { requested, joined }
     }
 
     #[cfg(test)]
     pub(crate) async fn active_count(&self) -> usize {
-        self.state
+        self.inner
+            .state
             .lock()
             .await
             .tasks
@@ -116,47 +133,127 @@ impl CatalogScanSupervisor {
             .filter(|entry| !entry.handle.is_finished())
             .count()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn tracked_count(&self) -> usize {
+        self.inner.state.lock().await.tasks.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogScanSpawn {
+    Started,
+    AlreadyRunning,
+    ShuttingDown,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CatalogScanShutdown {
     pub(crate) requested: usize,
     pub(crate) joined: usize,
-    pub(crate) timed_out: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn catalog_ids_are_single_flight_and_shutdown_closes_the_registry() {
         let supervisor = Arc::new(CatalogScanSupervisor::default());
         let started = Arc::new(tokio::sync::Notify::new());
         let started_for_task = started.clone();
-        assert!(
+        assert_eq!(
             supervisor
                 .spawn("catalog-a".to_owned(), move |cancellation| async move {
                     started_for_task.notify_one();
                     cancellation.cancelled().await;
                 })
-                .await
+                .await,
+            CatalogScanSpawn::Started
         );
         started.notified().await;
-        assert!(
-            !supervisor.spawn("catalog-a".to_owned(), |_| async {}).await,
-            "the same catalog must not receive a second live task"
+        assert_eq!(
+            supervisor.spawn("catalog-a".to_owned(), |_| async {}).await,
+            CatalogScanSpawn::AlreadyRunning
         );
 
-        let result = supervisor.shutdown(Duration::from_secs(1)).await;
+        let result = supervisor.shutdown().await;
         assert_eq!(result.requested, 1);
         assert_eq!(result.joined, 1);
-        assert!(!result.timed_out);
         assert_eq!(supervisor.active_count().await, 0);
-        assert!(
-            !supervisor.spawn("catalog-b".to_owned(), |_| async {}).await,
-            "shutdown permanently closes the supervisor to new work"
+        assert_eq!(
+            supervisor.spawn("catalog-b".to_owned(), |_| async {}).await,
+            CatalogScanSpawn::ShuttingDown
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_non_cooperative_blocking_work_to_finish() {
+        let supervisor = Arc::new(CatalogScanSupervisor::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_mutations = mutations.clone();
+        assert_eq!(
+            supervisor
+                .spawn("catalog-blocked".to_owned(), move |_| async move {
+                    tokio::task::spawn_blocking(move || {
+                        let _ = started_tx.send(());
+                        release_rx.recv().expect("test releases blocking pass");
+                        task_mutations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    })
+                    .await
+                    .expect("blocking pass joins");
+                })
+                .await,
+            CatalogScanSpawn::Started
+        );
+        started_rx.await.expect("blocking pass starts");
+
+        let shutdown_supervisor = supervisor.clone();
+        let mut shutdown = tokio::spawn(async move { shutdown_supervisor.shutdown().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must not detach a still-running blocking scanner"
+        );
+        release_tx.send(()).expect("blocking pass releases");
+        let result = shutdown.await.expect("shutdown task joins");
+        assert_eq!(result.requested, 1);
+        assert_eq!(result.joined, 1);
+        assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            mutations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "nothing mutates after shutdown returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_completed_catalogs_are_reaped_from_the_registry() {
+        let supervisor = CatalogScanSupervisor::default();
+        for index in 0..200 {
+            assert_eq!(
+                supervisor
+                    .spawn(format!("catalog-{index}"), |_| async {})
+                    .await,
+                CatalogScanSpawn::Started
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if supervisor.tracked_count().await == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion reaping is prompt and bounded");
+        assert_eq!(supervisor.active_count().await, 0);
     }
 }

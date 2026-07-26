@@ -14,16 +14,17 @@ use axum::Json;
 use sceneworks_core::catalog_store::{
     AttachedCatalog, Catalog, CatalogContractState, CatalogError, CatalogFacet,
     CatalogProcessingControl, CatalogProcessingDesiredState, CatalogProcessingLease,
-    CatalogProcessingProgress, CatalogRecord, CatalogRecordFilter, CatalogRegistry,
-    CatalogSourceConfig, CatalogStorageAccounting,
+    CatalogProcessingProgress, CatalogProcessingState, CatalogRecord, CatalogRecordFilter,
+    CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
 };
 use sceneworks_worker::catalog_parquet_scanner::{
-    validate_catalog_parquet_scan_plan, AttachedCatalogParquetScanDriver, CatalogParquetScanError,
-    CatalogParquetScanOptions,
+    validate_catalog_parquet_scan_plan_with_cancel, AttachedCatalogParquetScanDriver,
+    CatalogParquetScanError, CatalogParquetScanOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::catalog_scan_supervisor::CatalogScanSpawn;
 use crate::{ApiError, ApiJson, AppState};
 
 const CATALOG_API_CONTRACT_VERSION: u32 = 1;
@@ -32,6 +33,9 @@ const MAX_QUERY_LIMIT: u32 = 200;
 const DEFAULT_FACET_LIMIT: u32 = 50;
 const MAX_FACET_LIMIT: u32 = 100;
 const SCHEDULED_SCAN_PASS_ROWS: u64 = 25_000;
+const CATALOG_SCAN_START_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+const CATALOG_PREFLIGHT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+const CATALOG_PREFLIGHT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -456,7 +460,7 @@ fn catalog_response(
 }
 
 async fn validated_scan_plan(
-    _state: &AppState,
+    state: &AppState,
     source_config: Option<&CatalogSourceConfig>,
 ) -> Result<Option<CatalogScanPlan>, ApiError> {
     if source_config.is_some_and(|source| source.options.get("maxRows").is_some()) {
@@ -467,25 +471,101 @@ async fn validated_scan_plan(
     let plan = scan_plan(source_config).map_err(actionable_scan_plan_error)?;
     if let Some(validation_plan) = plan.clone() {
         #[cfg(test)]
-        let preflight_delay = _state.catalog_scan_preflight_delay_ms_once.clone();
+        let admission_wait = test_duration_override(
+            &state.catalog_scan_preflight_admission_timeout_ms,
+            CATALOG_PREFLIGHT_ADMISSION_WAIT,
+        );
+        #[cfg(not(test))]
+        let admission_wait = CATALOG_PREFLIGHT_ADMISSION_WAIT;
+        let permit = tokio::time::timeout(
+            admission_wait,
+            state.catalog_scan_preflight_slots.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            ApiError::service_unavailable(
+                "Parquet validation is busy; retry after another catalog preflight finishes",
+            )
+        })?
+        .map_err(|_| ApiError::service_unavailable("Parquet validation is shutting down"))?;
+
         #[cfg(test)]
-        let preflight_started = _state.catalog_scan_preflight_started.clone();
-        let validation = tokio::task::spawn_blocking(move || {
+        let preflight_delay = state.catalog_scan_preflight_delay_ms_once.clone();
+        #[cfg(test)]
+        let preflight_started = state.catalog_scan_preflight_started.clone();
+        #[cfg(test)]
+        let preflight_ticks = state.catalog_scan_preflight_test_ticks.clone();
+        #[cfg(test)]
+        let execution_timeout = test_duration_override(
+            &state.catalog_scan_preflight_execution_timeout_ms,
+            CATALOG_PREFLIGHT_EXECUTION_TIMEOUT,
+        );
+        #[cfg(not(test))]
+        let execution_timeout = CATALOG_PREFLIGHT_EXECUTION_TIMEOUT;
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancel_on_drop = CancelOnDrop(cancellation.clone());
+        let validation_cancellation = cancellation.clone();
+        let mut validation_task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             #[cfg(test)]
             {
                 let delay = preflight_delay.swap(0, std::sync::atomic::Ordering::SeqCst);
                 if delay > 0 {
                     preflight_started.notify_waiters();
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(delay);
+                    while std::time::Instant::now() < deadline {
+                        if validation_cancellation.is_cancelled() {
+                            return Err(CatalogParquetScanError::Interrupted(
+                                "Parquet validation was canceled before it completed.".to_owned(),
+                            ));
+                        }
+                        preflight_ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
                 }
             }
-            validate_catalog_parquet_scan_plan(&validation_plan.source, &validation_plan.options)
-        })
-        .await
-        .map_err(|error| ApiError::internal(format!("Catalog preflight task failed: {error}")))?;
+            validate_catalog_parquet_scan_plan_with_cancel(
+                &validation_plan.source,
+                &validation_plan.options,
+                || validation_cancellation.is_cancelled(),
+            )
+        });
+        let validation = match tokio::time::timeout(execution_timeout, &mut validation_task).await {
+            Ok(joined) => joined.map_err(|error| {
+                ApiError::internal(format!("Catalog preflight task failed: {error}"))
+            })?,
+            Err(_) => {
+                cancellation.cancel();
+                return Err(ApiError::service_unavailable(
+                    "Parquet validation timed out; reduce the source shard count and retry",
+                ));
+            }
+        };
+        drop(cancel_on_drop);
         validation.map_err(actionable_scanner_validation_error)?;
     }
     Ok(plan)
+}
+
+struct CancelOnDrop(tokio_util::sync::CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+#[cfg(test)]
+fn test_duration_override(
+    override_ms: &std::sync::atomic::AtomicU64,
+    default: std::time::Duration,
+) -> std::time::Duration {
+    match override_ms.swap(0, std::sync::atomic::Ordering::SeqCst) {
+        0 => default,
+        milliseconds => std::time::Duration::from_millis(milliseconds),
+    }
 }
 
 fn actionable_scan_plan_error(error: CatalogError) -> ApiError {
@@ -496,10 +576,11 @@ fn actionable_scan_plan_error(error: CatalogError) -> ApiError {
 }
 
 fn actionable_scanner_validation_error(error: CatalogParquetScanError) -> ApiError {
-    ApiError::bad_request(match error {
-        CatalogParquetScanError::InvalidSource(detail) => detail,
-        _ => "Parquet source could not be read with the supplied options".to_owned(),
-    })
+    match error {
+        CatalogParquetScanError::InvalidSource(detail) => ApiError::bad_request(detail),
+        CatalogParquetScanError::Interrupted(detail) => ApiError::service_unavailable(detail),
+        _ => ApiError::bad_request("Parquet source could not be read with the supplied options"),
+    }
 }
 
 fn scan_plan(
@@ -563,7 +644,7 @@ async fn schedule_catalog_scan(
                     _ = cancellation.cancelled() => return,
                 }
             }
-            let mut start_attempts = 0_u8;
+            let mut retry_delay = std::time::Duration::from_millis(10);
             let mut driver = loop {
                 if cancellation.is_cancelled() {
                     return;
@@ -579,14 +660,50 @@ async fn schedule_catalog_scan(
                 .await;
                 match start {
                     Ok(Ok(driver)) => break driver,
-                    Ok(Err(CatalogParquetScanError::Busy(_))) if start_attempts < 50 => {
-                        start_attempts += 1;
+                    Ok(Err(CatalogParquetScanError::Busy(_))) => {
+                        let retry_config_dir = config_dir.clone();
+                        let retry_catalog_id = catalog_id.clone();
+                        let should_retry = tokio::task::spawn_blocking(move || {
+                            let registry = CatalogRegistry::new(retry_config_dir);
+                            let catalog = registry.open_attached(&retry_catalog_id)?;
+                            let desired = catalog.processing_control()?.desired_state;
+                            let actual = catalog.contract_state()?.processing.state;
+                            Ok::<_, CatalogError>(
+                                desired == CatalogProcessingDesiredState::Running
+                                    && actual != CatalogProcessingState::Completed,
+                            )
+                        })
+                        .await;
+                        match should_retry {
+                            Ok(Ok(true)) => {}
+                            Ok(Ok(false)) | Ok(Err(CatalogError::NotFound(_))) => return,
+                            Ok(Err(error)) => {
+                                tracing::error!(
+                                    event = "catalog_parquet_scan_retry_check_failed",
+                                    catalog_id,
+                                    error = %error,
+                                    "catalog Parquet scanner stopped after a terminal retry check"
+                                );
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    event = "catalog_parquet_scan_task_failed",
+                                    catalog_id,
+                                    error = %error,
+                                    "catalog Parquet scanner retry check stopped"
+                                );
+                                return;
+                            }
+                        }
                         tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                            _ = tokio::time::sleep(retry_delay) => {}
                             _ = cancellation.cancelled() => return,
                         }
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
                     }
-                    Ok(Err(CatalogParquetScanError::Busy(_))) => return,
                     Ok(Err(error)) => {
                         tracing::error!(
                             event = "catalog_parquet_scan_start_failed",
@@ -664,12 +781,22 @@ async fn schedule_catalog_scan(
             }
         })
         .await;
-    if !spawned {
-        tracing::debug!(
-            event = "catalog_parquet_scan_deduplicated",
-            catalog_id = log_catalog_id,
-            "catalog Parquet scan was already active or the supervisor is shutting down"
-        );
+    match spawned {
+        CatalogScanSpawn::Started => {}
+        CatalogScanSpawn::AlreadyRunning => {
+            tracing::debug!(
+                event = "catalog_parquet_scan_deduplicated",
+                catalog_id = log_catalog_id,
+                "catalog Parquet scan already has a supervised task"
+            );
+        }
+        CatalogScanSpawn::ShuttingDown => {
+            tracing::warn!(
+                event = "catalog_parquet_scan_rejected_during_shutdown",
+                catalog_id = log_catalog_id,
+                "catalog Parquet scan was not started because the server is shutting down"
+            );
+        }
     }
 }
 

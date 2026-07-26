@@ -986,10 +986,7 @@ async fn slow_parquet_preflight_keeps_health_responsive() {
     assert_eq!(health.0, StatusCode::OK);
     let created = create.await.expect("create task joins");
     assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
-    state
-        .catalog_scan_supervisor
-        .shutdown(Duration::from_secs(2))
-        .await;
+    state.catalog_scan_supervisor.shutdown().await;
 }
 
 #[tokio::test]
@@ -1075,12 +1072,9 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
     }
     running.expect("scan reaches a durable running checkpoint");
 
-    let shutdown = state
-        .catalog_scan_supervisor
-        .shutdown(Duration::from_secs(2))
-        .await;
+    let shutdown = state.catalog_scan_supervisor.shutdown().await;
     assert_eq!(shutdown.requested, 1);
-    assert!(!shutdown.timed_out, "{shutdown:?}");
+    assert_eq!(shutdown.joined, 1, "{shutdown:?}");
     assert_eq!(state.catalog_scan_supervisor.active_count().await, 0);
 
     let (_, interrupted) = request(
@@ -1143,4 +1137,310 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
         completed.expect("restart completes from checkpoint")["counts"]["recordCount"],
         50_000
     );
+}
+
+#[tokio::test]
+async fn resume_waits_through_long_prestart_lease_contention_and_completes() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 1_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Long resume contention",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let catalog = registry.open_attached(&id).expect("catalog opens");
+    let mut contract = catalog.contract_state().expect("contract reads");
+    contract.source_config = Some(CatalogSourceConfig {
+        kind: "parquet".to_owned(),
+        paths: vec![source],
+        options: json!({}),
+    });
+    contract.processing.state = CatalogProcessingState::Running;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("contract updates");
+    let paused_control = catalog
+        .request_processing_control(
+            0,
+            sceneworks_core::catalog_store::CatalogProcessingDesiredState::Paused,
+        )
+        .expect("pause intent persists");
+    contract.processing.state = CatalogProcessingState::Paused;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("paused progress persists");
+    catalog.close();
+
+    let before_start = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": paused_control.revision }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+
+    let contended_catalog = registry.open_attached(&id).expect("catalog reopens");
+    let held_lease =
+        CatalogProcessingLease::try_acquire(&contended_catalog).expect("test lease acquires");
+    before_start.wait().await;
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(
+        state.catalog_scan_supervisor.active_count().await,
+        1,
+        "desired-running work must remain supervised beyond the old 510ms retry window"
+    );
+    drop(held_lease);
+    contended_catalog.close();
+
+    let mut completed = None;
+    for _ in 0..1_000 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            completed = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert_eq!(
+        completed.expect("scan starts after long lease contention")["counts"]["recordCount"],
+        1_000
+    );
+}
+
+#[tokio::test]
+async fn supervisor_cancellation_stops_prestart_lease_retry() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 100);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Canceled resume contention",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let catalog = registry.open_attached(&id).expect("catalog opens");
+    let mut contract = catalog.contract_state().expect("contract reads");
+    contract.source_config = Some(CatalogSourceConfig {
+        kind: "parquet".to_owned(),
+        paths: vec![source],
+        options: json!({}),
+    });
+    contract.processing.state = CatalogProcessingState::Running;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("contract updates");
+    let paused_control = catalog
+        .request_processing_control(
+            0,
+            sceneworks_core::catalog_store::CatalogProcessingDesiredState::Paused,
+        )
+        .expect("pause intent persists");
+    contract.processing.state = CatalogProcessingState::Paused;
+    contract.processing.updated_at = catalog_timestamp_now();
+    catalog
+        .set_contract_state(&contract)
+        .expect("paused progress persists");
+    catalog.close();
+
+    let before_start = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_before_driver_start_once.lock() = Some(before_start.clone());
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": paused_control.revision }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let contended_catalog = registry.open_attached(&id).expect("catalog reopens");
+    let held_lease =
+        CatalogProcessingLease::try_acquire(&contended_catalog).expect("test lease acquires");
+    before_start.wait().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let shutdown = tokio::time::timeout(
+        Duration::from_secs(1),
+        state.catalog_scan_supervisor.shutdown(),
+    )
+    .await
+    .expect("cancellation interrupts the retry backoff");
+    assert_eq!(shutdown.requested, 1);
+    assert_eq!(shutdown.joined, 1);
+    drop(held_lease);
+    contended_catalog.close();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, stable) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(stable["counts"]["recordCount"], 0);
+    assert_eq!(stable["processing"]["state"], "paused");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn saturated_preflight_admission_rejects_extra_work_without_blocking_catalog_status() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 0);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    let (_, existing) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Existing",
+            "path": temporary.path().join("existing")
+        }),
+    )
+    .await;
+    let existing_id = existing["id"].as_str().expect("existing id");
+    let first_permit = state
+        .catalog_scan_preflight_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("first slot");
+    let second_permit = state
+        .catalog_scan_preflight_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("second slot");
+    state
+        .catalog_scan_preflight_admission_timeout_ms
+        .store(50, Ordering::SeqCst);
+    let rejected_root = temporary.path().join("rejected");
+    let extra = tokio::spawn(request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Excess preflight",
+            "path": rejected_root,
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    ));
+
+    let status = tokio::time::timeout(
+        Duration::from_millis(75),
+        request(
+            app,
+            "GET",
+            &format!("/api/v1/catalogs/{existing_id}/status"),
+            Value::Null,
+        ),
+    )
+    .await
+    .expect("catalog DB/status remains responsive while admission is saturated");
+    assert_eq!(status.0, StatusCode::OK);
+    let rejected = extra.await.expect("extra request joins");
+    assert_eq!(
+        rejected.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        rejected.1
+    );
+    assert!(rejected.1["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("busy")));
+    assert!(!rejected_root.exists());
+    drop(first_permit);
+    drop(second_permit);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timed_out_preflight_cancels_remaining_validation_work() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 0);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_preflight_delay_ms_once
+        .store(500, Ordering::SeqCst);
+    state
+        .catalog_scan_preflight_execution_timeout_ms
+        .store(50, Ordering::SeqCst);
+    let started = state.catalog_scan_preflight_started.notified();
+    let catalog_root = temporary.path().join("timed-out");
+    let request_task = tokio::spawn(request(
+        app,
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Timed out preflight",
+            "path": catalog_root,
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    ));
+    tokio::time::timeout(Duration::from_secs(1), started)
+        .await
+        .expect("preflight starts");
+    let response = request_task.await.expect("request joins");
+    assert_eq!(
+        response.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        response.1
+    );
+    assert!(response.1["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("timed out")));
+    assert!(!catalog_root.exists());
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let stopped_ticks = state
+        .catalog_scan_preflight_test_ticks
+        .load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(
+        state
+            .catalog_scan_preflight_test_ticks
+            .load(Ordering::SeqCst),
+        stopped_ticks,
+        "timeout cancellation must stop further validation work"
+    );
+    assert_eq!(state.catalog_scan_preflight_slots.available_permits(), 2);
 }
