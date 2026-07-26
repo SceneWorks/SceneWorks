@@ -32,7 +32,7 @@ use sceneworks_core::lora_family::{
 use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
-    validate_public_ip,
+    validate_lora_url_host, validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use sceneworks_core::slug::slugify;

@@ -204,7 +204,7 @@ impl Default for AcquisitionState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionMarker {
     record_id: String,
@@ -322,11 +322,7 @@ where
                         prior.retries,
                         &mut checkpoint,
                     )?;
-                    if record_is_accepted(&record) {
-                        checkpoint.counts.accepted = checkpoint.counts.accepted.saturating_add(1);
-                    } else {
-                        checkpoint.counts.rejected = checkpoint.counts.rejected.saturating_add(1);
-                    }
+                    account_completed_record(&mut catalog, &mut record, options, &mut checkpoint)?;
                     if checkpoint.counts.accepted >= options.accepted_target {
                         checkpoint.exhausted = false;
                         break 'pages;
@@ -338,13 +334,12 @@ where
                     CompletedValidation::Valid => {
                         checkpoint.counts.cache_hits =
                             checkpoint.counts.cache_hits.saturating_add(1);
-                        if record_is_accepted(&record) {
-                            checkpoint.counts.accepted =
-                                checkpoint.counts.accepted.saturating_add(1);
-                        } else {
-                            checkpoint.counts.rejected =
-                                checkpoint.counts.rejected.saturating_add(1);
-                        }
+                        account_completed_record(
+                            &mut catalog,
+                            &mut record,
+                            options,
+                            &mut checkpoint,
+                        )?;
                         if checkpoint.counts.accepted >= options.accepted_target {
                             checkpoint.exhausted = false;
                             break 'pages;
@@ -401,20 +396,12 @@ where
                                 .saturating_add(u64::from(outcome.attempts.saturating_sub(1))),
                             &mut checkpoint,
                         )?;
-                        if record_is_accepted(&record) {
-                            checkpoint.counts.accepted =
-                                checkpoint.counts.accepted.saturating_add(1);
-                        } else {
-                            checkpoint.counts.rejected =
-                                checkpoint.counts.rejected.saturating_add(1);
-                            if options.discard_rejected_originals {
-                                discard_rejected_original(
-                                    &mut catalog,
-                                    &mut record,
-                                    &mut checkpoint,
-                                )?;
-                            }
-                        }
+                        account_completed_record(
+                            &mut catalog,
+                            &mut record,
+                            options,
+                            &mut checkpoint,
+                        )?;
                     }
                     Err(error) => {
                         checkpoint.counts.failures = checkpoint.counts.failures.saturating_add(1);
@@ -725,17 +712,50 @@ fn apply_failure(
     persist_record_and_checkpoint(catalog, record, checkpoint)
 }
 
+fn account_completed_record(
+    catalog: &mut Catalog,
+    record: &mut CatalogRecord,
+    options: &CatalogImageFetchOptions,
+    checkpoint: &mut CatalogImageFetchCheckpoint,
+) -> CatalogImageFetchResult<()> {
+    if record_is_accepted(record) {
+        checkpoint.counts.accepted = checkpoint.counts.accepted.saturating_add(1);
+    } else {
+        checkpoint.counts.rejected = checkpoint.counts.rejected.saturating_add(1);
+        if options.discard_rejected_originals {
+            discard_rejected_original(catalog, record, checkpoint)?;
+        }
+    }
+    Ok(())
+}
+
 fn discard_rejected_original(
     catalog: &mut Catalog,
     record: &mut CatalogRecord,
     checkpoint: &mut CatalogImageFetchCheckpoint,
 ) -> CatalogImageFetchResult<()> {
     let mut state = acquisition_state(record);
+    if state.availability == "discarded" {
+        state.status = "rejected".to_owned();
+        state.updated_at = utc_now();
+        set_acquisition_state(record, &state)?;
+        return persist_record_and_checkpoint(catalog, record, checkpoint);
+    }
     if let Some(path) = state.cache_path.as_deref() {
-        if !cache_path_referenced_by_another_record(catalog, &record.id, path)? {
+        let references = cache_path_references(catalog, &record.id, path)?;
+        if !references.has_live_reference && !references.has_pending_reference {
             let file = safe_catalog_file(catalog, path, false)?;
             if file.exists() {
                 std::fs::remove_file(file)?;
+            }
+            for mut other in references.rejected_references {
+                let mut other_state = acquisition_state(&other);
+                other_state.status = "rejected".to_owned();
+                other_state.availability = "discarded".to_owned();
+                other_state.updated_at = utc_now();
+                set_acquisition_state(&mut other, &other_state)?;
+                other.image_path = format!("images/{}", other.id);
+                persist_record_and_checkpoint(catalog, &other, checkpoint)?;
             }
             state.availability = "discarded".to_owned();
             record.image_path = format!("images/{}", record.id);
@@ -751,23 +771,47 @@ fn discard_rejected_original(
     persist_record_and_checkpoint(catalog, record, checkpoint)
 }
 
-fn cache_path_referenced_by_another_record(
+struct CachePathReferences {
+    has_live_reference: bool,
+    has_pending_reference: bool,
+    rejected_references: Vec<CatalogRecord>,
+}
+
+fn cache_path_references(
     catalog: &Catalog,
     record_id: &str,
     cache_path: &str,
-) -> CatalogImageFetchResult<bool> {
+) -> CatalogImageFetchResult<CachePathReferences> {
+    let mut references = CachePathReferences {
+        has_live_reference: false,
+        has_pending_reference: false,
+        rejected_references: Vec::new(),
+    };
     let mut cursor = None;
     loop {
         let page = catalog.page_records_after(cursor, MAX_PAGE_SIZE)?;
         for other in page.records {
-            if other.id != record_id
-                && acquisition_state(&other).cache_path.as_deref() == Some(cache_path)
+            if other.id == record_id {
+                continue;
+            }
+            let state = acquisition_state(&other);
+            if state.cache_path.as_deref() != Some(cache_path) || state.availability == "discarded"
             {
-                return Ok(true);
+                continue;
+            }
+            if record_is_accepted(&other) {
+                references.has_live_reference = true;
+            } else if state.status != "rejected" {
+                // This record has a rejection result but has not itself reached
+                // the retention reconciliation step yet. Preserve the shared
+                // file until it is processed later in the same/page-next run.
+                references.has_pending_reference = true;
+            } else {
+                references.rejected_references.push(other);
             }
         }
         let Some(next) = page.next_cursor else {
-            return Ok(false);
+            return Ok(references);
         };
         cursor = Some(next);
     }
@@ -813,7 +857,7 @@ fn validate_completed_record(
 ) -> CatalogImageFetchResult<CompletedValidation> {
     let state = acquisition_state(record);
     if state.status == "rejected"
-        && state.availability == "discarded"
+        && matches!(state.availability.as_str(), "discarded" | "shared")
         && !record_is_accepted(record)
     {
         return Ok(CompletedValidation::Valid);
@@ -1094,8 +1138,7 @@ fn persist_completion_marker(
     let payload = serde_json::to_vec(marker)?;
     if path.exists() {
         let existing: CompletionMarker = serde_json::from_slice(&std::fs::read(&path)?)?;
-        if existing.content_hash == marker.content_hash && existing.cache_path == marker.cache_path
-        {
+        if existing == *marker {
             return Ok(());
         }
         std::fs::remove_file(&path)?;
@@ -1231,6 +1274,29 @@ mod tests {
         (root, registry, id)
     }
 
+    fn set_analysis_acceptance(registry: &CatalogRegistry, id: &str, accepted: &[bool]) {
+        let mut catalog = registry.open_attached(id).expect("open");
+        let records = catalog
+            .page_records(0, accepted.len() as u32)
+            .expect("page")
+            .into_iter()
+            .zip(accepted)
+            .map(|(mut record, accepted)| {
+                record.metadata["analysis"] =
+                    json!({"accepted": accepted, "reason": "lifecycle-test"});
+                NewCatalogRecord {
+                    id: record.id,
+                    image_path: record.image_path,
+                    thumbnail_path: record.thumbnail_path,
+                    embedding_path: record.embedding_path,
+                    artifact_path: record.artifact_path,
+                    metadata: record.metadata,
+                }
+            })
+            .collect::<Vec<_>>();
+        catalog.append_records(&records).expect("persist analysis");
+    }
+
     #[test]
     fn image_validation_rejects_dimension_bomb_before_decode() {
         let bytes = png(32, 32);
@@ -1260,20 +1326,30 @@ mod tests {
         atomic_create(&path, &bytes).expect("cache");
         let marker = CompletionMarker {
             record_id: record.id.clone(),
-            content_hash: hash,
+            content_hash: hash.clone(),
             cache_path: relative,
             thumbnail_path: None,
             bytes: bytes.len() as u64,
             width: 8,
             height: 8,
         };
-        persist_completion_marker(&catalog, &marker).expect("marker");
+        persist_completion_marker(&catalog, &marker).expect("base marker");
+        let thumbnail_relative = format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash);
+        let thumbnail = safe_catalog_file(&catalog, &thumbnail_relative, true).expect("thumbnail");
+        atomic_create(&thumbnail, b"bounded thumbnail").expect("write thumbnail");
+        let marker = CompletionMarker {
+            thumbnail_path: Some(thumbnail_relative),
+            ..marker
+        };
+        // Simulates the crash window after the thumbnail is written but before
+        // SQLite is updated: the richer marker must replace the base marker.
+        persist_completion_marker(&catalog, &marker).expect("updated marker");
         assert_eq!(
             recover_completion_marker(&catalog, &record)
                 .expect("recover")
                 .expect("present")
-                .content_hash,
-            marker.content_hash
+                .thumbnail_path,
+            marker.thumbnail_path
         );
     }
 
@@ -1518,6 +1594,133 @@ mod tests {
             .root()
             .join(state.thumbnail_path.expect("thumbnail path"))
             .is_file());
+    }
+
+    #[tokio::test]
+    async fn later_analysis_rejection_discards_an_already_completed_original() {
+        let (_root, registry, id) = catalog_with_urls(&["https://example.com/later-rejected"]);
+        let bytes = png(20, 18);
+        let options = CatalogImageFetchOptions {
+            accepted_target: 1,
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let bytes = bytes.clone();
+            move |_url, _options| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            }
+        })
+        .await
+        .expect("initial fetch");
+        let cache_path = {
+            let catalog = registry.open_attached(&id).expect("open");
+            let record = catalog.page_records(0, 1).expect("page").remove(0);
+            catalog
+                .root()
+                .join(acquisition_state(&record).cache_path.expect("cache path"))
+        };
+        assert!(cache_path.is_file());
+        set_analysis_acceptance(&registry, &id, &[false]);
+        let network_calls = Arc::new(Mutex::new(0_u64));
+        let report = fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let network_calls = Arc::clone(&network_calls);
+            move |_url, _options| {
+                let network_calls = Arc::clone(&network_calls);
+                async move {
+                    *network_calls.lock().expect("calls") += 1;
+                    Err(WorkerError::InvalidPayload(
+                        "network must not be used for a valid cache hit".to_owned(),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect("reconcile rejection");
+        assert_eq!(report.checkpoint.counts.rejected, 1);
+        assert_eq!(*network_calls.lock().expect("calls"), 0);
+        assert!(!cache_path.exists());
+        let catalog = registry.open_attached(&id).expect("reopen");
+        let record = catalog.page_records(0, 1).expect("page").remove(0);
+        assert_eq!(acquisition_state(&record).availability, "discarded");
+    }
+
+    #[tokio::test]
+    async fn shared_content_keeps_one_live_reference_then_discards_when_all_rejected() {
+        let (_root, registry, id) = catalog_with_urls(&[
+            "https://example.com/duplicate-a",
+            "https://example.com/duplicate-b",
+        ]);
+        let bytes = png(14, 13);
+        let options = CatalogImageFetchOptions {
+            accepted_target: 2,
+            concurrency: 1,
+            thumbnail_max_edge: None,
+            ..CatalogImageFetchOptions::default()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &options, {
+            let bytes = bytes.clone();
+            move |_url, _options| {
+                let bytes = bytes.clone();
+                async move { Ok(bytes) }
+            }
+        })
+        .await
+        .expect("initial duplicate fetch");
+        let cache_path = {
+            let catalog = registry.open_attached(&id).expect("open");
+            let record = catalog.page_records(0, 1).expect("page").remove(0);
+            catalog
+                .root()
+                .join(acquisition_state(&record).cache_path.expect("cache path"))
+        };
+
+        // The first record is encountered before the still-live second record,
+        // so its rejection must not delete their shared content.
+        set_analysis_acceptance(&registry, &id, &[false, true]);
+        let one_target = CatalogImageFetchOptions {
+            accepted_target: 1,
+            ..options.clone()
+        };
+        fetch_attached_catalog_images_with(&registry, &id, &one_target, |_url, _options| async {
+            Err(WorkerError::InvalidPayload(
+                "valid cache hits must not fetch".to_owned(),
+            ))
+        })
+        .await
+        .expect("one accepted");
+        assert!(cache_path.is_file());
+        {
+            let catalog = registry.open_attached(&id).expect("open");
+            let records = catalog.page_records(0, 2).expect("page");
+            assert_eq!(acquisition_state(&records[0]).availability, "shared");
+            assert_eq!(acquisition_state(&records[1]).availability, "available");
+        }
+
+        // Once both analysis results reject, the first rejected/shared record
+        // is not a live reference. The last live record discards the file and
+        // both records are reconciled to `discarded`.
+        set_analysis_acceptance(&registry, &id, &[false, false]);
+        let report = fetch_attached_catalog_images_with(
+            &registry,
+            &id,
+            &one_target,
+            |_url, _options| async {
+                Err(WorkerError::InvalidPayload(
+                    "rejected cache records must not refetch".to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("all rejected");
+        assert_eq!(report.checkpoint.counts.rejected, 2);
+        assert!(report.checkpoint.exhausted);
+        assert!(!cache_path.exists());
+        let catalog = registry.open_attached(&id).expect("reopen");
+        for record in catalog.page_records(0, 2).expect("page") {
+            assert_eq!(acquisition_state(&record).availability, "discarded");
+        }
     }
 
     #[tokio::test]

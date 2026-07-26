@@ -1491,8 +1491,7 @@ pub(crate) async fn fetch_public_source_url_bytes_with_options(
             "dataset image fetch limits and timeouts must be positive".to_owned(),
         ));
     }
-    let mut current = parse_lora_source_url_with_private(source_url, false)
-        .map_err(|error| WorkerError::InvalidPayload(error.message().to_owned()))?;
+    let mut current = parse_public_dataset_url(source_url)?;
     let mut client = public_source_url_client(&current, options).await?;
     for _ in 0..=MAX_SOURCE_URL_REDIRECTS {
         let response = client
@@ -1511,19 +1510,10 @@ pub(crate) async fn fetch_public_source_url_bytes_with_options(
                         "dataset image redirect was missing a Location header".to_owned(),
                     )
                 })?;
-            current = current.join(location).map_err(|_| {
+            let next = current.join(location).map_err(|_| {
                 WorkerError::InvalidPayload("dataset image redirect target was invalid".to_owned())
             })?;
-            if !matches!(current.scheme(), "http" | "https") {
-                return Err(WorkerError::InvalidPayload(
-                    "dataset image redirect must use http or https".to_owned(),
-                ));
-            }
-            if !current.username().is_empty() || current.password().is_some() {
-                return Err(WorkerError::InvalidPayload(
-                    "dataset image redirect must not contain credentials".to_owned(),
-                ));
-            }
+            current = parse_public_dataset_url(next.as_str())?;
             client = public_source_url_client(&current, options).await?;
             continue;
         }
@@ -1535,6 +1525,32 @@ pub(crate) async fn fetch_public_source_url_bytes_with_options(
     Err(WorkerError::InvalidPayload(
         "dataset image exceeded the redirect limit".to_owned(),
     ))
+}
+
+/// Parses an untrusted metadata-dataset image endpoint.
+///
+/// Unlike LoRA downloads, dataset URLs do not need a filesystem-safe final
+/// filename: signed endpoints, percent-encoded object keys, and root/trailing
+/// slash paths are valid. The network safety contract remains identical:
+/// http(s) only, no credentials, a public host at parse time, followed by
+/// public-IP DNS validation and address pinning before every request.
+fn parse_public_dataset_url(source_url: &str) -> WorkerResult<reqwest::Url> {
+    let url = reqwest::Url::parse(source_url)
+        .map_err(|_| WorkerError::InvalidPayload("dataset image URL was invalid".to_owned()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image URL must use http or https".to_owned(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "dataset image URL must not contain credentials".to_owned(),
+        ));
+    }
+    validate_lora_url_host(&url).map_err(|_| {
+        WorkerError::InvalidPayload("dataset image URL host is not allowed".to_owned())
+    })?;
+    Ok(url)
 }
 
 async fn read_bounded_public_source_response(
@@ -1601,11 +1617,22 @@ async fn public_source_url_client(
         }
         resolved
     };
+    build_public_source_url_client(url, &addrs, options)
+}
+
+fn build_public_source_url_client(
+    url: &reqwest::Url,
+    addrs: &[SocketAddr],
+    options: &PublicSourceUrlFetchOptions,
+) -> WorkerResult<reqwest::Client> {
+    let host = url.host_str().ok_or_else(|| {
+        WorkerError::InvalidPayload("dataset image URL host is not allowed".to_owned())
+    })?;
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(options.connect_timeout)
         .read_timeout(options.read_timeout);
-    builder = builder.resolve_to_addrs(host, &addrs);
+    builder = builder.resolve_to_addrs(host, addrs);
     Ok(builder.build()?)
 }
 
@@ -1617,6 +1644,53 @@ mod public_source_url_tests {
     use axum::routing::get;
     use axum::Router;
     use std::convert::Infallible;
+
+    #[test]
+    fn dataset_url_parser_accepts_endpoint_urls_without_safe_filenames() {
+        for url in [
+            "https://example.com",
+            "https://example.com/",
+            "https://example.com/images/",
+            "https://example.com/object%2Fkey?X-Amz-Signature=a%2Fb%2Bc",
+            "https://example.com/%E2%9C%93?token=signed",
+        ] {
+            assert_eq!(
+                parse_public_dataset_url(url)
+                    .expect("valid dataset endpoint")
+                    .as_str(),
+                reqwest::Url::parse(url).expect("fixture URL").as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn dataset_url_parser_and_redirects_reject_malicious_targets() {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/image",
+            "http://user:secret@example.com/",
+            "http://localhost/",
+            "http://catalog.local/",
+            "http://127.0.0.1/",
+            "http://[::ffff:10.0.0.1]/",
+            "https://",
+        ] {
+            assert!(parse_public_dataset_url(url).is_err(), "{url} must fail");
+        }
+        let base =
+            parse_public_dataset_url("https://example.com/start/").expect("public redirect base");
+        for location in [
+            "http://127.0.0.1/admin",
+            "//user:secret@example.net/image",
+            "file:///etc/passwd",
+        ] {
+            let target = base.join(location).expect("syntactically valid redirect");
+            assert!(
+                parse_public_dataset_url(target.as_str()).is_err(),
+                "{location} redirect must fail"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn dataset_fetch_rejects_private_targets_and_credentials() {
@@ -1691,6 +1765,36 @@ mod public_source_url_tests {
             .await
             .expect_err("streamed cap");
         assert!(error.to_string().contains("limit"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dataset_client_pins_the_validated_address_set() {
+        let app = Router::new().route("/", get(|| async { "pinned" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let url = reqwest::Url::parse(&format!(
+            "http://catalog-source.invalid:{}/",
+            address.port()
+        ))
+        .expect("URL");
+        let options = PublicSourceUrlFetchOptions::default();
+        let client = build_public_source_url_client(&url, &[address], &options)
+            .expect("build pinned client");
+        let body = client
+            .get(url)
+            .send()
+            .await
+            .expect("pinned request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "pinned");
         server.abort();
     }
 }
