@@ -1308,13 +1308,15 @@ impl ProjectStore {
     /// List assets and return the complete request-scoped filesystem-operation
     /// inventory used by performance tests, benchmarks, and API observability.
     ///
-    /// The indexed `asset_json` envelope is authoritative on this clean path.
-    /// SceneWorks-owned mutations update the sidecar and index before returning.
-    /// Tools that edit sidecars out of band must call
+    /// The indexed `asset_json` envelope is authoritative on this clean path,
+    /// including its embedded generation set and poster presence. SceneWorks-owned
+    /// mutations update the sidecar and index before returning. Tools that edit
+    /// sidecars, generation-set JSON, media, or poster files out of band must call
     /// [`Self::reindex_project`] (the REST equivalent is
     /// `POST /api/v1/projects/:project_id/reindex`) before expecting those edits
-    /// in listings. This explicit contract includes same-size rewrites and edits
-    /// that preserve timestamps; list requests do not inspect or hash sidecars.
+    /// in listings. This explicit contract includes deletion, same-size rewrites,
+    /// and edits that preserve timestamps; list requests do not inspect or hash
+    /// any per-row files.
     pub fn list_assets_with_filesystem_operations(
         &self,
         project_id: &str,
@@ -1341,13 +1343,10 @@ impl ProjectStore {
         #[cfg(test)]
         run_ensure_ready_before_lock_hook(&project_path);
         let _project_guard = lock_project_files(&project_path);
-        ensure_project_db_ready(&project_path)?;
-        let total = {
-            let connection = connect_project_db(&project_path)?;
-            connection.query_row("select count(*) from assets", [], |row| {
-                row.get::<_, i64>(0)
-            })?
-        };
+        let mut connection = connect_project_db_ready_locked(&project_path)?;
+        let total = connection.query_row("select count(*) from assets", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
         // Pre-migration projects (created before the `sidecar_path` column /
         // asset index existed) surface as EMPTY libraries even though their
         // assets are still on disk as `.sceneworks.json` sidecars (V-4). The
@@ -1359,9 +1358,9 @@ impl ProjectStore {
         // holds (possibly empty), which is strictly better than an error.
         if total == 0 && project_has_sidecars(&project_path) {
             let _ = reindex_project_path(&project_path, false);
+            connection = connect_project_db(&project_path)?;
         }
 
-        let connection = connect_project_db(&project_path)?;
         // The Library view hides Character Studio test outputs (sc-2024). Rows
         // with a null origin (should not occur after the schema-bump reindex)
         // fail open and stay visible.
@@ -2612,9 +2611,56 @@ impl ProjectStore {
                 object.insert("recipe".to_owned(), recipe);
             }
         }
+        let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let dir = project_path.join("generation-sets");
         fs::create_dir_all(&dir)?;
         write_json(&dir.join(format!("{id}.json")), &record)?;
+        maybe_fail_asset_index_db_mutation()?;
+        let mut connection = connect_project_db(&project_path)?;
+        let transaction = connection.transaction()?;
+        apply_project_migrations(&transaction)?;
+        transaction.execute(
+            "
+            insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
+            values (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                id,
+                optional_str(&record, "mode").unwrap_or("unknown"),
+                optional_str(&record, "model").unwrap_or("unknown"),
+                optional_str(&record, "prompt").unwrap_or(""),
+                optional_str(&record, "createdAt").unwrap_or(""),
+                optional_str(&record, "jobId"),
+            ],
+        )?;
+        let indexed_assets = {
+            let mut statement = transaction
+                .prepare("select id, asset_json from assets where generation_set_id = ?1")?;
+            let rows = statement
+                .query_map(params![id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (asset_id, asset_json) in indexed_assets {
+            let Some(asset_json) = asset_json else {
+                continue;
+            };
+            let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) else {
+                continue;
+            };
+            let Some(object) = asset.as_object_mut() else {
+                continue;
+            };
+            object.insert("generationSet".to_owned(), record.clone());
+            transaction.execute(
+                "update assets set asset_json = ?1 where id = ?2",
+                params![serde_json::to_string(&asset)?, asset_id],
+            )?;
+        }
+        transaction.commit()?;
+        index_mutation.commit();
         Ok(())
     }
 
@@ -3194,7 +3240,13 @@ struct ReindexCounts {
 /// registry). The bump lets existing DBs pick up the new table through the gated
 /// migration; the table is DB-authoritative (no sidecar), so the reindex the bump
 /// triggers — which only clears the sidecar-rebuilt tables — leaves it intact.
-const PROJECT_SCHEMA_VERSION: i64 = 6;
+///
+/// v6: sc-14787 — rebuilt indexed asset envelopes for the authoritative clean
+/// path and its durable dirty-marker repair contract.
+///
+/// v7: sc-14799 — materializes generation-set and poster hydration in each
+/// indexed asset envelope, removing per-row filesystem reads from clean lists.
+const PROJECT_SCHEMA_VERSION: i64 = 7;
 const ASSET_INDEX_VERSION_KEY: &str = "assetIndexVersion";
 const ASSET_INDEX_DIRTY_MARKER: &str = ".asset-index-dirty";
 
@@ -3466,6 +3518,16 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     // serialized project operation. Mutation guards use the same reentrant lock,
     // so a list cannot repair and clear the marker owned by an in-flight write.
     let _project_guard = lock_project_files(project_path);
+    connect_project_db_ready_locked(project_path).map(drop)
+}
+
+/// Return one ready connection while the caller holds the project lock.
+///
+/// The clean path keeps and reuses the connection opened for migrations/index
+/// readiness, so an asset list performs one `project.db` open. A version bump or
+/// dirty-marker repair rebuilds transactionally and then opens the rebuilt DB;
+/// repair is intentionally outside the clean-path operation-count contract.
+fn connect_project_db_ready_locked(project_path: &Path) -> ProjectStoreResult<Connection> {
     let connection = connect_project_db(project_path)?;
     apply_project_migrations(&connection)?;
     let indexed_version = connection
@@ -3475,7 +3537,6 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    drop(connection);
     // The schema stamp and the derived-data rebuild are separate operations.
     // Record completion only in the rebuild transaction so a failed reindex is
     // retried even though PRAGMA user_version already reached this version.
@@ -3483,13 +3544,15 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
         && !current_thread_owns_asset_index_mutation(project_path);
     if indexed_version.as_deref() != Some(&PROJECT_SCHEMA_VERSION.to_string()) || asset_index_dirty
     {
+        drop(connection);
         // Legacy/version-bump rebuilds continue to recover sidecars even when
         // their media is temporarily unavailable. Only dirty-mutation repair
         // prunes missing-media rows before clearing the marker, closing the
         // partial-purge resurrection window.
         reindex_project_path(project_path, asset_index_dirty)?;
+        return connect_project_db(project_path);
     }
-    Ok(())
+    Ok(connection)
 }
 
 /// sc-10117: heal upscale-variant lineage on inline-upscaled asset sidecars.
@@ -5781,7 +5844,7 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=6\n",
+        "user_version=7\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0, asset_json TEXT notnull=0 default=NULL pk=0, source_asset_id TEXT notnull=0 default=NULL pk=0, upscaled_from_asset_id TEXT notnull=0 default=NULL pk=0, sidecar_size INTEGER notnull=0 default=NULL pk=0, sidecar_modified_ns TEXT notnull=0 default=NULL pk=0, sidecar_sha256 TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -6928,28 +6991,179 @@ mod tests {
     }
 
     #[test]
-    fn list_assets_many_clean_rows_reads_no_sidecar_content() {
+    fn list_assets_external_generation_set_edit_requires_explicit_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Indexed generation set").unwrap();
+        store
+            .write_generation_set(
+                &project.id,
+                "job-1",
+                &json!({
+                    "id": "set",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "prompt": "Before",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                }),
+                None,
+            )
+            .unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "set",
+                &json!({
+                    "assetId": "asset_cached",
+                    "mediaPath": "assets/images/set/asset_cached.png",
+                    "mimeType": "image/png",
+                    "displayName": "Cached",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "adapter": "benchmark",
+                    "prompt": "Before",
+                }),
+            )
+            .unwrap();
+
+        let project_path = store.find_project_path(&project.id).unwrap();
+        std::fs::write(
+            project_path.join("assets/images/set/asset_cached.png"),
+            b"png",
+        )
+        .unwrap();
+        let generation_set_path = project_path.join("generation-sets/set.json");
+        let mut generation_set = read_json(&generation_set_path).unwrap();
+        generation_set["prompt"] = json!("After!");
+        write_json(&generation_set_path, &generation_set).unwrap();
+
+        let (listed, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed[0]["generationSet"]["prompt"], json!("Before"));
+        assert_eq!(
+            operations.generation_set_reads, 0,
+            "clean listing serves the indexed generation set"
+        );
+
+        store.reindex_project(&project.id).unwrap();
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(
+            listed[0]["generationSet"]["prompt"],
+            json!("After!"),
+            "explicit reindex refreshes externally edited generation-set JSON"
+        );
+    }
+
+    #[test]
+    fn write_generation_set_refreshes_indexed_assets_before_returning() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Generation set mutation").unwrap();
+        let generation_set = |prompt: &str| {
+            json!({
+                "id": "set",
+                "mode": "text_to_image",
+                "model": "benchmark",
+                "prompt": prompt,
+                "createdAt": "2026-05-25T00:00:00Z",
+            })
+        };
+        store
+            .write_generation_set(&project.id, "job-1", &generation_set("Before"), None)
+            .unwrap();
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "set",
+                &json!({
+                    "assetId": "asset_cached",
+                    "mediaPath": "assets/images/set/asset_cached.png",
+                    "mimeType": "image/png",
+                    "displayName": "Cached",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "benchmark",
+                    "adapter": "benchmark",
+                    "prompt": "Before",
+                }),
+            )
+            .unwrap();
+
+        store
+            .write_generation_set(&project.id, "job-1", &generation_set("After!"), None)
+            .unwrap();
+        let (listed, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed[0]["generationSet"]["prompt"], json!("After!"));
+        assert_eq!(operations.generation_set_reads, 0);
+    }
+
+    #[test]
+    fn list_assets_many_clean_rows_has_constant_filesystem_operations() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("Many indexed assets").unwrap();
+        let project_path = store.find_project_path(&project.id).unwrap();
+        let mut one_row_operations = None;
         for index in 0..128 {
             let asset_id = format!("asset_{index:03}");
+            let generation_set_id = format!("set_{index:03}");
+            store
+                .write_generation_set(
+                    &project.id,
+                    "job-1",
+                    &json!({
+                        "id": generation_set_id,
+                        "mode": "image_to_video",
+                        "model": "benchmark",
+                        "prompt": "indexed",
+                        "createdAt": "2026-05-25T00:00:00Z",
+                    }),
+                    None,
+                )
+                .unwrap();
+            let media_rel = format!("assets/videos/{generation_set_id}/{asset_id}.mp4");
+            let poster_path = project_path.join(&media_rel).with_extension("poster.jpg");
+            std::fs::create_dir_all(poster_path.parent().unwrap()).unwrap();
+            std::fs::write(&poster_path, b"poster").unwrap();
             let fact = json!({
                 "assetId": asset_id,
-                "mediaPath": format!("assets/images/shared/{asset_id}.png"),
-                "mimeType": "image/png",
+                "mediaPath": media_rel,
+                "mimeType": "video/mp4",
+                "type": "video",
                 "displayName": format!("Asset {index:03}"),
                 "createdAt": format!("2026-05-25T00:{:02}:{:02}Z", index / 60, index % 60),
-                "mode": "text_to_image",
-                "model": "z_image_turbo",
-                "adapter": "z_image_diffusers",
+                "mode": "image_to_video",
+                "model": "benchmark",
+                "adapter": "benchmark",
                 "prompt": "indexed",
             });
             store
-                .persist_generated_asset(&project.id, "job-1", "shared", &fact)
+                .persist_generated_asset(&project.id, "job-1", &generation_set_id, &fact)
                 .unwrap();
+            if index == 0 {
+                one_row_operations = Some(
+                    store
+                        .list_assets_with_filesystem_operations(
+                            &project.id,
+                            false,
+                            false,
+                            AssetScope::All,
+                        )
+                        .unwrap()
+                        .1,
+                );
+            }
         }
 
+        let one_row_operations = one_row_operations.unwrap();
         let (assets, operations) = store
             .list_assets_with_filesystem_operations(&project.id, false, false, AssetScope::All)
             .unwrap();
@@ -6958,15 +7172,9 @@ mod tests {
             operations.sidecar_reads, 0,
             "clean indexed listing must not read or hash one sidecar per row"
         );
-        assert_eq!(
-            operations.generation_set_reads, 1,
-            "the shared generation set remains deduplicated within the request"
-        );
-        assert_eq!(operations.poster_stats, 0, "images do not probe posters");
-        assert!(
-            operations.db_opens > 0,
-            "DB opens stay visible in the total"
-        );
+        assert_eq!(operations.generation_set_reads, 0);
+        assert_eq!(operations.poster_stats, 0);
+        assert_eq!(operations.db_opens, 1);
         assert_eq!(operations.registry_opens, 1);
         assert_eq!(operations.registry_metadata_reads, 1);
         assert!(operations.path_stats >= 1);
@@ -6974,7 +7182,11 @@ mod tests {
         assert_eq!(operations.index_marker_reads, 1);
         assert_eq!(operations.index_marker_writes, 0);
         assert_eq!(operations.index_marker_removes, 0);
-        assert!(operations.total() >= 10);
+        assert_eq!(
+            operations.total(),
+            one_row_operations.total(),
+            "clean-list filesystem work must be independent of returned row count"
+        );
     }
 
     #[test]
@@ -7634,22 +7846,35 @@ mod tests {
                 "prompt": "x",
             })
         };
+        // The worker writes the media and best-effort poster before reporting the
+        // completed asset fact. Only `withposter` has that sibling when indexed.
+        let poster_path = project_path.join("assets/videos/genset/withposter.poster.jpg");
+        std::fs::create_dir_all(poster_path.parent().unwrap()).expect("video dir");
+        std::fs::write(&poster_path, b"jpg-bytes").expect("write poster");
+        std::fs::write(
+            project_path.join("assets/videos/genset/withposter.mp4"),
+            b"video",
+        )
+        .expect("write video");
+        std::fs::write(
+            project_path.join("assets/videos/genset/noposter.mp4"),
+            b"video",
+        )
+        .expect("write video");
         store
             .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("withposter"))
             .expect("withposter persists");
         store
             .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("noposter"))
             .expect("noposter persists");
-        // Only `withposter` has its `<name>.poster.jpg` sibling on disk.
-        std::fs::write(
-            project_path.join("assets/videos/genset/withposter.poster.jpg"),
-            b"jpg-bytes",
-        )
-        .expect("write poster");
 
-        let assets = store
-            .list_assets(&project.id, true, true, AssetScope::All)
+        let (assets, operations) = store
+            .list_assets_with_filesystem_operations(&project.id, true, true, AssetScope::All)
             .expect("list");
+        assert_eq!(
+            operations.poster_stats, 0,
+            "poster presence is served from the indexed envelope"
+        );
         let by_id = |id: &str| {
             assets
                 .iter()
@@ -7667,6 +7892,22 @@ mod tests {
         assert!(
             by_id("noposter").get("posterUrl").is_none(),
             "no posterUrl is advertised when the poster file is absent"
+        );
+
+        std::fs::remove_file(&poster_path).expect("external poster removal");
+        store
+            .reindex_project(&project.id)
+            .expect("explicit reindex");
+        let assets = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list after reindex");
+        assert!(
+            assets
+                .iter()
+                .find(|asset| asset["id"] == "withposter")
+                .and_then(|asset| asset.get("posterUrl"))
+                .is_none(),
+            "reindex never advertises a poster that no longer exists"
         );
     }
 

@@ -1,34 +1,51 @@
 # Indexed asset-list performance and reconciliation
 
 `ProjectStore::list_assets` serves the normalized `asset_json` envelope stored
-in each project's `project.db`. A clean list does not read or hash asset
-sidecars. SceneWorks-owned asset mutations write the sidecar and update the
-indexed envelope before returning, so the next list sees them immediately. A
-durable `.asset-index-dirty` marker spans the filesystem write and separate
-SQLite transaction. If either fails or the process exits between them, the next
-indexed read rebuilds from disk before serving data. Marker inspection, repair,
-orphan pruning, and marker clear share the same reentrant per-project lock as
-the owning mutation, so a concurrent list cannot clear an in-flight writer's
-marker. Native frame/render workers persist sidecar, recipe, and index through
-the same guarded core operation.
+in each project's `project.db`. That envelope includes filesystem-derived
+generation-set hydration and video-poster presence, so a clean list does not
+read or stat a per-row file. SceneWorks-owned asset mutations write the sidecar
+and update the indexed envelope before returning, so the next list sees them
+immediately. A durable `.asset-index-dirty` marker spans the filesystem write
+and separate SQLite transaction. If either fails or the process exits between
+them, the next indexed read rebuilds from disk before serving data. Marker
+inspection, repair, orphan pruning, and marker clear share the same reentrant
+per-project lock as the owning mutation, so a concurrent list cannot clear an
+in-flight writer's marker. Native frame/render workers persist sidecar, recipe,
+and index through the same guarded core operation.
 
-## Out-of-band sidecar edits
+## Out-of-band filesystem edits
 
-Direct edits to `*.sceneworks.json` files are supported through explicit
-reconciliation. After editing sidecars, call:
+Direct edits to `*.sceneworks.json`, `generation-sets/*.json`, media, or sibling
+`*.poster.jpg` files are supported through explicit reconciliation. After
+editing those files, call:
 
 ```text
 POST /api/v1/projects/<project-id>/reindex
 ```
 
 or use `ProjectStore::reindex_project`. Until reindex completes, list responses
-continue to use the last indexed envelope. Reindex reads the sidecar contents,
-so this contract also covers same-size rewrites and edits made by tools that
+continue to use the last indexed envelope, including its embedded generation
+set and poster-presence decision. Reindex reads the current files, so this
+contract also covers deletions, same-size rewrites, and edits made by tools that
 preserve file timestamps. A corrupt sidecar is skipped during reindex; a corrupt
 indexed envelope is skipped during listing without preventing healthy assets
 from loading. Here "corrupt sidecar" means unreadable or invalid JSON; a
 parseable sidecar that violates the asset schema can make reindex fail so the
 dirty marker remains and the prior DB transaction stays intact for retry.
+
+## SQLite connection and journal policy
+
+A clean asset-list request opens `project.db` once and reuses that connection
+for migration/index-readiness checks, the legacy empty-index check, and the
+asset query. Repair paths may open again after a transactional rebuild.
+
+`project.db` deliberately remains in SQLite's rollback-journal mode rather than
+enabling WAL. SceneWorks supports projects on mounted network volumes, while
+SQLite's [WAL design](https://www.sqlite.org/wal.html) requires same-host shared
+memory and explicitly does not support network filesystems. A per-project pool
+would also retain handles to removable or remounted project paths and complicate
+the existing project-file lock/repair lifecycle. One connection per request
+removes the redundant opens without narrowing the supported storage contract.
 
 ## Benchmark harness
 
@@ -77,3 +94,22 @@ steady-state-average(10): assets=500 elapsed_ms=4.721 fs_total=12 registry_opens
 A populated RunPod network volume was not available in the implementation
 environment. Run the existing-project command on RunPod before final rollout;
 do not treat the local SSD result as network-volume evidence.
+
+## SC-14799 validation record
+
+Windows local SSD, release build, 500 synthetic indexed video assets with 500
+distinct generation sets and 500 existing posters, 10 steady-state iterations.
+This deliberately reproduces the formerly row-scaled generation-set-read and
+poster-stat workload. It is first-call versus steady-state evidence, not an
+evicted cold-cache measurement:
+
+```text
+storage=synthetic-local-distinct-video-sets path=<temporary local directory>
+first-call: assets=500 elapsed_ms=8.305 fs_total=10 registry_opens=2 registry_metadata_reads=2 registry_content_reads=2 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+steady-state-average(10): assets=500 elapsed_ms=7.994 fs_total=7 registry_opens=1 registry_metadata_reads=1 registry_content_reads=1 path_stats=1 directory_scans=0 sidecar_reads=0 generation_set_reads=0 timeline_reads=0 character_reads=0 poster_stats=0 index_marker_reads=1 index_marker_writes=0 index_marker_removes=0 directory_create_calls=1 db_opens=1
+```
+
+The implementation environment had no mounted network volume or RunPod access,
+so no network-volume wall-time claim is recorded here. SC-14789 owns the
+populated-volume run; use the `existing` command above there and attach its
+first-call/steady-state output before final rollout.

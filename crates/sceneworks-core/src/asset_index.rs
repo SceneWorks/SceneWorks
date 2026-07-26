@@ -107,6 +107,25 @@ pub(crate) fn index_asset_on_connection(
     asset: &Value,
     sidecar_path: Option<&Path>,
 ) -> ProjectStoreResult<()> {
+    let mut indexed_asset = asset.clone();
+    let project_id = indexed_asset
+        .get("projectId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            read_json(&project_path.join("project.json"))
+                .ok()?
+                .get("id")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| ProjectStoreError::BadRequest("Missing project id".to_owned()))?;
+    hydrate_asset(
+        &project_id,
+        project_path,
+        &mut indexed_asset,
+        &mut GenerationSetCache::default(),
+    )?;
     let sidecar_rel = match sidecar_path {
         Some(path) => Some(relative_string(project_path, path)?),
         None => None,
@@ -114,7 +133,7 @@ pub(crate) fn index_asset_on_connection(
     let sidecar_fingerprint = sidecar_path.and_then(|path| sidecar_content_fingerprint(path).ok());
     upsert_asset_row(
         connection,
-        asset,
+        &indexed_asset,
         sidecar_rel.as_deref(),
         sidecar_fingerprint,
     )
@@ -266,8 +285,10 @@ fn hydrate_asset(
         // frame — WKWebView won't paint it. Advertise a `posterUrl` ONLY when that
         // file actually exists on disk, so the client never requests a poster a video
         // doesn't have — an imported clip, or a generation where ffmpeg was
-        // unavailable — which would otherwise 404 on every render (sc-10468). Resolved
-        // at read time so it reflects the real on-disk state; images never have one.
+        // unavailable — which would otherwise 404 on every render (sc-10468).
+        // The result is persisted in the indexed envelope. SceneWorks-owned writes
+        // refresh it before returning; out-of-band poster changes use the explicit
+        // reindex contract shared with sidecars and generation sets (sc-14799).
         let poster_url = (asset.get("type").and_then(Value::as_str) == Some("video"))
             .then(|| Path::new(&normalized_path).with_extension("poster.jpg"))
             .filter(|poster_rel| {
@@ -287,6 +308,7 @@ fn hydrate_asset(
                     "/api/v1/projects/{project_id}/files/{normalized_path}"
                 )),
             );
+            object.remove("posterUrl");
             if let Some(poster_url) = poster_url {
                 object.insert("posterUrl".to_owned(), Value::String(poster_url));
             }
@@ -317,26 +339,28 @@ fn hydrate_asset(
             if let Some(object) = asset.as_object_mut() {
                 object.insert("generationSet".to_owned(), generation_set);
             }
+        } else if let Some(object) = asset.as_object_mut() {
+            object.remove("generationSet");
         }
+    } else if let Some(object) = asset.as_object_mut() {
+        object.remove("generationSet");
     }
     Ok(())
 }
 
-/// Hydrate a normalized asset envelope already stored in project.db.
+/// Return an already-hydrated asset envelope stored in project.db.
+///
+/// Filesystem-derived fields (`generationSet` and `posterUrl`) are materialized
+/// when the row is indexed. Keeping this clean-list path pure is the SC-14799
+/// consistency contract: SceneWorks-owned mutations update the index before
+/// returning, while out-of-band sidecar, generation-set, media, or poster edits
+/// require an explicit project reindex.
 pub(crate) fn hydrate_indexed_asset_cached(
-    project_id: &str,
-    project_path: &Path,
-    mut asset: Value,
-    generation_sets: &mut GenerationSetCache,
+    _project_id: &str,
+    _project_path: &Path,
+    asset: Value,
+    _generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
-    let sidecar_rel = asset
-        .get("sidecarPath")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    hydrate_asset(project_id, project_path, &mut asset, generation_sets)?;
-    if let (Some(object), Some(sidecar_rel)) = (asset.as_object_mut(), sidecar_rel) {
-        object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
-    }
     Ok(asset)
 }
 

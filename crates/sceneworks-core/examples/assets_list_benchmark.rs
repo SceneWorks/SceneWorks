@@ -110,20 +110,42 @@ fn synthetic(asset_count: usize, iterations: usize) {
     let project = store
         .create_project("Synthetic asset-list benchmark")
         .expect("synthetic project creates");
+    let project_path = PathBuf::from(&project.path);
     for index in 0..asset_count {
         let asset_id = format!("asset_{index:08}");
+        let generation_set_id = format!("set_{index:08}");
+        store
+            .write_generation_set(
+                &project.id,
+                "benchmark-job",
+                &json!({
+                    "id": generation_set_id,
+                    "mode": "image_to_video",
+                    "model": "benchmark",
+                    "prompt": "benchmark",
+                    "createdAt": "2026-07-25T00:00:00Z",
+                }),
+                None,
+            )
+            .expect("synthetic generation set persists");
+        let media_path = format!("assets/videos/{generation_set_id}/{asset_id}.mp4");
+        let poster_path = project_path.join(&media_path).with_extension("poster.jpg");
+        std::fs::create_dir_all(poster_path.parent().expect("poster parent"))
+            .expect("poster directory creates");
+        std::fs::write(&poster_path, b"benchmark-poster").expect("poster writes");
         store
             .persist_generated_asset(
                 &project.id,
                 "benchmark-job",
-                "shared-set",
+                &generation_set_id,
                 &json!({
                     "assetId": asset_id,
-                    "mediaPath": format!("assets/images/shared-set/{asset_id}.png"),
-                    "mimeType": "image/png",
+                    "mediaPath": media_path,
+                    "mimeType": "video/mp4",
+                    "type": "video",
                     "displayName": format!("Asset {index}"),
                     "createdAt": format!("2026-07-25T00:00:00Z-{index:08}"),
-                    "mode": "text_to_image",
+                    "mode": "image_to_video",
                     "model": "benchmark",
                     "adapter": "benchmark",
                     "prompt": "benchmark",
@@ -131,7 +153,10 @@ fn synthetic(asset_count: usize, iterations: usize) {
             )
             .expect("synthetic asset persists");
     }
-    println!("storage=synthetic-local path={}", data_dir.display());
+    println!(
+        "storage=synthetic-local-distinct-video-sets path={}",
+        data_dir.display()
+    );
     // Seed through one store, then report the first call through a genuinely
     // fresh registry cache. This still does not evict the operating-system cache.
     run(
