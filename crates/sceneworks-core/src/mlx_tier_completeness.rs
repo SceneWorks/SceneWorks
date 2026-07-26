@@ -13,6 +13,42 @@
 
 use std::path::Path;
 
+/// The component names a tier's own `model_index.json` declares, or `None` when it ships none.
+///
+/// A diffusers `model_index.json` maps a component name to a `[library, class]` pair; every other
+/// value is configuration. Keys starting with `_` are metadata (`_class_name`, `_diffusers_version`,
+/// and sc-14980's `_sceneworks_tier` / `_sceneworks_shared_components`) and are never components.
+///
+/// Shared (sc-13513 / sc-14980) so the worker's tier resolver, rust-api's catalog completeness, and
+/// the training-base gate all read a tier's declared component set the same way — a split tier that
+/// ships only the components it owns must look identical to all three.
+pub fn tier_declared_components(dir: &Path) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(dir.join("model_index.json")).ok()?;
+    let index: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(
+        index
+            .as_object()?
+            .iter()
+            .filter(|(key, value)| !key.starts_with('_') && is_component_entry(value))
+            .map(|(key, _)| key.clone())
+            .collect(),
+    )
+}
+
+/// Whether a `model_index.json` value names a COMPONENT — the diffusers `[library, class]` pair.
+///
+/// Three things in a real index are NOT components, and all three must be rejected here (each is
+/// live in a shipping turnkey, so a laxer test fails a good tier):
+/// - `[null, null]` marks an ABSENT optional component — `SceneWorks/realvisxl-mlx` declares
+///   `feature_extractor` and `image_encoder` this way and ships neither dir.
+/// - config arrays — `SceneWorks/krea-2-raw-mlx` declares `text_encoder_select_layers: [2, 5, 8, …]`.
+/// - config scalars — krea's `patch_size: 2`, realvisxl's `force_zeros_for_empty_prompt: true`.
+fn is_component_entry(value: &serde_json::Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|pair| pair.len() == 2 && pair.iter().all(serde_json::Value::is_string))
+}
+
 /// Whether `dir` holds at least one non-hidden file whose name ends with `suffix` (e.g. `.safetensors`
 /// / `.index.json`). The building block for the per-family completeness checks: a hidden AppleDouble
 /// `._*` sidecar never counts (SceneWorks#1333).

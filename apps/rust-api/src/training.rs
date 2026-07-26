@@ -1814,7 +1814,32 @@ fn snapshot_is_tiered_turnkey(snapshot: &FsPath) -> bool {
 /// check the actual dirs. Testing the backbone as `transformer/`-only silently reported every
 /// SDXL-family tiered turnkey as un-installed, since those pack `unet/` (sc-10613).
 fn bf16_component_tree_present(bf16: &FsPath) -> bool {
-    has_backbone_dir(bf16) && bf16.join("text_encoder").is_dir() && bf16.join("vae").is_dir()
+    if !has_backbone_dir(bf16) {
+        return false;
+    }
+    if bf16.join("text_encoder").is_dir() && bf16.join("vae").is_dir() {
+        return true;
+    }
+    // sc-14980: a SPLIT tier ships only the components it owns, and declares exactly those in its
+    // own `model_index.json`. Mage-Flow's bf16 tier is the DiT + scheduler; its text encoder and VAE
+    // are bit-identical across all six variants and are hosted once as shared co-requisites, so
+    // requiring them *inside* the tier would report a complete, trainable install as
+    // `TrainingTierMissing` forever.
+    //
+    // This arm is purely ADDITIVE — it is only reached when the classic check already failed, and it
+    // only passes when the tier DECLARES a component set that excludes text_encoder/vae and has
+    // every declared component on disk. A tier that declares `text_encoder` (krea-2-raw-mlx's bf16
+    // declares transformer + text_encoder + tokenizer + vae + scheduler, and every SDXL-family
+    // turnkey the same) still fails here exactly as before, so no existing target is weakened.
+    let Some(declared) = sceneworks_core::mlx_tier_completeness::tier_declared_components(bf16)
+    else {
+        return false;
+    };
+    !declared.is_empty()
+        && !declared.iter().any(|component| component == "text_encoder")
+        && declared
+            .iter()
+            .all(|component| bf16.join(component).is_dir())
 }
 
 /// For a tiered-turnkey re-host (epic 9992 Krea 2 Raw: `SceneWorks/krea-2-raw-mlx` ships `bf16/ q8/ q4/`

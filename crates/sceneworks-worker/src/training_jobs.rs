@@ -674,12 +674,20 @@ fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
 /// load (never a mid-train hub fetch).
 ///
 /// **Training always resolves the DENSE `bf16` tier** (sc-14056 / sc-14980). A model whose mirror is
-/// split per tier declares one `coRequisite` row *per tier* for the same `componentId`, so a
-/// tier-agnostic lookup has more than one candidate and cannot pick correctly — the resolver would
-/// either guess or refuse. `tiered_turnkey_train_dir` already pins the training base to `bf16/` (a
-/// gradient path needs dense projections; `quantize` is a no-op over already-packed weights, so a
-/// q4/q8 tier would train silently WRONG rather than fail), so `bf16` is the only right answer here.
-/// [`training_tier_co_requisites`] narrows the manifest to that tier before resolution.
+/// split per tier declares one `coRequisite` row *per tier* for the same `componentId`, so the
+/// tier-agnostic [`crate::model_jobs::resolve_co_requisites`] has more than one candidate and
+/// deliberately REFUSES rather than guessing. `bf16` is the only right answer here, not a
+/// preference: `tiered_turnkey_train_dir` already pins the training base to `bf16/`, the
+/// `TrainingTierMissing` pre-flight keys off the same tier, and a gradient path needs dense
+/// projections — `quantize` is a no-op over already-packed weights, so a q4/q8 tier would train
+/// silently WRONG rather than fail.
+///
+/// [`crate::model_jobs::resolve_co_requisites_for_tier`] is what must be called, not merely a
+/// tier-filtered manifest: it also carries the glob-vs-literal guard (Mage declares
+/// `files: ["bf16/text_encoder/*"]`, and a single GLOB must take the directory arm — joined
+/// verbatim it is not a file and a correctly-installed component reports missing) and the `subdir`
+/// narrowing (the shared components mirror hosts every tier AND both components in ONE repo, so the
+/// provider must be handed `<snapshot>/bf16/text_encoder`, not the snapshot root).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -701,8 +709,12 @@ fn resolve_trainer_components(
              '{engine_id}' components from"
         ))
     })?;
-    let manifest_entry = training_tier_co_requisites(manifest_entry, TRAINING_COMPONENT_TIER);
-    crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_entry, settings)
+    crate::model_jobs::resolve_co_requisites_for_tier(
+        &descriptor,
+        &manifest_entry,
+        settings,
+        Some(TRAINING_COMPONENT_TIER),
+    )
 }
 
 /// The tier a training run resolves its base + shared components from. Dense by definition: the
@@ -713,60 +725,6 @@ fn resolve_trainer_components(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const TRAINING_COMPONENT_TIER: &str = "bf16";
-
-/// Narrow a catalog entry's `downloads` to the co-requisite rows that apply at `tier`, so
-/// [`crate::model_jobs::resolve_co_requisites`] sees exactly one candidate per `componentId`.
-///
-/// Per `componentId`: keep the row whose `variant` is `tier` when one exists, otherwise keep the
-/// untiered row (no `variant`). Rows for other tiers are dropped. Non-co-requisite downloads pass
-/// through untouched — this only disambiguates component provisioning.
-///
-/// On a model whose components are declared once and untiered (SDXL / RealVisXL tokenizers + VAE,
-/// chatterbox's `perth` / `voice_embedding`) this is the identity, so those lanes are unaffected.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn training_tier_co_requisites(mut entry: Value, tier: &str) -> Value {
-    let Some(downloads) = entry.get("downloads").and_then(Value::as_array).cloned() else {
-        return entry;
-    };
-    let is_co_req = |d: &Value| d.get("coRequisite").and_then(Value::as_bool) == Some(true);
-    let variant_of = |d: &Value| d.get("variant").and_then(Value::as_str).map(str::to_owned);
-    let component_of = |d: &Value| {
-        d.get("componentId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    };
-
-    // Which component ids actually have a row at this tier — those are the ones whose other-tier and
-    // untiered rows must be dropped. A component with no tiered row keeps whatever it declares.
-    let tiered: std::collections::BTreeSet<String> = downloads
-        .iter()
-        .filter(|d| is_co_req(d) && variant_of(d).as_deref() == Some(tier))
-        .filter_map(component_of)
-        .collect();
-
-    let kept: Vec<Value> = downloads
-        .into_iter()
-        .filter(|d| {
-            if !is_co_req(d) {
-                return true;
-            }
-            match component_of(d) {
-                Some(component) if tiered.contains(&component) => {
-                    variant_of(d).as_deref() == Some(tier)
-                }
-                // No tiered row for this component (or no componentId at all) — leave it alone.
-                _ => true,
-            }
-        })
-        .collect();
-    if let Some(object) = entry.as_object_mut() {
-        object.insert("downloads".to_owned(), Value::Array(kept));
-    }
-    entry
-}
 
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
 /// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
@@ -2373,93 +2331,100 @@ mod tests {
         assert_eq!(cfg.trigger_word, None);
     }
 
-    /// sc-14056 / sc-14980 — training must resolve the DENSE tier's shared components.
+    /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.
     ///
-    /// The sc-14980 re-host splits each Mage mirror per tier and shares one text encoder + VAE across
-    /// the variants, so the catalog declares **three** `coRequisite` rows per `componentId` (q4/q8/
-    /// bf16). The generator descriptor that drives `resolve_trainer_components` now advertises those
-    /// components, so a tier-agnostic lookup has more than one candidate for the same id and either
-    /// guesses or refuses — and a training job that resolved the q4 row would hand the gradient path
-    /// PACKED weights, which `quantize` treats as a no-op: it would train silently wrong rather than
-    /// fail.
+    /// `model_jobs` has its own coverage that `resolve_co_requisites_for_tier` honours `variant` and
+    /// `subdir`. What is untested there — and what broke when sc-14980 landed under this story — is
+    /// which tier *training* asks for. Three ways to get it wrong, all silent or misleading:
+    /// passing `None` (the resolver refuses with "refusing to guess"), passing whichever tier is
+    /// installed (a q4 tier would hand the gradient path PACKED weights, which `quantize` no-ops —
+    /// it trains WRONG and reports success), or keeping the old tier-agnostic call (which cannot
+    /// pick at all).
     ///
-    /// This drives the pure selection over a three-row fixture so it is proven against the tiered
-    /// shape regardless of what the committed manifest happens to look like today, and asserts the
-    /// untiered case is untouched (SDXL/RealVisXL tokenizers, chatterbox `perth`).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    /// So: stage ONLY q4 and require that training still fails, naming `bf16`. A resolver asking for
+    /// `None` produces the "refusing to guess" text instead; one asking for q4 would SUCCEED here,
+    /// which is the dangerous outcome this asserts against.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn training_component_resolution_picks_the_dense_tier_row() {
-        let component_rows = |entry: &Value, component: &str| -> Vec<Value> {
-            entry
+    fn training_components_demand_the_dense_tier_even_when_a_packed_tier_is_installed() {
+        // Pin the HF cache to the temp data dir so the staged components are the only ones visible.
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let manifest = builtin_model_manifest_entry("mage_flow_base")
+            .expect("mage_flow_base has a builtin catalog entry");
+        // Stage exactly one tier's shared components into a data dir.
+        let stage = |settings: &Settings, tier: &str| {
+            for download in manifest
                 .get("downloads")
                 .and_then(Value::as_array)
                 .expect("downloads")
-                .iter()
-                .filter(|d| d.get("componentId").and_then(Value::as_str) == Some(component))
-                .cloned()
-                .collect()
+            {
+                if download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                    || download.get("variant").and_then(Value::as_str) != Some(tier)
+                {
+                    continue;
+                }
+                let repo = download["repo"].as_str().expect("repo");
+                let revision = download["revision"].as_str().expect("revision");
+                let subdir = download["subdir"].as_str().expect("subdir");
+                let dir =
+                    sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+                        .expect("repo cache path")
+                        .join("snapshots")
+                        .join(revision)
+                        .join(subdir);
+                std::fs::create_dir_all(&dir).expect("stage component dir");
+                std::fs::write(dir.join("model.safetensors"), b"stub")
+                    .expect("stage component file");
+            }
         };
 
-        // The split-tier shape: three rows per shared component, plus the per-tier DiT downloads.
-        let tiered = json!({
-            "id": "mage_flow_base",
-            "downloads": [
-                { "variant": "q4", "repo": "SceneWorks/Mage-Flow-Base" },
-                { "variant": "q8", "repo": "SceneWorks/Mage-Flow-Base" },
-                { "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Base" },
-                { "coRequisite": true, "componentId": "text_encoder", "variant": "q4", "repo": "SceneWorks/Mage-Flow-Shared" },
-                { "coRequisite": true, "componentId": "text_encoder", "variant": "q8", "repo": "SceneWorks/Mage-Flow-Shared" },
-                { "coRequisite": true, "componentId": "text_encoder", "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Shared" },
-                { "coRequisite": true, "componentId": "vae", "variant": "q4", "repo": "SceneWorks/Mage-Flow-Shared" },
-                { "coRequisite": true, "componentId": "vae", "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Shared" }
-            ]
-        });
-        let narrowed = training_tier_co_requisites(tiered, TRAINING_COMPONENT_TIER);
-
+        // POSITIVE: with the dense tier staged, training resolves each component to THAT tier's own
+        // component DIR, not the snapshot root. `subdir` is what makes this pass — a resolver
+        // ignoring it hands the engine a repo root holding q4/ q8/ bf16/ side by side.
+        let dense = tempfile::tempdir().expect("tempdir");
+        let dense_settings = test_settings(dense.path());
+        stage(&dense_settings, "bf16");
+        let components =
+            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings)
+                .expect("the bf16 shared components are staged");
+        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["text_encoder", "vae"]);
         for component in ["text_encoder", "vae"] {
-            let rows = component_rows(&narrowed, component);
-            assert_eq!(
-                rows.len(),
-                1,
-                "{component} must resolve to exactly ONE candidate — more than one is what makes the \
-                 tier-agnostic lookup fail"
+            let WeightsSource::Dir(dir) = &components[component] else {
+                panic!("{component} must stage as a directory");
+            };
+            assert!(
+                dir.ends_with(format!("bf16/{component}")),
+                "{component} must resolve to the DENSE tier's component dir, got {}",
+                dir.display()
             );
-            assert_eq!(
-                rows[0].get("variant").and_then(Value::as_str),
-                Some("bf16"),
-                "{component} must resolve the DENSE tier; a packed tier trains silently wrong"
-            );
+            assert!(dir.is_dir(), "{component} dir must exist");
         }
-        // Non-co-requisite downloads are untouched — this only disambiguates component provisioning.
-        assert_eq!(
-            narrowed
-                .get("downloads")
-                .and_then(Value::as_array)
-                .expect("downloads")
-                .iter()
-                .filter(|d| d.get("coRequisite").is_none())
-                .count(),
-            3,
-            "the per-tier DiT downloads must pass through untouched"
-        );
 
-        // The untiered shape (SDXL/RealVisXL tokenizers + VAE, chatterbox perth) is the identity —
-        // narrowing must not drop a component that simply declares no per-tier rows.
-        let untiered = json!({
-            "id": "sdxl",
-            "downloads": [
-                { "repo": "SceneWorks/sdxl-base-mlx" },
-                { "coRequisite": true, "componentId": "tokenizer_clip_l", "repo": "openai/clip-vit-large-patch14" },
-                { "coRequisite": true, "componentId": "vae_fp16_fix", "repo": "madebyollin/sdxl-vae-fp16-fix" }
-            ]
-        });
-        assert_eq!(
-            training_tier_co_requisites(untiered.clone(), TRAINING_COMPONENT_TIER),
-            untiered,
-            "a model with no per-tier component rows must be passed through unchanged"
+        // NEGATIVE: with only a PACKED tier installed, training refuses rather than falling back.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(temp.path());
+        stage(&settings, "q4");
+
+        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings)
+            .expect_err(
+                "only the q4 shared components are installed, so a training run — which needs the \
+                 DENSE base — must be refused",
+            );
+        let message = error.to_string();
+        assert!(
+            message.contains("bf16"),
+            "training must ask for the bf16 tier BY NAME; asking for `None` yields the \
+             refusing-to-guess error instead. got: {message}"
+        );
+        assert!(
+            !message.contains("refusing to guess"),
+            "training resolves a concrete tier, so it must never hit the ambiguous-candidate \
+             branch: {message}"
         );
     }
 

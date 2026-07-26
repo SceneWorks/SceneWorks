@@ -278,32 +278,12 @@ pub(super) fn min_quality_floor(request: &ImageRequest) -> Option<&str> {
 /// perfectly good tier lose the chain to a sibling that merely ships an index, which is a worse bug
 /// than the one this fixes. We only ever demote a tier on POSITIVE evidence: its own index naming a
 /// component that is not on disk.
-fn tier_declared_components(dir: &Path) -> Option<Vec<String>> {
-    let raw = std::fs::read_to_string(dir.join("model_index.json")).ok()?;
-    let index: Value = serde_json::from_str(&raw).ok()?;
-    Some(
-        index
-            .as_object()?
-            .iter()
-            .filter(|(key, value)| !key.starts_with('_') && is_component_entry(value))
-            .map(|(key, _)| key.clone())
-            .collect(),
-    )
-}
-
-/// Whether a `model_index.json` value names a COMPONENT — the diffusers `[library, class]` pair.
-///
-/// Three things in a real index are NOT components, and all three must be rejected here (each is
-/// live in a shipping turnkey, so a laxer test fails a good tier):
-/// - `[null, null]` marks an ABSENT optional component — `SceneWorks/realvisxl-mlx` declares
-///   `feature_extractor` and `image_encoder` this way and ships neither dir.
-/// - config arrays — `SceneWorks/krea-2-raw-mlx` declares `text_encoder_select_layers: [2, 5, 8, …]`.
-/// - config scalars — krea's `patch_size: 2`, realvisxl's `force_zeros_for_empty_prompt: true`.
-fn is_component_entry(value: &Value) -> bool {
-    value
-        .as_array()
-        .is_some_and(|pair| pair.len() == 2 && pair.iter().all(Value::is_string))
-}
+/// Moved to `sceneworks_core::mlx_tier_completeness` (sc-14980) so this resolver, rust-api's catalog
+/// completeness, and the training-base gate all read a tier's declared component set the SAME way —
+/// a split tier that ships only the components it owns must look identical to all three. Re-exported
+/// here rather than reimplemented, for the same anti-drift reason the per-family predicates are
+/// shared (sc-13513).
+use sceneworks_core::mlx_tier_completeness::tier_declared_components;
 
 /// Whether every component `dir`'s own `model_index.json` declares is actually on disk (sc-12279).
 ///

@@ -586,6 +586,14 @@
                   }
                 },
                 {
+                  "$comment": "sc-14980: a subdir narrows WHICH directory of a coRequisite's snapshot is staged for its componentId, so like componentId it is valid ONLY on coRequisite: true entries.",
+                  "if": { "required": ["subdir"] },
+                  "then": {
+                    "properties": { "coRequisite": { "const": true } },
+                    "required": ["coRequisite"]
+                  }
+                },
+                {
                   "$comment": "sc-13771: a componentId names a component PROVISIONED by a coRequisite download, so it is valid ONLY on coRequisite: true entries — a manifest-local invariant that JSON Schema CAN enforce without inference-descriptor knowledge (contrast the componentId ⟺ some descriptor.required_components match, which the manifest audit cannot see and stays a runtime resolve_co_requisites check).",
                   "if": { "required": ["componentId"] },
                   "then": {
@@ -613,13 +621,19 @@
                   "pattern": "^[a-z][a-z0-9_]*$",
                   "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
                 },
+                "subdir": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$",
+                  "x-sceneworks-contract": "binding",
+                  "description": "Optional path, relative to this coRequisite's cached snapshot, of the directory actually staged for `componentId` (sc-14980). Valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above. Without it a multi-file co-requisite stages the WHOLE snapshot, which cannot express a shared mirror hosting SEVERAL components at SEVERAL quant tiers: Mage-Flow's `SceneWorks/Mage-Flow-Components-mlx` holds `<tier>/text_encoder/` and `<tier>/vae/`, so each row sets `subdir` to the exact component dir (e.g. `q4/text_encoder`) while `files` keeps listing the snapshot-relative patterns the downloader fetches. Confined under the snapshot with safe_join at resolve time, so a `..`/absolute value is rejected rather than staged."
+                },
                 "default": {
                   "type": "boolean",
                   "description": "Marks the canonical alternate used for displayed size, install path, and download jobs. For a quant matrix this marks the DEFAULT tier (the one that installs when no explicit variant is requested)."
                 },
                 "variant": {
                   "$ref": "#/$defs/quantVariantKey",
-                  "description": "The quantization tier this entry provisions (bf16 / q8 / q4). Present only on quant-matrix entries (sc-8508); a single-variant model omits it. The web/download-job selects a tier by this key, and per-variant install tracking reports which tiers are on disk. Never combined with coRequisite (a co-requisite is not a selectable tier)."
+                  "description": "The quantization tier this entry provisions (bf16 / q8 / q4). Present only on quant-matrix entries (sc-8508); a single-variant model omits it. The web/download-job selects a tier by this key, and per-variant install tracking reports which tiers are on disk. On a NON-coRequisite entry this is the selectable tier. On a `coRequisite: true` entry (sc-14980) it instead SCOPES that co-requisite to one tier: Mage-Flow's shared text encoder and VAE exist as q4/q8/bf16 subtrees of a single components mirror, so only the row matching the selected tier is fetched, sized, and gated on, and `resolve_co_requisites_for_tier` picks among same-`componentId` rows by it. A co-requisite WITHOUT a variant is tier-agnostic and always applies — every pre-sc-14980 co-requisite."
                 },
                 "coRequisite": {
                   "type": "boolean",

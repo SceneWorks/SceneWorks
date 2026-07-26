@@ -366,6 +366,14 @@ mod illustrious_train_apply_mlx_smoke;
 // non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
 #[cfg(all(test, target_os = "macos"))]
 mod lens_turbo_q4_mlx_smoke;
+
+// Real-weight MLX smoke for the Mage-Flow q4 worker lane (sc-14980 / sc-14979). Mage is the first
+// family whose tier subdir is NOT engine-complete — `<snapshot>/q4/` is DiT-only, and the shared text
+// encoder + VAE arrive as per-tier co-requisites — so this is the on-device proof that the manifest's
+// per-tier downloads and the pinned engine agree. It fails loudly against an engine pinned before the
+// sc-14979 split, which is exactly the ordering hazard the pin bump closes.
+#[cfg(all(test, target_os = "macos"))]
+mod mage_flow_q8_mlx_smoke;
 // Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
 // Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
 // turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the

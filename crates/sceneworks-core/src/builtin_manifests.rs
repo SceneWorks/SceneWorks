@@ -1013,27 +1013,29 @@ mod tests {
     }
 
     #[test]
-    fn mage_flow_family_ships_six_variants_as_load_time_quant_tiers() {
-        // sc-14059 (epic 14034, P6): pin the shipped Mage-Flow catalog shape that the desktop
-        // provisioning + per-tier download/delete flows depend on. This is the manifest-contract
-        // guard that keeps two shipped behaviors HONEST, and it discriminates a real regression
-        // from the current state rather than asserting a code default:
+    fn mage_flow_family_ships_six_variants_as_prequantized_per_tier_artifacts() {
+        // sc-14980 / sc-14979 (epic 14034), superseding the sc-14059 load-time-quant invariant.
         //
-        //   1. Per-tier delete honesty (closes sc-14046's delegated acceptance). Mage's three
-        //      q4/q8/bf16 tiers are LOAD-TIME MLX quant choices over ONE dense diffusers snapshot,
-        //      not physically-distinct on-disk artifacts. The overlap-safe tier delete in
-        //      apps/rust-api (delete_model_variant) only reclaims zero bytes and preserves the
-        //      shared snapshot BECAUSE every tier declares the SAME repo+revision+files. If a future
-        //      edit gave the tiers distinct file predicates (e.g. z-image-style `q4/*` subdirs) that
-        //      per-tier delete would begin removing real bytes another logical tier still needs and
-        //      corrupt the snapshot — so the identical-predicate invariant is load-bearing, not
-        //      cosmetic. The absence of `mlx.standardTierLayout` (which z_image_turbo DOES set to
-        //      route to physical `<tier>/` subdirs) is the discriminating marker that Mage is
-        //      on-the-fly quant, not a physical tier matrix.
-        //   2. Resume/retry skip (sc-13614 pattern). Because the three tier download jobs carry
-        //      identical repo+revision+files, downloading a second tier of an already-installed
-        //      variant re-verifies but never re-fetches bytes (downloads.rs size-equals-expected
-        //      skip), and installing one tier marks all three installed.
+        // Mage's q4/q8/bf16 are no longer on-the-fly quantization over ONE dense snapshot; they are
+        // physically distinct `<tier>/` artifacts on our mirrors, with the text encoder and VAE —
+        // bit-identical across all six variants — hosted once as per-tier co-requisites. The old
+        // test pinned the exact opposite (identical repo+revision+files across tiers, and
+        // `standardTierLayout` absent), so it is REPLACED rather than relaxed. What it protected is
+        // preserved and inverted here, plus the two new invariants the split layout depends on:
+        //
+        //   1. Per-tier delete honesty (closes sc-14046's delegated acceptance). Each tier now
+        //      declares its OWN `<tier>/*` predicate, so the overlap-safe delete in apps/rust-api
+        //      reclaims that tier's real bytes while the other tiers' predicates keep theirs. The
+        //      DISTINCT-predicate invariant is now the load-bearing one; identical predicates would
+        //      silently return per-tier delete to reclaiming zero bytes.
+        //   2. Shared components are never stranded. text_encoder/vae are `coRequisite` rows, which
+        //      per-variant and per-tier delete skip structurally, so deleting one variant or tier
+        //      can never remove weights another installed variant still needs.
+        //   3. `mlx.standardTierLayout` MUST be set — it is what routes the worker into
+        //      `standard_tier_subdir` so a tier request loads `<tier>/` instead of the snapshot root.
+        //   4. Every co-requisite carries `componentId` + `subdir` + `variant`: the id matches the
+        //      `mlx_mage` descriptor's `required_components`, the subdir addresses the component dir
+        //      inside the shared mirror, and the variant scopes the fetch to one tier.
         //
         // It also proves the P6 model guide (apps/web/public/prompt-guides/mage-flow.md) is wired to
         // every variant.
@@ -1083,6 +1085,12 @@ mod tests {
             ("mage_flow_edit_turbo", "edit_image", 4, 1.0),
         ];
 
+        // The one shared components mirror, pinned. Every variant must agree on it — a second
+        // components repo would silently double the shared-weight cost the split layout exists to
+        // avoid.
+        const COMPONENTS_REPO: &str = "SceneWorks/Mage-Flow-Components-mlx";
+        const TIERS: [&str; 3] = ["q4", "q8", "bf16"];
+
         for (id, capability, steps, guidance) in expected {
             let model = find(id);
             assert_eq!(
@@ -1117,25 +1125,45 @@ mod tests {
                 "{id} points at the P6 Mage-Flow model guide"
             );
 
-            // Load-time quant marker, and NOT a physical per-tier layout.
+            // The physical-tier markers. `quantize` still names the default tier, but it now selects
+            // WHICH subdir is loaded, and `standardTierLayout` is what makes the worker descend.
             assert_eq!(
                 model["mlx"]["quantize"].as_u64(),
                 Some(4),
-                "{id} declares the image-lane load-time quant default tier"
+                "{id} declares q4 as the default tier"
             );
-            assert!(
-                model["mlx"]["standardTierLayout"].is_null(),
-                "{id} must NOT declare standardTierLayout — its q4/q8/bf16 are on-the-fly quant over \
-                 one dense snapshot, not physical <tier>/ subdirs (that flag is what makes per-tier \
-                 delete reclaim real bytes, which would corrupt Mage's shared snapshot)"
+            assert_eq!(
+                model["mlx"]["standardTierLayout"].as_bool(),
+                Some(true),
+                "{id} MUST declare standardTierLayout — without it the worker loads the snapshot \
+                 ROOT instead of the requested `<tier>/` subdir, silently serving the dense flat \
+                 weights for every tier and making per-tier delete meaningless again"
             );
 
-            // The three tiers must share ONE repo+revision+file predicate (the overlap invariant).
             let downloads = model["downloads"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{id} has a downloads array"));
+            let tier_rows: Vec<&serde_json::Value> = downloads
+                .iter()
+                .filter(|d| d.get("coRequisite").and_then(serde_json::Value::as_bool) != Some(true))
+                .collect();
+            let co_reqs: Vec<&serde_json::Value> = downloads
+                .iter()
+                .filter(|d| d.get("coRequisite").and_then(serde_json::Value::as_bool) == Some(true))
+                .collect();
+            assert_eq!(
+                tier_rows.len(),
+                3,
+                "{id} declares exactly the q4/q8/bf16 tiers"
+            );
+            assert_eq!(
+                co_reqs.len(),
+                6,
+                "{id} declares the shared text_encoder + vae at each of the three tiers"
+            );
+
             let tier_of = |variant: &str| {
-                downloads
+                *tier_rows
                     .iter()
                     .find(|d| {
                         d["variant"]
@@ -1146,11 +1174,6 @@ mod tests {
             };
             let (q4, q8, bf16) = (tier_of("q4"), tier_of("q8"), tier_of("bf16"));
             assert_eq!(
-                downloads.len(),
-                3,
-                "{id} declares exactly the q4/q8/bf16 tiers (no co-requisites today)"
-            );
-            assert_eq!(
                 q4["default"].as_bool(),
                 Some(true),
                 "{id} q4 is the default install tier"
@@ -1159,45 +1182,140 @@ mod tests {
                 q8["default"].as_bool() != Some(true) && bf16["default"].as_bool() != Some(true),
                 "{id} marks only one default tier"
             );
-            for field in ["repo", "revision", "files"] {
+
+            // THE inverted invariant. Under load-time quant the three tiers had to share one file
+            // predicate so a per-tier delete could not corrupt the shared snapshot. Now they must
+            // NOT: each tier owns a disjoint `<tier>/*` subtree, which is exactly what lets a tier
+            // delete reclaim real bytes while the siblings survive. Identical predicates here would
+            // mean the re-host silently regressed to zero-byte tier deletes.
+            for (name, tier) in [("q4", q4), ("q8", q8), ("bf16", bf16)] {
+                let files: Vec<&str> = tier["files"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{id} {name} declares a files predicate"))
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect();
                 assert_eq!(
-                    q4[field], q8[field],
-                    "{id} q4 and q8 must share an identical {field} (load-time quant overlap invariant)"
+                    files,
+                    vec![format!("{name}/*")],
+                    "{id} {name} must fetch ONLY its own tier subtree"
                 );
-                assert_eq!(
-                    q4[field], bf16[field],
-                    "{id} q4 and bf16 must share an identical {field} (load-time quant overlap invariant)"
-                );
+                // Fetching the flat dense tree would defeat the whole re-host: the tier download
+                // would pull all 17.5 GB again. The dense root stays HOSTED for existing installs,
+                // but no tier may reference it.
+                for legacy in [
+                    "transformer/*",
+                    "text_encoder/*",
+                    "vae/*",
+                    "model_index.json",
+                ] {
+                    assert!(
+                        !files.contains(&legacy),
+                        "{id} {name} must not fetch the flat dense {legacy}"
+                    );
+                }
             }
-            // The shared predicate is the COMPLETE flat diffusers snapshot the mlx_mage adapter loads
-            // (required_components: &[] — it reads the whole dir, so every component must be fetched).
-            let files: Vec<&str> = q4["files"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{id} q4 declares a files predicate"))
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect();
-            for required in [
-                "model_index.json",
-                "scheduler/*",
-                "text_encoder/*",
-                "transformer/*",
-                "vae/*",
-            ] {
-                assert!(
-                    files.contains(&required),
-                    "{id} must fetch {required} for a complete loadable snapshot; got {files:?}"
-                );
-            }
-            // The mirror lives under our own HF org (never microsoft/*), pinned to an immutable SHA.
+            assert_ne!(
+                q4["files"], q8["files"],
+                "{id} q4 and q8 must own DISJOINT file predicates (physical per-tier reclaim)"
+            );
+            assert_ne!(
+                q4["files"], bf16["files"],
+                "{id} q4 and bf16 must own DISJOINT file predicates (physical per-tier reclaim)"
+            );
+
+            // The mirror lives under our own HF org (never microsoft/*), pinned to an immutable SHA,
+            // and all three tiers come from the SAME variant repo (only the subdir differs).
             let repo = q4["repo"].as_str().unwrap_or_default();
             assert!(
                 repo.starts_with("SceneWorks/Mage-Flow"),
                 "{id} pulls from the SceneWorks org mirror, not upstream; got {repo:?}"
             );
+            for (name, tier) in [("q8", q8), ("bf16", bf16)] {
+                assert_eq!(
+                    tier["repo"].as_str(),
+                    Some(repo),
+                    "{id} {name} ships in the same variant mirror as q4"
+                );
+            }
+            for (name, tier) in [("q4", q4), ("q8", q8), ("bf16", bf16)] {
+                assert!(
+                    tier["revision"].as_str().is_some_and(is_full_sha_revision),
+                    "{id} {name} pins a full 40-hex mirror revision"
+                );
+                // A tier that reported the dense snapshot's size would mis-quote the download by ~3x
+                // and defeat the point of the split, so require a plausible per-tier size.
+                let bytes = tier["estimatedSizeBytes"].as_u64().unwrap_or_default();
+                assert!(
+                    (1..12_000_000_000).contains(&bytes),
+                    "{id} {name} must declare its OWN tier size, not the 17.5 GB dense snapshot; \
+                     got {bytes}"
+                );
+            }
+            // Physically distinct means physically SMALLER as the tier drops.
+            let size = |tier: &serde_json::Value| tier["estimatedSizeBytes"].as_u64().unwrap_or(0);
             assert!(
-                q4["revision"].as_str().is_some_and(is_full_sha_revision),
-                "{id} pins a full 40-hex mirror revision"
+                size(q4) < size(q8) && size(q8) < size(bf16),
+                "{id} tier sizes must be strictly ordered q4 < q8 < bf16 — equal sizes would mean \
+                 the tiers are not physically distinct artifacts"
+            );
+
+            // ---- shared components (sc-14979) --------------------------------------------------
+            for component in ["text_encoder", "vae"] {
+                for tier in TIERS {
+                    let row = co_reqs
+                        .iter()
+                        .find(|d| {
+                            d["componentId"].as_str() == Some(component)
+                                && d["variant"]
+                                    .as_str()
+                                    .is_some_and(|v| v.eq_ignore_ascii_case(tier))
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("{id} declares the shared {component} co-requisite for {tier}")
+                        });
+                    assert_eq!(
+                        row["repo"].as_str(),
+                        Some(COMPONENTS_REPO),
+                        "{id} {component}/{tier} resolves from the ONE shared components mirror — a \
+                         per-variant copy would restore the 105 GB six-variant install"
+                    );
+                    assert!(
+                        row["revision"].as_str().is_some_and(is_full_sha_revision),
+                        "{id} {component}/{tier} pins a full 40-hex revision"
+                    );
+                    assert_eq!(
+                        row["subdir"].as_str(),
+                        Some(format!("{tier}/{component}").as_str()),
+                        "{id} {component}/{tier} must address its exact component dir — without \
+                         `subdir` the whole components snapshot is staged and the engine is handed \
+                         the wrong directory"
+                    );
+                    let files: Vec<&str> = row["files"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{id} {component}/{tier} declares files"))
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect();
+                    assert_eq!(
+                        files,
+                        vec![format!("{tier}/{component}/*")],
+                        "{id} {component}/{tier} fetches only its own tier's component subtree"
+                    );
+                }
+            }
+            // The component ids must be exactly what the mlx_mage descriptor advertises as
+            // `required_components`; a typo resolves to no row and fails the job at load.
+            let mut ids: Vec<&str> = co_reqs
+                .iter()
+                .filter_map(|d| d["componentId"].as_str())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(
+                ids,
+                vec!["text_encoder", "vae"],
+                "{id} co-requisites provision exactly the two components mlx_mage requires"
             );
         }
     }

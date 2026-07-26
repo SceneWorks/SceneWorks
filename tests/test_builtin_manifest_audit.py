@@ -186,20 +186,65 @@ def test_cached_manifest_and_schema_loaders_return_isolated_copies():
     assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
+COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
+COMPONENTS_REVISION = "5b6ab823ad92cbf5b5033c3ac5de936fa71a6d62"
+# Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
+DIT_BYTES = {"q4": 2316856860, "q8": 4374163324, "bf16": 8231571754}
+TE_BYTES = {"q4": 2514418914, "q8": 4731076490, "bf16": 8887219239}
+VAE_BYTES = 345053168
+TIERS = ("q4", "q8", "bf16")
+
+
+def _assert_mage_tier_layout(model, model_id, repo, revision):
+    """sc-14980/sc-14979: the shared per-tier shape every Mage row must have.
+
+    Supersedes the sc-14047/sc-14050 "complete flat snapshot" pin: the tiers are physically
+    distinct `<tier>/` artifacts now, and the text encoder + VAE are hosted once as per-tier
+    co-requisites rather than duplicated into all six variant mirrors.
+    """
+    downloads = model["downloads"]
+    tiers = [d for d in downloads if not d.get("coRequisite")]
+    co_reqs = [d for d in downloads if d.get("coRequisite")]
+
+    assert [d["variant"] for d in tiers] == list(TIERS), model_id
+    assert sum(d.get("default") is True for d in tiers) == 1, model_id
+    for entry in tiers:
+        tier = entry["variant"]
+        assert entry["repo"] == repo, model_id
+        assert entry["revision"] == revision, model_id
+        # Each tier fetches ONLY its own subtree — this is what makes a per-tier delete reclaim
+        # real bytes. A shared full-snapshot predicate here would silently restore 0-byte deletes.
+        assert entry["files"] == [f"{tier}/*"], (model_id, tier)
+        assert entry["estimatedSizeBytes"] == DIT_BYTES[tier], (model_id, tier)
+
+    # The shared components: one mirror, one pinned revision, addressed per tier via `subdir`.
+    assert len(co_reqs) == 6, model_id
+    for component, sizes in (("text_encoder", TE_BYTES), ("vae", None)):
+        for tier in TIERS:
+            row = next(
+                d
+                for d in co_reqs
+                if d["componentId"] == component and d["variant"] == tier
+            )
+            assert row["repo"] == COMPONENTS_REPO, (model_id, component, tier)
+            assert row["revision"] == COMPONENTS_REVISION, (model_id, component, tier)
+            assert row["subdir"] == f"{tier}/{component}", (model_id, component, tier)
+            assert row["files"] == [f"{tier}/{component}/*"], (model_id, component, tier)
+            expected = sizes[tier] if sizes else VAE_BYTES
+            assert row["estimatedSizeBytes"] == expected, (model_id, component, tier)
+
+    assert model["mlx"]["standardTierLayout"] is True, model_id
+    assert model["mlx"]["quantize"] == 4, model_id
+    assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
+
+
 def test_mage_flow_generation_family_is_pinned_and_complete():
-    """sc-14047: all published Mage generation variants remain loadable flat snapshots."""
+    """sc-14047 + sc-14980: the generation variants ship physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     expected = {
-        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "a160c0a2c9d82106687d969d161c313c7e528550", 30, 5),
-        "mage_flow": ("SceneWorks/Mage-Flow", "e6719fb1abb0d3fa83ecebbf31cbf431eb054ab8", 20, 5),
-        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "6fc43b7b586078997047acc9c39dbbd26044a035", 4, 1),
-    }
-    complete_snapshot = {
-        "model_index.json",
-        "scheduler/*",
-        "text_encoder/*",
-        "transformer/*",
-        "vae/*",
+        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "2c0b473896ef87af5a0873a26ed62c319213ae36", 30, 5),
+        "mage_flow": ("SceneWorks/Mage-Flow", "b9204c289b235bce9ade608f76a009f80a135bfd", 20, 5),
+        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "dca431fa8dfb4b3411cf3986435540ed31a7e8b7", 4, 1),
     }
     for model_id, (repo, revision, steps, guidance) in expected.items():
         model = models[model_id]
@@ -212,34 +257,18 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
-        downloads = model["downloads"]
-        assert [entry["variant"] for entry in downloads] == ["q4", "q8", "bf16"]
-        assert sum(entry.get("default") is True for entry in downloads) == 1
-        for entry in downloads:
-            assert entry["repo"] == repo
-            assert entry["revision"] == revision
-            # These are load-time quant choices over one dense mirror, so every logical tier
-            # uses the same full-snapshot predicate. Physical tier provisioning belongs to sc-14059.
-            assert set(entry["files"]) == complete_snapshot
-        assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
+        _assert_mage_tier_layout(model, model_id, repo, revision)
 
 
 def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
-    """sc-14050: every edit variant is a complete shared-component snapshot."""
+    """sc-14050 + sc-14980: every edit variant ships physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     expected = {
-        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "5345fa8b0d41bdd612351f0933ef4cc9021281ab", 17495714677, 30, 5),
-        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "d668ecc8ce5addcb3c0bbe268227eb17f832aa9f", 17495714677, 30, 5),
-        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "3e5ae67807083a25f3d344bc2c5ff16276415a14", 17495714653, 4, 1),
+        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "199b4cae841403e8a1cca3c585a09f10fc70d3f1", 30, 5),
+        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "eb22e9ddbdea4a447e63ecd3ad46c62d3d5f3503", 30, 5),
+        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "c3437cbb91e565ab6373e3c7b8e9b8048d29831b", 4, 1),
     }
-    complete_snapshot = {
-        "model_index.json",
-        "scheduler/*",
-        "text_encoder/*",
-        "transformer/*",
-        "vae/*",
-    }
-    for model_id, (repo, revision, size, steps, guidance) in expected.items():
+    for model_id, (repo, revision, steps, guidance) in expected.items():
         model = models[model_id]
         assert model["family"] == "mage-flow"
         assert model["adapter"] == "mlx_mage"
@@ -254,14 +283,7 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["defaults"]["guidanceScale"] == guidance
         assert model["ui"]["sourceWithMultiReference"] is True
         assert model["ui"]["recommendedFor"] == ["edit_image"]
-        assert [entry["variant"] for entry in model["downloads"]] == ["q4", "q8", "bf16"]
-        assert sum(entry.get("default") is True for entry in model["downloads"]) == 1
-        for entry in model["downloads"]:
-            assert entry["repo"] == repo
-            assert entry["revision"] == revision
-            assert entry["estimatedSizeBytes"] == size
-            assert set(entry["files"]) == complete_snapshot
-        assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
+        _assert_mage_tier_layout(model, model_id, repo, revision)
 
 
 def _model_table_default_repos() -> dict[str, str]:
