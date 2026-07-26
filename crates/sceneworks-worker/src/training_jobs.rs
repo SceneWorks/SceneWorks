@@ -672,6 +672,14 @@ fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
 /// the self-contained macOS MLX SDXL trainer (descriptor `&[]`), so this never reads the manifest on
 /// macOS. All-or-nothing: a missing component fails the job with an actionable error BEFORE the trainer
 /// load (never a mid-train hub fetch).
+///
+/// **Training always resolves the DENSE `bf16` tier** (sc-14056 / sc-14980). A model whose mirror is
+/// split per tier declares one `coRequisite` row *per tier* for the same `componentId`, so a
+/// tier-agnostic lookup has more than one candidate and cannot pick correctly — the resolver would
+/// either guess or refuse. `tiered_turnkey_train_dir` already pins the training base to `bf16/` (a
+/// gradient path needs dense projections; `quantize` is a no-op over already-packed weights, so a
+/// q4/q8 tier would train silently WRONG rather than fail), so `bf16` is the only right answer here.
+/// [`training_tier_co_requisites`] narrows the manifest to that tier before resolution.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -693,7 +701,71 @@ fn resolve_trainer_components(
              '{engine_id}' components from"
         ))
     })?;
+    let manifest_entry = training_tier_co_requisites(manifest_entry, TRAINING_COMPONENT_TIER);
     crate::model_jobs::resolve_co_requisites(&descriptor, &manifest_entry, settings)
+}
+
+/// The tier a training run resolves its base + shared components from. Dense by definition: the
+/// gradient path needs unpacked projections, and the app's `TrainingTierMissing` pre-flight plus the
+/// engine's own packed-weight refusal both key off this same tier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const TRAINING_COMPONENT_TIER: &str = "bf16";
+
+/// Narrow a catalog entry's `downloads` to the co-requisite rows that apply at `tier`, so
+/// [`crate::model_jobs::resolve_co_requisites`] sees exactly one candidate per `componentId`.
+///
+/// Per `componentId`: keep the row whose `variant` is `tier` when one exists, otherwise keep the
+/// untiered row (no `variant`). Rows for other tiers are dropped. Non-co-requisite downloads pass
+/// through untouched — this only disambiguates component provisioning.
+///
+/// On a model whose components are declared once and untiered (SDXL / RealVisXL tokenizers + VAE,
+/// chatterbox's `perth` / `voice_embedding`) this is the identity, so those lanes are unaffected.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_tier_co_requisites(mut entry: Value, tier: &str) -> Value {
+    let Some(downloads) = entry.get("downloads").and_then(Value::as_array).cloned() else {
+        return entry;
+    };
+    let is_co_req = |d: &Value| d.get("coRequisite").and_then(Value::as_bool) == Some(true);
+    let variant_of = |d: &Value| d.get("variant").and_then(Value::as_str).map(str::to_owned);
+    let component_of = |d: &Value| {
+        d.get("componentId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+
+    // Which component ids actually have a row at this tier — those are the ones whose other-tier and
+    // untiered rows must be dropped. A component with no tiered row keeps whatever it declares.
+    let tiered: std::collections::BTreeSet<String> = downloads
+        .iter()
+        .filter(|d| is_co_req(d) && variant_of(d).as_deref() == Some(tier))
+        .filter_map(component_of)
+        .collect();
+
+    let kept: Vec<Value> = downloads
+        .into_iter()
+        .filter(|d| {
+            if !is_co_req(d) {
+                return true;
+            }
+            match component_of(d) {
+                Some(component) if tiered.contains(&component) => {
+                    variant_of(d).as_deref() == Some(tier)
+                }
+                // No tiered row for this component (or no componentId at all) — leave it alone.
+                _ => true,
+            }
+        })
+        .collect();
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("downloads".to_owned(), Value::Array(kept));
+    }
+    entry
 }
 
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
@@ -2299,6 +2371,96 @@ mod tests {
         );
         assert_eq!(cfg.timestep_bias, "high_noise");
         assert_eq!(cfg.trigger_word, None);
+    }
+
+    /// sc-14056 / sc-14980 — training must resolve the DENSE tier's shared components.
+    ///
+    /// The sc-14980 re-host splits each Mage mirror per tier and shares one text encoder + VAE across
+    /// the variants, so the catalog declares **three** `coRequisite` rows per `componentId` (q4/q8/
+    /// bf16). The generator descriptor that drives `resolve_trainer_components` now advertises those
+    /// components, so a tier-agnostic lookup has more than one candidate for the same id and either
+    /// guesses or refuses — and a training job that resolved the q4 row would hand the gradient path
+    /// PACKED weights, which `quantize` treats as a no-op: it would train silently wrong rather than
+    /// fail.
+    ///
+    /// This drives the pure selection over a three-row fixture so it is proven against the tiered
+    /// shape regardless of what the committed manifest happens to look like today, and asserts the
+    /// untiered case is untouched (SDXL/RealVisXL tokenizers, chatterbox `perth`).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_component_resolution_picks_the_dense_tier_row() {
+        let component_rows = |entry: &Value, component: &str| -> Vec<Value> {
+            entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .expect("downloads")
+                .iter()
+                .filter(|d| d.get("componentId").and_then(Value::as_str) == Some(component))
+                .cloned()
+                .collect()
+        };
+
+        // The split-tier shape: three rows per shared component, plus the per-tier DiT downloads.
+        let tiered = json!({
+            "id": "mage_flow_base",
+            "downloads": [
+                { "variant": "q4", "repo": "SceneWorks/Mage-Flow-Base" },
+                { "variant": "q8", "repo": "SceneWorks/Mage-Flow-Base" },
+                { "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Base" },
+                { "coRequisite": true, "componentId": "text_encoder", "variant": "q4", "repo": "SceneWorks/Mage-Flow-Shared" },
+                { "coRequisite": true, "componentId": "text_encoder", "variant": "q8", "repo": "SceneWorks/Mage-Flow-Shared" },
+                { "coRequisite": true, "componentId": "text_encoder", "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Shared" },
+                { "coRequisite": true, "componentId": "vae", "variant": "q4", "repo": "SceneWorks/Mage-Flow-Shared" },
+                { "coRequisite": true, "componentId": "vae", "variant": "bf16", "repo": "SceneWorks/Mage-Flow-Shared" }
+            ]
+        });
+        let narrowed = training_tier_co_requisites(tiered, TRAINING_COMPONENT_TIER);
+
+        for component in ["text_encoder", "vae"] {
+            let rows = component_rows(&narrowed, component);
+            assert_eq!(
+                rows.len(),
+                1,
+                "{component} must resolve to exactly ONE candidate — more than one is what makes the \
+                 tier-agnostic lookup fail"
+            );
+            assert_eq!(
+                rows[0].get("variant").and_then(Value::as_str),
+                Some("bf16"),
+                "{component} must resolve the DENSE tier; a packed tier trains silently wrong"
+            );
+        }
+        // Non-co-requisite downloads are untouched — this only disambiguates component provisioning.
+        assert_eq!(
+            narrowed
+                .get("downloads")
+                .and_then(Value::as_array)
+                .expect("downloads")
+                .iter()
+                .filter(|d| d.get("coRequisite").is_none())
+                .count(),
+            3,
+            "the per-tier DiT downloads must pass through untouched"
+        );
+
+        // The untiered shape (SDXL/RealVisXL tokenizers + VAE, chatterbox perth) is the identity —
+        // narrowing must not drop a component that simply declares no per-tier rows.
+        let untiered = json!({
+            "id": "sdxl",
+            "downloads": [
+                { "repo": "SceneWorks/sdxl-base-mlx" },
+                { "coRequisite": true, "componentId": "tokenizer_clip_l", "repo": "openai/clip-vit-large-patch14" },
+                { "coRequisite": true, "componentId": "vae_fp16_fix", "repo": "madebyollin/sdxl-vae-fp16-fix" }
+            ]
+        });
+        assert_eq!(
+            training_tier_co_requisites(untiered.clone(), TRAINING_COMPONENT_TIER),
+            untiered,
+            "a model with no per-tier component rows must be passed through unchanged"
+        );
     }
 
     /// sc-14056 — the full-base-fine-tune signal must actually REACH the engine, and the target's own

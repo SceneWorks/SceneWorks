@@ -3342,14 +3342,17 @@ fn mage_flow_foundation_targets_resolve_the_installed_flat_mirrors() {
 
 #[test]
 fn mage_flow_foundation_targets_are_missing_when_not_installed() {
-    // sc-14056: the counterpart to the "installed ⇒ Ready" case above. While Mage's mirror is a FLAT
-    // all-platform snapshot (q4/q8/bf16 are load-time quant over the same dense files, sc-14054), an
-    // absent install is `Missing` — the generic "install it" message, not the tier-specific one.
+    // sc-14056: the counterpart to the "installed ⇒ Ready" case above. An absent install is
+    // `Missing` — the generic "install it" message, not the tier-specific one — whatever the mirror
+    // layout is.
     //
-    // This case is NOT evidence that a tiered layout would be handled: an empty data dir yields
-    // `Missing` under either layout, so it does not discriminate. The layout-sensitivity proof is
-    // `mage_flow_training_base_status_discriminates_flat_from_tiered_layouts` below, which fabricates
-    // a real tiered snapshot — relevant because sc-14980 is re-hosting Mage to exactly that shape.
+    // This case is NOT evidence that a tiered layout is handled: an empty data dir yields `Missing`
+    // under either layout, so it does not discriminate, and an earlier revision of this file wrongly
+    // cited it as proof that "a future tiered re-host fails loudly". The layout-sensitivity proof is
+    // `mage_flow_training_base_status_discriminates_flat_from_tiered_layouts` below. That is now the
+    // live case rather than a hypothetical: sc-14980 re-hosts Mage to PHYSICAL per-tier artifacts
+    // with shared TE/VAE co-requisites, so `TrainingTierMissing` is genuinely REACHABLE for Mage —
+    // a q4/q8-only install must produce it rather than a false `Ready`.
     for base_model in ["mage_flow_base", "mage_flow_edit_base"] {
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().expect("tempdir");
