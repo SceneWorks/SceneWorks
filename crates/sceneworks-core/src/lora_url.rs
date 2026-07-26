@@ -166,9 +166,12 @@ fn blocked_ipv6(address: Ipv6Addr) -> bool {
     // assignments explicit so unallocated/reserved holes cannot become SSRF
     // bypasses.
     if first == 0x2001 && segments[1] <= 0x01ff {
-        let globally_usable_assignment = segments[1] == 0
+        // Teredo (2001:0000::/32) is intentionally absent: its server and
+        // obfuscated client IPv4 fields can route through an overlay, and
+        // IANA does not guarantee that prefix as globally reachable.
+        let globally_usable_assignment =
             // PCP, TURN, and DNS-SD anycast singleton addresses.
-            || (segments[1] == 1
+            (segments[1] == 1
                 && segments[2..7] == [0, 0, 0, 0, 0]
                 && matches!(segments[7], 1..=3))
             // AMT.
@@ -265,6 +268,10 @@ mod tests {
             "fec0::",
             "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "ff00::",
+            // Teredo with private server/client fields and with
+            // public-looking fields are both denied by policy.
+            "2001:0000:0a00:0001:0000:0000:f5ff:fffe",
+            "2001:0000:0808:0808:0000:0000:fefe:fefe",
             "2001:2::",
             "2001:1::4",
             "2001:5::",

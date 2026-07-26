@@ -1725,6 +1725,8 @@ mod public_source_url_tests {
         for location in [
             "http://127.0.0.1/admin",
             "http://[fec0::1]/admin",
+            "http://[2001:0000:0a00:0001:0000:0000:f5ff:fffe]/admin",
+            "http://[2001:0000:0808:0808:0000:0000:fefe:fefe]/admin",
             "//user:secret@example.net/image",
             "file:///etc/passwd",
         ] {
@@ -2005,6 +2007,8 @@ mod public_source_url_tests {
             "fec0::",
             "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "ff00::1",
+            "2001:0000:0a00:0001:0000:0000:f5ff:fffe",
+            "2001:0000:0808:0808:0000:0000:fefe:fefe",
             "2001:2::",
             "2001:5::",
             "2001:db8::1",
