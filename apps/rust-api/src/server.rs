@@ -19,7 +19,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ use sceneworks_core::jobs_store::JobsStore;
 use sceneworks_core::project_store::ProjectStore;
 
 use crate::auth::{cors_layer, AuthThrottle};
+use crate::catalog_scan_supervisor::CatalogScanSupervisor;
 use crate::events::EventHub;
 use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
@@ -322,12 +323,18 @@ pub struct AppState {
     /// idempotent catalog/project writes. A retry re-checks the DB after taking
     /// this lock, so two overlapping terminal reports cannot duplicate work.
     pub(crate) progress_side_effects_lock: Arc<AsyncMutex<()>>,
+    /// Owns, deduplicates, cancels, and drains background catalog scans.
+    pub(crate) catalog_scan_supervisor: Arc<CatalogScanSupervisor>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     #[cfg(test)]
     pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
     pub(crate) catalog_scan_stop_after_pass_once: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_delay_ms_once: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_preflight_started: Arc<tokio::sync::Notify>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
@@ -597,6 +604,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result = &mut serve => {
                 state.startup_maintenance.cancel();
                 progress_side_effect_recovery.abort();
+                shutdown_catalog_scans(&state).await;
                 result?;
                 return Ok(());
             }
@@ -608,12 +616,38 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_result = serve.await;
     state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
+    shutdown_catalog_scans(&state).await;
     serve_result?;
 
     if let Some(worker) = utility_worker {
         worker.shutdown().await;
     }
     Ok(())
+}
+
+const CATALOG_SCAN_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+async fn shutdown_catalog_scans(state: &AppState) {
+    let result = state
+        .catalog_scan_supervisor
+        .shutdown(CATALOG_SCAN_SHUTDOWN_GRACE)
+        .await;
+    if result.timed_out {
+        tracing::warn!(
+            event = "catalog_scan_shutdown_timeout",
+            requested = result.requested,
+            joined = result.joined,
+            grace_seconds = CATALOG_SCAN_SHUTDOWN_GRACE.as_secs(),
+            "catalog scans did not drain before the graceful-shutdown deadline"
+        );
+    } else if result.requested > 0 {
+        tracing::info!(
+            event = "catalog_scan_shutdown_complete",
+            requested = result.requested,
+            joined = result.joined,
+            "catalog scans drained during graceful shutdown"
+        );
+    }
 }
 
 /// Dispatched from `main` when `SCENEWORKS_WORKER_ONLY=1`; the desktop app uses

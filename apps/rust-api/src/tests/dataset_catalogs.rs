@@ -13,6 +13,7 @@ use sceneworks_core::catalog_store::{
     catalog_timestamp_now, CatalogProcessingLease, CatalogProcessingProgress,
     CatalogProcessingState, CatalogRegistry, CatalogSourceConfig, NewCatalogRecord,
 };
+use sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS;
 
 use super::support::*;
 
@@ -944,5 +945,202 @@ async fn invalid_parquet_options_are_rejected_before_create_or_control_cas() {
     assert_eq!(
         catalog.contract_state().unwrap().processing.state,
         CatalogProcessingState::Failed
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_parquet_preflight_keeps_health_responsive() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 0);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_preflight_delay_ms_once
+        .store(250, Ordering::SeqCst);
+    let preflight_started = state.catalog_scan_preflight_started.notified();
+    let create = tokio::spawn(request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Slow preflight",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), preflight_started)
+        .await
+        .expect("blocking-pool preflight starts");
+
+    let health = tokio::time::timeout(
+        Duration::from_millis(75),
+        request(app, "GET", "/api/v1/health", Value::Null),
+    )
+    .await
+    .expect("health remains responsive while Parquet metadata preflight is blocked");
+    assert_eq!(health.0, StatusCode::OK);
+    let created = create.await.expect("create task joins");
+    assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
+    state
+        .catalog_scan_supervisor
+        .shutdown(Duration::from_secs(2))
+        .await;
+}
+
+#[tokio::test]
+async fn excessive_parquet_shards_are_rejected_before_catalog_persistence() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("shards");
+    std::fs::create_dir(&source).expect("shard directory creates");
+    for index in 0..=MAX_PARQUET_SHARDS {
+        File::create(source.join(format!("{index:05}.parquet"))).expect("empty shard creates");
+    }
+    let catalog_root = temporary.path().join("catalog");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Too many shards",
+            "path": catalog_root,
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains(&MAX_PARQUET_SHARDS.to_string())));
+    assert!(
+        !catalog_root.exists(),
+        "the shard limit must be checked before catalog persistence"
+    );
+}
+
+#[tokio::test]
+async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 50_000);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Shutdown restart",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+
+    let mut running = None;
+    for _ in 0..500 {
+        let (_, status_body) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "running"
+            && status_body["processing"]["processedCount"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        {
+            running = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    running.expect("scan reaches a durable running checkpoint");
+
+    let shutdown = state
+        .catalog_scan_supervisor
+        .shutdown(Duration::from_secs(2))
+        .await;
+    assert_eq!(shutdown.requested, 1);
+    assert!(!shutdown.timed_out, "{shutdown:?}");
+    assert_eq!(state.catalog_scan_supervisor.active_count().await, 0);
+
+    let (_, interrupted) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(interrupted["processing"]["state"], "failed");
+    assert!(interrupted["processing"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("shutdown")));
+    let checkpoint_count = interrupted["processing"]["processedCount"]
+        .as_u64()
+        .expect("processed count");
+    assert!(checkpoint_count > 0 && checkpoint_count < 50_000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (_, stable) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        stable["processing"]["processedCount"].as_u64(),
+        Some(checkpoint_count),
+        "no catalog task may continue after supervisor shutdown returns"
+    );
+
+    let restarted_app = create_app(settings).expect("restarted app creates");
+    let revision = stable["processingControl"]["revision"]
+        .as_u64()
+        .expect("revision");
+    let (status, resumed) = request(
+        restarted_app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({ "expectedRevision": revision }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let mut completed = None;
+    for _ in 0..2_000 {
+        let (_, status_body) = request(
+            restarted_app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if status_body["processing"]["state"] == "completed" {
+            completed = Some(status_body);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    assert_eq!(
+        completed.expect("restart completes from checkpoint")["counts"]["recordCount"],
+        50_000
     );
 }

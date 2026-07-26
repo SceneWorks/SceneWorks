@@ -27,6 +27,8 @@ const MAX_IMAGE_EDGE: u32 = 16_384;
 const MAX_COLUMN_NAME_CHARS: usize = 256;
 const MAX_FILTER_TERMS: usize = 100;
 const MAX_FILTER_TERM_CHARS: usize = 256;
+pub const MAX_PARQUET_SHARDS: usize = 4_096;
+const MAX_PARQUET_DIRECTORY_ENTRIES: usize = 100_000;
 
 #[derive(Debug)]
 pub enum CatalogParquetScanError {
@@ -37,6 +39,7 @@ pub enum CatalogParquetScanError {
     InvalidSource(String),
     CheckpointMismatch(String),
     Busy(String),
+    Interrupted(String),
 }
 
 impl std::fmt::Display for CatalogParquetScanError {
@@ -46,9 +49,10 @@ impl std::fmt::Display for CatalogParquetScanError {
             Self::Parquet(error) => write!(formatter, "{error}"),
             Self::Catalog(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
-            Self::InvalidSource(detail) | Self::CheckpointMismatch(detail) | Self::Busy(detail) => {
-                formatter.write_str(detail)
-            }
+            Self::InvalidSource(detail)
+            | Self::CheckpointMismatch(detail)
+            | Self::Busy(detail)
+            | Self::Interrupted(detail) => formatter.write_str(detail),
         }
     }
 }
@@ -188,11 +192,37 @@ impl AttachedCatalogParquetScanDriver {
         source: &Path,
         options: &CatalogParquetScanOptions,
     ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
-        let result = scan_parquet_catalog_under_lease(&mut self.catalog, source, options);
-        if result.is_err() {
-            publish_scan_failure(&self.catalog);
+        self.scan_pass_with_cancel(source, options, || false)
+    }
+
+    /// Runs one bounded pass and observes process cancellation at every durable
+    /// batch boundary. The checkpoint is committed before interruption is
+    /// published, so a later public restart resumes without replaying rows.
+    pub fn scan_pass_with_cancel<F>(
+        &mut self,
+        source: &Path,
+        options: &CatalogParquetScanOptions,
+        should_cancel: F,
+    ) -> CatalogParquetScanResult<CatalogParquetScanReport>
+    where
+        F: Fn() -> bool,
+    {
+        let result =
+            scan_parquet_catalog_under_lease(&mut self.catalog, source, options, &should_cancel);
+        if let Err(error) = &result {
+            publish_scan_failure(&self.catalog, error);
         }
         result
+    }
+
+    /// Marks a between-pass cancellation durably before releasing the lease.
+    pub fn publish_interrupted(&self) {
+        publish_scan_failure(
+            &self.catalog,
+            &CatalogParquetScanError::Interrupted(
+                "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
+            ),
+        );
     }
 }
 
@@ -240,18 +270,20 @@ fn scan_parquet_catalog(
         )),
         error => CatalogParquetScanError::Catalog(error),
     })?;
-    let result = scan_parquet_catalog_under_lease(catalog, source, options);
-    if result.is_err() {
-        publish_scan_failure(catalog);
+    let result = scan_parquet_catalog_under_lease(catalog, source, options, &|| false);
+    if let Err(error) = &result {
+        publish_scan_failure(catalog, error);
     }
     result
 }
 
-fn publish_scan_failure(catalog: &Catalog) {
+fn publish_scan_failure(catalog: &Catalog, error: &CatalogParquetScanError) {
     if let Ok(mut progress) = catalog.contract_state().map(|state| state.processing) {
         progress.state = CatalogProcessingState::Failed;
-        progress.message =
-            Some("Parquet scan failed; inspect the worker logs for details".to_owned());
+        progress.message = Some(match error {
+            CatalogParquetScanError::Interrupted(detail) => detail.clone(),
+            _ => "Parquet scan failed; inspect the worker logs for details".to_owned(),
+        });
         progress.updated_at = catalog_timestamp_now();
         let _ = catalog.set_processing_progress(&progress);
     }
@@ -261,6 +293,7 @@ fn scan_parquet_catalog_under_lease(
     catalog: &mut Catalog,
     source: &Path,
     options: &CatalogParquetScanOptions,
+    should_cancel: &dyn Fn() -> bool,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
     validate_options(options)?;
     let shards = parquet_shards(source)?;
@@ -299,6 +332,11 @@ fn scan_parquet_catalog_under_lease(
         CatalogProcessingState::Running,
         Some("Scanning Parquet metadata"),
     )?;
+    if should_cancel() {
+        return Err(CatalogParquetScanError::Interrupted(
+            "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
+        ));
+    }
 
     let batch_size = options.batch_size.clamp(1, MAX_BATCH_SIZE);
     let row_budget = options.max_rows.unwrap_or(u64::MAX);
@@ -325,6 +363,12 @@ fn scan_parquet_catalog_under_lease(
             for (row_index, row) in rows.enumerate().skip(row_start as usize) {
                 if rows_this_pass >= row_budget {
                     let paused = flush_batch(catalog, &mut pending, &checkpoint)?;
+                    if should_cancel() && !paused {
+                        return Err(CatalogParquetScanError::Interrupted(
+                            "Catalog scan interrupted by server shutdown; restart it to continue."
+                                .to_owned(),
+                        ));
+                    }
                     if !paused {
                         publish_progress(
                             catalog,
@@ -385,6 +429,12 @@ fn scan_parquet_catalog_under_lease(
                             paused: true,
                         });
                     }
+                    if should_cancel() {
+                        return Err(CatalogParquetScanError::Interrupted(
+                            "Catalog scan interrupted by server shutdown; restart it to continue."
+                                .to_owned(),
+                        ));
+                    }
                     pending_ids.clear();
                 }
             }
@@ -397,6 +447,12 @@ fn scan_parquet_catalog_under_lease(
                     paused: true,
                 });
             }
+            if should_cancel() {
+                return Err(CatalogParquetScanError::Interrupted(
+                    "Catalog scan interrupted by server shutdown; restart it to continue."
+                        .to_owned(),
+                ));
+            }
             pending_ids.clear();
         }
         checkpoint.shard = shard_index + 1;
@@ -408,6 +464,11 @@ fn scan_parquet_catalog_under_lease(
                 source_shards: shards,
                 paused: true,
             });
+        }
+        if should_cancel() {
+            return Err(CatalogParquetScanError::Interrupted(
+                "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
+            ));
         }
         pending_ids.clear();
     }
@@ -455,10 +516,22 @@ pub(crate) fn parquet_shards(source: &Path) -> CatalogParquetScanResult<Vec<Path
         vec![canonical]
     } else if metadata.is_dir() {
         let mut discovered = Vec::new();
-        for entry in std::fs::read_dir(&canonical)? {
+        for (entry_index, entry) in std::fs::read_dir(&canonical)?.enumerate() {
+            if entry_index >= MAX_PARQUET_DIRECTORY_ENTRIES {
+                return Err(CatalogParquetScanError::InvalidSource(format!(
+                    "Parquet source directory exceeds the {MAX_PARQUET_DIRECTORY_ENTRIES}-entry \
+                     validation limit; split it into smaller source directories."
+                )));
+            }
             let path = entry?.path();
             if path.is_file() && has_parquet_extension(&path) {
                 discovered.push(std::fs::canonicalize(path)?);
+                if discovered.len() > MAX_PARQUET_SHARDS {
+                    return Err(CatalogParquetScanError::InvalidSource(format!(
+                        "Parquet source contains more than {MAX_PARQUET_SHARDS} shards; combine \
+                         shards or split them across catalogs."
+                    )));
+                }
             }
         }
         discovered

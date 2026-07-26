@@ -169,7 +169,7 @@ pub(crate) async fn create_catalog(
     ApiJson(request): ApiJson<CreateCatalogRequest>,
 ) -> Result<(StatusCode, Json<CatalogResponse>), ApiError> {
     require_absolute_catalog_path(&request.path)?;
-    validated_scan_plan(request.source_config.as_ref())?;
+    validated_scan_plan(&state, request.source_config.as_ref()).await?;
     let config_dir = state.settings.config_dir.clone();
     let scheduling_config_dir = config_dir.clone();
     let (response, scan_plan) = catalog_call(move || {
@@ -197,7 +197,8 @@ pub(crate) async fn create_catalog(
             scheduling_config_dir,
             response.id.clone(),
             scan_plan,
-        );
+        )
+        .await;
     }
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -363,7 +364,7 @@ async fn request_processing_state(
                 .map(|state| state.source_config)
         })
         .await?;
-        validated_scan_plan(source_config.as_ref())?
+        validated_scan_plan(&state, source_config.as_ref()).await?
     } else {
         None
     };
@@ -399,7 +400,8 @@ async fn request_processing_state(
             scheduling_config_dir,
             response.id.clone(),
             scan_plan,
-        );
+        )
+        .await;
     }
     Ok(Json(response))
 }
@@ -453,7 +455,8 @@ fn catalog_response(
     })
 }
 
-fn validated_scan_plan(
+async fn validated_scan_plan(
+    _state: &AppState,
     source_config: Option<&CatalogSourceConfig>,
 ) -> Result<Option<CatalogScanPlan>, ApiError> {
     if source_config.is_some_and(|source| source.options.get("maxRows").is_some()) {
@@ -462,9 +465,25 @@ fn validated_scan_plan(
         ));
     }
     let plan = scan_plan(source_config).map_err(actionable_scan_plan_error)?;
-    if let Some(plan) = &plan {
-        validate_catalog_parquet_scan_plan(&plan.source, &plan.options)
-            .map_err(actionable_scanner_validation_error)?;
+    if let Some(validation_plan) = plan.clone() {
+        #[cfg(test)]
+        let preflight_delay = _state.catalog_scan_preflight_delay_ms_once.clone();
+        #[cfg(test)]
+        let preflight_started = _state.catalog_scan_preflight_started.clone();
+        let validation = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            {
+                let delay = preflight_delay.swap(0, std::sync::atomic::Ordering::SeqCst);
+                if delay > 0 {
+                    preflight_started.notify_waiters();
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+            validate_catalog_parquet_scan_plan(&validation_plan.source, &validation_plan.options)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Catalog preflight task failed: {error}")))?;
+        validation.map_err(actionable_scanner_validation_error)?;
     }
     Ok(plan)
 }
@@ -515,110 +534,143 @@ fn scan_plan(
     }))
 }
 
-/// Starts an idempotent bounded scanner loop without retaining AppState.
+/// Starts an idempotent bounded scanner loop owned by AppState.
 ///
-/// Every pass takes the catalog's cross-process lease. Concurrent create/resume
-/// requests therefore collapse naturally: one task processes and the others
-/// observe `Busy` and exit. The task owns only registry config, an attached
-/// catalog id, and the source path already persisted in that catalog. Each
-/// blocking call has a finite row budget so shutdown waits for at most one
-/// bounded pass; the async driver is cancelled with its runtime.
-fn schedule_catalog_scan(
-    _state: &AppState,
+/// The supervisor uses the catalog id as a single-flight key, requests
+/// cooperative cancellation on shutdown, and drains the task before server
+/// teardown returns.
+async fn schedule_catalog_scan(
+    state: &AppState,
     config_dir: PathBuf,
     catalog_id: String,
     mut plan: CatalogScanPlan,
 ) {
     plan.options.max_rows = Some(SCHEDULED_SCAN_PASS_ROWS);
     #[cfg(test)]
-    let before_start = _state.catalog_scan_before_driver_start_once.clone();
+    let before_start = state.catalog_scan_before_driver_start_once.clone();
     #[cfg(test)]
-    let stop_after_pass = _state.catalog_scan_stop_after_pass_once.clone();
-    tokio::spawn(async move {
-        #[cfg(test)]
-        let start_barrier = { before_start.lock().take() };
-        #[cfg(test)]
-        if let Some(barrier) = start_barrier {
-            barrier.wait().await;
-        }
-        let mut start_attempts = 0_u8;
-        let mut driver = loop {
-            let pass_config_dir = config_dir.clone();
-            let pass_catalog_id = catalog_id.clone();
-            let start = tokio::task::spawn_blocking(move || {
-                AttachedCatalogParquetScanDriver::try_start(
-                    &CatalogRegistry::new(pass_config_dir),
-                    &pass_catalog_id,
-                )
-            })
-            .await;
-            match start {
-                Ok(Ok(driver)) => break driver,
-                Ok(Err(CatalogParquetScanError::Busy(_))) if start_attempts < 50 => {
-                    start_attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                Ok(Err(CatalogParquetScanError::Busy(_))) => return,
-                Ok(Err(error)) => {
-                    tracing::error!(
-                        event = "catalog_parquet_scan_start_failed",
-                        catalog_id,
-                        error = %error,
-                        "catalog Parquet scanner could not start"
-                    );
-                    return;
-                }
-                Err(error) => {
-                    tracing::error!(
-                        event = "catalog_parquet_scan_task_failed",
-                        catalog_id,
-                        error = %error,
-                        "catalog Parquet scanner start task stopped"
-                    );
-                    return;
+    let stop_after_pass = state.catalog_scan_stop_after_pass_once.clone();
+    let log_catalog_id = catalog_id.clone();
+    let spawned = state
+        .catalog_scan_supervisor
+        .spawn(catalog_id.clone(), move |cancellation| async move {
+            #[cfg(test)]
+            let start_barrier = { before_start.lock().take() };
+            #[cfg(test)]
+            if let Some(barrier) = start_barrier {
+                tokio::select! {
+                    _ = barrier.wait() => {}
+                    _ = cancellation.cancelled() => return,
                 }
             }
-        };
-        loop {
-            let pass_source = plan.source.clone();
-            let pass_options = plan.options.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let result = driver.scan_pass(&pass_source, &pass_options);
-                (driver, result)
-            })
-            .await;
-            match result {
-                Err(error) => {
-                    tracing::error!(
-                        event = "catalog_parquet_scan_task_failed",
-                        catalog_id,
-                        error = %error,
-                        "catalog Parquet scanner task stopped"
-                    );
-                    break;
+            let mut start_attempts = 0_u8;
+            let mut driver = loop {
+                if cancellation.is_cancelled() {
+                    return;
                 }
-                Ok((next_driver, Ok(report))) => {
-                    driver = next_driver;
-                    if report.paused || report.checkpoint.complete {
+                let pass_config_dir = config_dir.clone();
+                let pass_catalog_id = catalog_id.clone();
+                let start = tokio::task::spawn_blocking(move || {
+                    AttachedCatalogParquetScanDriver::try_start(
+                        &CatalogRegistry::new(pass_config_dir),
+                        &pass_catalog_id,
+                    )
+                })
+                .await;
+                match start {
+                    Ok(Ok(driver)) => break driver,
+                    Ok(Err(CatalogParquetScanError::Busy(_))) if start_attempts < 50 => {
+                        start_attempts += 1;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                            _ = cancellation.cancelled() => return,
+                        }
+                    }
+                    Ok(Err(CatalogParquetScanError::Busy(_))) => return,
+                    Ok(Err(error)) => {
+                        tracing::error!(
+                            event = "catalog_parquet_scan_start_failed",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner could not start"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            event = "catalog_parquet_scan_task_failed",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner start task stopped"
+                        );
+                        return;
+                    }
+                }
+            };
+            loop {
+                let pass_source = plan.source.clone();
+                let pass_options = plan.options.clone();
+                let pass_cancellation = cancellation.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
+                        pass_cancellation.is_cancelled()
+                    });
+                    (driver, result)
+                })
+                .await;
+                match result {
+                    Err(error) => {
+                        tracing::error!(
+                            event = "catalog_parquet_scan_task_failed",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner task stopped"
+                        );
                         break;
                     }
-                    #[cfg(test)]
-                    if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    Ok((next_driver, Ok(report))) => {
+                        driver = next_driver;
+                        if report.paused || report.checkpoint.complete {
+                            break;
+                        }
+                        #[cfg(test)]
+                        if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        if cancellation.is_cancelled() {
+                            driver.publish_interrupted();
+                            break;
+                        }
+                    }
+                    Ok((_next_driver, Err(CatalogParquetScanError::Interrupted(error)))) => {
+                        tracing::info!(
+                            event = "catalog_parquet_scan_interrupted",
+                            catalog_id,
+                            error,
+                            "catalog Parquet scanner stopped for server shutdown"
+                        );
                         break;
                     }
-                }
-                Ok((_next_driver, Err(error))) => {
-                    tracing::error!(
-                        event = "catalog_parquet_scan_failed",
-                        catalog_id,
-                        error = %error,
-                        "catalog Parquet scanner stopped"
-                    );
-                    break;
+                    Ok((_next_driver, Err(error))) => {
+                        tracing::error!(
+                            event = "catalog_parquet_scan_failed",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner stopped"
+                        );
+                        break;
+                    }
                 }
             }
-        }
-    });
+        })
+        .await;
+    if !spawned {
+        tracing::debug!(
+            event = "catalog_parquet_scan_deduplicated",
+            catalog_id = log_catalog_id,
+            "catalog Parquet scan was already active or the supervisor is shutting down"
+        );
+    }
 }
 
 fn unavailable_catalog_response(attached: AttachedCatalog) -> CatalogResponse {
