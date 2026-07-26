@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "5491c85ecea601bdda58f84787e42c6a7f0fac44",
-  "auditDigest": "6386d52b8a908536c037039646c1475c49445620b6f9507dc18cfc7d89ab77fb",
+  "inferenceRevision": "981c80508103c2af264cab05c149605f60a341d2",
+  "auditDigest": "05fbe33206a33c99675d71a6766757f701788731139405d21a70c15e7e45c42c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "5491c85ecea601bdda58f84787e42c6a7f0fac44",
+    "revision": "981c80508103c2af264cab05c149605f60a341d2",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 540,
-    "populationSha256": "aa939dda8d76b20a379e0f1232eb3b199db18b748e2d800556ee9a80941438d0"
+    "matchedFiles": 547,
+    "populationSha256": "35332318e3e33f9e8c977ff18283e3111ee3cff2bab95f083d5341d0f9494b22"
   },
   "portedSourceAreas": [
     {
@@ -437,6 +437,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-krea-realtime",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-krea-realtime/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest (Krea Realtime 14B is Wan 2.1 T2V 14B weight-for-weight); the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-lens",
