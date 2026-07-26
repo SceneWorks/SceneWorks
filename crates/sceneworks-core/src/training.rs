@@ -1326,7 +1326,23 @@ fn mage_flow_lora_target(
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            "networkTypes": ["lora"],
+            // The Training Studio builds its network-type picker STRAIGHT from this list, so an
+            // entry missing here makes the capability unreachable from the product no matter what
+            // the engine can do. Both non-`lora` entries were exactly that defect:
+            //
+            // - `lokr` (sc-14055): the `mlx-gen-mage` trainer advertises `supports_lokr` and ships a
+            //   real LoKr branch (verified: loss 0.245 → 0.121, velocity shift 0.711), and Mage
+            //   inference installs LoKr through the same strict adapter loader as LoRA
+            //   (`apply_mage_adapters`, stacked + mixed) — so the produced adapter is selectable and
+            //   loadable. Only this list kept it from being offerable.
+            // - `full` (sc-14056): the **full base fine-tune** — the trainer updates every DiT weight
+            //   and writes a fine-tuned checkpoint instead of an adapter. Mage-Flow is the only family
+            //   with that path today, so this is the only target that advertises it. A full run is
+            //   additionally admission-gated at submit by the unified-memory pre-flight
+            //   (`full_finetune_memory_error`), which refuses machines that cannot hold it.
+            //
+            // Order is adapter kinds first, then the non-adapter path.
+            "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"]
         })),

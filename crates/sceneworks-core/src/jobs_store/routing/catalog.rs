@@ -1162,6 +1162,14 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
     // conditioner). It is native-only, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
     "anima_lora",
+    // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune): the native
+    // `mlx-gen-mage` trainer. It is native-only, so it is ALSO in `MLX_ONLY_TRAINING_KERNELS` — and
+    // that pairing is exactly why this entry is load-bearing: `MLX_ONLY_TRAINING_KERNELS` makes every
+    // generic/candle worker refuse the job, so until the kernel appears HERE no worker claims it at
+    // all and a Mage training job queues forever (sc-14056). The kernel serves both the LoRA path and
+    // the `networkType: "full"` base fine-tune; the full path is additionally admission-gated by the
+    // worker's unified-memory pre-flight.
+    "mage_flow_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -1195,9 +1203,12 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while a generic worker is refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no candle trainer yet (the off-Mac/candle SD3.5 trainer is epic
-/// 7982), so — like LTX — only an mlx worker runs it today. `mage_flow_lora` is registered as a
-/// training-target contract in sc-14054 ahead of its native trainer (sc-14055); keeping it here makes
-/// every worker refuse it until that worker explicitly adds the kernel to its routed set.
+/// 7982), so — like LTX — only an mlx worker runs it today. `mage_flow_lora` was registered as a
+/// training-target contract in sc-14054 ahead of its native trainer; the `mlx-gen-mage` trainer
+/// landed in sc-14055 (LoRA/LoKr) and sc-14056 (full base fine-tune), and sc-14056 added the kernel
+/// to [`MLX_ROUTED_TRAINING_KERNELS`] so an mlx worker finally claims it. It stays here because there
+/// is no candle Mage trainer — a generic/candle worker must leave the job queued rather than claim it
+/// and fail with "no training kernel".
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "ltx_mlx_lora",
     "krea_lora",
@@ -1475,6 +1486,10 @@ mod tests {
         "wan_moe_lora",
         "ltx_mlx_lora",
         "anima_lora",
+        // sc-14056: Mage-Flow's native mlx trainer is routed to the mlx worker. Before this, the
+        // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
+        // and Mage training jobs queued forever.
+        "mage_flow_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[

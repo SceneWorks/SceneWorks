@@ -2163,6 +2163,8 @@ mod tests {
             supports_lora: true,
             supports_lokr: true,
             supports_control: false,
+            // sc-14056: adapter-only stub — the full base fine-tune path is Mage/mlx-only.
+            supports_full_finetune: false,
         }
     }
     fn stub_candle_trainer_load(
