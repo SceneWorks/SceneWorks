@@ -909,7 +909,9 @@ pub(crate) async fn begin_training_cancel(
 ))]
 struct SamplePersister {
     cfg: TrainingConfig,
-    output_dir: Option<PathBuf>,
+    /// Directory holding this run's `step-NNNNNN/` preview folders — NOT always under
+    /// `output_dir`; see [`resolve_sample_root`].
+    sample_root: Option<PathBuf>,
     project_root: Option<PathBuf>,
     stem: String,
     all_samples: Vec<Value>,
@@ -957,9 +959,14 @@ impl SamplePersister {
             .and_then(|s| s.to_str())
             .unwrap_or("lora")
             .to_owned();
+        let sample_root = resolve_sample_root(
+            output_dir.as_deref(),
+            project_root.as_deref(),
+            &plan.output.lora_id,
+        );
         Self {
             cfg,
-            output_dir,
+            sample_root,
             project_root,
             stem,
             all_samples: Vec::new(),
@@ -985,14 +992,14 @@ impl SamplePersister {
         prompt: String,
         image: gen_core::Image,
     ) -> WorkerResult<()> {
-        let output_dir = self.output_dir.clone();
+        let sample_root = self.sample_root.clone();
         let project_root = self.project_root.clone();
         let stem = self.stem.clone();
         let sample_steps = self.cfg.sample_steps;
         let sample_guidance_scale = self.cfg.sample_guidance_scale;
         let persisted = tokio::task::spawn_blocking(move || {
             write_training_sample(
-                output_dir.as_deref(),
+                sample_root.as_deref(),
                 project_root.as_deref(),
                 &stem,
                 step,
@@ -1044,6 +1051,72 @@ impl SamplePersister {
             ),
         }
         Ok(())
+    }
+}
+
+/// Pick the directory that holds a run's `step-NNNNNN/` preview folders.
+///
+/// A preview is only *renderable* when its record carries a project-root-relative `relativePath`:
+/// the Training Studio's `trainingSampleToAsset` drops any record that has only an absolute `path`,
+/// and the API serves media exclusively from `GET /api/v1/projects/:project_id/files/*relative_path`.
+/// So the sample root has to sit inside the owning project's tree or the preview is invisible.
+///
+/// Project-scope runs — the default — already satisfy that: `output_dir` is
+/// `<project>/loras/<lora_id>`, so previews go beside the adapter in `<output_dir>/samples/` and
+/// strip cleanly. A GLOBAL-scope run (`advanced.outputScope: "global"`, offered on every training
+/// target in `sceneworks-core::training`) puts `output_dir` at `<data>/loras/<lora_id>` — OUTSIDE the
+/// project tree — so `strip_prefix(project_root)` in [`write_training_sample`] always failed, every
+/// record lost its `relativePath`, and the Studio rendered nothing while the PNGs piled up on disk.
+/// The sc-9812 / F-075 canonicalization fixed a `/var` vs `/private/var` mismatch on this same
+/// `strip_prefix`, but only for output dirs already nested under the project; global scope was never
+/// covered, and the unit test's fixture nests the output dir, so it stayed green over the hole.
+///
+/// Previews are ephemeral render artifacts, not the trained adapter, so a global-scope run keeps its
+/// adapter in `<data>/loras/<lora_id>` and parks its previews under the owning project instead:
+/// `<project>/training/samples/<lora_id>/`. `delete_lora` sweeps that directory when the LoRA is
+/// deleted (see `lora_preview_sample_paths` in apps/rust-api/src/loras.rs) so the relocation doesn't
+/// orphan them.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_sample_root(
+    output_dir: Option<&Path>,
+    project_root: Option<&Path>,
+    lora_id: &str,
+) -> Option<PathBuf> {
+    let output_dir = output_dir?;
+    let beside_adapter = output_dir.join("samples");
+    // No owning project (or the store lookup failed) — nothing can serve the previews from
+    // anywhere, so keep them beside the adapter rather than inventing a home for them.
+    let Some(project_root) = project_root else {
+        return Some(beside_adapter);
+    };
+    if output_dir.starts_with(project_root) {
+        return Some(beside_adapter);
+    }
+    // `lora_id` comes off the job payload and is about to be joined as a directory component, so
+    // confine it to a single plain component with the same primitive `output.file_name` goes
+    // through in `validate_training_plan` — a forged `../…` must not walk previews out of the
+    // project tree. A rejected id falls back to the (unservable) adapter-side directory: previews
+    // won't render, but nothing escapes and training is unaffected.
+    match safe_weight_filename(lora_id, "Training loraId") {
+        Ok(component) => Some(
+            project_root
+                .join("training")
+                .join("samples")
+                .join(component),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                event = "training_preview_sample_root_rejected",
+                lora_id,
+                error = %error,
+                "training loraId is not a plain path component — previews stay beside the adapter \
+                 and will not render in the Training Studio"
+            );
+            Some(beside_adapter)
+        }
     }
 }
 
@@ -1373,17 +1446,20 @@ fn training_samples_result(
 
 /// Persist one preview sample (sc-5637) as a PNG project asset and return the record the Training
 /// Studio renders. The on-disk layout mirrors the Python trainer:
-/// `<output_dir>/samples/step-NNNNNN/<stem>-stepNNNNNN-<index>.png`. `relativePath` is project-root-
-/// relative (the UI resolves it as `/api/v1/projects/<id>/files/<relativePath>`); it is omitted when
-/// the project root is unknown (the absolute `path` is still recorded for debugging). PNG encoding +
-/// the atomic temp-then-rename mirror `image_jobs::write_image_asset`.
+/// `<sample_root>/step-NNNNNN/<stem>-stepNNNNNN-<index>.png`, where `sample_root` is
+/// [`resolve_sample_root`]'s pick — `<output_dir>/samples` for a project-scope run, or
+/// `<project>/training/samples/<lora_id>` for a global-scope one whose output dir sits outside the
+/// project tree. `relativePath` is project-root-relative (the UI resolves it as
+/// `/api/v1/projects/<id>/files/<relativePath>`); it is omitted when the project root is unknown (the
+/// absolute `path` is still recorded for debugging). PNG encoding + the atomic temp-then-rename
+/// mirror `image_jobs::write_image_asset`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[allow(clippy::too_many_arguments)]
 fn write_training_sample(
-    output_dir: Option<&Path>,
+    sample_root: Option<&Path>,
     project_root: Option<&Path>,
     stem: &str,
     step: u32,
@@ -1393,10 +1469,10 @@ fn write_training_sample(
     sample_steps: u32,
     sample_guidance_scale: f32,
 ) -> WorkerResult<JsonObject> {
-    let output_dir = output_dir.ok_or_else(|| {
-        WorkerError::Engine("training preview: output directory is unavailable".to_owned())
+    let sample_root = sample_root.ok_or_else(|| {
+        WorkerError::Engine("training preview: sample directory is unavailable".to_owned())
     })?;
-    let dir = output_dir.join("samples").join(format!("step-{step:06}"));
+    let dir = sample_root.join(format!("step-{step:06}"));
     std::fs::create_dir_all(&dir)?;
     let filename = format!("{stem}-step{step:06}-{index}.png");
     let path = dir.join(&filename);
@@ -2297,7 +2373,7 @@ mod tests {
     }
 
     /// sc-5637 — `write_training_sample` must persist the PNG under
-    /// `<output_dir>/samples/step-NNNNNN/<stem>-stepNNNNNN-<index>.png` and return a record carrying
+    /// `<sample_root>/step-NNNNNN/<stem>-stepNNNNNN-<index>.png` and return a record carrying
     /// the exact shape the Training Studio reads (`step`/`prompt`/`relativePath`/`numInferenceSteps`/
     /// `guidanceScale`/`sampleSource`), with `relativePath` resolved against the project root. Validates
     /// the worker persistence deterministically (no model weights), so the chain engine→worker→UI shape
@@ -2324,8 +2400,9 @@ mod tests {
                 .take(4 * 2 * 3)
                 .collect(),
         };
+        let sample_root = output_dir.join("samples");
         let record = write_training_sample(
-            Some(output_dir.as_path()),
+            Some(sample_root.as_path()),
             Some(project_root.path()),
             "mychar",
             250,
@@ -2337,8 +2414,7 @@ mod tests {
         )
         .expect("sample persists");
 
-        let png = output_dir
-            .join("samples")
+        let png = sample_root
             .join("step-000250")
             .join("mychar-step000250-2.png");
         assert!(png.exists(), "preview PNG written to {}", png.display());
@@ -2441,10 +2517,10 @@ mod tests {
             persister.cfg.sample_steps, finalized_config.sample_steps,
             "preview persistence uses the trainer's finalized config"
         );
-        let resolved_output = persister
-            .output_dir
+        let resolved_sample_root = persister
+            .sample_root
             .clone()
-            .expect("output dir resolves under the projects tree");
+            .expect("sample root resolves under the projects tree");
         let resolved_project_root = persister
             .project_root
             .clone()
@@ -2460,7 +2536,7 @@ mod tests {
                 .collect(),
         };
         let record = write_training_sample(
-            Some(resolved_output.as_path()),
+            Some(resolved_sample_root.as_path()),
             Some(resolved_project_root.as_path()),
             &persister.stem,
             250,
@@ -2486,6 +2562,168 @@ mod tests {
         assert_eq!(
             relative, "loras/lora-1/samples/step-000250/mychar-step000250-2.png",
             "relativePath must be project-root-relative"
+        );
+    }
+
+    /// The global-scope hole the two tests above cannot catch: both nest `output_dir` INSIDE the
+    /// project root, so `strip_prefix(project_root)` succeeds no matter what `resolve_sample_root`
+    /// does. A run with `advanced.outputScope: "global"` — offered on every training target — puts
+    /// `output_dir` at `<data>/loras/<lora_id>`, outside the project tree entirely. Before the fix
+    /// the strip failed, every record carried only an absolute `path`, `trainingSampleToAsset`
+    /// returned `null` for all of them, and the Training Studio rendered nothing while the PNGs
+    /// accumulated on disk. Drives the REAL provenance (`SamplePersister::new` against a
+    /// store-provisioned project) and asserts previews land under the owning project with a
+    /// populated, correct `relativePath`.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn sample_persister_parks_global_scope_previews_under_the_owning_project() {
+        let data_dir = tempfile::tempdir().expect("data dir tempdir");
+        let settings = test_settings(data_dir.path());
+        let store = ProjectStore::new(settings.data_dir.to_path_buf(), "test");
+        let project = store
+            .create_project("Char Studio")
+            .expect("project provisions");
+
+        // `plan_json` already points `output.outputDir` at `<data>/loras/<lora_id>` — the
+        // global-scope layout, outside the project tree.
+        let mut plan_value = plan_json(
+            data_dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &["x.png"],
+        );
+        plan_value["output"]["fileName"] = json!("mychar.safetensors");
+        let plan = parse(plan_value);
+        assert!(
+            !PathBuf::from(&plan.output.output_dir).starts_with(&project.path),
+            "fixture must model GLOBAL scope: output dir outside the project tree"
+        );
+
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-1",
+            "type": "train_lora",
+            "status": "running",
+            "projectId": project.id,
+            "projectName": "Char Studio",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "queued",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-26T00:00:00Z",
+            "updatedAt": "2026-07-26T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("job snapshot deserializes");
+
+        let finalized_config = finalize_training_config(map_training_config(&plan.config), &plan);
+        let persister = SamplePersister::new(&settings, &job, &plan, finalized_config);
+        let sample_root = persister
+            .sample_root
+            .clone()
+            .expect("sample root resolves for a global-scope run");
+        let project_root = persister
+            .project_root
+            .clone()
+            .expect("project root resolves from the store");
+        assert!(
+            sample_root.starts_with(&project_root),
+            "global-scope previews must be parked under the owning project, got {}",
+            sample_root.display()
+        );
+
+        let image = gen_core::Image {
+            width: 4,
+            height: 2,
+            pixels: vec![255u8, 0, 0]
+                .into_iter()
+                .cycle()
+                .take(4 * 2 * 3)
+                .collect(),
+        };
+        let record = write_training_sample(
+            Some(sample_root.as_path()),
+            Some(project_root.as_path()),
+            &persister.stem,
+            250,
+            2,
+            "mychar, studio portrait",
+            image,
+            8,
+            1.5,
+        )
+        .expect("sample persists");
+
+        let relative = record
+            .get("relativePath")
+            .and_then(|value| value.as_str())
+            .expect("relativePath is populated for a global-scope sample");
+        assert_eq!(
+            relative, "training/samples/lora-1/step-000250/mychar-step000250-2.png",
+            "relativePath must be project-root-relative so the Studio can resolve it"
+        );
+        // The record must point at a PNG that actually exists at the relative location the UI
+        // will request — not just carry a well-formed string.
+        let served = project_root.join(relative);
+        assert!(
+            served.exists(),
+            "the served path must resolve to the written PNG: {}",
+            served.display()
+        );
+    }
+
+    /// A forged `output.loraId` must not walk previews out of the project tree. `lora_id` is joined
+    /// as a directory component by `resolve_sample_root`, so a `../…` id is rejected and the run
+    /// falls back to the (unservable) adapter-side directory rather than escaping.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn resolve_sample_root_rejects_traversing_lora_id() {
+        let project_root = PathBuf::from("/data/projects/char.sceneworks");
+        let output_dir = PathBuf::from("/data/loras/lora-1");
+
+        assert_eq!(
+            resolve_sample_root(Some(&output_dir), Some(&project_root), "lora-1"),
+            Some(project_root.join("training").join("samples").join("lora-1")),
+            "a plain id parks previews under the project"
+        );
+        for forged in ["../../escape", "/etc", "..", "a/b"] {
+            assert_eq!(
+                resolve_sample_root(Some(&output_dir), Some(&project_root), forged),
+                Some(output_dir.join("samples")),
+                "forged loraId {forged:?} must fall back beside the adapter, never escape"
+            );
+        }
+        // No owning project: previews stay beside the adapter (nothing can serve them anyway).
+        assert_eq!(
+            resolve_sample_root(Some(&output_dir), None, "lora-1"),
+            Some(output_dir.join("samples"))
+        );
+        // Project-scope runs keep the pre-existing layout, byte for byte.
+        let nested = project_root.join("loras").join("lora-1");
+        assert_eq!(
+            resolve_sample_root(Some(&nested), Some(&project_root), "lora-1"),
+            Some(nested.join("samples")),
+            "project-scope layout must be unchanged"
         );
     }
 
@@ -3142,7 +3380,10 @@ mod tests {
                 } = progress
                 {
                     write_training_sample(
-                        Some(&output_dir),
+                        // This smoke drives the engine directly, with no owning project, so it
+                        // uses the adapter-side sample root `resolve_sample_root` picks for a
+                        // project-less run.
+                        Some(&output_dir.join("samples")),
                         None,
                         stem,
                         step,

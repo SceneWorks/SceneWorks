@@ -3393,6 +3393,111 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     assert_eq!(loras.as_array().expect("loras array").len(), 0);
 }
 
+/// Deleting a global-scope trained LoRA must also sweep the preview-sample directory the training
+/// run parked under the owning project (`<project>/training/samples/<lora_id>`). Those previews live
+/// outside `<data>/loras/<lora_id>` — they have to, or the Training Studio cannot render them — and
+/// nothing in the global manifest entry records which project ran the training, so without the sweep
+/// they would survive the LoRA forever. Also pins the confinement: only the deleted LoRA's own
+/// directory goes, never a sibling's.
+#[tokio::test]
+async fn deleting_a_global_lora_sweeps_its_project_parked_preview_samples() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let lora_dir = temp_dir.path().join("data/loras/lora_trained");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    std::fs::write(lora_dir.join("adapter.safetensors"), b"lora").expect("lora writes");
+
+    // Global-scope run: adapter in `<data>/loras/<lora_id>`, previews under the owning project.
+    let previews = temp_dir
+        .path()
+        .join("data/projects/char.sceneworks/training/samples/lora_trained/step-000250");
+    std::fs::create_dir_all(&previews).expect("preview dir creates");
+    std::fs::write(previews.join("mychar-step000250-1.png"), b"png").expect("preview writes");
+    // A different LoRA's previews in the same project must be untouched.
+    let sibling = temp_dir
+        .path()
+        .join("data/projects/char.sceneworks/training/samples/lora_other/step-000250");
+    std::fs::create_dir_all(&sibling).expect("sibling dir creates");
+    std::fs::write(sibling.join("other-step000250-1.png"), b"png").expect("sibling writes");
+
+    for (name, body) in [
+        (
+            "builtin.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        (
+            "user.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        (
+            "builtin.loras.jsonc",
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        ),
+        (
+            "builtin.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+        (
+            "user.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+    ] {
+        std::fs::write(config_dir.join(name), body).expect("manifest writes");
+    }
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "loras": [{{
+                    "id": "lora_trained",
+                    "name": "Trained",
+                    "family": "z-image",
+                    "source": {{ "provider": "local", "path": "{}" }}
+                  }}]
+                }}"#,
+            lora_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .expect("user loras writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    crate::test_reset_catalog_build_counters();
+    // permanent=true keeps this deterministic — the default move-to-trash needs a host recycle bin.
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/loras/lora_trained?scope=global&permanent=true",
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(!lora_dir.exists(), "the adapter directory must be removed");
+    assert!(
+        !previews.parent().expect("samples parent").exists(),
+        "the project-parked preview directory must be swept"
+    );
+    assert!(
+        sibling.exists(),
+        "another LoRA's previews in the same project must survive"
+    );
+    let removed = deleted["removedPaths"]
+        .as_array()
+        .expect("removedPaths array")
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|path| path.contains("training") && path.contains("lora_trained"));
+    assert!(
+        removed,
+        "the swept preview directory must be reported in removedPaths, got {:?}",
+        deleted["removedPaths"]
+    );
+}
+
 #[test]
 fn model_download_size_helpers_match_contract_shapes() {
     let siblings = json!([
