@@ -30,6 +30,16 @@ vi.mock("./screens/VideoStudio.jsx", () => ({
 
 import { App } from "./main.jsx";
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, reject, resolve };
+}
+
 describe("project asset render boundary", () => {
   let container;
   let root;
@@ -152,5 +162,63 @@ describe("project asset render boundary", () => {
         new URL(url).pathname.endsWith("/projects/project-b/assets"),
       ),
     ).toBe(false);
+  });
+
+  it("aborts project A and ignores its non-abort-aware failure after switching to B", async () => {
+    const projectAAssets = deferred();
+    const baseFetch = global.fetch;
+    let projectASignal;
+    global.fetch = vi.fn((url, options) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/projects/project-a/assets")) {
+        projectASignal = options?.signal;
+        return projectAAssets.promise;
+      }
+      if (path.endsWith("/projects/project-b/assets")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "asset-b",
+              projectId: "project-b",
+              type: "image",
+              origin: "image_studio",
+              displayName: "Asset B",
+              status: {},
+            },
+          ]),
+        );
+      }
+      return baseFetch(url, options);
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    expect(projectASignal?.aborted).toBe(false);
+
+    await act(async () => {
+      document.body.querySelector(".project-pill")?.click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll(".project-menu-item")]
+        .find((item) => item.textContent.includes("Project B"))
+        ?.click();
+    });
+    await settle();
+
+    expect(projectASignal?.aborted).toBe(true);
+    expect(container.textContent).toContain("Asset B");
+
+    // Simulate a transport that ignores AbortSignal and reports a late ordinary
+    // failure. The old request must not replace B's settled state or error UI.
+    await act(async () => {
+      projectAAssets.reject(new Error("stale A failure"));
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Asset B");
+    expect(container.textContent).not.toContain("stale A failure");
   });
 });
