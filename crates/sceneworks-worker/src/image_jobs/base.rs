@@ -3284,6 +3284,9 @@ fn generate_one(
     // ignores the field regardless). The caller resolves it from the manifest `textStyleGain` slider +
     // `advanced` only when the model declares the control, so a non-Krea render passes `None`.
     text_style_gain: Option<f32>,
+    // Quality-preserving, request-scoped memory adaptations selected by the candle Krea Turbo fit
+    // ladder. `None` is the historical path for every other provider and unconstrained Krea jobs.
+    memory: Option<gen_core::GenerationMemory>,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -3326,6 +3329,7 @@ fn generate_one(
         guidance_method: guidance_method.map(str::to_owned),
         use_pid,
         text_style_gain,
+        memory,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -4666,6 +4670,7 @@ async fn generate_stream(
                         guidance_method.as_deref(),
                         use_pid,
                         text_style_gain,
+                        None,
                         &enhance,
                         &cancel,
                         on_progress,
@@ -4856,6 +4861,132 @@ fn candle_tier_fit(
             needed_gb,
             available_gb,
         },
+    }
+}
+
+/// Whether a candle job may use Krea Turbo's request-scoped, quality-preserving memory ladder.
+/// Keep every exclusion explicit: these surfaces have distinct component graphs or denoise contracts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_turbo_memory_route(
+    engine_id: &str,
+    has_convrot: bool,
+    has_edit_reference: bool,
+    has_img2img_reference: bool,
+    has_edit_references: bool,
+    has_edit_mask: bool,
+    use_pid: bool,
+) -> bool {
+    engine_id == "krea_2_turbo"
+        && !has_convrot
+        && !has_edit_reference
+        && !has_img2img_reference
+        && !has_edit_references
+        && !has_edit_mask
+        && !use_pid
+}
+
+/// The constrained Krea ladder preserves the precision selected for the request. Its memory rungs
+/// change residency only; they must never make the generic capability clamp silently cross from Q8
+/// to Q4 before the ladder can return its measured reject/lower-resolution result.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn capability_downtier_floor<'a>(
+    krea_turbo_ladder: bool,
+    resolved_tier: &'a str,
+    manifest_floor: Option<&'a str>,
+) -> Option<&'a str> {
+    if krea_turbo_ladder {
+        Some(resolved_tier)
+    } else {
+        manifest_floor
+    }
+}
+
+#[cfg(all(
+    test,
+    not(target_os = "macos"),
+    feature = "backend-candle"
+))]
+mod krea_turbo_memory_route_tests {
+    use super::{capability_downtier_floor, krea_turbo_memory_route};
+
+    #[test]
+    fn only_plain_turbo_text_to_image_uses_the_memory_ladder() {
+        assert!(krea_turbo_memory_route(
+            "krea_2_turbo",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+        ));
+        for excluded_surface in 0..6 {
+            let mut flags = [false; 6];
+            flags[excluded_surface] = true;
+            assert!(
+                !krea_turbo_memory_route(
+                    "krea_2_turbo",
+                    flags[0],
+                    flags[1],
+                    flags[2],
+                    flags[3],
+                    flags[4],
+                    flags[5],
+                ),
+                "surface flag {excluded_surface} must retain its established route"
+            );
+        }
+        for engine in ["krea_2_raw", "krea_2_turbo_edit", "krea_2_turbo_control"] {
+            assert!(!krea_turbo_memory_route(
+                engine, false, false, false, false, false, false
+            ));
+        }
+    }
+
+    #[test]
+    fn constrained_q8_reject_never_capability_downtiers_to_q4() {
+        use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
+        use crate::vram_gate::{krea_turbo_fit, KreaTurboFit, VramBudget};
+        use serde_json::Value;
+
+        let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+        let manifest = parsed["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
+            .and_then(Value::as_object)
+            .expect("Krea 2 Turbo manifest entry");
+        let available_gb = 8.95;
+        let budget = Some(VramBudget {
+            free_gb: available_gb,
+            total_gb: available_gb,
+        });
+        let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
+            .expect("Q8 and Q4 have measured ladder curves")
+        {
+            KreaTurboFit::Fits { .. } => TierFit::Fits,
+            KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
+                needed_gb,
+                available_gb,
+            },
+        };
+        assert!(matches!(fit("q8"), TierFit::TooBig { .. }));
+        assert_eq!(fit("q4"), TierFit::Fits);
+
+        let floor = capability_downtier_floor(true, "q8", None).expect("Q8 precision floor");
+        let candidates: Vec<_> = ["q8", "q4"]
+            .into_iter()
+            .filter(|tier| tier_quality_rank(tier) >= tier_quality_rank(floor))
+            .map(|tier| (tier, fit(tier)))
+            .collect();
+        assert!(matches!(
+            choose_downtier("q8", &candidates),
+            DowntierPick::Reject { tier: "q8", .. }
+        ));
     }
 }
 
@@ -5276,6 +5407,20 @@ async fn generate_candle_stream(
     // generic txt2img/img2img reaches this point and uses the same registry-derived signal for both the
     // capability downtier and the resident/sequential decision.
     let sequential_capable = crate::mlx_fit_gate::engine_supports_sequential(engine_id);
+    // SC-15117: the deeper, request-scoped Krea Turbo ladder is intentionally limited to the stock
+    // ordinary txt2img route implemented by candle-gen-krea. Reference/edit/PiD/ConvRot surfaces keep
+    // their established paths. Adapter jobs may use three-stage/tile/chunk but never block streaming,
+    // because streamed blocks cannot carry forward-time additive residuals.
+    let krea_turbo_ladder = krea_turbo_memory_route(
+        engine_id,
+        convrot.is_some(),
+        edit_reference.is_some(),
+        img2img_reference.is_some(),
+        !edit_refs.is_empty(),
+        edit_mask.is_some(),
+        use_pid,
+    );
+    let krea_allow_streamed_blocks = adapter_count == 0;
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
@@ -5297,20 +5442,47 @@ async fn generate_candle_stream(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if convrot.is_none() && !explicit_pick {
-        let floor = min_quality_floor(request);
+        let floor = capability_downtier_floor(
+            krea_turbo_ladder,
+            tier,
+            min_quality_floor(request),
+        );
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
                 .map(|candidate| {
-                    (
-                        candidate,
+                    let fit = if krea_turbo_ladder {
+                        match crate::vram_gate::krea_turbo_fit(
+                            &request.model_manifest_entry,
+                            candidate,
+                            width,
+                            height,
+                            budget,
+                            krea_allow_streamed_blocks,
+                        ) {
+                            Some(crate::vram_gate::KreaTurboFit::Fits { .. }) => TierFit::Fits,
+                            Some(crate::vram_gate::KreaTurboFit::Reject { needed_gb, .. }) => {
+                                TierFit::TooBig {
+                                    needed_gb,
+                                    available_gb: budget.map_or(0.0, |budget| budget.free_gb),
+                                }
+                            }
+                            None => candle_tier_fit(
+                                &request.model_manifest_entry,
+                                candidate,
+                                budget,
+                                sequential_capable,
+                            ),
+                        }
+                    } else {
                         candle_tier_fit(
                             &request.model_manifest_entry,
                             candidate,
                             budget,
                             sequential_capable,
-                        ),
-                    )
+                        )
+                    };
+                    (candidate, fit)
                 })
                 .collect();
         match choose_downtier(tier, &candidates) {
@@ -5343,10 +5515,28 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
+                let resolution_option = if krea_turbo_ladder {
+                    crate::vram_gate::krea_turbo_smaller_fit(
+                            &request.model_manifest_entry,
+                            smallest,
+                            width,
+                            height,
+                            budget,
+                            krea_allow_streamed_blocks,
+                        )
+                    .map(|(smaller_w, smaller_h)| {
+                        format!(
+                            "Lower the output resolution to {smaller_w}x{smaller_h} or below, or "
+                        )
+                    })
+                    .unwrap_or_default()
+                } else {
+                    "Lower the output resolution, or ".to_owned()
+                };
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
-                     ({smallest}) but GPU {gpu} has ~{available} GB available. Lower the output \
-                     resolution or run on a card with more VRAM.",
+                     ({smallest}) but GPU {gpu} has ~{available} GB available. {resolution_option}Run \
+                     on a card with more VRAM.",
                     model = request.model,
                     needed = needed_gb.round() as i64,
                     available = available_gb.round() as i64,
@@ -5360,6 +5550,8 @@ async fn generate_candle_stream(
     // the one being rejected — never the rejected tier, never the picker (hidden when ≤1 tier installed).
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
+    let mut generation_memory: Option<gen_core::GenerationMemory> = None;
+    let mut adapted_peak_gb: Option<f64> = None;
     let use_sequential = {
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
@@ -5369,34 +5561,153 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
-                // Second-stage gate (sc-10856): sequential residency was selected because the resident
-                // peak won't fit. If this tier's MEASURED sequential peak is known and STILL exceeds the
-                // budget, reject before load instead of running into a reactive OOM. Absent the number
-                // (unmeasured tier) keep the best-effort run — the reactive OOM containment backstops it.
+                // The resident peak does not fit. Krea Turbo first evaluates its measured three-stage
+                // ladder, even when the older two-stage sequential estimate would fit, so a 24 GB card
+                // physically drops the DiT before VAE decode. Other models and unmeasured Krea tiers
+                // retain the established sequential-overflow gate below.
                 let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
                     &request.model_manifest_entry,
                     tier,
                 );
-                if let Some(seq_gb) =
-                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
-                {
-                    let installed_smaller: Vec<&'static str> =
-                        installed_tier_keys(request, settings)
-                            .into_iter()
-                            .filter(|candidate| {
-                                tier_quality_rank(candidate) < tier_quality_rank(tier)
-                            })
-                            .collect();
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
-                         component residency (loading one component at a time), but GPU {gpu} has \
-                         ~{available} GB available. {tail}",
-                        model = request.model,
-                        seq = seq_gb.round() as i64,
-                        available = available_gb.round() as i64,
-                        gpu = settings.gpu_id,
-                        tail = vram_reject_tail(&installed_smaller),
-                    )));
+                let krea_selected = if krea_turbo_ladder {
+                    match crate::vram_gate::krea_turbo_fit(
+                        &request.model_manifest_entry,
+                        tier,
+                        width,
+                        height,
+                        budget,
+                        krea_allow_streamed_blocks,
+                    ) {
+                        Some(crate::vram_gate::KreaTurboFit::Fits {
+                            rung,
+                            phases,
+                            needed_gb,
+                        }) => {
+                            generation_memory = Some(match rung {
+                                crate::vram_gate::KreaTurboRung::ThreeStage => {
+                                    gen_core::GenerationMemory::default()
+                                }
+                                crate::vram_gate::KreaTurboRung::TiledVae => {
+                                    gen_core::GenerationMemory {
+                                        tile_vae_decode: true,
+                                        ..Default::default()
+                                    }
+                                }
+                                crate::vram_gate::KreaTurboRung::ChunkedAttention => {
+                                    gen_core::GenerationMemory {
+                                        tile_vae_decode: true,
+                                        chunk_attention: true,
+                                        ..Default::default()
+                                    }
+                                }
+                                crate::vram_gate::KreaTurboRung::StreamedBlocks => {
+                                    gen_core::GenerationMemory {
+                                        tile_vae_decode: true,
+                                        chunk_attention: true,
+                                        stream_transformer_blocks: true,
+                                    }
+                                }
+                            });
+                            // Reclaim accounting records allocations, not the admission threshold.
+                            // `needed_gb` includes the 2 GB safety reserve, which is deliberately never
+                            // allocated and therefore cannot be credited back during a model swap.
+                            adapted_peak_gb = Some(phases.peak_gb());
+                            tracing::info!(
+                                model = %request.model,
+                                tier,
+                                width,
+                                height,
+                                ?rung,
+                                text_peak_gb = phases.text_gb,
+                                denoise_peak_gb = phases.denoise_gb,
+                                decode_peak_gb = phases.decode_gb,
+                                needed_gb,
+                                available_gb,
+                                "Krea Turbo VRAM fit ladder selected the least-cost sufficient rung"
+                            );
+                            true
+                        }
+                        Some(crate::vram_gate::KreaTurboFit::Reject { phases, needed_gb }) => {
+                            let installed_smaller: Vec<&'static str> =
+                                installed_tier_keys(request, settings)
+                                    .into_iter()
+                                    .filter(|candidate| {
+                                        tier_quality_rank(candidate) < tier_quality_rank(tier)
+                                    })
+                                    .collect();
+                            let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit(
+                                &request.model_manifest_entry,
+                                tier,
+                                width,
+                                height,
+                                budget,
+                                krea_allow_streamed_blocks,
+                            );
+                            let mut options = Vec::new();
+                            if let Some((smaller_w, smaller_h)) = lower_resolution {
+                                options.push(format!(
+                                        "lower the output resolution to {smaller_w}x{smaller_h} or below"
+                                    ));
+                            }
+                            if !installed_smaller.is_empty() {
+                                options.push(format!(
+                                    "select a smaller installed tier ({})",
+                                    installed_smaller
+                                        .iter()
+                                        .map(|candidate| candidate.to_uppercase())
+                                        .collect::<Vec<_>>()
+                                        .join(" / ")
+                                ));
+                            }
+                            options.push("run on a GPU with more VRAM".to_owned());
+                            return Err(WorkerError::InvalidPayload(format!(
+                                    "{model} at {width}x{height} on the {tier} tier needs ~{needed} GB \
+                                     of VRAM even with three-stage loading, tiled VAE decode, attention \
+                                     chunking, and {streaming}, but GPU {gpu} has ~{available} GB \
+                                     available. Measured phase predictions: text {text:.1} GB, denoise \
+                                     {denoise:.1} GB, decode {decode:.1} GB. {options}.",
+                                    model = request.model,
+                                    needed = needed_gb.round() as i64,
+                                    available = available_gb.round() as i64,
+                                    gpu = settings.gpu_id,
+                                    streaming = if krea_allow_streamed_blocks {
+                                        "transformer block streaming"
+                                    } else {
+                                        "the deepest adapter-compatible rung"
+                                    },
+                                    text = phases.text_gb,
+                                    denoise = phases.denoise_gb,
+                                    decode = phases.decode_gb,
+                                    options = options.join(", or "),
+                                )));
+                        }
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                if !krea_selected {
+                    if let Some(seq_gb) =
+                        crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                    {
+                        let installed_smaller: Vec<&'static str> =
+                            installed_tier_keys(request, settings)
+                                .into_iter()
+                                .filter(|candidate| {
+                                    tier_quality_rank(candidate) < tier_quality_rank(tier)
+                                })
+                                .collect();
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                             component residency (loading one component at a time), but GPU {gpu} has \
+                             ~{available} GB available. {tail}",
+                            model = request.model,
+                            seq = seq_gb.round() as i64,
+                            available = available_gb.round() as i64,
+                            gpu = settings.gpu_id,
+                            tail = vram_reject_tail(&installed_smaller),
+                        )));
+                    }
                 }
                 tracing::info!(
                     model = %request.model,
@@ -5438,7 +5749,9 @@ async fn generate_candle_stream(
     // when the gate ADMITTED the load (the reject arms `return` above), so we never record a peak we
     // didn't actually attempt to allocate.
     let incurred_peak = if use_sequential {
-        crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier)
+        adapted_peak_gb.or_else(|| {
+            crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier)
+        })
     } else {
         needed
     };
@@ -5511,6 +5824,7 @@ async fn generate_candle_stream(
                         // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
                         use_pid,
                         text_style_gain,
+                        generation_memory,
                         &enhance,
                         &cancel,
                         on_progress,
