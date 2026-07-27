@@ -35,6 +35,13 @@ const INFERENCE_CRATES = ["sceneworks-gen-core", "runtime-macos", "runtime-cuda"
 // Resolved through the root [patch], not a direct dependency — still pinned to the inference
 // repo, so its lock entry must be refreshed on every bump.
 const PATCHED_CRATES = ["candle-kernels"];
+// The worker stamps every catalog semantic analysis with the inference revision it was produced
+// under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
+// the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
+// red test (sc-14958 had to fix exactly that up after the previous bump). Moving it deliberately
+// marks prior analyses stale so they re-run under the new runtime.
+const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
+const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 // --- pure: rewrite the inference pins to rev=<sha> (self-tested; no fs/network) ---------------
@@ -59,6 +66,16 @@ function repin(manifestText, sha, manifestPath = MANIFEST) {
     throw new Error(`expected to rewrite ${inferenceLines} inference pin(s), rewrote ${rewrote}`);
   }
   return out.join("\n");
+}
+
+function repinSemanticProvenance(source, sha) {
+  if (!SEMANTIC_PROVENANCE_RE.test(source)) {
+    throw new Error(
+      `no INFERENCE_RUNTIME_REVISION constant found in ${SEMANTIC_PROVENANCE} -- the semantic ` +
+        "provenance stamp must move with the pin or its lockstep test goes red",
+    );
+  }
+  return source.replace(SEMANTIC_PROVENANCE_RE, `$1${sha}$2`);
 }
 
 // --- git / cargo orchestration ----------------------------------------------------------------
@@ -157,6 +174,22 @@ function selfTest() {
   }
   check("throws when no inference pin is present", threw);
 
+  check(
+    "semantic provenance stamp bumps with the pin",
+    repinSemanticProvenance(
+      `const CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${"b".repeat(40)}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`,
+      SHA,
+    ) ===
+      `const CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${SHA}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`,
+  );
+  let stampThrew = false;
+  try {
+    repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
+  } catch {
+    stampThrew = true;
+  }
+  check("throws when the semantic provenance stamp is missing", stampThrew);
+
   console.log(rc === 0 ? "self-test: PASS" : "self-test: FAIL");
   process.exit(rc);
 }
@@ -175,11 +208,15 @@ function main() {
     process.exit(2);
   }
 
-  // Both manifests carry inference pins: the worker's direct deps and the root's
-  // candle-kernels [patch]. They must land on the same rev, so bump them as one unit.
-  const manifests = [MANIFEST, ROOT_MANIFEST].map((path) => {
+  // Three files carry the revision: the worker's direct deps, the root's candle-kernels [patch],
+  // and the worker's semantic-provenance stamp. They must land on the same rev, so bump as one unit.
+  const manifests = [
+    { path: MANIFEST, rewrite: (text) => repin(text, sha, MANIFEST) },
+    { path: ROOT_MANIFEST, rewrite: (text) => repin(text, sha, ROOT_MANIFEST) },
+    { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
+  ].map(({ path, rewrite }) => {
     const current = readFileSync(path, "utf8");
-    return { path, current, bumped: repin(current, sha, path) };
+    return { path, current, bumped: rewrite(current) };
   });
   if (manifests.every((m) => m.bumped === m.current)) {
     console.log(`bump-inference: already pinned at ${sha}`);
