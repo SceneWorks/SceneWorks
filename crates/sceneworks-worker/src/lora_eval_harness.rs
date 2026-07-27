@@ -164,6 +164,20 @@ struct EvalReport {
     aggregates: EvalAggregates,
 }
 
+/// Which `PROMPTS_JSON` key an output image belongs to: an exact stem match, else the **longest**
+/// key that is a `_`-delimited prefix of the stem.
+///
+/// Longest, not first, because prompt keys nest. Keying prompts by angle (so several seeds of one
+/// angle share a `prompt_id` and `same_prompt_spread` has a group to measure) puts both `up` and
+/// `up_left` in the map, and the stem `up_left_s8003` legitimately prefix-matches both. Callers
+/// pass BTreeMap keys, so a first-match would take `up` — scoring the image against the wrong
+/// prompt and grouping it into the wrong seed cohort, with nothing in the output to show for it.
+fn match_prompt_key<'a>(stem: &str, keys: impl Iterator<Item = &'a String>) -> Option<String> {
+    keys.filter(|k| stem == k.as_str() || stem.starts_with(&format!("{k}_")))
+        .max_by_key(|k| k.len())
+        .cloned()
+}
+
 /// Fold per-output scores + the per-output CLIP image embeddings (aligned with `outputs`, `None`
 /// where the embedding failed) into the aggregate Y vector.
 fn aggregate(outputs: &[OutputScore], output_clip: &[Option<Vec<f32>>]) -> EvalAggregates {
@@ -425,11 +439,7 @@ mod harness {
             // clip image embedding (for spread + prompt adherence), aligned per output
             let clip_norm =
                 clip_image_embedding(img_embedder.as_ref(), p).and_then(|e| l2_normalized(&e));
-            // prompt adherence: match prompt by exact stem, else by stem prefix before '_'
-            let prompt_key = prompt_text_norm
-                .keys()
-                .find(|k| s == **k || s.starts_with(&format!("{k}_")))
-                .cloned();
+            let prompt_key = match_prompt_key(&s, prompt_text_norm.keys());
             let prompt_adherence = match (&clip_norm, prompt_key.as_ref()) {
                 (Some(img_n), Some(k)) => {
                     prompt_text_norm.get(k).map(|t| cosine_normalized(img_n, t))
@@ -608,6 +618,29 @@ mod tests {
         let b = l2_normalized(&[0.0, 1.0]).unwrap();
         assert!(approx(mean_pairwise_cosine(&[a, b]).unwrap(), 0.0));
         assert!(mean_pairwise_cosine(&[]).is_none()); // < 2 → None
+    }
+
+    #[test]
+    fn prompt_key_prefers_the_longest_nested_match() {
+        // The canonical angle set nests: `up` is a `_`-delimited prefix of `up_left`, and `down`
+        // of `down_right`. Keys arrive BTreeMap-sorted, so `up` is seen first — taking it would
+        // score an up-left render against the up prompt and pool it into the wrong seed cohort.
+        let keys: Vec<String> = ["down", "down_right", "front", "up", "up_left"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let key = |stem: &str| match_prompt_key(stem, keys.iter());
+
+        assert_eq!(key("up_left_s8003").as_deref(), Some("up_left"));
+        assert_eq!(key("down_right_s8001").as_deref(), Some("down_right"));
+        // The shorter key still wins when it is the only real match.
+        assert_eq!(key("up_s8003").as_deref(), Some("up"));
+        assert_eq!(key("down_s8001").as_deref(), Some("down"));
+        // Exact stem, and a stem belonging to no prompt.
+        assert_eq!(key("front").as_deref(), Some("front"));
+        assert_eq!(key("left_profile_s8001"), None);
+        // A key must be a *delimited* prefix — `up` must not swallow `upward`.
+        assert_eq!(key("upward_s8001"), None);
     }
 
     #[test]
