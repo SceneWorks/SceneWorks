@@ -54,6 +54,7 @@ const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
 const CURATION_PROJECTION_CHECKPOINT_METADATA_KEY: &str = "curation_projection_v1_checkpoint";
 const CURATION_PROJECTION_COMPLETE_METADATA_KEY: &str = "curation_projection_v1_complete";
 const CURATION_BACKFILL_BATCH_SIZE: u32 = 1_000;
+const CURATION_PROJECTION_WRITE_BATCH_SIZE: usize = 50;
 const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
 const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
 const CATALOG_NAME_METADATA_KEY: &str = "name";
@@ -664,6 +665,8 @@ impl Catalog {
             .connection
             .transaction()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let existing_record_ids =
+            existing_record_ids(&transaction, &database_path, records.iter())?;
         {
             let mut statement = transaction
                 .prepare_cached(
@@ -695,19 +698,12 @@ impl Catalog {
                     .map_err(|error| map_sqlite_error(&database_path, error))?;
             }
         }
-        {
-            let mut rowid_statement = transaction
-                .prepare_cached("select rowid from catalog_records where id = ?1")
-                .map_err(|error| map_sqlite_error(&database_path, error))?;
-            let mut projected = Vec::with_capacity(records.len());
-            for record in records {
-                let rowid: i64 = rowid_statement
-                    .query_row([&record.id], |row| row.get(0))
-                    .map_err(|error| map_sqlite_error(&database_path, error))?;
-                projected.push((rowid, record));
-            }
-            upsert_search_projection(&transaction, &database_path, projected)?;
-        }
+        upsert_search_projection(
+            &transaction,
+            &database_path,
+            records.iter(),
+            Some(&existing_record_ids),
+        )?;
         {
             let mut statement = transaction
                 .prepare_cached(
@@ -2443,22 +2439,126 @@ fn search_projection(record: &NewCatalogRecord) -> CatalogSearchProjection {
     }
 }
 
+fn existing_record_ids<'a>(
+    transaction: &Transaction<'_>,
+    database_path: &Path,
+    records: impl IntoIterator<Item = &'a NewCatalogRecord>,
+) -> CatalogResult<HashSet<String>> {
+    let records = records.into_iter().collect::<Vec<_>>();
+    let mut existing = HashSet::new();
+    for records in records.chunks(CURATION_PROJECTION_WRITE_BATCH_SIZE) {
+        let mut sql = String::from("select id from catalog_records where id in (");
+        let mut bindings = Vec::with_capacity(records.len());
+        for (index, record) in records.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            bindings.push(SqlValue::Text(record.id.clone()));
+        }
+        sql.push(')');
+        let mut statement = transaction
+            .prepare_cached(&sql)
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        let ids = statement
+            .query_map(params_from_iter(bindings), |row| row.get::<_, String>(0))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        for id in ids {
+            existing.insert(id.map_err(|error| map_sqlite_error(database_path, error))?);
+        }
+    }
+    Ok(existing)
+}
+
 fn upsert_search_projection<'a>(
     transaction: &Transaction<'_>,
     database_path: &Path,
-    records: impl IntoIterator<Item = (i64, &'a NewCatalogRecord)>,
+    records: impl IntoIterator<Item = &'a NewCatalogRecord>,
+    existing_record_ids: Option<&HashSet<String>>,
 ) -> CatalogResult<()> {
-    let mut index_statement = transaction
-        .prepare_cached(
+    let records = records.into_iter().collect::<Vec<_>>();
+    // Preserve the existing last-write-wins behavior for callers that include
+    // the same record id more than once, including across write chunks.
+    let mut seen = HashSet::with_capacity(records.len());
+    let mut unique = records
+        .into_iter()
+        .rev()
+        .filter(|record| seen.insert(record.id.as_str()))
+        .collect::<Vec<_>>();
+    unique.reverse();
+    for unique in unique.chunks(CURATION_PROJECTION_WRITE_BATCH_SIZE) {
+        let projected = unique
+            .iter()
+            .map(|record| search_projection(record))
+            .collect::<Vec<_>>();
+
+        let mut index_sql = String::from(
             "insert into catalog_record_search (
                 record_id, sample_key, medium, person_count, face_count, full_body,
                 qualified_single_full_body, pose_coverage, crop_state, subject_size,
                 width, height, availability, analyzer_confidence, content_hash,
                 perceptual_hash
-             ) values (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-             )
-             on conflict(record_id) do update set
+             ) values ",
+        );
+        let mut index_bindings = Vec::with_capacity(unique.len() * 16);
+        for (index, (record, projection)) in unique.iter().zip(&projected).enumerate() {
+            if index > 0 {
+                index_sql.push(',');
+            }
+            index_sql.push_str("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            index_bindings.extend([
+                SqlValue::Text(record.id.clone()),
+                SqlValue::Integer(projection.sample_key),
+                projection
+                    .medium
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                projection
+                    .person_count
+                    .map_or(SqlValue::Null, SqlValue::Integer),
+                projection
+                    .face_count
+                    .map_or(SqlValue::Null, SqlValue::Integer),
+                projection
+                    .full_body
+                    .map_or(SqlValue::Null, SqlValue::Integer),
+                projection
+                    .qualified_single_full_body
+                    .map_or(SqlValue::Null, SqlValue::Integer),
+                projection
+                    .pose_coverage
+                    .map_or(SqlValue::Null, SqlValue::Real),
+                projection
+                    .crop_state
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                projection
+                    .subject_size
+                    .map_or(SqlValue::Null, SqlValue::Real),
+                projection.width.map_or(SqlValue::Null, SqlValue::Integer),
+                projection.height.map_or(SqlValue::Null, SqlValue::Integer),
+                SqlValue::Text(projection.availability.clone()),
+                projection
+                    .analyzer_confidence
+                    .map_or(SqlValue::Null, SqlValue::Real),
+                projection
+                    .content_hash
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                projection
+                    .perceptual_hash
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+            ]);
+        }
+        let requires_upsert = existing_record_ids.map_or(true, |existing| {
+            unique
+                .iter()
+                .any(|record| existing.contains(record.id.as_str()))
+        });
+        if requires_upsert {
+            index_sql.push_str(
+                " on conflict(record_id) do update set
                 sample_key = excluded.sample_key,
                 medium = excluded.medium,
                 person_count = excluded.person_count,
@@ -2474,49 +2574,57 @@ fn upsert_search_projection<'a>(
                 analyzer_confidence = excluded.analyzer_confidence,
                 content_hash = excluded.content_hash,
                 perceptual_hash = excluded.perceptual_hash",
-        )
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    let mut fts_delete = transaction
-        .prepare_cached("delete from catalog_record_fts where rowid = ?1")
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    let mut fts_insert = transaction
-        .prepare_cached(
-            "insert into catalog_record_fts(rowid, record_id, caption, tags)
-             values (?1, ?2, ?3, ?4)",
-        )
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    for (rowid, record) in records {
-        let projection = search_projection(record);
-        index_statement
-            .execute(params![
-                record.id,
-                projection.sample_key,
-                projection.medium,
-                projection.person_count,
-                projection.face_count,
-                projection.full_body,
-                projection.qualified_single_full_body,
-                projection.pose_coverage,
-                projection.crop_state,
-                projection.subject_size,
-                projection.width,
-                projection.height,
-                projection.availability,
-                projection.analyzer_confidence,
-                projection.content_hash,
-                projection.perceptual_hash,
-            ])
+            );
+        }
+        transaction
+            .prepare_cached(&index_sql)
+            .and_then(|mut statement| statement.execute(params_from_iter(index_bindings)))
             .map_err(|error| map_sqlite_error(database_path, error))?;
-        fts_delete
-            .execute([rowid])
-            .map_err(|error| map_sqlite_error(database_path, error))?;
-        fts_insert
-            .execute(params![
-                rowid,
-                record.id,
-                projection.caption,
-                projection.tags
-            ])
+
+        let replaced = unique
+            .iter()
+            .filter(|record| {
+                existing_record_ids.map_or(true, |existing| existing.contains(record.id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        if !replaced.is_empty() {
+            let mut delete_sql = String::from(
+                "delete from catalog_record_fts where rowid in (
+                    select rowid from catalog_records where id in (",
+            );
+            let mut delete_bindings = Vec::with_capacity(replaced.len());
+            for (index, record) in replaced.iter().enumerate() {
+                if index > 0 {
+                    delete_sql.push(',');
+                }
+                delete_sql.push('?');
+                delete_bindings.push(SqlValue::Text(record.id.clone()));
+            }
+            delete_sql.push_str("))");
+            transaction
+                .prepare_cached(&delete_sql)
+                .and_then(|mut statement| statement.execute(params_from_iter(delete_bindings)))
+                .map_err(|error| map_sqlite_error(database_path, error))?;
+        }
+
+        let mut fts_sql =
+            String::from("insert into catalog_record_fts(rowid, record_id, caption, tags) values ");
+        let mut fts_bindings = Vec::with_capacity(unique.len() * 4);
+        for (index, (record, projection)) in unique.iter().zip(&projected).enumerate() {
+            if index > 0 {
+                fts_sql.push(',');
+            }
+            fts_sql.push_str("((select rowid from catalog_records where id = ?),?,?,?)");
+            fts_bindings.extend([
+                SqlValue::Text(record.id.clone()),
+                SqlValue::Text(record.id.clone()),
+                SqlValue::Text(projection.caption.clone()),
+                SqlValue::Text(projection.tags.clone()),
+            ]);
+        }
+        transaction
+            .prepare_cached(&fts_sql)
+            .and_then(|mut statement| statement.execute(params_from_iter(fts_bindings)))
             .map_err(|error| map_sqlite_error(database_path, error))?;
     }
     Ok(())
@@ -3236,38 +3344,52 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
             .execute_batch(
                 "begin immediate;
                  create index if not exists idx_catalog_search_medium
-                    on catalog_record_search(medium, record_id);
+                    on catalog_record_search(medium, record_id)
+                    where medium is not null;
                  create index if not exists idx_catalog_search_people
-                    on catalog_record_search(person_count, record_id);
+                    on catalog_record_search(person_count, record_id)
+                    where person_count is not null;
                  create index if not exists idx_catalog_search_faces
-                    on catalog_record_search(face_count, record_id);
+                    on catalog_record_search(face_count, record_id)
+                    where face_count is not null;
                  create index if not exists idx_catalog_search_full_body
-                    on catalog_record_search(full_body, record_id);
+                    on catalog_record_search(full_body, record_id)
+                    where full_body is not null;
                  create index if not exists idx_catalog_search_qualified_full_body
-                    on catalog_record_search(qualified_single_full_body, record_id);
+                    on catalog_record_search(qualified_single_full_body, record_id)
+                    where qualified_single_full_body is not null;
                  create index if not exists idx_catalog_search_pose
-                    on catalog_record_search(pose_coverage, record_id);
+                    on catalog_record_search(pose_coverage, record_id)
+                    where pose_coverage is not null;
                  create index if not exists idx_catalog_search_crop
-                    on catalog_record_search(crop_state, record_id);
+                    on catalog_record_search(crop_state, record_id)
+                    where crop_state is not null;
                  create index if not exists idx_catalog_search_subject_size
-                    on catalog_record_search(subject_size, record_id);
+                    on catalog_record_search(subject_size, record_id)
+                    where subject_size is not null;
                  create index if not exists idx_catalog_search_dimensions
                     on catalog_record_search(width, height, record_id);
                  create index if not exists idx_catalog_search_availability
                     on catalog_record_search(availability, record_id);
                  create index if not exists idx_catalog_search_confidence
-                    on catalog_record_search(analyzer_confidence, record_id);
+                    on catalog_record_search(analyzer_confidence, record_id)
+                    where analyzer_confidence is not null;
                  create index if not exists idx_catalog_search_sample
                     on catalog_record_search(sample_key, record_id);
                  drop index if exists idx_catalog_search_primary_flow;
                  create index idx_catalog_search_primary_flow
                     on catalog_record_search(
                         medium, person_count, qualified_single_full_body, sample_key, record_id
-                    );
+                    )
+                    where medium is not null
+                      and person_count is not null
+                      and qualified_single_full_body is not null;
                  create index if not exists idx_catalog_search_content_hash
-                    on catalog_record_search(content_hash, record_id);
+                    on catalog_record_search(content_hash, record_id)
+                    where content_hash is not null;
                  create index if not exists idx_catalog_search_perceptual_hash
-                    on catalog_record_search(perceptual_hash, record_id);
+                    on catalog_record_search(perceptual_hash, record_id)
+                    where perceptual_hash is not null;
                  pragma user_version = 2;
                  commit;",
             )
@@ -3400,7 +3522,8 @@ fn backfill_curation_projection(
         upsert_search_projection(
             &transaction,
             database_path,
-            batch.iter().map(|(rowid, record)| (*rowid, record)),
+            batch.iter().map(|(_, record)| record),
+            None,
         )?;
         let checkpoint = batch.last().map(|(rowid, _)| *rowid).unwrap_or(checkpoint);
         transaction
@@ -4379,6 +4502,99 @@ mod tests {
                 .records
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn batched_projection_preserves_last_write_updates_and_sparse_indexes() {
+        let temporary = tempdir().expect("temp directory");
+        let mut catalog =
+            Catalog::create(temporary.path().join("catalog"), "Batched projection").unwrap();
+        let records = (0..51)
+            .map(|index| {
+                let id = if index == 0 || index == 50 {
+                    "duplicate-across-chunks".to_owned()
+                } else {
+                    format!("record-{index:02}")
+                };
+                let caption = if index == 50 {
+                    "latest_duplicate_caption".to_owned()
+                } else if index == 0 {
+                    "old_duplicate_caption".to_owned()
+                } else {
+                    format!("unique_caption_{index}")
+                };
+                curation_record(
+                    &id,
+                    &caption,
+                    &format!("sha256:{index}"),
+                    &format!("dhash64:{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        catalog.append_records(&records).unwrap();
+        assert_eq!(
+            catalog
+                .search_records(&CatalogSearchRequest {
+                    limit: 10,
+                    text: "latest_duplicate_caption".to_owned(),
+                    ..CatalogSearchRequest::default()
+                })
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        assert!(catalog
+            .search_records(&CatalogSearchRequest {
+                limit: 10,
+                text: "old_duplicate_caption".to_owned(),
+                ..CatalogSearchRequest::default()
+            })
+            .unwrap()
+            .records
+            .is_empty());
+
+        let mut existing = curation_record(
+            "duplicate-across-chunks",
+            "mixed_existing_update",
+            "sha256:existing-update",
+            "dhash64:existing-update",
+        );
+        existing.metadata["analysis"]["medium"] = serde_json::json!("illustration");
+        let new = curation_record(
+            "mixed-new-record",
+            "mixed_new_insert",
+            "sha256:mixed-new",
+            "dhash64:mixed-new",
+        );
+        catalog.append_records(&[existing, new]).unwrap();
+        for text in ["mixed_existing_update", "mixed_new_insert"] {
+            assert_eq!(
+                catalog
+                    .search_records(&CatalogSearchRequest {
+                        limit: 10,
+                        text: text.to_owned(),
+                        ..CatalogSearchRequest::default()
+                    })
+                    .unwrap()
+                    .records
+                    .len(),
+                1
+            );
+        }
+        let medium_index_sql: String = catalog
+            .connection
+            .query_row(
+                "select sql from sqlite_master
+                 where type = 'index' and name = 'idx_catalog_search_medium'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            medium_index_sql.contains("where medium is not null"),
+            "analysis-only facet indexes must stay sparse: {medium_index_sql}"
         );
     }
 
