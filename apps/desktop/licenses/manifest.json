@@ -901,6 +901,23 @@
       ]
     },
     {
+      "id": "krea-realtime",
+      "models": [
+        "krea_realtime_14b"
+      ],
+      "name": "Krea Realtime 14B",
+      "publisher": "Krea AI",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/SceneWorks/krea-realtime-14b-mlx",
+      "usage": "Video generation model. SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights (krea/krea-realtime-video, a Self-Forcing distillation of Wan-AI/Wan2.1-T2V-14B, bundled with that model's Apache-2.0 VAE / UMT5 text encoder / tokenizer), re-hosted at SceneWorks/krea-realtime-14b-mlx. Redistributed with attribution as permitted by Apache-2.0.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "krea-realtime-apache"
+        }
+      ]
+    },
+    {
       "id": "svd",
       "models": [
         "svd"
