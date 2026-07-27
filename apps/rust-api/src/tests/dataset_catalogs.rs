@@ -11,7 +11,8 @@ use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
 use sceneworks_core::catalog_store::{
     catalog_timestamp_now, CatalogProcessingLease, CatalogProcessingProgress,
-    CatalogProcessingState, CatalogRegistry, CatalogSourceConfig, NewCatalogRecord,
+    CatalogProcessingState, CatalogRecordFilter, CatalogRegistry, CatalogSearchRequest,
+    CatalogSourceConfig, NewCatalogRecord,
 };
 use sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS;
 use tower::ServiceExt as _;
@@ -47,6 +48,571 @@ fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord
             }
         }),
     }
+}
+
+fn cached_materialization_record(
+    root: &std::path::Path,
+    id: &str,
+    rgb: [u8; 3],
+) -> NewCatalogRecord {
+    let relative = format!("images/cache/{id}.png");
+    let path = root.join(&relative);
+    std::fs::create_dir_all(path.parent().expect("cache parent")).expect("cache dir creates");
+    image::RgbImage::from_pixel(32, 32, image::Rgb(rgb))
+        .save(&path)
+        .expect("cache image writes");
+    let content_hash =
+        sceneworks_core::media_convert::file_content_hash(&path).expect("cache hashes");
+    let source_caption = format!(
+        "source caption {id} {} CAPTION_TAIL_SENTINEL",
+        "🦀".repeat(2_000)
+    );
+    let generated_caption = format!(
+        "generated caption {id} {} GENERATED_TAIL_SENTINEL",
+        "界".repeat(3_000)
+    );
+    let mut generated_tags = vec![json!({"value": "outdoor"}), json!({"value": "full_body"})];
+    generated_tags.extend((0..40).map(|index| {
+        json!({
+            "value": format!("tag-{index}-{}-TAG_TAIL_SENTINEL", "界".repeat(100)),
+            "confidence": 0.75
+        })
+    }));
+    NewCatalogRecord {
+        id: id.to_owned(),
+        image_path: format!("images/{id}.png"),
+        thumbnail_path: None,
+        embedding_path: None,
+        artifact_path: None,
+        metadata: json!({
+            "url": format!("https://example.test/{id}.png"),
+            "caption": source_caption,
+            "medium": "photograph",
+            "personCount": 1,
+            "analysis": {
+                "medium": "photograph",
+                "personCount": 1,
+                "qualifiedSingleFullBody": true,
+                "unrelatedPayload": "not-provenance".repeat(32_000),
+                "structured": {
+                    "schemaVersion": 1,
+                    "inputFingerprint": "f".repeat(1_024),
+                    "executionOrder": ["person", "face", "pose", "derived"],
+                    "person": {
+                        "analyzer": {
+                            "analyzerVersion": "person-v1",
+                            "modelId": "person-model",
+                            "modelVersion": "sha256:person",
+                            "status": "succeeded",
+                            "thresholds": {"unbounded": "x".repeat(32_000)}
+                        }
+                    }
+                },
+                "visionLanguage": {
+                    "schemaVersion": 1,
+                    "caption": generated_caption,
+                    "tags": generated_tags,
+                    "analyzerVersion": "vlm-v1",
+                    "modelId": "caption-model",
+                    "modelRevision": "sha256:caption",
+                    "runtimeRevision": "runtime-v1",
+                    "backend": "mlx",
+                    "provider": "local",
+                    "taxonomyVersion": "taxonomy-v1",
+                    "status": "succeeded"
+                },
+                "semanticEmbedding": {
+                    "schemaVersion": 1,
+                    "analyzerVersion": "embedding-v1",
+                    "modelId": "clip-model",
+                    "modelRevision": "sha256:clip",
+                    "runtimeRevision": "runtime-v1",
+                    "backend": "candle",
+                    "provider": "local",
+                    "inputFingerprint": "sha256:input",
+                    "status": "succeeded"
+                }
+            },
+            "acquisition": {
+                "status": "available",
+                "availability": "available",
+                "cachePath": relative,
+                "contentHash": content_hash,
+                "width": 32,
+                "height": 32
+            }
+        }),
+    }
+}
+
+#[tokio::test]
+async fn materialization_replaces_invalid_cache_deterministically_and_survives_catalog_deletion() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let catalog_root = temporary.path().join("materialize-catalog");
+    let registry = CatalogRegistry::new(&settings.config_dir);
+    let mut catalog = registry
+        .create_catalog(&catalog_root, "Materialize")
+        .expect("catalog creates");
+    let records = [
+        cached_materialization_record(&catalog_root, "one", [255, 0, 0]),
+        cached_materialization_record(&catalog_root, "two", [0, 255, 0]),
+        cached_materialization_record(&catalog_root, "three", [0, 0, 255]),
+        cached_materialization_record(&catalog_root, "four", [255, 255, 0]),
+    ];
+    catalog.append_records(&records).expect("records append");
+    let mut contract = catalog.contract_state().expect("contract reads");
+    contract.analyzer_versions =
+        BTreeMap::from([("vision_tagger".to_owned(), "model@sha256:abc".to_owned())]);
+    catalog
+        .set_contract_state(&contract)
+        .expect("analyzer version persists");
+    let order = catalog
+        .search_records(&CatalogSearchRequest {
+            limit: 200,
+            filters: vec![
+                CatalogRecordFilter {
+                    field: "personCount".to_owned(),
+                    values: vec!["1".to_owned()],
+                },
+                CatalogRecordFilter {
+                    field: "medium".to_owned(),
+                    values: vec!["photograph".to_owned()],
+                },
+            ],
+            sample_seed: Some(77),
+            ..CatalogSearchRequest::default()
+        })
+        .expect("sample query")
+        .records;
+    let unavailable_id = order[0].id.clone();
+    let mut unavailable = records
+        .iter()
+        .find(|record| record.id == unavailable_id)
+        .expect("ordered record exists")
+        .clone();
+    let invalid_cache = catalog_root.join("images/cache/invalid.png");
+    std::fs::write(&invalid_cache, b"not an image").expect("invalid cache writes");
+    unavailable.metadata["url"] = json!("http://127.0.0.1/private.png");
+    unavailable.metadata["acquisition"]["cachePath"] = json!("images/cache/invalid.png");
+    unavailable.metadata["acquisition"]["contentHash"] = json!("00");
+    catalog
+        .append_records(&[unavailable])
+        .expect("unavailable update persists");
+    let catalog_id = catalog.descriptor().id.clone();
+    drop(catalog);
+
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Catalog materialization"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let body = json!({
+        "projectId": project_id,
+        "name": "Seeded catalog dataset",
+        "requestedCount": 2,
+        "seed": 77,
+        "deduplicationPolicy": "content_and_perceptual",
+        "query": {
+            "limit": 48,
+            "filters": [
+                {"field": "personCount", "values": ["1", "1"]},
+                {"field": "medium", "values": ["photograph"]}
+            ],
+            "text": "",
+            "deduplicate": false
+        },
+        "includeGeneratedCaption": true,
+        "includeGeneratedTags": true,
+        "idempotencyKey": "materialization-retry-1"
+    });
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["requestedCount"], 2);
+    assert_eq!(created["materializedCount"], 2);
+    assert_eq!(created["skipped"][0]["recordId"], unavailable_id);
+    assert_eq!(created["skipped"][0]["reason"], "unavailable");
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["selectedRecordIds"],
+        created["selectedRecordIds"]
+    );
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["query"]["filters"][0]["field"], "medium",
+        "canonical query sorts filters"
+    );
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["query"]["filters"][1]["values"],
+        json!(["1"]),
+        "canonical query deduplicates values"
+    );
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["analyzerVersions"]["vision_tagger"],
+        "model@sha256:abc"
+    );
+    assert!(created["dataset"]["items"][0]["caption"]["text"]
+        .as_str()
+        .expect("caption")
+        .contains("generated caption"));
+    assert!(created["dataset"]["items"][0]["caption"]["text"]
+        .as_str()
+        .expect("caption")
+        .contains("full_body"));
+    assert!(
+        created["dataset"]["items"][0]["catalogSource"]["sourceCaption"]
+            .as_str()
+            .expect("source caption snapshot")
+            .starts_with("source caption")
+    );
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["selectedRecordVersions"]
+            .as_array()
+            .expect("record versions")
+            .len(),
+        2
+    );
+    assert_eq!(
+        created["dataset"]["catalogMaterialization"]["catalog"]["generation"], 2,
+        "record append plus unavailable-record update advance catalog generation"
+    );
+    assert!(
+        created["dataset"]["catalogMaterialization"]["materializationFingerprint"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64)
+    );
+    assert!(
+        created["dataset"]["catalogMaterialization"]["requestFingerprint"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64)
+    );
+    assert!(
+        created["dataset"]["catalogMaterialization"]["selectedRecordVersions"][0]
+            ["analyzerProvenance"]
+            .is_object()
+    );
+    let analyzer_provenance = &created["dataset"]["catalogMaterialization"]
+        ["selectedRecordVersions"][0]["analyzerProvenance"];
+    assert_eq!(
+        analyzer_provenance["structured"]["inputFingerprint"]
+            .as_str()
+            .expect("bounded input fingerprint")
+            .len(),
+        512
+    );
+    assert_eq!(
+        analyzer_provenance["structured"]["analyzers"]["person"]["modelVersion"],
+        "sha256:person"
+    );
+    assert_eq!(
+        analyzer_provenance["visionLanguage"]["runtimeRevision"],
+        "runtime-v1"
+    );
+    assert_eq!(analyzer_provenance["visionLanguage"]["schemaVersion"], 1);
+    assert_eq!(analyzer_provenance["visionLanguage"]["backend"], "mlx");
+    assert_eq!(
+        analyzer_provenance["semanticEmbedding"]["modelRevision"],
+        "sha256:clip"
+    );
+    assert_eq!(
+        analyzer_provenance["semanticEmbedding"]["provider"],
+        "local"
+    );
+    assert!(
+        !created.to_string().contains("not-provenance"),
+        "unrelated and oversized analysis metadata is never copied into the project manifest"
+    );
+    assert!(
+        analyzer_provenance["structured"]["analyzers"]["person"]
+            .get("thresholds")
+            .is_none(),
+        "potentially unbounded analyzer thresholds are represented by the bounded global analyzer snapshot"
+    );
+    let first_item = &created["dataset"]["items"][0];
+    assert!(
+        first_item["caption"]["text"]
+            .as_str()
+            .expect("bounded caption")
+            .len()
+            <= 8_192
+    );
+    let catalog_source = &first_item["catalogSource"];
+    assert!(
+        catalog_source["sourceCaption"]
+            .as_str()
+            .expect("bounded source caption")
+            .len()
+            <= 2_048
+    );
+    assert!(
+        catalog_source["generatedCaption"]
+            .as_str()
+            .expect("bounded generated caption")
+            .len()
+            <= 2_048
+    );
+    assert!(catalog_source["generatedTags"]
+        .as_array()
+        .is_some_and(|tags| tags.len() == 32));
+    assert_eq!(
+        catalog_source["truncation"]["sourceCaption"]["truncated"],
+        true
+    );
+    assert!(catalog_source["truncation"]["sourceCaption"]["sha256"]
+        .as_str()
+        .is_some_and(|value| value.len() == 64));
+    assert_eq!(
+        catalog_source["truncation"]["generatedTags"]["originalCount"],
+        42
+    );
+    for sentinel in [
+        "CAPTION_TAIL_SENTINEL",
+        "GENERATED_TAIL_SENTINEL",
+        "TAG_TAIL_SENTINEL",
+    ] {
+        assert!(
+            !created.to_string().contains(sentinel),
+            "oversized caption/tag tails must not be persisted"
+        );
+    }
+    let dataset_id = created["dataset"]["id"].as_str().expect("dataset id");
+
+    let mut conflicting_retry = body.clone();
+    conflicting_retry["requestedCount"] = json!(1);
+    let (conflict_status, conflict) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        conflicting_retry,
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT, "{conflict}");
+    assert!(conflict["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("idempotencyKey")));
+
+    let (delete_status, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/catalogs/{catalog_id}/on-disk"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::OK);
+    let (get_status, detached_dataset) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(detached_dataset["items"].as_array().unwrap().len(), 2);
+    let (readiness_status, readiness) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/readiness"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(readiness_status, StatusCode::OK, "{readiness}");
+
+    let (retry_status, retried) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        body,
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["reusedExisting"], true);
+    assert_eq!(retried["dataset"]["id"], dataset_id);
+    assert_eq!(retried["selectedRecordIds"], created["selectedRecordIds"]);
+    assert_eq!(retried["skipped"], created["skipped"]);
+}
+
+#[tokio::test]
+async fn materialization_none_policy_allows_identical_verified_content() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let catalog_root = temporary.path().join("duplicate-catalog");
+    let registry = CatalogRegistry::new(&settings.config_dir);
+    let mut catalog = registry
+        .create_catalog(&catalog_root, "Duplicates")
+        .expect("catalog creates");
+    let first = cached_materialization_record(&catalog_root, "duplicate-a", [12, 34, 56]);
+    let mut second = first.clone();
+    second.id = "duplicate-b".to_owned();
+    second.image_path = "images/duplicate-b.png".to_owned();
+    second.metadata["caption"] = json!("second identical image");
+    catalog
+        .append_records(&[first, second])
+        .expect("duplicate records append");
+    let catalog_id = catalog.descriptor().id.clone();
+    drop(catalog);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Duplicate policy"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (invalid_status, invalid) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        json!({
+            "projectId": project_id,
+            "name": "Invalid count",
+            "requestedCount": 0,
+            "seed": 5,
+            "deduplicationPolicy": "none",
+            "query": {"limit": 48},
+            "idempotencyKey": "invalid-zero"
+        }),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+    assert!(invalid["detail"]
+        .as_str()
+        .expect("invalid detail")
+        .contains("requestedCount"));
+    let (seed_status, seed_error) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        json!({
+            "projectId": project_id,
+            "name": "Unsafe seed",
+            "requestedCount": 1,
+            "seed": 9_007_199_254_740_992_u64,
+            "deduplicationPolicy": "none",
+            "query": {"limit": 48},
+            "idempotencyKey": "invalid-seed"
+        }),
+    )
+    .await;
+    assert_eq!(seed_status, StatusCode::BAD_REQUEST, "{seed_error}");
+    assert!(seed_error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("seed")));
+    let (status, created) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+        json!({
+            "projectId": project_id,
+            "name": "Keep duplicates",
+            "requestedCount": 2,
+            "seed": 5,
+            "deduplicationPolicy": "none",
+            "query": {"limit": 48},
+            "idempotencyKey": "duplicates-none"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["materializedCount"], 2);
+    assert_eq!(created["dataset"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(created["skipped"], json!([]));
+}
+
+#[tokio::test]
+async fn timed_out_cache_verifier_cannot_overwrite_its_deterministic_replacement() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let catalog_root = temporary.path().join("late-cache-catalog");
+    let registry = CatalogRegistry::new(&settings.config_dir);
+    let mut catalog = registry
+        .create_catalog(&catalog_root, "Late cache verifier")
+        .expect("catalog creates");
+    let records = [
+        cached_materialization_record(&catalog_root, "late-a", [255, 0, 0]),
+        cached_materialization_record(&catalog_root, "replacement-b", [0, 255, 0]),
+    ];
+    catalog.append_records(&records).expect("records append");
+    let mut ordered = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = catalog
+            .search_records(&CatalogSearchRequest {
+                cursor,
+                limit: 200,
+                sample_seed: Some(44),
+                deduplicate: false,
+                ..CatalogSearchRequest::default()
+            })
+            .expect("ordered records");
+        ordered.extend(page.records);
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    let timed_out_id = ordered[0].id.clone();
+    let expected_replacement_id = ordered[1].id.clone();
+    let expected_replacement_hash = ordered[1].metadata["acquisition"]["contentHash"]
+        .as_str()
+        .expect("replacement hash")
+        .to_owned();
+    let catalog_id = catalog.descriptor().id.clone();
+    drop(catalog);
+
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name": "Late cache replacement"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let control = crate::catalogs::install_catalog_cache_stage_test_hook();
+    let materialization = tokio::spawn(async move {
+        request(
+            app,
+            "POST",
+            &format!("/api/v1/catalogs/{catalog_id}/materialize"),
+            json!({
+                "projectId": project_id,
+                "name": "Late cache replacement",
+                "requestedCount": 1,
+                "seed": 44,
+                "deduplicationPolicy": "none",
+                "query": {"limit": 48},
+                "idempotencyKey": "late-cache-replacement"
+            }),
+        )
+        .await
+    });
+
+    control.wait_before_stage().await;
+    control.wait_for_timeout().await;
+    control.wait_before_project_copy().await;
+    control.release_stage().await;
+    control.wait_for_stage_completion().await;
+    control.release_project_copy().await;
+    let (status, created) = materialization.await.expect("request task joins");
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["skipped"][0]["recordId"], timed_out_id);
+    assert_eq!(created["selectedRecordIds"][0], expected_replacement_id);
+    assert_eq!(
+        created["dataset"]["items"][0]["contentHash"],
+        expected_replacement_hash
+    );
 }
 
 fn write_catalog_parquet(path: &std::path::Path, row_count: usize) {

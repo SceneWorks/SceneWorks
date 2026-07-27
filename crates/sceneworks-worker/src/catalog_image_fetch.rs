@@ -99,6 +99,75 @@ impl From<rusqlite::Error> for CatalogImageFetchError {
 
 pub type CatalogImageFetchResult<T> = Result<T, CatalogImageFetchError>;
 
+/// One public-URL image after the same SSRF, redirect, encoded-size, format,
+/// edge, pixel-count, and decode checks used by the catalog acquisition cache.
+#[derive(Debug)]
+pub struct VerifiedCatalogImage {
+    pub bytes: Vec<u8>,
+    pub extension: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub content_hash: String,
+}
+
+pub async fn fetch_verified_catalog_image(
+    source_url: &str,
+    max_bytes: usize,
+) -> WorkerResult<VerifiedCatalogImage> {
+    if max_bytes == 0 || max_bytes > MAX_IMAGE_BYTES {
+        return Err(WorkerError::InvalidPayload(
+            "catalog materialization image limit was invalid".to_owned(),
+        ));
+    }
+    let bytes = crate::downloads::fetch_public_source_url_bytes(source_url, max_bytes).await?;
+    verify_catalog_image_bytes(bytes, max_bytes)
+}
+
+pub fn verify_catalog_image_bytes(
+    bytes: Vec<u8>,
+    max_bytes: usize,
+) -> WorkerResult<VerifiedCatalogImage> {
+    if bytes.is_empty() || bytes.len() > max_bytes || max_bytes > MAX_IMAGE_BYTES {
+        return Err(WorkerError::InvalidPayload(
+            "catalog image exceeds the materialization byte limit".to_owned(),
+        ));
+    }
+    let format = image::guess_format(&bytes)
+        .map_err(|_| WorkerError::InvalidPayload("catalog image format was invalid".to_owned()))?;
+    let extension = match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::WebP => "webp",
+        _ => {
+            return Err(WorkerError::InvalidPayload(
+                "catalog image must be PNG, JPEG, or WebP".to_owned(),
+            ))
+        }
+    };
+    let decoded = image::load_from_memory_with_format(&bytes, format).map_err(|_| {
+        WorkerError::InvalidPayload("catalog image could not be decoded".to_owned())
+    })?;
+    let (width, height) = (decoded.width(), decoded.height());
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_EDGE
+        || height > MAX_IMAGE_EDGE
+        || u64::from(width).saturating_mul(u64::from(height)) > MAX_DECODED_PIXELS
+    {
+        return Err(WorkerError::InvalidPayload(
+            "catalog image dimensions exceed the materialization limit".to_owned(),
+        ));
+    }
+    drop(decoded);
+    Ok(VerifiedCatalogImage {
+        content_hash: hex_digest(&bytes),
+        bytes,
+        extension,
+        width,
+        height,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CatalogImageFetchOptions {
@@ -2179,6 +2248,16 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .expect("encode fixture");
         bytes
+    }
+
+    #[test]
+    fn shared_materialization_verifier_rejects_invalid_and_oversized_cached_bytes() {
+        assert!(verify_catalog_image_bytes(b"not an image".to_vec(), 1024).is_err());
+        assert!(verify_catalog_image_bytes(vec![0; 1025], 1024).is_err());
+        let verified = verify_catalog_image_bytes(png(8, 6), 1024 * 1024).expect("PNG verifies");
+        assert_eq!((verified.width, verified.height), (8, 6));
+        assert_eq!(verified.extension, "png");
+        assert_eq!(verified.content_hash.len(), 64);
     }
 
     fn catalog_fixture() -> (TempDir, CatalogRegistry, String) {

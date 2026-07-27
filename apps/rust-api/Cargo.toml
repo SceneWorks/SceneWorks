@@ -29,6 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 subtle = "2.6"
+tempfile = "3.13"
 tokio = { version = "1.40", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
@@ -68,6 +69,5 @@ parquet = { version = "53.4", default-features = false, features = ["snap"] }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
-tempfile = "3.13"
 [lints]
 workspace = true

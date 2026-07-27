@@ -30,6 +30,7 @@ pub use crate::character_store::{
     CharacterLoraUpdateInput, CharacterMutationResult, CharacterReferenceInput,
     CharacterReferenceUpdateInput, CharacterUpdateInput, CHARACTER_SIDECAR_PATTERN,
 };
+use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
@@ -41,10 +42,10 @@ use crate::store_util::{
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
 use crate::training_store::{
-    apply_training_dataset_migrations, DatasetItemRepoint, TrainingCaptionSidecarsResult,
-    TrainingDatasetBatchRenameInput, TrainingDatasetCaptionSidecarsInput,
-    TrainingDatasetCreateInput, TrainingDatasetMutationResult, TrainingDatasetStore,
-    TrainingDatasetSummary, TrainingDatasetUpdateInput,
+    apply_training_dataset_migrations, DatasetItemRepoint, ExternalTrainingDatasetItemInput,
+    TrainingCaptionSidecarsResult, TrainingDatasetBatchRenameInput,
+    TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
+    TrainingDatasetStore, TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 
 pub const PROJECT_FOLDERS: &[&str] = &[
@@ -791,6 +792,34 @@ impl ProjectStore {
     ) -> ProjectStoreResult<TrainingDataset> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).create_dataset(project_id, input)
+    }
+
+    pub fn create_training_dataset_from_external(
+        &self,
+        project_id: &str,
+        input: TrainingDatasetCreateInput,
+        items: Vec<ExternalTrainingDatasetItemInput>,
+        extra: ExtraFields,
+        idempotency_key: &str,
+    ) -> ProjectStoreResult<(TrainingDataset, bool)> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).create_dataset_from_external(
+            project_id,
+            input,
+            items,
+            extra,
+            idempotency_key,
+        )
+    }
+
+    pub fn get_catalog_materialization(
+        &self,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> ProjectStoreResult<Option<TrainingDataset>> {
+        let project_path = self.find_project_path(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .get_catalog_materialization(project_id, idempotency_key)
     }
 
     pub fn upload_training_dataset_item(

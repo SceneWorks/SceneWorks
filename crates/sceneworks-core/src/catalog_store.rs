@@ -158,6 +158,7 @@ const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
 const CURATION_PROJECTION_CHECKPOINT_METADATA_KEY: &str = "curation_projection_v1_checkpoint";
 const CURATION_PROJECTION_COMPLETE_METADATA_KEY: &str = "curation_projection_v1_complete";
 const CATALOG_RECORD_COUNT_METADATA_KEY: &str = "catalog_record_count";
+const CATALOG_GENERATION_METADATA_KEY: &str = "catalog_generation";
 const CURATION_BACKFILL_BATCH_SIZE: u32 = 1_000;
 const CATALOG_RECORD_WRITE_BATCH_SIZE: usize = 50;
 const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
@@ -179,6 +180,7 @@ const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
     CURATION_PROJECTION_CHECKPOINT_METADATA_KEY,
     CURATION_PROJECTION_COMPLETE_METADATA_KEY,
     CATALOG_RECORD_COUNT_METADATA_KEY,
+    CATALOG_GENERATION_METADATA_KEY,
 ];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -823,7 +825,13 @@ impl Catalog {
             records.iter(),
             Some(&existing_record_ids),
         )?;
-        upsert_catalog_metadata(&transaction, &database_path, metadata, added_record_count)?;
+        upsert_catalog_metadata(
+            &transaction,
+            &database_path,
+            metadata,
+            added_record_count,
+            !records.is_empty(),
+        )?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
@@ -896,6 +904,7 @@ impl Catalog {
             &database_path,
             &transaction_metadata,
             added_record_count,
+            !new_records.is_empty(),
         )?;
         transaction
             .commit()
@@ -913,6 +922,21 @@ impl Catalog {
             )
             .optional()
             .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    /// Monotonically advances whenever record or review state that can affect
+    /// materialization selection changes.
+    pub fn content_generation(&self) -> CatalogResult<u64> {
+        self.metadata(CATALOG_GENERATION_METADATA_KEY)?
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    CatalogError::InvalidCatalog(
+                        "Catalog content generation metadata is invalid".to_owned(),
+                    )
+                })
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(0))
     }
 
     pub fn contains_record_id(&self, record_id: &str) -> CatalogResult<bool> {
@@ -1497,19 +1521,24 @@ impl Catalog {
                 "Catalog rejection reason is invalid".to_owned(),
             ));
         }
-        match decision {
+        let database_path = self.database_path();
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let result: Option<CatalogRecordReview> = match decision {
             CatalogReviewDecision::Default => {
-                self.connection
+                transaction
                     .execute(
                         "delete from catalog_record_reviews where record_id = ?1",
                         [record_id],
                     )
-                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
-                Ok(None)
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+                Ok::<_, CatalogError>(None)
             }
             CatalogReviewDecision::Include => {
                 let updated_at = utc_now();
-                self.connection
+                transaction
                     .execute(
                         "insert into catalog_record_reviews(
                             record_id, decision, rejection_reason, updated_at
@@ -1519,7 +1548,7 @@ impl Catalog {
                             updated_at = excluded.updated_at",
                         params![record_id, updated_at],
                     )
-                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
                 Ok(Some(CatalogRecordReview {
                     record_id: record_id.to_owned(),
                     decision,
@@ -1534,7 +1563,7 @@ impl Catalog {
                     )
                 })?;
                 let updated_at = utc_now();
-                self.connection
+                transaction
                     .execute(
                         "insert into catalog_record_reviews(
                             record_id, decision, rejection_reason, updated_at
@@ -1544,7 +1573,7 @@ impl Catalog {
                             updated_at = excluded.updated_at",
                         params![record_id, reason, updated_at],
                     )
-                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
                 Ok(Some(CatalogRecordReview {
                     record_id: record_id.to_owned(),
                     decision,
@@ -1552,7 +1581,12 @@ impl Catalog {
                     updated_at,
                 }))
             }
-        }
+        }?;
+        upsert_catalog_metadata(&transaction, &database_path, &[], 0, true)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        Ok(result)
     }
 
     pub fn saved_views(&self) -> CatalogResult<Vec<CatalogSavedView>> {
@@ -2693,8 +2727,9 @@ fn upsert_catalog_metadata(
     database_path: &Path,
     metadata: &[(&str, &str)],
     added_record_count: u64,
+    records_mutated: bool,
 ) -> CatalogResult<()> {
-    if metadata.is_empty() && added_record_count == 0 {
+    if metadata.is_empty() && added_record_count == 0 && !records_mutated {
         return Ok(());
     }
     let mut entries = metadata
@@ -2706,6 +2741,9 @@ fn upsert_catalog_metadata(
             CATALOG_RECORD_COUNT_METADATA_KEY.to_owned(),
             added_record_count.to_string(),
         ));
+    }
+    if records_mutated {
+        entries.push((CATALOG_GENERATION_METADATA_KEY.to_owned(), "1".to_owned()));
     }
     for entries in entries.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
         let mut sql = String::from("insert into catalog_metadata(key, value) values ");
@@ -2722,7 +2760,7 @@ fn upsert_catalog_metadata(
         }
         sql.push_str(
             " on conflict(key) do update set value =
-                case when excluded.key = 'catalog_record_count'
+                case when excluded.key in ('catalog_record_count', 'catalog_generation')
                      then cast(cast(catalog_metadata.value as integer)
                                + cast(excluded.value as integer) as text)
                      else excluded.value end",
@@ -5443,6 +5481,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         catalog.append_records(&records).unwrap();
+        let mut generation = catalog.content_generation().unwrap();
+        assert_eq!(generation, 1);
         let base = CatalogSearchRequest {
             limit: 4,
             filters: vec![
@@ -5532,6 +5572,8 @@ mod tests {
             )
             .unwrap()
             .is_some());
+        assert_eq!(catalog.content_generation().unwrap(), generation + 1);
+        generation += 1;
         assert_eq!(
             catalog.record_reviews(&["record-00".to_owned()]).unwrap()[0]
                 .rejection_reason
@@ -5548,10 +5590,13 @@ mod tests {
             .unwrap()
             .rejection_reason
             .is_none());
+        assert_eq!(catalog.content_generation().unwrap(), generation + 1);
+        generation += 1;
         assert!(catalog
             .set_record_review("record-00", CatalogReviewDecision::Default, None)
             .unwrap()
             .is_none());
+        assert_eq!(catalog.content_generation().unwrap(), generation + 1);
 
         let view = catalog
             .save_view(None, "Full body photos".to_owned(), base.clone(), None)

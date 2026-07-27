@@ -123,6 +123,9 @@ describe("DatasetCatalogsScreen", () => {
         return response({ selectedCatalogId: "cat-1" });
       }
       if (path === "/api/v1/ui-preferences") return response({});
+      if (path === "/api/v1/projects") {
+        return response([{ id: "project-1", name: "Portrait project" }]);
+      }
       if (path === "/api/v1/catalogs" && (!options.method || options.method === "GET")) {
         return response(catalogs);
       }
@@ -215,6 +218,17 @@ describe("DatasetCatalogsScreen", () => {
             values: [{ value: "photograph", count: 28 }],
           }],
         });
+      }
+      if (path.endsWith("/materialize") && options.method === "POST") {
+        const body = JSON.parse(options.body);
+        return response({
+          dataset: { id: "ds-catalog", name: body.name },
+          requestedCount: body.requestedCount,
+          materializedCount: body.requestedCount,
+          selectedRecordIds: ["record-1", "record-2"],
+          skipped: [{ recordId: "unavailable", reason: "unavailable" }],
+          reusedExisting: false,
+        }, 201);
       }
       if (path.endsWith("/review") && options.method === "PUT") {
         const body = JSON.parse(options.body);
@@ -396,6 +410,144 @@ describe("DatasetCatalogsScreen", () => {
     const pages = requests.filter((item) => item.path.endsWith("/curation/query"));
     expect(pages.at(-1).body.cursor).toBe("opaque-next");
     expect(pages.at(-1).body.includeTotal).toBe(false);
+  });
+
+  it("creates a project-owned training dataset from the exact server query with progress and completion", async () => {
+    const completion = deferred();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/materialize")) {
+        requests.push({ path, options, body: JSON.parse(options.body) });
+        return completion.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Browse catalog")).click());
+    await flush();
+
+    const form = container.querySelector(".catalog-materialize-form");
+    const name = form.querySelector("input[aria-label='Training dataset name']");
+    const resultCount = form.querySelector("input[aria-label='Training dataset result count']");
+    const seed = form.querySelector("input[aria-label='Training dataset sampling seed']");
+    const policy = form.querySelector("select[aria-label='Training dataset deduplication policy']");
+    const tags = [...form.querySelectorAll("label")].find((label) =>
+      label.textContent.includes("Append generated tags")).querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(name, "Detached training set");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(resultCount, "2");
+      resultCount.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(seed, "9007199254740993");
+      seed.dispatchEvent(new Event("input", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")
+        .set.call(policy, "none");
+      policy.dispatchEvent(new Event("change", { bubbles: true }));
+      tags.click();
+    });
+    await act(async () => [...form.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create training dataset").click());
+    expect(container.textContent).toContain("Sampling seed must be a whole number");
+    expect(requests.some((item) => item.path.endsWith("/materialize"))).toBe(false);
+    expect(seed.max).toBe("9007199254740991");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(seed, "123");
+      seed.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...form.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create training dataset").click());
+    expect(form.querySelector("[role='status']").textContent).toContain("deterministic replacements");
+
+    await act(async () => completion.resolve(await response({
+      dataset: { id: "ds-catalog", name: "Detached training set" },
+      requestedCount: 2,
+      materializedCount: 2,
+      selectedRecordIds: ["record-1", "record-2"],
+      skipped: [{ recordId: "gone", reason: "unavailable" }],
+      reusedExisting: false,
+    }, 201)));
+    await flush();
+
+    const materialize = requests.find((item) => item.path.endsWith("/materialize"));
+    expect(materialize.body).toEqual(expect.objectContaining({
+      projectId: "project-1",
+      name: "Detached training set",
+      requestedCount: 2,
+      seed: 123,
+      deduplicationPolicy: "none",
+      includeGeneratedTags: true,
+    }));
+    expect(materialize.body.idempotencyKey).toEqual(expect.any(String));
+    expect(materialize.body.query.filters).toEqual(expect.arrayContaining([
+      { field: "medium", values: ["photograph"] },
+      { field: "personCount", values: ["1"] },
+    ]));
+    expect(form.textContent).toContain("Created Detached training set with 2 images");
+    expect(form.textContent).toContain("1 unavailable or duplicate candidates were replaced");
+  });
+
+  it("aborts and ignores stale materialization completion after switching catalogs", async () => {
+    catalogs = [
+      catalog(),
+      catalog({ id: "cat-2", name: "Other catalog", path: "C:\\data\\other.catalog" }),
+    ];
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
+    const completion = deferred();
+    const original = fetch.getMockImplementation();
+    let materializeSignal;
+    let firstMaterializeBody;
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/materialize") && !firstMaterializeBody) {
+        materializeSignal = options.signal;
+        firstMaterializeBody = JSON.parse(options.body);
+        return completion.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Browse catalog")).click());
+    await flush();
+    const form = container.querySelector(".catalog-materialize-form");
+    const name = form.querySelector("input[aria-label='Training dataset name']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(name, "Stale result");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...form.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create training dataset").click());
+    await act(async () => [...container.querySelectorAll(".catalog-list-item")]
+      .find((button) => button.textContent.includes("Other catalog")).click());
+    expect(materializeSignal.aborted).toBe(true);
+    await act(async () => completion.resolve(await response({
+      dataset: { id: "stale", name: "Stale result" },
+      requestedCount: 20,
+      materializedCount: 20,
+      selectedRecordIds: [],
+      skipped: [],
+      reusedExisting: false,
+    }, 201)));
+    await flush();
+    expect(container.textContent).not.toContain("Created Stale result");
+    expect(container.textContent).toContain("Other catalog");
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Browse catalog")).click());
+    await flush();
+    const nextForm = container.querySelector(".catalog-materialize-form");
+    await act(async () => [...nextForm.querySelectorAll("button")]
+      .find((button) => button.textContent === "Create training dataset").click());
+    await flush();
+    const nextMaterialize = requests.filter((item) => item.path.endsWith("/materialize")).at(-1);
+    expect(nextMaterialize.body.idempotencyKey).not.toBe(firstMaterializeBody.idempotencyKey);
+    expect(nextMaterialize.path).toContain("/cat-2/materialize");
   });
 
   it("renders running progress as indeterminate when the scanner has no total", async () => {

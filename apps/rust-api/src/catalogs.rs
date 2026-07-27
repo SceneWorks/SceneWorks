@@ -5,8 +5,9 @@
 //! user-selected absolute path; no request can substitute a root for an attached
 //! catalog id.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -21,17 +22,23 @@ use sceneworks_core::catalog_store::{
 };
 use sceneworks_core::contracts::{JobSnapshot, JobType};
 use sceneworks_core::jobs_store::CreateJob;
+use sceneworks_core::training::{CaptionSource, TrainingDataset, TrainingDatasetStatus};
+use sceneworks_core::training_store::{
+    CaptionInput, ExternalTrainingDatasetItemInput, TrainingDatasetCreateInput,
+    TrainingDatasetItemInput,
+};
 use sceneworks_worker::catalog_parquet_scanner::{
     validate_catalog_parquet_scan_plan_with_cancel, AttachedCatalogParquetScanDriver,
     CatalogParquetScanError, CatalogParquetScanOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog_scan_supervisor::CatalogScanSpawn;
-use crate::{ApiError, ApiJson, AppState};
+use crate::{project_call, ApiError, ApiJson, AppState};
 
 const CATALOG_API_CONTRACT_VERSION: u32 = 1;
 const DEFAULT_QUERY_LIMIT: u32 = 50;
@@ -44,6 +51,109 @@ const CATALOG_SCAN_START_MAX_BACKOFF: std::time::Duration = std::time::Duration:
 pub(crate) const CATALOG_SCAN_MAX_CONTENTION_RETRIES: u8 = 6;
 const CATALOG_PREFLIGHT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const CATALOG_PREFLIGHT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_MATERIALIZED_ITEMS: u32 = 500;
+const MAX_MATERIALIZATION_CANDIDATES: usize = 10_000;
+const MAX_MATERIALIZED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MATERIALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const MATERIALIZATION_CANDIDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_SAFE_INTEGER_SEED: u64 = 9_007_199_254_740_991;
+const MAX_ANALYZER_PROVENANCE_STRING_BYTES: usize = 512;
+const MAX_ANALYZER_PROVENANCE_STAGES: usize = 16;
+const MAX_CATALOG_CAPTION_COMPONENT_BYTES: usize = 2_048;
+const MAX_CATALOG_GENERATED_TAGS: usize = 32;
+const MAX_CATALOG_GENERATED_TAG_BYTES: usize = 128;
+const MAX_MATERIALIZED_CAPTION_BYTES: usize = 8_192;
+
+#[cfg(test)]
+struct CatalogCacheStageTestHook {
+    claimed: std::sync::atomic::AtomicBool,
+    before_stage: std::sync::Arc<std::sync::Barrier>,
+    release_stage: std::sync::Arc<std::sync::Barrier>,
+    stage_completed: std::sync::Arc<std::sync::Barrier>,
+    timeout_observed: std::sync::Arc<std::sync::Barrier>,
+    before_project_copy: std::sync::Arc<std::sync::Barrier>,
+    release_project_copy: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn catalog_cache_stage_test_hook(
+) -> &'static std::sync::Mutex<Option<std::sync::Arc<CatalogCacheStageTestHook>>> {
+    static HOOK: std::sync::OnceLock<
+        std::sync::Mutex<Option<std::sync::Arc<CatalogCacheStageTestHook>>>,
+    > = std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct CatalogCacheStageTestControl {
+    hook: std::sync::Arc<CatalogCacheStageTestHook>,
+}
+
+#[cfg(test)]
+impl CatalogCacheStageTestControl {
+    async fn wait(barrier: std::sync::Arc<std::sync::Barrier>) {
+        tokio::task::spawn_blocking(move || barrier.wait())
+            .await
+            .expect("catalog materialization test barrier joins");
+    }
+
+    pub(crate) async fn wait_before_stage(&self) {
+        Self::wait(self.hook.before_stage.clone()).await;
+    }
+
+    pub(crate) async fn wait_for_timeout(&self) {
+        Self::wait(self.hook.timeout_observed.clone()).await;
+    }
+
+    pub(crate) async fn wait_before_project_copy(&self) {
+        Self::wait(self.hook.before_project_copy.clone()).await;
+    }
+
+    pub(crate) async fn release_stage(&self) {
+        Self::wait(self.hook.release_stage.clone()).await;
+    }
+
+    pub(crate) async fn wait_for_stage_completion(&self) {
+        Self::wait(self.hook.stage_completed.clone()).await;
+    }
+
+    pub(crate) async fn release_project_copy(&self) {
+        Self::wait(self.hook.release_project_copy.clone()).await;
+    }
+}
+
+#[cfg(test)]
+impl Drop for CatalogCacheStageTestControl {
+    fn drop(&mut self) {
+        let mut current = catalog_cache_stage_test_hook()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .as_ref()
+            .is_some_and(|hook| std::sync::Arc::ptr_eq(hook, &self.hook))
+        {
+            *current = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_catalog_cache_stage_test_hook() -> CatalogCacheStageTestControl {
+    let barrier = || std::sync::Arc::new(std::sync::Barrier::new(2));
+    let hook = std::sync::Arc::new(CatalogCacheStageTestHook {
+        claimed: std::sync::atomic::AtomicBool::new(false),
+        before_stage: barrier(),
+        release_stage: barrier(),
+        stage_completed: barrier(),
+        timeout_observed: barrier(),
+        before_project_copy: barrier(),
+        release_project_copy: barrier(),
+    });
+    *catalog_cache_stage_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook.clone());
+    CatalogCacheStageTestControl { hook }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -134,6 +244,40 @@ pub(crate) struct RunCatalogAnalysisRequest {
     requested_gpu: String,
     #[serde(default = "default_catalog_analysis_batch_size")]
     batch_size: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MaterializeCatalogRequest {
+    project_id: String,
+    name: String,
+    requested_count: u32,
+    seed: u64,
+    deduplication_policy: String,
+    query: CatalogSearchRequest,
+    #[serde(default)]
+    include_generated_caption: bool,
+    #[serde(default)]
+    include_generated_tags: bool,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MaterializationSkip {
+    record_id: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MaterializeCatalogResponse {
+    dataset: TrainingDataset,
+    requested_count: u32,
+    materialized_count: u32,
+    selected_record_ids: Vec<String>,
+    skipped: Vec<MaterializationSkip>,
+    reused_existing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -368,6 +512,854 @@ pub(crate) async fn curate_catalog(
     })
     .await?;
     Ok(Json(response))
+}
+
+pub(crate) async fn materialize_catalog_results(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(mut request): ApiJson<MaterializeCatalogRequest>,
+) -> Result<(StatusCode, Json<MaterializeCatalogResponse>), ApiError> {
+    validate_materialization_request(&request)?;
+    let deduplicate = match request.deduplication_policy.as_str() {
+        "content_and_perceptual" => true,
+        "none" => false,
+        _ => {
+            return Err(ApiError::bad_request(
+                "deduplicationPolicy must be content_and_perceptual or none",
+            ))
+        }
+    };
+    request.query.cursor = None;
+    request.query.limit = MAX_QUERY_LIMIT;
+    request.query.sample_seed = Some(request.seed);
+    request.query.deduplicate = deduplicate;
+    request.query.include_total = false;
+    canonicalize_search_query(&mut request.query);
+    request.name = request.name.trim().to_owned();
+    let request_fingerprint = materialization_request_fingerprint(&catalog_id, &request)?;
+    if let Some(existing) = project_call(state.clone(), {
+        let project_id = request.project_id.clone();
+        let idempotency_key = request.idempotency_key.clone();
+        move |store| store.get_catalog_materialization(&project_id, &idempotency_key)
+    })
+    .await?
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(materialization_response_from_dataset(
+                existing,
+                true,
+                &request_fingerprint,
+            )?),
+        ));
+    }
+
+    let config_dir = state.settings.config_dir.clone();
+    let registry = CatalogRegistry::new(config_dir);
+    let catalog = registry
+        .open_attached(&catalog_id)
+        .map_err(ApiError::from)?;
+    let _lifecycle_lease = CatalogProcessingLease::try_acquire(&catalog).map_err(ApiError::from)?;
+    let descriptor = catalog.descriptor().clone();
+    let contract = catalog.contract_state().map_err(ApiError::from)?;
+    let analyzer_config = catalog.analyzer_config().map_err(ApiError::from)?;
+    let catalog_generation = catalog.content_generation().map_err(ApiError::from)?;
+    let catalog_root = fs::canonicalize(catalog.root())
+        .map_err(|error| ApiError::conflict(format!("Catalog storage is unavailable: {error}")))?;
+    let canonical_query = canonical_json(
+        serde_json::to_value(&request.query)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+    let catalog_snapshot = canonical_json(serde_json::json!({
+        "id": descriptor.id,
+        "createdAt": descriptor.created_at,
+        "schemaVersion": descriptor.schema_version,
+        "contract": &contract,
+        "analyzerConfig": &analyzer_config,
+    }));
+    let staging = tempfile::tempdir().map_err(|error| {
+        ApiError::internal(format!("Could not create dataset staging: {error}"))
+    })?;
+    let candidate_limit = (request.requested_count as usize)
+        .saturating_mul(20)
+        .max(request.requested_count as usize)
+        .min(MAX_MATERIALIZATION_CANDIDATES);
+    let mut selected = Vec::with_capacity(request.requested_count as usize);
+    let mut selected_ids = Vec::with_capacity(request.requested_count as usize);
+    let mut selected_versions = Vec::with_capacity(request.requested_count as usize);
+    let mut skipped = Vec::new();
+    let mut actual_hashes = BTreeSet::new();
+    let mut cursor = None;
+    let mut examined = 0_usize;
+    let deadline = tokio::time::Instant::now() + MATERIALIZATION_TIMEOUT;
+
+    'pages: loop {
+        request.query.cursor = cursor.take();
+        let page = catalog
+            .search_records(&request.query)
+            .map_err(ApiError::from)?;
+        for record in page.records {
+            if examined >= candidate_limit {
+                break 'pages;
+            }
+            examined += 1;
+            // A timed-out spawn_blocking verifier cannot be canceled. Use the
+            // monotonic attempt number so its eventual write can never replace
+            // a later accepted candidate.
+            let staging_token = examined;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break 'pages;
+            }
+            let acquired = tokio::time::timeout(
+                remaining.min(materialization_candidate_timeout()),
+                acquire_materialization_source(
+                    &catalog_root,
+                    staging.path(),
+                    staging_token,
+                    &record,
+                ),
+            )
+            .await;
+            let acquired = match acquired {
+                Ok(result) => result,
+                Err(_) => {
+                    signal_catalog_cache_timeout_test_hook();
+                    Err(ApiError::conflict("Catalog record image fetch timed out"))
+                }
+            };
+            let acquired = match acquired {
+                Ok(acquired) => acquired,
+                Err(_) => {
+                    skipped.push(MaterializationSkip {
+                        record_id: record.id,
+                        reason: "unavailable".to_owned(),
+                    });
+                    continue;
+                }
+            };
+            if deduplicate && !actual_hashes.insert(acquired.content_hash.clone()) {
+                skipped.push(MaterializationSkip {
+                    record_id: record.id,
+                    reason: "duplicate_content".to_owned(),
+                });
+                continue;
+            }
+            let caption = catalog_caption(
+                &record.metadata,
+                request.include_generated_caption,
+                request.include_generated_tags,
+            );
+            let item_id = format!("item_{:04}", selected.len() + 1);
+            selected_ids.push(record.id.clone());
+            selected_versions.push(serde_json::json!({
+                "recordId": &record.id,
+                "recordUpdatedAt": &record.updated_at,
+                "contentHash": &acquired.content_hash,
+                "analyzerProvenance": catalog_analyzer_provenance(&record.metadata),
+            }));
+            let mut item_extra = BTreeMap::new();
+            item_extra.insert(
+                "catalogSource".to_owned(),
+                catalog_source_snapshot(&record.metadata),
+            );
+            selected.push(ExternalTrainingDatasetItemInput {
+                item: TrainingDatasetItemInput {
+                    id: Some(item_id),
+                    asset_id: None,
+                    path: None,
+                    display_name: Some(record.id.clone()),
+                    caption: Some(CaptionInput {
+                        text: caption,
+                        source: Some(CaptionSource::Imported),
+                        trigger_words: Vec::new(),
+                    }),
+                    width: Some(acquired.width),
+                    height: Some(acquired.height),
+                },
+                source_path: acquired.path,
+                expected_content_hash: acquired.content_hash,
+                expected_width: acquired.width,
+                expected_height: acquired.height,
+                extra: item_extra,
+            });
+            if selected.len() == request.requested_count as usize {
+                break 'pages;
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    if catalog.content_generation().map_err(ApiError::from)? != catalog_generation {
+        return Err(ApiError::conflict(
+            "Catalog changed while materialization was selecting records; retry the request",
+        ));
+    }
+    drop(catalog);
+    drop(_lifecycle_lease);
+
+    if selected.len() != request.requested_count as usize {
+        return Err(ApiError::conflict(format!(
+            "Only {} verified images were available after deterministically examining {examined} candidates; requested {}",
+            selected.len(),
+            request.requested_count
+        )));
+    }
+
+    let selected_snapshot = selected_ids.clone();
+    let skipped_snapshot = skipped.clone();
+    let materialization_fingerprint = hex_sha256(
+        &serde_json::to_vec(&canonical_json(serde_json::json!({
+            "catalog": &catalog_snapshot,
+            "catalogGeneration": catalog_generation,
+            "requestFingerprint": &request_fingerprint,
+            "query": &canonical_query,
+            "selectedRecords": &selected_versions,
+        })))
+        .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+    let requested_count = request.requested_count;
+    let project_id = request.project_id.clone();
+    let idempotency_key = request.idempotency_key.clone();
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "catalogMaterialization".to_owned(),
+        serde_json::json!({
+            "contractVersion": 1,
+            "idempotencyKey": idempotency_key,
+            "requestFingerprint": &request_fingerprint,
+            "catalog": {
+                "id": catalog_id,
+                "schemaVersion": descriptor.schema_version,
+                "generation": catalog_generation,
+            },
+            "materializationFingerprint": materialization_fingerprint,
+            "query": canonical_query,
+            "requestedCount": requested_count,
+            "materializedCount": selected_snapshot.len(),
+            "selectedRecordIds": selected_snapshot,
+            "selectedRecordVersions": selected_versions,
+            "skipped": skipped_snapshot,
+            "analyzerVersions": contract.analyzer_versions,
+            "seed": request.seed,
+            "deduplicationPolicy": request.deduplication_policy,
+            "captionOptions": {
+                "source": true,
+                "generatedCaption": request.include_generated_caption,
+                "generatedTags": request.include_generated_tags,
+            },
+        }),
+    );
+    let create = TrainingDatasetCreateInput {
+        name: request.name,
+        modality: None,
+        status: Some(TrainingDatasetStatus::Draft),
+        character_id: None,
+        items: selected.iter().map(|value| value.item.clone()).collect(),
+    };
+    let response_fingerprint = request_fingerprint.clone();
+    let (dataset, reused_existing) = project_call(state, move |store| {
+        run_before_project_copy_test_hook();
+        let _staging_guard = staging;
+        store.create_training_dataset_from_external(
+            &project_id,
+            create,
+            selected,
+            extra,
+            &idempotency_key,
+        )
+    })
+    .await?;
+    let status = if reused_existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((
+        status,
+        Json(materialization_response_from_dataset(
+            dataset,
+            reused_existing,
+            &response_fingerprint,
+        )?),
+    ))
+}
+
+struct AcquiredMaterializationSource {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    content_hash: String,
+}
+
+async fn acquire_materialization_source(
+    catalog_root: &FsPath,
+    staging_root: &FsPath,
+    index: usize,
+    record: &CatalogRecord,
+) -> Result<AcquiredMaterializationSource, ApiError> {
+    if let Some(relative) = record
+        .metadata
+        .pointer("/acquisition/cachePath")
+        .and_then(Value::as_str)
+    {
+        let catalog_root = catalog_root.to_owned();
+        let staging_root = staging_root.to_owned();
+        let relative = relative.to_owned();
+        let record = record.clone();
+        let cached = tokio::task::spawn_blocking(move || {
+            verified_cached_source(&catalog_root, &staging_root, index, &relative, &record)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Catalog cache verifier failed: {error}")))?;
+        if let Ok(source) = cached {
+            return Ok(source);
+        }
+    }
+    let url = record
+        .metadata
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::conflict("Catalog record has no available image source"))?;
+    let verified = sceneworks_worker::catalog_image_fetch::fetch_verified_catalog_image(
+        url,
+        MAX_MATERIALIZED_IMAGE_BYTES,
+    )
+    .await
+    .map_err(|_| ApiError::conflict("Catalog record image was unavailable"))?;
+    verify_record_content_hash(record, &verified.content_hash)?;
+    let path = staging_root.join(format!("candidate-{index}.{}", verified.extension));
+    tokio::fs::write(&path, &verified.bytes)
+        .await
+        .map_err(|error| ApiError::internal(format!("Could not stage catalog image: {error}")))?;
+    Ok(AcquiredMaterializationSource {
+        path,
+        width: verified.width,
+        height: verified.height,
+        content_hash: verified.content_hash,
+    })
+}
+
+fn verified_cached_source(
+    catalog_root: &FsPath,
+    staging_root: &FsPath,
+    index: usize,
+    relative: &str,
+    record: &CatalogRecord,
+) -> Result<AcquiredMaterializationSource, ApiError> {
+    let path = FsPath::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ApiError::conflict("Catalog cache path was invalid"));
+    }
+    let canonical = fs::canonicalize(catalog_root.join(path))
+        .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?;
+    if !canonical.starts_with(catalog_root) || !canonical.is_file() {
+        return Err(ApiError::conflict("Catalog cache path escaped its catalog"));
+    }
+    let byte_count = fs::metadata(&canonical)
+        .map_err(|_| ApiError::conflict("Catalog cache image was unavailable"))?
+        .len();
+    if byte_count == 0 || byte_count > MAX_MATERIALIZED_IMAGE_BYTES as u64 {
+        return Err(ApiError::conflict(
+            "Catalog cache image exceeded the materialization limit",
+        ));
+    }
+    let bytes = fs::read(&canonical)
+        .map_err(|_| ApiError::conflict("Catalog cache image could not be read"))?;
+    let verified = sceneworks_worker::catalog_image_fetch::verify_catalog_image_bytes(
+        bytes,
+        MAX_MATERIALIZED_IMAGE_BYTES,
+    )
+    .map_err(|_| ApiError::conflict("Catalog cache image format was invalid"))?;
+    let content_hash = verified.content_hash;
+    verify_record_content_hash(record, &content_hash)?;
+    #[cfg(test)]
+    let claimed_test_hook = claim_catalog_cache_stage_test_hook();
+    #[cfg(test)]
+    if let Some(hook) = &claimed_test_hook {
+        hook.before_stage.wait();
+        hook.release_stage.wait();
+    }
+    let staged = staging_root.join(format!("candidate-{index}.{}", verified.extension));
+    let write_result = fs::write(&staged, &verified.bytes);
+    #[cfg(test)]
+    if let Some(hook) = claimed_test_hook {
+        hook.stage_completed.wait();
+    }
+    write_result
+        .map_err(|error| ApiError::internal(format!("Could not stage catalog image: {error}")))?;
+    Ok(AcquiredMaterializationSource {
+        path: staged,
+        width: verified.width,
+        height: verified.height,
+        content_hash,
+    })
+}
+
+fn verify_record_content_hash(record: &CatalogRecord, actual: &str) -> Result<(), ApiError> {
+    if record
+        .metadata
+        .pointer("/acquisition/contentHash")
+        .and_then(Value::as_str)
+        .is_some_and(|expected| expected != actual)
+    {
+        return Err(ApiError::conflict(
+            "Catalog record image failed content verification",
+        ));
+    }
+    Ok(())
+}
+
+fn materialization_candidate_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if catalog_cache_stage_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+    {
+        return std::time::Duration::from_millis(100);
+    }
+    MATERIALIZATION_CANDIDATE_TIMEOUT
+}
+
+#[cfg(test)]
+fn claim_catalog_cache_stage_test_hook() -> Option<std::sync::Arc<CatalogCacheStageTestHook>> {
+    use std::sync::atomic::Ordering;
+
+    let hook = catalog_cache_stage_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()?;
+    hook.claimed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| hook)
+}
+
+#[cfg(test)]
+fn signal_catalog_cache_timeout_test_hook() {
+    if let Some(hook) = catalog_cache_stage_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        hook.timeout_observed.wait();
+    }
+}
+
+#[cfg(not(test))]
+fn signal_catalog_cache_timeout_test_hook() {}
+
+#[cfg(test)]
+fn run_before_project_copy_test_hook() {
+    if let Some(hook) = catalog_cache_stage_test_hook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        hook.before_project_copy.wait();
+        hook.release_project_copy.wait();
+    }
+}
+
+#[cfg(not(test))]
+fn run_before_project_copy_test_hook() {}
+
+fn materialization_response_from_dataset(
+    dataset: TrainingDataset,
+    reused_existing: bool,
+    expected_request_fingerprint: &str,
+) -> Result<MaterializeCatalogResponse, ApiError> {
+    let provenance = dataset
+        .extra
+        .get("catalogMaterialization")
+        .ok_or_else(|| ApiError::internal("Materialized dataset provenance was missing"))?;
+    if provenance.get("requestFingerprint").and_then(Value::as_str)
+        != Some(expected_request_fingerprint)
+    {
+        return Err(ApiError::conflict(
+            "idempotencyKey was already used for a different catalog materialization request",
+        ));
+    }
+    let requested_count = provenance
+        .get("requestedCount")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| ApiError::internal("Materialized dataset requestedCount was invalid"))?;
+    let selected_record_ids = provenance
+        .get("selectedRecordIds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::internal("Materialized dataset selectedRecordIds was invalid"))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ApiError::internal("Materialized dataset selectedRecordIds was invalid")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let skipped = serde_json::from_value(
+        provenance
+            .get("skipped")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    )
+    .map_err(|_| ApiError::internal("Materialized dataset skipped provenance was invalid"))?;
+    let materialized_count = provenance
+        .get("materializedCount")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| ApiError::internal("Materialized dataset materializedCount was invalid"))?;
+    Ok(MaterializeCatalogResponse {
+        materialized_count,
+        dataset,
+        requested_count,
+        selected_record_ids,
+        skipped,
+        reused_existing,
+    })
+}
+
+fn catalog_caption(metadata: &Value, generated_caption: bool, generated_tags: bool) -> String {
+    let mut parts = Vec::new();
+    if let Some(source) = metadata
+        .get("caption")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(truncate_utf8(source, MAX_CATALOG_CAPTION_COMPONENT_BYTES));
+    }
+    if generated_caption {
+        for pointer in [
+            "/analysis/visionLanguage/caption",
+            "/analysis/generatedCaption",
+            "/generatedCaption",
+        ] {
+            if let Some(caption) = metadata
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let caption = truncate_utf8(caption, MAX_CATALOG_CAPTION_COMPONENT_BYTES);
+                if !parts.iter().any(|value| value == &caption) {
+                    parts.push(caption);
+                }
+                break;
+            }
+        }
+    }
+    if generated_tags {
+        if let Some(tags) = metadata
+            .pointer("/analysis/visionLanguage/tags")
+            .and_then(Value::as_array)
+        {
+            let tags = tags
+                .iter()
+                .take(MAX_CATALOG_GENERATED_TAGS)
+                .filter_map(|tag| {
+                    tag.get("value")
+                        .and_then(Value::as_str)
+                        .or_else(|| tag.as_str())
+                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| truncate_utf8(value, MAX_CATALOG_GENERATED_TAG_BYTES))
+                .collect::<Vec<_>>();
+            if !tags.is_empty() {
+                parts.push(tags.join(", "));
+            }
+        }
+    }
+    truncate_utf8(&parts.join("\n"), MAX_MATERIALIZED_CAPTION_BYTES)
+}
+
+fn catalog_source_snapshot(metadata: &Value) -> Value {
+    let source_caption = metadata.get("caption").and_then(Value::as_str);
+    let generated_caption = [
+        "/analysis/visionLanguage/caption",
+        "/analysis/generatedCaption",
+        "/generatedCaption",
+    ]
+    .into_iter()
+    .find_map(|pointer| metadata.pointer(pointer).and_then(Value::as_str));
+    let (source_caption, source_truncation) =
+        bounded_text_snapshot(source_caption, MAX_CATALOG_CAPTION_COMPONENT_BYTES);
+    let (generated_caption, generated_truncation) =
+        bounded_text_snapshot(generated_caption, MAX_CATALOG_CAPTION_COMPONENT_BYTES);
+    let (generated_tags, tag_truncation) = bounded_tag_snapshot(
+        metadata
+            .pointer("/analysis/visionLanguage/tags")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+    );
+    let mut truncation = serde_json::Map::new();
+    if let Some(value) = source_truncation {
+        truncation.insert("sourceCaption".to_owned(), value);
+    }
+    if let Some(value) = generated_truncation {
+        truncation.insert("generatedCaption".to_owned(), value);
+    }
+    if let Some(value) = tag_truncation {
+        truncation.insert("generatedTags".to_owned(), value);
+    }
+    serde_json::json!({
+        "sourceCaption": source_caption,
+        "generatedCaption": generated_caption,
+        "generatedTags": generated_tags,
+        "truncation": truncation,
+    })
+}
+
+fn bounded_text_snapshot(value: Option<&str>, max_bytes: usize) -> (Value, Option<Value>) {
+    let Some(value) = value else {
+        return (Value::Null, None);
+    };
+    let bounded = truncate_utf8(value, max_bytes);
+    let truncation = (bounded.len() != value.len()).then(|| {
+        serde_json::json!({
+            "truncated": true,
+            "originalBytes": value.len(),
+            "sha256": hex_sha256(value.as_bytes()),
+        })
+    });
+    (Value::String(bounded), truncation)
+}
+
+fn bounded_tag_snapshot(tags: Option<&[Value]>) -> (Value, Option<Value>) {
+    let Some(tags) = tags else {
+        return (Value::Array(Vec::new()), None);
+    };
+    let mut bounded = Vec::new();
+    let mut truncated_values = Vec::new();
+    for (index, tag) in tags.iter().take(MAX_CATALOG_GENERATED_TAGS).enumerate() {
+        let Some(value) = tag
+            .get("value")
+            .and_then(Value::as_str)
+            .or_else(|| tag.as_str())
+        else {
+            continue;
+        };
+        let bounded_value = truncate_utf8(value, MAX_CATALOG_GENERATED_TAG_BYTES);
+        if bounded_value.len() != value.len() {
+            truncated_values.push(serde_json::json!({
+                "index": index,
+                "originalBytes": value.len(),
+                "sha256": hex_sha256(value.as_bytes()),
+            }));
+        }
+        let mut snapshot = serde_json::Map::new();
+        snapshot.insert("value".to_owned(), Value::String(bounded_value));
+        if let Some(confidence @ Value::Number(_)) = tag.get("confidence") {
+            snapshot.insert("confidence".to_owned(), confidence.clone());
+        }
+        bounded.push(Value::Object(snapshot));
+    }
+    let truncated = tags.len() > MAX_CATALOG_GENERATED_TAGS || !truncated_values.is_empty();
+    let truncation = truncated.then(|| {
+        serde_json::json!({
+            "truncated": true,
+            "originalCount": tags.len(),
+            "maxCount": MAX_CATALOG_GENERATED_TAGS,
+            "truncatedValues": truncated_values,
+        })
+    });
+    (Value::Array(bounded), truncation)
+}
+
+fn catalog_analyzer_provenance(metadata: &Value) -> Value {
+    let mut provenance = serde_json::Map::new();
+    if let Some(structured) = metadata
+        .pointer("/analysis/structured")
+        .and_then(Value::as_object)
+    {
+        let mut snapshot = serde_json::Map::new();
+        copy_scalar(structured, "schemaVersion", &mut snapshot);
+        copy_bounded_string(structured, "inputFingerprint", &mut snapshot);
+        if let Some(stages) = structured.get("executionOrder").and_then(Value::as_array) {
+            snapshot.insert(
+                "executionOrder".to_owned(),
+                Value::Array(
+                    stages
+                        .iter()
+                        .take(MAX_ANALYZER_PROVENANCE_STAGES)
+                        .filter_map(Value::as_str)
+                        .map(|value| Value::String(bounded_provenance_string(value)))
+                        .collect(),
+                ),
+            );
+        }
+        let analyzers: serde_json::Map<String, Value> = ["person", "face", "pose", "derived"]
+            .into_iter()
+            .filter_map(|stage| {
+                bounded_analyzer_snapshot(
+                    structured
+                        .get(stage)
+                        .and_then(|value| value.get("analyzer")),
+                )
+                .map(|value| (stage.to_owned(), value))
+            })
+            .collect();
+        if !analyzers.is_empty() {
+            snapshot.insert("analyzers".to_owned(), Value::Object(analyzers));
+        }
+        if !snapshot.is_empty() {
+            provenance.insert("structured".to_owned(), Value::Object(snapshot));
+        }
+    }
+    for (source_key, output_key) in [
+        ("visionLanguage", "visionLanguage"),
+        ("semanticEmbedding", "semanticEmbedding"),
+    ] {
+        if let Some(snapshot) =
+            bounded_analyzer_snapshot(metadata.pointer(&format!("/analysis/{source_key}")))
+        {
+            provenance.insert(output_key.to_owned(), snapshot);
+        }
+    }
+    Value::Object(provenance)
+}
+
+fn bounded_analyzer_snapshot(value: Option<&Value>) -> Option<Value> {
+    let value = value?.as_object()?;
+    let mut snapshot = serde_json::Map::new();
+    for key in [
+        "analyzerVersion",
+        "modelId",
+        "modelVersion",
+        "modelRevision",
+        "runtime",
+        "runtimeVersion",
+        "runtimeRevision",
+        "backend",
+        "provider",
+        "taxonomyVersion",
+        "inputFingerprint",
+        "status",
+    ] {
+        copy_bounded_string(value, key, &mut snapshot);
+    }
+    copy_scalar(value, "schemaVersion", &mut snapshot);
+    copy_scalar(value, "confidence", &mut snapshot);
+    (!snapshot.is_empty()).then_some(Value::Object(snapshot))
+}
+
+fn copy_bounded_string(
+    source: &serde_json::Map<String, Value>,
+    key: &str,
+    target: &mut serde_json::Map<String, Value>,
+) {
+    if let Some(value) = source.get(key).and_then(Value::as_str) {
+        target.insert(
+            key.to_owned(),
+            Value::String(bounded_provenance_string(value)),
+        );
+    }
+}
+
+fn copy_scalar(
+    source: &serde_json::Map<String, Value>,
+    key: &str,
+    target: &mut serde_json::Map<String, Value>,
+) {
+    if let Some(value @ (Value::Bool(_) | Value::Number(_))) = source.get(key) {
+        target.insert(key.to_owned(), value.clone());
+    }
+}
+
+fn bounded_provenance_string(value: &str) -> String {
+    truncate_utf8(value, MAX_ANALYZER_PROVENANCE_STRING_BYTES)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn validate_materialization_request(request: &MaterializeCatalogRequest) -> Result<(), ApiError> {
+    if request.project_id.trim().is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if request.name.trim().is_empty() || request.name.chars().count() > 120 {
+        return Err(ApiError::bad_request(
+            "name must contain 1 to 120 characters",
+        ));
+    }
+    if !(1..=MAX_MATERIALIZED_ITEMS).contains(&request.requested_count) {
+        return Err(ApiError::bad_request(format!(
+            "requestedCount must be between 1 and {MAX_MATERIALIZED_ITEMS}"
+        )));
+    }
+    if request.seed > MAX_SAFE_INTEGER_SEED {
+        return Err(ApiError::bad_request(format!(
+            "seed must be no greater than {MAX_SAFE_INTEGER_SEED}"
+        )));
+    }
+    if request.idempotency_key.trim().is_empty() || request.idempotency_key.chars().count() > 128 {
+        return Err(ApiError::bad_request(
+            "idempotencyKey must contain 1 to 128 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn materialization_request_fingerprint(
+    catalog_id: &str,
+    request: &MaterializeCatalogRequest,
+) -> Result<String, ApiError> {
+    let value = canonical_json(serde_json::json!({
+        "catalogId": catalog_id,
+        "projectId": request.project_id,
+        "name": request.name,
+        "requestedCount": request.requested_count,
+        "seed": request.seed,
+        "deduplicationPolicy": request.deduplication_policy,
+        "query": request.query,
+        "includeGeneratedCaption": request.include_generated_caption,
+        "includeGeneratedTags": request.include_generated_tags,
+    }));
+    let bytes =
+        serde_json::to_vec(&value).map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn canonicalize_search_query(query: &mut CatalogSearchRequest) {
+    query
+        .filters
+        .sort_by(|left, right| left.field.cmp(&right.field));
+    for filter in &mut query.filters {
+        filter.values.sort();
+        filter.values.dedup();
+    }
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, canonical_json(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        other => other,
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) async fn review_catalog_record(
@@ -1742,6 +2734,34 @@ mod scan_admission_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn materialization_record(expected_hash: Option<&str>) -> CatalogRecord {
+        CatalogRecord {
+            id: "record".to_owned(),
+            image_path: "images/record.png".to_owned(),
+            thumbnail_path: None,
+            embedding_path: None,
+            artifact_path: None,
+            metadata: serde_json::json!({
+                "acquisition": {"contentHash": expected_hash}
+            }),
+            created_at: "2026-07-27T00:00:00Z".to_owned(),
+            updated_at: "2026-07-27T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn remote_fallback_must_match_the_catalog_acquisition_hash() {
+        assert!(
+            verify_record_content_hash(&materialization_record(Some("expected")), "changed")
+                .is_err()
+        );
+        assert!(
+            verify_record_content_hash(&materialization_record(Some("expected")), "expected")
+                .is_ok()
+        );
+        assert!(verify_record_content_hash(&materialization_record(None), "downloaded").is_ok());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn global_scan_admission_bounds_distinct_catalog_work_and_preserves_db_capacity() {

@@ -112,9 +112,9 @@ use catalogs::{
     attach_catalog, catalog_curation_facets, catalog_facets, catalog_record_thumbnail,
     create_catalog, create_catalog_saved_view, curate_catalog, delete_catalog_on_disk,
     delete_catalog_saved_view, detach_catalog, get_catalog, get_catalog_status,
-    list_catalog_saved_views, list_catalogs, pause_catalog, query_catalog, resume_catalog,
-    review_catalog_record, run_catalog_analysis, update_catalog_analyzer_config,
-    update_catalog_saved_view,
+    list_catalog_saved_views, list_catalogs, materialize_catalog_results, pause_catalog,
+    query_catalog, resume_catalog, review_catalog_record, run_catalog_analysis,
+    update_catalog_analyzer_config, update_catalog_saved_view,
 };
 mod assets;
 use assets::{
@@ -1401,6 +1401,10 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/datasets",
             get(list_training_datasets).post(create_training_dataset),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/materialize",
+            post(materialize_catalog_results),
         )
         .route(
             "/api/v1/projects/:project_id/training/uploads",
