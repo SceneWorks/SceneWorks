@@ -80,6 +80,7 @@ default 4 s clip is **93 frames**. A user at defaults should expect roughly **6�
 | Whole-clip wall | **256 s** |
 | Load + UMT5 encode | 4.8–5.9 s |
 | AR denoise | 211 s — **≈5.3 s/denoise step**, **31 s/chunk** mean (20 s first chunk → 36 s once the KV window fills) |
+| ↳ why 31 × 7 = 217 ≠ 211 | the 211 s window runs first-step-mark → last-step-mark, so it *excludes* the first step's own compute; the per-chunk figures impute it. The ~6 s gap is that one step. |
 | VAE decode (84→81 frames) | 38–39 s |
 | **MLX peak, active** | **27.9 GiB** |
 | MLX peak, active + allocator cache (sampled ⇒ lower bound) | ≥90.4 GiB |
@@ -161,8 +162,12 @@ caught a bad measurement during S13: against that corrupt reference every tiled 
 ### Coherence — what the clip actually looks like
 
 **Not** "coherent with minor stylization". Through the shipped decode the clip is **visibly broken**:
-violet snow and rainbow fringing by frame 13 (half a second in), a heavy yellow-green cast by frame 78,
-saturation climbing 0.24 → 0.55 while mean brightness falls 133 → 116.
+violet snow and rainbow fringing by frame 13 (half a second in), and a heavy colour cast late in the
+clip. Measured on the 81-frame run, mean frame brightness walks **137 → 122** head-to-tail; on the
+33-frame comparison the shipped decode holds saturation at **0.293 → 0.261** where a single-pass decode
+of the same latents relaxes to **0.293 → 0.199**, i.e. the tiling *adds* saturation as the clip runs.
+Highlight clipping is the clearest single number: **9.71% of pixels mean, 26.63% worst** against
+**0.08% / 0.25%** single-pass.
 
 The *underlying generation* is good — subject identity, gait and background hold across all 81 frames,
 and single-pass decoding of the same latents yields a clean photographic clip. There is a *separate*
