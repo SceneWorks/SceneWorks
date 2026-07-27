@@ -171,6 +171,9 @@ export function referenceStrengthFor(model) {
  * @param {number} [input.img2imgStrength] - from referenceStrengthFor(selectedModel).
  * @param {object|null} [input.editLora] - the model's managed `image_edit`-role LoRA catalog entry
  *   (findModelEditLora), auto-applied in edit mode. Null for models needing none.
+ * @param {object[]} [input.loras] - already-serialized picker selections (epic 15404). The
+ *   Simple LoRA field produces `serializeLora(lora, { weight })` entries, so this is the same
+ *   array the advanced studio sends for the same picks.
  * @param {string} [input.quantTier] / @param {boolean} [input.tierExplicit] - from resolveSimpleTier.
  * @returns {object|null} the payload for createImageJob, or null when the resolution is invalid.
  */
@@ -185,6 +188,7 @@ export function buildSimpleImageRequest({
   supportsImg2img = false,
   img2imgStrength = DEFAULT_IMG2IMG_STRENGTH,
   editLora = null,
+  loras: selectedLoras = [],
   quantTier = "",
   tierExplicit = false,
 }) {
@@ -203,7 +207,15 @@ export function buildSimpleImageRequest({
   // manages this for the user rather than exposing it in the LoRA picker, which is exactly the
   // Simple behavior; it just has to actually be applied. `serializeLora` round-trips
   // `conditioningRole`, which is what the worker's role check reads.
-  const loras = editing && editLora ? [serializeLora(editLora)] : [];
+  //
+  // It rides on TOP of the user's picks and is de-duplicated by id, mirroring ImageStudio's
+  // `buildLorasPayload`: it is not a picker entry, but it does occupy one of the run's
+  // MAX_JOB_LORAS_TOTAL slots — which is exactly why the picker's own cap is the lower
+  // MAX_USER_JOB_LORAS.
+  const loras = [...selectedLoras];
+  if (editing && editLora && !loras.some((entry) => entry.id === editLora.id)) {
+    loras.push(serializeLora(editLora));
+  }
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
     loras,
@@ -241,6 +253,9 @@ export function buildSimpleVideoRequest({
   duration,
   styleId,
   sourceAssetId,
+  // Already-serialized picker selections (epic 15404) — `serializeLora(lora, { weight })`,
+  // the same entries VideoStudio posts.
+  loras = [],
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
@@ -278,7 +293,7 @@ export function buildSimpleVideoRequest({
     referenceClipAssetId: null,
     personTrackId: null,
     replacementMode: "face_only",
-    loras: [],
+    loras,
     advanced: {
       resolution,
       ...(styleApplied ? { styleId, stylePrompt: prompt } : {}),
