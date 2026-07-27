@@ -1,4 +1,4 @@
-//! Native MLX LoRA/LoKr training jobs (epic 3039) — the training analog of
+//! Native Rust LoRA/LoKr training jobs (epic 3039) — the training analog of
 //! [`image_jobs`](crate::image_jobs)/[`video_jobs`](crate::video_jobs).
 //!
 //! Parses a `lora_train` job into the Rust-resolved [`TrainingPlan`], then either
@@ -18,9 +18,9 @@
 //! sc-7884 (engine trainer sc-7883/7885), native-MLX/Apple-Silicon only. The dry-run validator is
 //! cross-platform. The real run executes in-process on the macOS
 //! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
-//! engine, for the five families with a candle trainer (`sdxl`/`z_image_turbo`/`lens`/the Krea 2 Raw
-//! 12B DiT `krea_2_raw` (sc-8614)/the Wan A14B **T2V** `wan2_2_t2v_14b`). Families without a native
-//! trainer for the active backend (Kolors, LTX, the dense Wan 5B, and Wan I2V A14B off-Mac) are
+//! engine, for the candle trainers (`sdxl`/`z_image_turbo`/`lens`/the Krea 2 Raw 12B DiT
+//! `krea_2_raw` (sc-8614)/LTX-2.3 `ltx_2_3`/the Wan A14B **T2V** `wan2_2_t2v_14b`). Families without
+//! a native trainer for the active backend (Kolors, the dense Wan 5B, and Wan I2V A14B off-Mac) are
 //! refused and remain queued; there is no Python/torch training fallback.
 
 use super::*;
@@ -267,8 +267,9 @@ pub(crate) fn training_progress(
 /// TI2V-5B (`wan_lora`) vs the two A14B MoE variants (`wan_moe_lora` + the T2V/I2V base model).
 /// `None` for a family with no native trainer at all — those never route here, but the mapping fails
 /// loudly if one does. NB the candle registry only holds a subset of these ids (`sdxl`,
-/// `z_image_turbo`, `lens`, `wan2_2_t2v_14b`); the API's `training_job_is_candle_eligible` gate keeps
-/// the candle-untrained ids (Kolors/LTX/Wan-5B/Wan-I2V) off the candle worker, and `load_trainer`
+/// `z_image_turbo`, `lens`, `krea_2_raw`, `ltx_2_3`, `wan2_2_t2v_14b`); the API's
+/// `training_job_is_candle_eligible` gate keeps the candle-untrained ids
+/// (Kolors/Wan-5B/Wan-I2V) off the candle worker, and `load_trainer`
 /// fails loudly as the backstop if one ever slips through.
 #[cfg(any(
     target_os = "macos",
@@ -556,7 +557,7 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
 /// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
-/// candle-trainable big-DiT families: Z-Image and the Wan A14B **T2V** MoE — the same set
+/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and the Wan A14B **T2V** MoE — the same set
 /// `jobs_store::training_job_is_candle_eligible` gates the MoE to (only `wan_2_2_t2v_14b` has a candle
 /// trainer; the I2V A14B / dense 5B are refused and remain queued). Krea 2 Raw is a 12B DiT
 /// (epic 7565 P4, sc-8614) —
@@ -573,6 +574,9 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
         // Krea pose-ControlNet trains a control branch on the same frozen 12B DiT — same OOM risk,
         // so force checkpointing on (sc-10163).
         "krea_control" => true,
+        // LTX-2.3 is a 22B DiT. Its candle trainer supports packed-q4 bases, but a dense backward
+        // still materializes frozen-weight gradients unless checkpointing is forced.
+        "ltx_mlx_lora" => true,
         "wan_moe_lora" => plan.target.base_model == "wan_2_2_t2v_14b",
         _ => false,
     }
@@ -604,6 +608,12 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
         );
         config.gradient_checkpointing = true;
     }
+    // The candle LTX trainer intentionally runs f32: bf16 was measured to decorrelate gradients
+    // through the deep distilled DiT. Keep the shared target's bf16 default for MLX, but normalize
+    // the off-Mac config before validation.
+    if plan.target.kernel == "ltx_mlx_lora" {
+        config.train_dtype = "f32".to_owned();
+    }
     config
 }
 
@@ -623,20 +633,16 @@ enum TrainEvent {
 /// resolve the bundled sibling and thread it on, letting a self-contained install train without a
 /// separate `mlx-community/gemma-3-12b-it-bf16` download (sc-9989). `None` for every other family (TE
 /// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
-/// `$LTX_GEMMA_DIR` (the engine's env/HF-cache fallback stays in force). LTX training is mlx-only, so
-/// off-Mac this is always `None`.
+/// `$LTX_GEMMA_DIR`. The same resolver is used by MLX and candle so the turnkey layout is portable.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Option<WeightsSource> {
-    #[cfg(target_os = "macos")]
     if engine_id == "ltx_2_3" {
         return crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(weights_dir)
             .map(WeightsSource::Dir);
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (engine_id, weights_dir);
     None
 }
 
@@ -673,7 +679,10 @@ fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
 /// macOS. All-or-nothing: a missing component fails the job with an actionable error BEFORE the trainer
 /// load (never a mid-train hub fetch).
 ///
-/// **Training always resolves the DENSE `bf16` tier** (sc-14056 / sc-14980). A model whose mirror is
+/// Caller-staged shared components resolve from the DENSE `bf16` tier (sc-14056 / sc-14980).
+/// LTX is not handled here: its packed q4 base and sibling Gemma travel through `weights_dir` and
+/// `LoadSpec::text_encoder`, and its descriptor advertises no co-requisite component ids. For a model
+/// that does advertise components, a mirror whose
 /// split per tier declares one `coRequisite` row *per tier* for the same `componentId`, so the
 /// tier-agnostic [`crate::model_jobs::resolve_co_requisites`] has more than one candidate and
 /// deliberately REFUSES rather than guessing. `bf16` is the only right answer here, not a
@@ -1663,11 +1672,15 @@ mod tests {
     // those modules write `HF_HUB_CACHE` too (sc-12380).
     use crate::test_env::EnvVars;
 
-    /// sc-9989: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, and only from the
+    /// sc-9989/sc-13870: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, on both
+    /// native backends, and only from the
     /// complete bundled sibling `gemma/` (the self-contained turnkey install). Every other family's
     /// TE lives inside the weights dir → `None`. A complete operator `$LTX_GEMMA_DIR` override wins
     /// and is threaded onto the spec by the shared resolver.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn training_text_encoder_gates_on_engine_and_bundle() {
         let root = std::env::temp_dir().join(format!(
@@ -1877,7 +1890,7 @@ mod tests {
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
-    /// families (Z-Image, Wan A14B-T2V), so `finalize_training_config` must force gradient
+    /// families (Z-Image, LTX-2.3, Wan A14B-T2V), so `finalize_training_config` must force gradient
     /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
     /// cross-platform "Gradient Checkpointing" UI box, or a thin submit that omits the key (the
     /// worker default is `false`). SDXL's smaller U-Net fits a dense backward, so its plan value is
@@ -1910,6 +1923,19 @@ mod tests {
             finalized_checkpointing("wan_moe_lora", "wan_2_2_t2v_14b"),
             "wan A14B T2V forces gradient checkpointing on candle"
         );
+        assert!(
+            finalized_checkpointing("ltx_mlx_lora", "ltx_2_3"),
+            "LTX-2.3 22B forces gradient checkpointing on candle"
+        );
+        let ltx_plan = parse(plan_json(
+            dir.path(),
+            "ltx_mlx_lora",
+            "ltx_2_3",
+            "lora",
+            &[&image],
+        ));
+        let ltx = finalize_training_config(map_training_config(&ltx_plan.config), &ltx_plan);
+        assert_eq!(ltx.train_dtype, "f32", "candle LTX training requires f32");
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
             !finalized_checkpointing("sdxl_lora", "sdxl"),
@@ -3370,7 +3396,7 @@ mod tests {
     ///
     /// `gradient_checkpointing` matters per-family on candle: UNLIKE MLX/torch, candle's matmul
     /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
-    /// multi-billion-param DiT (Z-Image, Krea Raw 12B, Wan) OOMs even at 512² on a 96 GB card — checkpointing
+    /// multi-billion-param DiT (Z-Image, Krea Raw 12B, LTX 22B, Wan) OOMs even at 512² on a 96 GB card — checkpointing
     /// (sc-5246) recomputes activations and avoids retaining those frozen-weight grads. SDXL's smaller
     /// U-Net fits dense; Z-Image needs checkpointing on. (A real training job carries this from its
     /// preset; the smoke sets it explicitly per family.)
@@ -3756,6 +3782,216 @@ mod tests {
             256,
             true,
             "candle_krea_smoke.safetensors",
+        );
+    }
+
+    /// sc-13870 — Windows/Linux CUDA walking skeleton for the actual SceneWorks LTX training seam.
+    /// Unlike the shared direct-trainer smoke, this starts from a resolved SceneWorks plan and uses
+    /// `engine_trainer_id`, `map_training_config` + `finalize_training_config`, and
+    /// `training_text_encoder` to build the exact `LoadSpec` the worker execution path uses. It then
+    /// trains one 64px step, requires cache + training progress, inspects the saved PEFT A/B factors
+    /// and requires a non-zero trained B, then drops the trainer and renders the candle inference
+    /// generator with and without that adapter at the same seed. The unequal frames are the
+    /// cross-repo usability proof: the output is not merely a non-empty file accepted by the loader;
+    /// it carries a learned residual that changes production inference.
+    ///
+    /// Run on the RTX box:
+    /// `SCENEWORKS_LTX_Q4_DIR=E:\huggingface\hub\models--SceneWorks--ltx-2.3-mlx\snapshots\<rev>\q4 \
+    ///  CUDA_VISIBLE_DEVICES=0 cargo test -p sceneworks-worker --lib --features backend-candle \
+    ///  --release -- --ignored candle_ltx_worker_path_trains_and_applies_adapter --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs the real SceneWorks LTX q4+Gemma turnkey and a CUDA device"]
+    fn candle_ltx_worker_path_trains_and_applies_adapter() {
+        let q4 = std::env::var_os("SCENEWORKS_LTX_Q4_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                candle_hf_snapshot("models--SceneWorks--ltx-2.3-mlx", "q4").join("q4")
+            });
+        assert!(
+            q4.join("transformer.safetensors").is_file(),
+            "q4 transformer"
+        );
+        assert!(q4.join("quantize_config.json").is_file(), "q4 quant config");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dataset = tmp.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset).expect("dataset");
+        let image_path = dataset.join("swatch.png");
+        image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, 128])
+        })
+        .save(&image_path)
+        .expect("training image");
+
+        let image_string = image_path.display().to_string();
+        let mut value = plan_json(
+            tmp.path(),
+            "ltx_mlx_lora",
+            "ltx_2_3",
+            "lora",
+            &[&image_string],
+        );
+        value["target"]["modality"] = json!("video");
+        value["target"]["family"] = json!("ltx-video");
+        value["target"]["baseModelPath"] = json!(q4.display().to_string());
+        value["config"]["rank"] = json!(4);
+        value["config"]["alpha"] = json!(4);
+        value["config"]["steps"] = json!(1);
+        value["config"]["gradientAccumulation"] = json!(1);
+        value["config"]["resolution"] = json!(64);
+        value["config"]["saveEvery"] = json!(0);
+        value["config"]["optimizer"] = json!("adamw");
+        value["config"]["advanced"]["mixedPrecision"] = json!("bf16");
+        value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
+        value["config"]["advanced"]["loraTargetModules"] =
+            json!(["to_q", "to_k", "to_v", "to_out.0"]);
+        value["config"]["advanced"]["sampleEvery"] = json!(0);
+        value["output"]["outputDir"] = json!(tmp.path().join("out").display().to_string());
+        value["output"]["fileName"] = json!("ltx-worker-e2e.safetensors");
+        let plan = parse(value);
+
+        let engine_id = engine_trainer_id(&plan).expect("worker maps LTX trainer id");
+        assert_eq!(engine_id, "ltx_2_3");
+        let config = finalize_training_config(map_training_config(&plan.config), &plan);
+        assert!(
+            config.gradient_checkpointing,
+            "22B LTX must checkpoint on candle"
+        );
+        assert_eq!(
+            config.train_dtype, "f32",
+            "candle LTX's validated train dtype"
+        );
+
+        let text_encoder =
+            training_text_encoder(engine_id, &q4).expect("worker resolves bundled sibling Gemma");
+        let gemma = match &text_encoder {
+            WeightsSource::Dir(path) => path,
+            WeightsSource::File(_) => panic!("Gemma must resolve as a directory"),
+        };
+        assert_eq!(gemma, &q4.parent().expect("snapshot root").join("gemma"));
+
+        let output_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&output_dir).expect("output");
+        let request = TrainingRequest {
+            items: vec![TrainingItem {
+                image_path,
+                caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
+            }],
+            config,
+            output_dir,
+            file_name: "ltx-worker-e2e.safetensors".to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+        let spec = LoadSpec {
+            text_encoder: Some(text_encoder.clone()),
+            ..LoadSpec::new(WeightsSource::Dir(q4.clone()))
+        };
+        let mut trainer = crate::inference_runtime::load_trainer(engine_id, &spec)
+            .expect("runtime catalog exposes LTX trainer");
+        trainer
+            .validate(&request)
+            .expect("mapped worker request validates");
+        let mut saw_caching = false;
+        let mut saw_training = false;
+        let output = trainer
+            .train(&request, &mut |progress| match progress {
+                TrainingProgress::Caching { .. } => saw_caching = true,
+                TrainingProgress::Training { .. } => saw_training = true,
+                _ => {}
+            })
+            .expect("worker-mapped LTX training runs");
+        drop(trainer);
+
+        assert!(saw_caching, "worker receives caching progress");
+        assert!(saw_training, "worker receives training progress");
+        let bytes = std::fs::metadata(&output.adapter_path)
+            .expect("adapter metadata")
+            .len();
+        assert!(bytes > 8, "adapter is non-empty: {bytes} bytes");
+
+        let tensors = runtime_cuda::media::candle_core::safetensors::load(
+            &output.adapter_path,
+            &runtime_cuda::media::candle_core::Device::Cpu,
+        )
+        .expect("saved adapter is valid safetensors");
+        let a_count = tensors
+            .keys()
+            .filter(|key| key.ends_with(".lora_A.weight"))
+            .count();
+        let b_factors: Vec<_> = tensors
+            .iter()
+            .filter(|(key, _)| key.ends_with(".lora_B.weight"))
+            .collect();
+        assert!(a_count > 0, "saved adapter must contain LoRA A factors");
+        assert_eq!(
+            a_count,
+            b_factors.len(),
+            "every saved LoRA A factor must have a matching B factor"
+        );
+        assert!(
+            b_factors.iter().any(|(_, tensor)| {
+                tensor
+                    .to_dtype(runtime_cuda::media::candle_core::DType::F32)
+                    .and_then(|tensor| tensor.abs())
+                    .and_then(|tensor| tensor.max_all())
+                    .and_then(|tensor| tensor.to_scalar::<f32>())
+                    .is_ok_and(|value| value > 0.0)
+            }),
+            "one optimizer step must update at least one LoRA B factor"
+        );
+
+        let render = |adapter: Option<std::path::PathBuf>| {
+            let adapters = adapter
+                .map(|path| {
+                    vec![gen_core::AdapterSpec::new(
+                        path,
+                        16.0,
+                        gen_core::AdapterKind::Lora,
+                    )]
+                })
+                .unwrap_or_default();
+            let inference_spec = LoadSpec {
+                text_encoder: Some(text_encoder.clone()),
+                ..LoadSpec::new(WeightsSource::Dir(q4.clone())).with_adapters(adapters)
+            };
+            assert!(
+                inference_spec.quantize.is_none(),
+                "the pre-packed q4 tier must reach the provider with quantize=None"
+            );
+            let generator = crate::inference_runtime::load("ltx_2_3_distilled", &inference_spec)
+                .expect("candle LTX inference load");
+            assert_eq!(generator.descriptor().id, "ltx_2_3_distilled");
+            let generation = gen_core::GenerationRequest {
+                prompt: "a colorful test swatch".to_owned(),
+                width: 256,
+                height: 256,
+                frames: Some(1),
+                steps: Some(8),
+                seed: Some(11),
+                ..Default::default()
+            };
+            let output = generator
+                .generate(&generation, &mut |_| {})
+                .expect("candle LTX inference render");
+            let gen_core::GenerationOutput::Video { frames, .. } = output else {
+                panic!("expected LTX video output");
+            };
+            assert_eq!(frames.len(), 1);
+            assert_eq!((frames[0].width, frames[0].height), (256, 256));
+            assert!(
+                frames[0].pixels.iter().any(|&value| value != 0),
+                "rendered frame must not be all black"
+            );
+            frames.into_iter().next().expect("one frame").pixels
+        };
+        let base_pixels = render(None);
+        let adapted_pixels = render(Some(output.adapter_path));
+        assert_ne!(
+            base_pixels, adapted_pixels,
+            "the trained adapter must have an observable production inference effect"
         );
     }
 

@@ -542,8 +542,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // missing — a target-registry error keeps its own "registry unavailable" message.
   const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
   // Readiness + the install offer track the tier LoRA training actually needs — a dedicated `training`
-  // variant (lens, sc-8797) or else the DENSE `bf16` tier (Krea 2 Raw quant-matrix re-host, epic 9992) —
-  // not the default (q4) inference tier a user may have installed for generation. Resolution lives in the
+  // variant (Lens), packed `q4` for LTX QLoRA, or else dense `bf16` for a quant-matrix base —
+  // not merely whichever inference tier happens to be installed. Resolution lives in the
   // pure, unit-tested `trainingBase.js` (sc-8966). A non-matrix base (z-image / sdxl) uses its default tier.
   const trainingBaseMissing = (target) => {
     const base = models.find((item) => item.id === target?.baseModel);

@@ -1762,7 +1762,7 @@ fn sd3_large_lora_target() -> TrainingTarget {
         // engines.rs `default_repo`), NOT the flat upstream `stabilityai/stable-diffusion-3.5-large` —
         // the epic-8506 re-host stopped downloading the latter, so the pre-flight install gate reported
         // the installed base as missing and blocked every real run (sc-13860). The native-MLX `sd3_lora`
-        // trainer reads the dense `bf16/` tier (resolved via `tiered_turnkey_train_dir`), like LTX.
+        // trainer reads the dense `bf16/` tier (resolved via `tiered_turnkey_train_dir`).
         base_model_repo: Some("SceneWorks/sd3.5-large-mlx".to_owned()),
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
@@ -1824,7 +1824,7 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Native MLX trainer, mirroring the Krea / LTX MLX targets.
+            // Native MLX trainer, mirroring the SD3 Medium target.
             "requiresBackend": "mlx",
             "appleSiliconOnly": true
         })),
@@ -1927,11 +1927,11 @@ fn sd3_medium_lora_target() -> TrainingTarget {
     }
 }
 
-/// Native MLX LoRA training for LTX-2.3 video, trained from a still-image dataset.
+/// Native Rust LoRA training for LTX-2.3 video, trained from a still-image dataset.
 ///
-/// Apple-Silicon only: the `ltx_mlx_lora` kernel runs a native MLX (mlx.core /
-/// mlx.optimizers) QLoRA loop against the quantized LTX transformer, so the
-/// worker only advertises/accepts it on macOS with MLX (gated in story 1538).
+/// The stable `ltx_mlx_lora` kernel runs the native MLX trainer on Apple Silicon and the candle
+/// QLoRA trainer on Windows/Linux NVIDIA. Both load the packed `q4/` LTX transformer plus its
+/// sibling `gemma/` text encoder from the SceneWorks turnkey bundle.
 /// `modality` is the *output* modality (a video LoRA); the consumed dataset is
 /// images (the only dataset modality the store supports), surfaced via
 /// `ui.datasetModality`. The output registers as an `ltx-video` family LoRA the
@@ -1944,9 +1944,9 @@ fn ltx_video_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "ltx-video".to_owned(),
         base_model: "ltx_2_3".to_owned(),
-        // Mirrors the generation load path (sc-5608): the turnkey SceneWorks LTX-2.3 MLX bundle,
-        // replacing the third-party notapalindrome mirror. Informational here — the MLX kernel loads
-        // the base from `base_model_path` (the app-managed dir), not this repo.
+        // Mirrors the generation load path (sc-5608): the turnkey SceneWorks LTX-2.3 bundle,
+        // replacing the third-party mirror. Both native kernels load its packed q4 tier from
+        // `base_model_path` and its sibling Gemma encoder.
         base_model_repo: Some("SceneWorks/ltx-2.3-mlx".to_owned()),
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
@@ -1959,21 +1959,19 @@ fn ltx_video_lora_target() -> TrainingTarget {
             resolution: 768,
             save_every: 250,
             seed: 42,
-            // MLX trains with mlx.optimizers.AdamW; bitsandbytes 8-bit is CUDA-only
-            // and never applies here.
+            // Both native engines implement AdamW directly; bitsandbytes never applies here.
             optimizer: "adamw".to_owned(),
             trigger_word: None,
             advanced: object(json!({
                 "mixedPrecision": "bf16",
                 "cacheLatents": true,
                 "networkType": "lora",
-                // Learning-rate scheduler (see the Z-Image target). MLX honors the
-                // same `constant`/`linear`/`cosine` set via mlx.optimizers schedules.
+                // Learning-rate scheduler (see the Z-Image target). Both engines honor the same
+                // `constant`/`linear`/`cosine` set.
                 "lrScheduler": "constant",
-                "backend": "mlx",
                 // Still-image training: each item encodes to a single latent frame.
                 "numFrames": 1,
-                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out"],
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
                 "sampleEvery": 250,
                 "qualityPreset": "balanced",
                 "outputScope": "project",
@@ -1991,16 +1989,12 @@ fn ltx_video_lora_target() -> TrainingTarget {
             // scope for epic 2193 v1, so this target stays `lora`-only.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"],
-            "requiresBackend": "mlx",
-            "appleSiliconOnly": true
+            "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
             "label": "LTX-2.3 Video LoRA",
-            "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon only (native MLX).",
+            "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
             "recommendedFor": ["character", "style"],
-            "appleSiliconOnly": true,
-            "backend": "mlx",
             "datasetModality": "image"
         })),
         extra: ExtraFields::new(),

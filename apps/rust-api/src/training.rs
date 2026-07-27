@@ -1778,7 +1778,9 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                return tiered_turnkey_train_dir(snapshot).display().to_string();
+                return tiered_turnkey_train_dir(snapshot, target)
+                    .display()
+                    .to_string();
             }
             return cache_path.display().to_string();
         }
@@ -1842,14 +1844,55 @@ fn bf16_component_tree_present(bf16: &FsPath) -> bool {
             .all(|component| bf16.join(component).is_dir())
 }
 
+/// LTX is the packed-training exception to the dense-tier rule: both native trainers run QLoRA
+/// directly against the SceneWorks turnkey's `q4/` tier and its sibling Gemma encoder. Pin the exact
+/// LTX files plus every Gemma shard named by its index so a partial generation-only or torn
+/// co-requisite download cannot pass the run gate.
+fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
+    let q4 = snapshot.join("q4");
+    let q4_present = [
+        "quantize_config.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+    ]
+    .iter()
+    .all(|file| q4.join(file).is_file());
+    if !q4_present {
+        return false;
+    }
+
+    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+}
+
+fn training_tier_name(target: &TrainingTarget) -> &'static str {
+    if target.kernel == "ltx_mlx_lora" {
+        "q4"
+    } else {
+        "bf16"
+    }
+}
+
+fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
+    if target.kernel == "ltx_mlx_lora" {
+        ltx_q4_training_tier_present(snapshot)
+    } else {
+        bf16_component_tree_present(&snapshot.join("bf16"))
+    }
+}
+
 /// For a tiered-turnkey re-host (epic 9992 Krea 2 Raw: `SceneWorks/krea-2-raw-mlx` ships `bf16/ q8/ q4/`
 /// tier subdirs), training reads the DENSE `bf16/` tier — the trainer needs the full-precision base, and
 /// the bf16 tier is byte-identical to the retired `krea/Krea-2-Raw` diffusers tree. A flat diffusers
 /// snapshot (transformer/ at the root) is returned unchanged, so this is backward-compatible. Mirrors
 /// how generation resolves a tier subdir via `krea_model_subdir`.
-fn tiered_turnkey_train_dir(snapshot: std::path::PathBuf) -> std::path::PathBuf {
+fn tiered_turnkey_train_dir(
+    snapshot: std::path::PathBuf,
+    target: &TrainingTarget,
+) -> std::path::PathBuf {
     if snapshot_is_tiered_turnkey(&snapshot) {
-        return snapshot.join("bf16");
+        return snapshot.join(training_tier_name(target));
     }
     snapshot
 }
@@ -2159,8 +2202,8 @@ pub(crate) fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> 
 pub(crate) enum TrainingBaseStatus {
     /// The dense training weights are present on disk — a real run can proceed.
     Ready,
-    /// The base repo IS on disk (a tiered turnkey is installed — e.g. the q4 generation default) but
-    /// its dense `bf16/` training tier is absent. Training needs the full-precision tier specifically.
+    /// The base repo IS on disk but its family-specific training tier is absent (`bf16/` generally,
+    /// packed `q4/` for LTX).
     TrainingTierMissing,
     /// Nothing for this base is on disk — the model was never installed.
     Missing,
@@ -2193,7 +2236,7 @@ pub(crate) fn training_base_model_status(
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
                 if snapshot_is_tiered_turnkey(&snapshot) {
-                    return if bf16_component_tree_present(&snapshot.join("bf16")) {
+                    return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
                     } else {
                         TrainingBaseStatus::TrainingTierMissing
@@ -2232,19 +2275,26 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
 /// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.
 /// The two blocking states get DISTINCT messages: `Missing` keeps the historical "not installed …
 /// install it from the model catalog" wording, while `TrainingTierMissing` says the model IS installed
-/// (for generation) but training needs the dense bf16 tier — the actionable message the flat #1694 error
-/// lacked (sc-13860, AC #4). Split out as a pure fn so the wording is unit-testable without the API.
+/// (for generation) but training needs its family-specific tier — dense bf16 generally, packed q4
+/// for LTX QLoRA. Split out as a pure fn so the wording is unit-testable without the API.
 pub(crate) fn training_base_unavailable_message(
     status: TrainingBaseStatus,
     base_model: &str,
 ) -> Option<String> {
     match status {
         TrainingBaseStatus::Ready => None,
-        TrainingBaseStatus::TrainingTierMissing => Some(format!(
-            "The training tier for base model '{base_model}' is not installed. It's installed for \
-             generation, but training needs the full-precision (bf16) tier — install that tier from \
-             the model catalog before starting a real training run (dry runs work without it)."
-        )),
+        TrainingBaseStatus::TrainingTierMissing => {
+            let tier = if base_model == "ltx_2_3" {
+                "packed q4"
+            } else {
+                "full-precision (bf16)"
+            };
+            Some(format!(
+                "The training tier for base model '{base_model}' is not installed. It's installed \
+                 for generation, but training needs the {tier} tier — install that tier from the \
+                 model catalog before starting a real training run (dry runs work without it)."
+            ))
+        }
         TrainingBaseStatus::Missing => Some(format!(
             "Base model '{base_model}' is not installed. Install it from the model catalog before \
              starting a real training run (dry runs work without it)."

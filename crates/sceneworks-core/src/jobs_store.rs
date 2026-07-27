@@ -3723,9 +3723,9 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         {
             return false;
         }
-        // Training (sc-7817, epic 5164): the candle worker trains only the candle-native families
-        // (sdxl / z_image / lens / the Wan A14B T2V MoE) via `gen_core::load_trainer`. Everything
-        // else — Kolors, LTX, the dense Wan 5B, the Wan I2V A14B — has no candle trainer and remains
+        // Training (sc-7817 / sc-13870): the candle worker trains only candle-native families
+        // (sdxl / z_image / lens / Krea / LTX / the Wan A14B T2V MoE) via
+        // `gen_core::load_trainer`. Everything else — Kolors, the dense Wan 5B, Wan I2V A14B — remains
         // queued. WITHOUT this gate the candle worker would claim a real
         // training job it can't execute (the `lora_train_execute` advertisement is coarse — it lights
         // up whenever ANY candle trainer is registered) and fail it terminally instead of leaving it

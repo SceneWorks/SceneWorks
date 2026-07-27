@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, mochi::*, svd::*, wan::*};
+use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -223,10 +223,10 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, mochi::*, svd::*, wan::*};")
+        test_imports.contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};")
             && !test_imports
-                .contains("use super::{bernini::*, mochi::*, svd::*, vace::*, wan::*};"),
-        "Candle tests must not import the unused VACE family glob"
+                .contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, vace::*, wan::*};"),
+        "Candle tests must import the LTX helpers without the unused VACE family glob"
     );
     for dispatch in [
         "generate_candle_video",
@@ -7008,7 +7008,10 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn write_tiny_safetensors(path: &Path) {
     let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
@@ -7017,7 +7020,10 @@ fn write_tiny_safetensors(path: &Path) {
     std::fs::write(path, bytes).unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn write_complete_gemma_dir(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("config.json"), br#"{"model_type":"gemma3_text"}"#).unwrap();
@@ -7178,7 +7184,10 @@ fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
 
 /// `ltx_gemma_dir_is_complete`: needs config + tokenizer + every shard a non-empty index maps
 /// (or a lone single-file checkpoint); missing load inputs and malformed/empty maps all fail.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn ltx_gemma_completeness_requires_config_and_all_shards() {
     let root = std::env::temp_dir().join(format!("sw_gemma_ok_{}", Uuid::new_v4().simple()));
@@ -7214,6 +7223,43 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
     .unwrap();
     assert!(!ltx_gemma_dir_is_complete(&root));
 
+    // An index cannot escape its snapshot through either portable traversal syntax or an absolute
+    // path, even when the target outside the Gemma dir is a structurally valid safetensors file.
+    let outside_name = format!("sw_gemma_outside_{}.safetensors", Uuid::new_v4().simple());
+    let outside = root.parent().unwrap().join(&outside_name);
+    write_tiny_safetensors(&outside);
+    for unsafe_shard in [
+        format!("../{outside_name}"),
+        format!(r"..\{outside_name}"),
+        outside.display().to_string(),
+    ] {
+        std::fs::write(
+            root.join("model.safetensors.index.json"),
+            serde_json::json!({"weight_map":{"bad":&unsafe_shard}}).to_string(),
+        )
+        .unwrap();
+        assert!(
+            !ltx_gemma_dir_is_complete(&root),
+            "unsafe indexed shard must be rejected: {unsafe_shard}"
+        );
+    }
+
+    // A present but structurally invalid shard is just as incomplete as a missing shard.
+    std::fs::write(
+        root.join("model.safetensors.index.json"),
+        br#"{"weight_map":{"bad":"model-00001-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("model-00001-of-00002.safetensors"),
+        b"placeholder",
+    )
+    .unwrap();
+    assert!(
+        !ltx_gemma_dir_is_complete(&root),
+        "filename-only shard placeholders must not be resolved by the worker"
+    );
+
     // Single-file checkpoint (no index) is complete once config + tokenizer + weights exist.
     let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&single).unwrap();
@@ -7238,6 +7284,7 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&single);
+    let _ = std::fs::remove_file(&outside);
 }
 
 /// sc-14377: filtered HF downloads can split one managed bundle across revisions. The selected
@@ -8995,12 +9042,55 @@ mod candle_video_label_tests {
         );
         assert_eq!(
             candle_video_default_repo("ltx_2_3_distilled"),
-            "Lightricks/LTX-2.3"
+            "SceneWorks/ltx-2.3-mlx"
         );
         // SVD-XT loads the stock diffusers img2vid-xt snapshot directly (sc-5493).
         assert_eq!(
             candle_video_default_repo("svd_xt"),
             "stabilityai/stable-video-diffusion-img2vid-xt"
+        );
+    }
+
+    #[test]
+    fn candle_ltx_resolves_the_shared_q4_turnkey_tier_only_for_the_base_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let q4 = temp.path().join("q4");
+        std::fs::create_dir_all(&q4).expect("q4");
+        std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
+        std::fs::write(q4.join("quantize_config.json"), "{}").expect("quant config");
+
+        let (resolved, quant) = candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3")
+            .expect("base LTX q4 tier");
+        assert_eq!(resolved, q4);
+        assert_eq!(
+            quant, None,
+            "the q4 files are already packed; the provider must not quantize them again"
+        );
+
+        // Drive the exact production hand-off into the provider. The resolver's marker is copied to
+        // `VideoGenInput::quant`, then `video_load_spec` copies that field onto `LoadSpec::quantize`.
+        // Pinning the final spec prevents a future tier-selection refactor from reintroducing Q4
+        // on-the-fly quantization while a resolver-only assertion still passes.
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3_distilled",
+            model_dir: resolved,
+            quant,
+            ..VideoGenInput::default()
+        };
+        let spec = video_load_spec(&input);
+        assert!(
+            spec.quantize.is_none(),
+            "production LTX provider spec must load the pre-packed q4 tier with quantize=None"
+        );
+        assert!(
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3_eros").is_none(),
+            "Eros stays on its dense standalone checkpoint"
+        );
+
+        std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
+        assert!(
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3").is_none(),
+            "a partial q4 tier is never selected"
         );
     }
 

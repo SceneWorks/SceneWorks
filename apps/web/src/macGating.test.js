@@ -30,7 +30,10 @@ const gating = {
     imageUpscaleSeedvr2: { supported: true },
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability feature entry.
   },
-  training: { supportedKernels: ["z_image_lora", "sdxl_lora"], lokrOnWanSupported: false },
+  training: {
+    supportedKernels: ["z_image_lora", "sdxl_lora", "ltx_mlx_lora"],
+    lokrOnWanSupported: false,
+  },
 };
 
 const torchModel = { id: "kolors", macSupport: { supported: false, reason: { detail: "no MLX engine.", suggestedEpic: "epic 3532" } } };
@@ -118,6 +121,13 @@ describe("macGating helpers", () => {
   it("blocks a training kernel without a native Rust trainer", () => {
     expect(macTrainingKernelBlocked(gating, "kolors_lora")).toBe(true);
     expect(macTrainingKernelBlocked(gating, "z_image_lora")).toBe(false);
+    expect(macTrainingKernelBlocked(gating, "ltx_mlx_lora")).toBe(false);
+    expect(
+      macTrainingKernelBlocked(
+        { ...DEFAULT_MAC_CAPABILITIES, platform: "windows" },
+        "ltx_mlx_lora",
+      ),
+    ).toBe(false);
   });
 
   it("blocks an MLX-unsupported video mode by per-model eligibility", () => {

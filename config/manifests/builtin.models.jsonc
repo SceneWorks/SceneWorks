@@ -7656,10 +7656,9 @@
       "type": "video",
       "adapter": "ltx_video",
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-      // Per-platform source (sc-5608, epic 5594): macOS downloads the turnkey pre-converted MLX
-      // bundle from the SceneWorks HF org — replaces the third-party notapalindrome (LTX) +
-      // mlx-community (gemma) mirrors. Windows/Linux keep loading the multi-file torch checkpoint
-      // set from Lightricks/LTX-2.3 (the resources block below is untouched).
+      // Native turnkey source (sc-5608 / sc-13870): every platform downloads the packed q4 LTX
+      // tier plus its sibling Gemma encoder from the SceneWorks HF org. MLX consumes it on macOS;
+      // candle consumes the same layout for generation and QLoRA training on Windows/Linux NVIDIA.
       "downloads": [
         // macOS quant matrix (sc-8513, epic 8506): each LTX tier is a SEPARATE user-selectable
         // artifact tagged with a `variant`; `q4` (default) installs when no tier is chosen. The shared
@@ -7670,36 +7669,36 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          // Shared gemma-3-12b-it-bf16 text encoder (~26.4 GB); the worker points the engine at the
+          // Shared gemma-3-12b-it-bf16 text encoder (~26.4 GB); the worker points either engine at the
           // sibling gemma/ (resolve_bundled_ltx_gemma_dir → LoadSpec::text_encoder). Fetched with any
-          // tier, kept while any remains. Windows/Linux load Gemma from the resources.gemma repo
-          // instead, so macOS-only. Pinned to the full 40-hex bundle commit (== the worker's
+          // tier, kept while any remains, and shared by MLX and candle. Pinned to the full 40-hex
+          // bundle commit (== the worker's
           // LTX_BUNDLE_REVISION) so this first-install coRequisite download resolves the SAME
           // snapshots/<sha>/ the worker's on-demand ensure_ltx_bundle_gemma_present fetches — one pinned
           // snapshot, offline-clean. As of sc-13664 the MLX LTX provider REQUIRES this Gemma TE via
           // LoadSpec::text_encoder (no $LTX_GEMMA_DIR / HF-cache fallback), so it MUST be provisioned;
           // pinning keeps it reproducible + offline-resolvable.
           "coRequisite": true,
-          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
           "files": ["gemma/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 26427894918
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 20467690460,
           "footprint": { "diskSizeBytes": 20467690460, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -7709,7 +7708,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+          "revision": "254989c3ca7ee691187647f350b112c0c448789d",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -7718,14 +7717,6 @@
           // (transformer 37.98 GB dense BF16 + the already-bf16 connector/vae/upsampler/vocoder).
           "estimatedSizeBytes": 47092811992,
           "footprint": { "diskSizeBytes": 47092811992, "residentMemoryBytes": null, "peakMemoryBytes": null }
-        },
-        {
-          "provider": "huggingface",
-          "repo": "Lightricks/LTX-2.3",
-          "files": [],
-          "default": true,
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 157004895813
         }
       ],
       "paths": {

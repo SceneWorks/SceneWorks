@@ -5031,7 +5031,7 @@ fn candle_training_caps() -> Vec<WorkerCapability> {
 
 #[test]
 fn candle_worker_claims_candle_native_training_kernels() {
-    // The five families with a candle trainer (sdxl / z_image / lens / Krea 2 Raw / Wan A14B T2V)
+    // Candle-native families (sdxl / z_image / lens / Krea 2 Raw / LTX / Wan A14B T2V)
     // route to the candle worker off-Mac. `krea_lora` is listed in MLX_ONLY yet candle claims it
     // (sc-8614) — the gate exempts a candle-eligible job from the mlx-only refusal. Each in
     // its own store so the claim is unambiguous.
@@ -5040,6 +5040,7 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("z_image_lora", "z_image_turbo", "lokr"),
         ("lens_lora", "lens", "lora"),
         ("krea_lora", "krea_2_raw", "lokr"),
+        ("ltx_mlx_lora", "ltx_2_3", "lora"),
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lora"),
     ];
     for (kernel, base_model, network_type) in cases {
@@ -5166,13 +5167,13 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
 }
 
 #[test]
-fn candle_worker_refuses_ltx_mlx_only_training() {
-    // ltx_mlx_lora is native-MLX-only (MLX_ONLY_TRAINING_KERNELS) and has no candle trainer, so off-Mac
-    // neither candle nor a generic descriptor may claim it; it stays queued for an mlx worker.
-    let store = store("candle-refuse-ltx");
+fn ltx_training_runs_on_candle_with_no_torch_fallback() {
+    // The stable kernel name is historical: LTX is native-Rust-only and has both MLX and candle
+    // trainers. A generic descriptor must defer while a candle worker may claim it.
+    let store = store("candle-route-ltx");
     register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
     register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-    store
+    let job = store
         .create_job(mlx_training_job(
             "ltx_mlx_lora",
             "ltx_2_3",
@@ -5183,22 +5184,20 @@ fn candle_worker_refuses_ltx_mlx_only_training() {
         .expect("job creates");
     assert!(
         store
-            .claim_next_job("worker-candle")
-            .expect("candle claim ok")
-            .is_none(),
-        "candle must refuse ltx_mlx_lora (no candle trainer)"
-    );
-    assert!(
-        store
             .claim_next_job("worker-torch")
             .expect("torch claim ok")
             .is_none(),
-        "torch must refuse ltx_mlx_lora (mlx-only, no torch trainer)"
+        "torch must refuse ltx_mlx_lora (native-only, no torch trainer)"
     );
+    let claimed = store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims LTX training");
+    assert_eq!(claimed.id, job.id);
 }
 
 #[test]
-fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
+fn ltx_training_remains_claimable_by_the_mlx_worker() {
     let store = store("mlx-training-ltx-only");
     // sc-3049 retired the Python MLX LTX trainer, so `ltx_mlx_lora` is native-only: a generic
     // worker must NOT claim it — it stays queued for the mlx worker.
@@ -5218,7 +5217,7 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
         .expect("torch claim ok")
         .is_none());
 
-    // The mlx worker is the only home for it.
+    // MLX routing remains intact on Mac.
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
     let claimed = store
         .claim_next_job("worker-mlx")
@@ -5232,8 +5231,8 @@ fn ltx_training_is_mlx_worker_only_with_no_torch_fallback() {
 fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
     let store = store("training-krea-no-torch");
     // Krea 2 (epic 7565) trains on a native Rust trainer, so — like LTX — a generic worker must NOT
-    // claim a `krea_lora` job. UNLIKE LTX it is Rust-only on BOTH backends:
-    // the mlx worker (Mac) and, since sc-8614, the candle worker (off-Mac) each run it.
+    // claim a `krea_lora` job. Like LTX, it runs on BOTH native backends:
+    // the mlx worker (Mac) and the candle worker (off-Mac).
     register_gpu_worker(&store, "worker-torch", "mps", training_caps());
     let job = store
         .create_job(mlx_training_job(
