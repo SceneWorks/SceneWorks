@@ -3055,44 +3055,6 @@ export function ImageStudio() {
           </div>
         ) : null}
 
-        {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
-            text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
-            supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
-            take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
-            submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale. */}
-        {showControlPanel ? (
-          <div className="studio-source-band">
-            <ControlPanel
-              supportedModes={controlModes}
-              controlMode={activeControlMode}
-              onControlModeChange={setControlMode}
-              selectedPoseIds={selectedPoseIds}
-              onTogglePose={(id) =>
-                setSelectedPoseIds((ids) =>
-                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
-                )
-              }
-              onClearPoses={() => setSelectedPoseIds([])}
-              loadUserPoses={loadUserPoses}
-              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
-              controlImageAssetId={controlImageAssetId}
-              onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={controlImagePassthrough}
-              onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={editImageAssets}
-              importAsset={importAsset}
-              projectId={activeProject?.id}
-              characters={characters}
-              controlScaleConfig={controlScaleConfig}
-              controlScale={effectiveControlScale}
-              onControlScaleChange={setControlScale}
-              controlOverlayBaseModel={controlOverlayBaseModel}
-              selectedOverlayId={controlOverlayId}
-              onOverlayChange={setControlOverlayId}
-            />
-          </div>
-        ) : null}
-
           {/* Generation settings (UI-refinement 2b): the everyday knobs — Model, Aspect,
               Variations, Style preset — sit in a bar directly under the composer instead of a
               detached right rail. Power-user knobs fold into Advanced below; the results area
@@ -3185,6 +3147,44 @@ export function ImageStudio() {
             stackAddsNegative={stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
+
+          {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
+              text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
+              supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
+              take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
+              submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale.
+              Sits directly above Advanced (studio-cleanup sc-15369): it is a disclosure of the same
+              kind, so it belongs beside the other one rather than in a source band above the settings. */}
+          {showControlPanel ? (
+            <ControlPanel
+              supportedModes={controlModes}
+              controlMode={activeControlMode}
+              onControlModeChange={setControlMode}
+              selectedPoseIds={selectedPoseIds}
+              onTogglePose={(id) =>
+                setSelectedPoseIds((ids) =>
+                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+                )
+              }
+              onClearPoses={() => setSelectedPoseIds([])}
+              loadUserPoses={loadUserPoses}
+              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
+              controlImageAssetId={controlImageAssetId}
+              onControlImageChange={setControlImageAssetId}
+              controlImagePassthrough={controlImagePassthrough}
+              onControlImagePassthroughChange={setControlImagePassthrough}
+              controlImageAssets={editImageAssets}
+              importAsset={importAsset}
+              projectId={activeProject?.id}
+              characters={characters}
+              controlScaleConfig={controlScaleConfig}
+              controlScale={effectiveControlScale}
+              onControlScaleChange={setControlScale}
+              controlOverlayBaseModel={controlOverlayBaseModel}
+              selectedOverlayId={controlOverlayId}
+              onOverlayChange={setControlOverlayId}
+            />
+          ) : null}
 
           <AdvancedSection
             hint="cleared values → model default"

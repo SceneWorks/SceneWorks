@@ -4203,35 +4203,17 @@ label {
   height: 14px;
 }
 
-/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. Reuses the
-   .studio-source-band shell, .reference-strength slider, .checkline toggle, and .asset-picker-field /
-   .pose-library inner surfaces; only the mode tabs + section spacing are panel-specific. */
-.control-panel {
-  display: grid;
+/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. The shell is now
+   the shared .advanced-section disclosure (studio-cleanup sc-15369) — this class only carries the
+   body-specific spacing. .reference-strength slider, .checkline toggle, and .asset-picker-field /
+   .pose-library inner surfaces are reused as before; the mode tabs are panel-specific. */
+.control-panel > .advanced-section-body {
   gap: 12px;
 }
 
-/* Section header reuses the shared .advanced-toggle disclosure look (13px/500/muted). The
-   whole Structure Control body folds under it; the chevron points down when open and rotates
-   -90deg when collapsed (design handoff sc-8245 Fix 1). */
-.control-panel-toggle {
-  justify-self: start;
-  margin-left: -6px;
-}
-
-.control-panel-chev {
-  flex: 0 0 auto;
-  transition: transform 0.18s ease;
-}
-
-.control-panel-chev.collapsed {
-  transform: rotate(-90deg);
-}
-
-/* The former section caption, now a quiet helper line inside the expanded body, indented to
-   align under the label text (past the chevron). */
+/* Section caption: a quiet helper line leading the disclosure body. */
 .control-panel-desc {
-  margin: 0 0 0 20px;
+  margin: 0;
   font-size: 12px;
   color: var(--text-faint);
 }

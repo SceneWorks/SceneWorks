@@ -56,7 +56,7 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
   // the gated inner content (tabs, pose/upload, slider) mounts. Most tests below assert on that
   // content, so they render then expand.
   async function toggle() {
-    const head = container.querySelector(".control-panel-toggle");
+    const head = container.querySelector(".control-panel .advanced-section-toggle");
     await act(async () => {
       head.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -111,7 +111,7 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
   it("is collapsed by default and expands on clicking the toggle", async () => {
     await render(<ControlPanel {...baseProps()} />);
     // Collapsed: the disclosure toggle is present but the gated inner content is not mounted.
-    const head = container.querySelector(".control-panel-toggle");
+    const head = container.querySelector(".control-panel .advanced-section-toggle");
     expect(head).not.toBeNull();
     expect(head.getAttribute("aria-expanded")).toBe("false");
     expect(tabLabels()).toEqual([]);

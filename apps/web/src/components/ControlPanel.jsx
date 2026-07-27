@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { PoseLibraryPicker } from "./PoseLibraryPicker.jsx";
 import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { ControlOverlayPicker } from "./ControlOverlayPicker.jsx";
-import { Icon } from "./Icons.jsx";
+import { AdvancedSection } from "./AdvancedSection.jsx";
 
 // Strict-control panel for the text-to-image studios (epic 8236, sc-8245). One picker gated by the
 // selected backbone's supported control modes (`ui.controlModes`, mirrored from the manifest /
@@ -59,8 +59,9 @@ export function ControlPanel({
   const modes = Array.isArray(supportedModes) ? supportedModes : [];
   // Collapsed by default (this is a large, optional section on an already-busy page); the user opts
   // in when they want to lock structure. The whole body — mode tabs, overlay selector, pose picker,
-  // control-strength slider — folds under one disclosure that looks and behaves like the shared
-  // Advanced toggle (design handoff sc-8245 Fix 1). Local-only state (Advanced doesn't persist).
+  // control-strength slider — folds under the app's ONE canonical disclosure (studio-cleanup sc-15369;
+  // the bespoke `.control-panel-toggle` header it used to draw is gone). Local-only state, matching
+  // Advanced, which doesn't persist either.
   const [open, setOpen] = useState(false);
   if (!modes.length) {
     return null;
@@ -69,123 +70,112 @@ export function ControlPanel({
   const scaleCfg = controlScaleConfig ?? {};
 
   return (
-    <div className={`control-panel${open ? " open" : " collapsed"}`}>
-      <button
-        aria-expanded={open}
-        className="advanced-toggle control-panel-toggle"
-        onClick={() => setOpen((prev) => !prev)}
-        type="button"
+    <AdvancedSection
+      className="control-panel"
+      hint="lock pose, edges, or depth to a reference"
+      label="Structure control"
+      onToggle={() => setOpen((prev) => !prev)}
+      open={open}
+    >
+      <p className="control-panel-desc">
+        Lock the output's pose, edges, or depth to a reference.
+      </p>
+      <div
+        className="control-mode-tabs"
+        role="tablist"
+        aria-label="Control type"
       >
-        <Icon.ChevDown
-          className={open ? "control-panel-chev" : "control-panel-chev collapsed"}
-          size={14}
-        />
-        Structure control
-      </button>
-
-      {open ? (
-        <>
-          <p className="control-panel-desc">
-            Lock the output's pose, edges, or depth to a reference.
-          </p>
-          <div
-            className="control-mode-tabs"
-            role="tablist"
-            aria-label="Control type"
+        {modes.map((mode) => (
+          <button
+            aria-pressed={mode === activeMode}
+            className={
+              mode === activeMode
+                ? "control-mode-tab active"
+                : "control-mode-tab"
+            }
+            key={mode}
+            onClick={() => onControlModeChange?.(mode)}
+            role="tab"
+            type="button"
           >
-            {modes.map((mode) => (
-              <button
-                aria-pressed={mode === activeMode}
-                className={
-                  mode === activeMode
-                    ? "control-mode-tab active"
-                    : "control-mode-tab"
-                }
-                key={mode}
-                onClick={() => onControlModeChange?.(mode)}
-                role="tab"
-                type="button"
-              >
-                {MODE_LABELS[mode] ?? mode}
-              </button>
-            ))}
-          </div>
+            {MODE_LABELS[mode] ?? mode}
+          </button>
+        ))}
+      </div>
 
-          {activeMode === "pose" ? (
-            poseBlockText ? (
-              <p className="mac-gating-note">{poseBlockText}</p>
-            ) : (
-              <div className="control-pose-section">
-                {controlOverlayBaseModel ? (
-                  <ControlOverlayPicker
-                    baseModel={controlOverlayBaseModel}
-                    onOverlayChange={onOverlayChange}
-                    selectedOverlayId={selectedOverlayId}
-                  />
-                ) : null}
-                <PoseLibraryPicker
-                  categoryFilter
-                  loadUserPoses={loadUserPoses}
-                  onClear={onClearPoses}
-                  onToggle={onTogglePose}
-                  selectedIds={selectedPoseIds}
-                />
-                <p className="muted">
-                  Selecting poses generates one image per pose (overrides
-                  Variations).
-                </p>
-              </div>
-            )
-          ) : (
-            <div className="control-image-section">
-              <ImageEditSourcePickerField
-                assets={controlImageAssets}
-                buttonLabel="Select image"
-                characters={characters}
-                clearable
-                emptyLabel={`No ${activeMode} control image selected`}
-                importAsset={importAsset}
-                label={
-                  activeMode === "canny" ? "Edge/canny source" : "Depth source"
-                }
-                onChange={onControlImageChange}
-                projectId={projectId}
-                value={controlImageAssetId}
+      {activeMode === "pose" ? (
+        poseBlockText ? (
+          <p className="mac-gating-note">{poseBlockText}</p>
+        ) : (
+          <div className="control-pose-section">
+            {controlOverlayBaseModel ? (
+              <ControlOverlayPicker
+                baseModel={controlOverlayBaseModel}
+                onOverlayChange={onOverlayChange}
+                selectedOverlayId={selectedOverlayId}
               />
-              <label className="checkline">
-                <input
-                  checked={Boolean(controlImagePassthrough)}
-                  onChange={(event) =>
-                    onControlImagePassthroughChange?.(event.target.checked)
-                  }
-                  type="checkbox"
-                />
-                Use this image as the control map directly (skip preprocessing)
-              </label>
-              <p className="muted">
-                {controlImagePassthrough
-                  ? `Your image is fed in verbatim as the ${activeMode} map — supply an already-prepared ${activeMode} map.`
-                  : `The worker auto-derives the ${activeMode} map from your image before generating.`}
-              </p>
-            </div>
-          )}
-
-          <label className="reference-strength control-scale">
-            {scaleCfg.label ?? "Control strength"}
-            <input
-              max={scaleCfg.max ?? 2}
-              min={scaleCfg.min ?? 0}
-              onChange={(event) =>
-                onControlScaleChange?.(Number(event.target.value))
-              }
-              step={scaleCfg.step ?? 0.05}
-              type="range"
-              value={controlScale}
+            ) : null}
+            <PoseLibraryPicker
+              categoryFilter
+              loadUserPoses={loadUserPoses}
+              onClear={onClearPoses}
+              onToggle={onTogglePose}
+              selectedIds={selectedPoseIds}
             />
-            <span>{Number(controlScale).toFixed(2)}</span>
+            <p className="muted">
+              Selecting poses generates one image per pose (overrides
+              Variations).
+            </p>
+          </div>
+        )
+      ) : (
+        <div className="control-image-section">
+          <ImageEditSourcePickerField
+            assets={controlImageAssets}
+            buttonLabel="Select image"
+            characters={characters}
+            clearable
+            emptyLabel={`No ${activeMode} control image selected`}
+            importAsset={importAsset}
+            label={
+              activeMode === "canny" ? "Edge/canny source" : "Depth source"
+            }
+            onChange={onControlImageChange}
+            projectId={projectId}
+            value={controlImageAssetId}
+          />
+          <label className="checkline">
+            <input
+              checked={Boolean(controlImagePassthrough)}
+              onChange={(event) =>
+                onControlImagePassthroughChange?.(event.target.checked)
+              }
+              type="checkbox"
+            />
+            Use this image as the control map directly (skip preprocessing)
           </label>
-        </>
-      ) : null}
-    </div>
+          <p className="muted">
+            {controlImagePassthrough
+              ? `Your image is fed in verbatim as the ${activeMode} map — supply an already-prepared ${activeMode} map.`
+              : `The worker auto-derives the ${activeMode} map from your image before generating.`}
+          </p>
+        </div>
+      )}
+
+      <label className="reference-strength control-scale">
+        {scaleCfg.label ?? "Control strength"}
+        <input
+          max={scaleCfg.max ?? 2}
+          min={scaleCfg.min ?? 0}
+          onChange={(event) =>
+            onControlScaleChange?.(Number(event.target.value))
+          }
+          step={scaleCfg.step ?? 0.05}
+          type="range"
+          value={controlScale}
+        />
+        <span>{Number(controlScale).toFixed(2)}</span>
+      </label>
+    </AdvancedSection>
   );
 }
