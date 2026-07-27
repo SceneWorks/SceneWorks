@@ -100,6 +100,77 @@ const openAdvanced = async (container) => {
   }
 };
 
+// sc-15398 — `quality` (fast/balanced/best) is read by exactly ONE adapter: `svd_steps` maps it to
+// 15/25/30 inference steps for `svd_video`. Every other video engine ignores the key, so the
+// control is gated on the adapter that honors it. This pair is what makes the gate meaningful:
+// asserting only the hidden case would pass just as well if the segment were deleted outright.
+describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
+  let container;
+  let root;
+
+  const SVD = {
+    id: "svd",
+    name: "Stable Video Diffusion",
+    type: "video",
+    family: "svd",
+    adapter: "svd_video",
+    capabilities: ["image_to_video"],
+    promptless: true,
+    defaults: { duration: 4, fps: 7, resolution: "1024x576", quality: "balanced" },
+    limits: {},
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("shows Quality in Advanced for the SVD adapter, which honors it", async () => {
+    await render(baseContext({ videoModels: [SVD] }));
+    await openAdvanced(container);
+
+    const segment = container.querySelector(".quality-segment");
+    expect(segment).toBeTruthy();
+    expect([...segment.querySelectorAll("button")].map((b) => b.textContent.trim())).toEqual([
+      "Draft",
+      "Balanced",
+      "Final",
+    ]);
+  });
+
+  it("hides Quality for an adapter that never reads the key", async () => {
+    await render(baseContext({ videoModels: [LTX] }));
+    await openAdvanced(container);
+
+    expect(container.querySelector(".quality-segment")).toBeNull();
+    // The Steps override — which beats `quality` even on SVD — is still there, so the run is not
+    // left without a way to trade speed for fidelity.
+    expect(
+      [...container.querySelectorAll("label")].some((label) => label.textContent.trim().startsWith("Steps")),
+    ).toBe(true);
+  });
+});
+
 describe("VideoStudio Save as Preset", () => {
   let container;
   let root;
@@ -945,11 +1016,12 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     );
 
     // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374) — no disclosure
-    // needs opening, and the abstract Fast/Balanced/Best segment no longer sits in that row.
+    // needs opening. Quality is gone from that row entirely, and on a Bernini (non-SVD) adapter it
+    // is not in Advanced either (sc-15398) — nothing reads the key there.
     expect(container.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
     expect(container.querySelector(".settings-bar-row .quality-segment")).toBeNull();
     await openAdvanced();
-    expect(container.querySelector(".advanced-panel .quality-segment")).toBeTruthy();
+    expect(container.querySelector(".quality-segment")).toBeNull();
 
     // All bits-based tiers appear (NVFP4 filtered on MLX); bf16 is declared-but-not-installed → disabled.
     expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
