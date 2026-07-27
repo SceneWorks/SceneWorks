@@ -954,6 +954,16 @@ fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String
     None
 }
 
+/// Worker claim is a one-second idle poll, so logging every successful sub-millisecond response
+/// floods the session ring buffer and pushes actionable events out of the Logs screen. Keep the
+/// Server-Timing header on every response, but emit the duration event for this route only when the
+/// request fails or is unexpectedly slow. All other API/MCP routes retain per-request timing logs.
+const SLOW_CLAIM_REQUEST_MS: f64 = 1_000.0;
+
+fn should_log_api_request_duration(route: &str, status: StatusCode, elapsed_ms: f64) -> bool {
+    route != "/api/v1/jobs/claim" || !status.is_success() || elapsed_ms >= SLOW_CLAIM_REQUEST_MS
+}
+
 async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
     let method = request.method().clone();
     // `Uri::path()` excludes the query by contract. Retain it only long enough
@@ -974,14 +984,16 @@ async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
                 .headers_mut()
                 .insert(HeaderName::from_static("server-timing"), value);
         }
-        tracing::info!(
-            event = "api_request_duration",
-            method = %method,
-            route,
-            status = response.status().as_u16(),
-            duration_ms = elapsed_ms,
-            "SceneWorks API response completed"
-        );
+        if should_log_api_request_duration(&route, response.status(), elapsed_ms) {
+            tracing::info!(
+                event = "api_request_duration",
+                method = %method,
+                route,
+                status = response.status().as_u16(),
+                duration_ms = elapsed_ms,
+                "SceneWorks API response completed"
+            );
+        }
     }
 
     response

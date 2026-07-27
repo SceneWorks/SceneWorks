@@ -20,11 +20,11 @@ pub(crate) use crate::{
     inprocess_utility_worker_id, inprocess_worker_gpu_id, lora_artifact_paths,
     merge_model_manifest_entry, mlx_catalog_status, normalized_api_route,
     open_bind_override_enabled, parse_inprocess_utility_worker_count, safe_download_dir,
-    seed_mode_for_config_dir, serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
-    sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, sweep_stale_uploads,
-    validate_model_id, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
-    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
-    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    seed_mode_for_config_dir, serialize_job_lora, should_log_api_request_duration,
+    should_warn_open_bind, strip_jsonc_comments, sweep_stale_asset_uploads_before,
+    sweep_stale_lora_uploads_before, sweep_stale_uploads, validate_model_id, Settings,
+    WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST,
+    EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 
 pub(crate) use axum::body::{to_bytes, Body};

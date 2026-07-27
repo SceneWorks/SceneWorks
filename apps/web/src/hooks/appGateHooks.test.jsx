@@ -12,6 +12,12 @@ import { useAccessGate } from "./useAccessGate.js";
 import { useJobEvents } from "./useJobEvents.js";
 import { useTimelines } from "./useTimelines.js";
 import { apiFetch } from "../api.js";
+import {
+  ACCESS_TOKEN_KEY,
+  readAccessToken,
+  resetAccessTokenForTests,
+} from "../accessToken.js";
+import { installWriteRejectingStorage } from "../testUtils/storage.js";
 import { MAX_TERMINAL_JOBS } from "../sorters.js";
 
 // Controllable apiFetch: each call resolves with whatever the per-path map returns (or
@@ -116,6 +122,11 @@ describe("useAccessGate (sc-9750)", () => {
     setMediaTicketSpy.mockClear();
     unauthorizedHandler = null;
     window.localStorage.clear();
+    // sc-15223: accessToken.js now holds the live token in module state, which outlives an
+    // individual test. Clearing storage alone would leave a previous test's `saveToken` /
+    // `lockRemote` value in memory, so the raw `setItem` seeding below would be ignored —
+    // this restores the fresh-page-load state each test is written against.
+    resetAccessTokenForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -336,6 +347,282 @@ describe("useAccessGate (sc-9750)", () => {
       // Exactly one: saveToken's own check. The re-verify effect must recognize the token
       // as already proved and not POST it again (which would re-block the shell).
       expect(verifies() - before).toBe(1);
+    });
+  });
+
+  // sc-15165: `token` was seeded from localStorage once at mount, so a token changed in
+  // ANOTHER tab never reached this tab's gate. The two readers of the same credential —
+  // this state and `readAccessToken()`, which `serverToken()` / `uiPreferences.js` call
+  // fresh on every write — then disagreed for the rest of the session.
+  describe("cross-tab token sync (sc-15165)", () => {
+    // Storage mutation + the event the browser delivers to the OTHER tabs. jsdom, like a
+    // real browser, does not fire `storage` for same-window writes, so the dispatch is
+    // explicit; the write is what the gate actually reads. `storageArea` is set because
+    // real browsers always set it and the handler discriminates on it.
+    function otherTabSets(value) {
+      if (value === null) {
+        window.localStorage.removeItem(ACCESS_TOKEN_KEY);
+      } else {
+        window.localStorage.setItem(ACCESS_TOKEN_KEY, value);
+      }
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: ACCESS_TOKEN_KEY,
+          newValue: value,
+          storageArea: window.localStorage,
+        }),
+      );
+    }
+    // Live token per unlocked tab, mounted and settled.
+    async function mountUnlocked({ verify } = {}) {
+      window.localStorage.setItem(ACCESS_TOKEN_KEY, "shared-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", verify ?? { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const mounted = mount();
+      await settle();
+      expect(mounted.get().api.gateStatus).toBe("open");
+      expect(mounted.get().api.token).toBe("shared-token");
+      return mounted;
+    }
+    const verifyCalls = () =>
+      apiFetch.mock.calls.filter((call) => call[0] === "/api/v1/auth/verify");
+
+    it("locks this tab when another tab hits forget, instead of writing credential-less", async () => {
+      const { get } = await mountUnlocked();
+
+      act(() => otherTabSets(null));
+      await settle();
+
+      // The whole bug: before this, the gate stayed open holding "shared-token" while
+      // storage was empty, so every readAccessToken() write went out with "" to a 401 that
+      // (correctly, sc-15105) never raised the gate — a silent no-op.
+      expect(get().api.token).toBe("");
+      expect(get().api.authenticated).toBe(false);
+      expect(get().api.gateStatus).toBe("locked");
+    });
+
+    it("keeps the gate's token and readAccessToken() on the same value throughout", async () => {
+      // "Single live source" IS this pairing — the two readers the story is about agreeing
+      // at every observed state, not either one's value in isolation. Asserting only
+      // `token === ""` after a clear would pass on the test's own removeItem.
+      const { get } = await mountUnlocked();
+      expect(get().api.token).toBe(readAccessToken());
+
+      act(() => otherTabSets(null));
+      await settle();
+      expect(get().api.token).toBe(readAccessToken());
+
+      act(() => otherTabSets("promoted-elsewhere"));
+      await settle();
+      expect(get().api.token).toBe(readAccessToken());
+    });
+
+    it("adopts and re-verifies a token another tab unlocked with, opening this gate", async () => {
+      // This tab starts locked; the other tab logs in.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get, statuses } = mount();
+      await settle();
+      expect(get().api.gateStatus).toBe("locked");
+      const before = verifyCalls().length;
+
+      act(() => otherTabSets("promoted-elsewhere"));
+      await settle();
+
+      expect(get().api.token).toBe("promoted-elsewhere");
+      expect(get().api.gateStatus).toBe("open");
+      // The re-verify must present the ADOPTED token, not the one this tab used to hold —
+      // the responder map ignores its token argument, so nothing else here would catch that.
+      expect(verifyCalls().slice(before)).toEqual([
+        ["/api/v1/auth/verify", "promoted-elsewhere", { method: "POST" }],
+      ]);
+      // And it goes through "unlocking" on the way: `authenticated` is false for that one
+      // round-trip, which App renders as the full-page blocker instead of either shell.
+      // A transient the final state cannot show — pinned so the cost stays visible.
+      expect(statuses).toContain("unlocking");
+    });
+
+    it("clears a half-typed password draft and a stale error when a token arrives", async () => {
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: false });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get } = mount();
+      await settle();
+
+      // User is mid-attempt on this tab: a wrong password left an error, and they have
+      // started retyping.
+      act(() => get().api.setPasswordDraft("wrong-guess"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+      expect(get().api.authError).toContain("Incorrect password");
+      act(() => get().api.setPasswordDraft("half-ty"));
+
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      act(() => otherTabSets("promoted-elsewhere"));
+      await settle();
+
+      // The gate is being redefined from outside; carrying that draft/error forward would
+      // render stale failure text over a session that just succeeded.
+      expect(get().api.passwordDraft).toBe("");
+      expect(get().api.authError).toBe("");
+    });
+
+    it("drops the 'retrying' notice the token change just made untrue", async () => {
+      // The re-verify loop pushes this while it backs off against an unreachable host. A
+      // cross-tab token change tears that loop down, so the notice would sit there claiming
+      // a retry that is no longer running — the same lie lockRemote already guards against.
+      const { get, notices } = await mountUnlocked();
+
+      // Another tab logs in, but this tab can't reach the host to check the adopted token,
+      // so the re-verify backs off and raises the notice.
+      apiResponders.set("/api/v1/auth/verify", () => new Error("host unreachable"));
+      act(() => otherTabSets("unreachable-host-token"));
+      await settle();
+      expect(get().api.gateStatus).toBe("unlocking");
+      expect(notices.some((notice) => notice.kind === "access-verify")).toBe(true);
+
+      // Now that tab hits "forget". The re-verify effect BAILS on an empty token, so it
+      // neither dismisses nor re-raises — the subscriber's own dismiss is the only thing
+      // that can clear this, which is what makes the assertion discriminating.
+      act(() => otherTabSets(null));
+      await settle();
+
+      expect(get().api.gateStatus).toBe("locked");
+      expect(notices.some((notice) => notice.kind === "access-verify")).toBe(false);
+    });
+
+    it("adopts only the final value of a burst of storage events", async () => {
+      // Several tabs (or one tab rotating) can land events back to back before React
+      // flushes. The handler reads live storage rather than each event's newValue, and the
+      // gate's ref is written eagerly, so the burst collapses to the last value — not one
+      // verify POST per event, and not a stale winner.
+      const { get } = await mountUnlocked();
+      const before = verifyCalls().length;
+
+      act(() => {
+        otherTabSets("intermediate");
+        otherTabSets("final-token");
+      });
+      await settle();
+
+      expect(get().api.token).toBe("final-token");
+      expect(get().api.gateStatus).toBe("open");
+      expect(verifyCalls().slice(before)).toEqual([
+        ["/api/v1/auth/verify", "final-token", { method: "POST" }],
+      ]);
+    });
+
+    it("converges when a burst ends back on the token this tab already had", async () => {
+      // The shape that makes the EAGER ref write load-bearing: another tab forgets and then
+      // logs straight back in with the same password, both before React flushes. Comparing
+      // the second event against the last COMMITTED render (still "shared-token") would
+      // early-return it as "unchanged" while the queued clear from the first event lands —
+      // leaving the gate locked on "" with a live token in storage. That is the story's own
+      // divergence, reintroduced from the other direction.
+      const { get } = await mountUnlocked();
+
+      act(() => {
+        otherTabSets(null);
+        otherTabSets("shared-token");
+      });
+      await settle();
+
+      expect(get().api.token).toBe("shared-token");
+      expect(get().api.token).toBe(readAccessToken());
+      expect(get().api.gateStatus).toBe("open");
+    });
+
+    it("resolves a cross-tab change that lands on a token already demoted by a 401", async () => {
+      // Where sc-15105 and sc-15165 meet: a mid-session 401 has already demoted this tab to
+      // "pending" and armed the re-verify, and THEN the other tab logs in with the new
+      // password. The adopted token must win and settle the gate, not be stranded behind
+      // the in-flight check for the old one.
+      const { get } = await mountUnlocked();
+      // The host is now unreachable, so the demotion's re-verify can't resolve on its own —
+      // the tab is parked on "unlocking" with a backoff armed when the change arrives.
+      apiResponders.set("/api/v1/auth/verify", () => new Error("host unreachable"));
+      const stale = await unauthorizedError();
+      apiResponders.set("/api/v1/jobs", () => stale);
+      await act(async () => {
+        await apiFetch("/api/v1/jobs", "shared-token").catch(() => {});
+      });
+      await settle();
+      expect(get().api.gateStatus).toBe("unlocking");
+
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      act(() => otherTabSets("rotated-password"));
+      await settle();
+
+      expect(get().api.token).toBe("rotated-password");
+      expect(get().api.gateStatus).toBe("open");
+    });
+
+    it("re-verifies an adopted token rather than trusting the other tab's word for it", async () => {
+      // sc-15102's bar applies to a token this tab did not prove itself: the host may have
+      // rotated since, and a token adopted straight to "accepted" would 401 every request
+      // behind a shell that looks merely broken.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: false });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get } = mount();
+      await settle();
+
+      act(() => otherTabSets("no-longer-valid"));
+      await settle();
+
+      expect(get().api.gateStatus).toBe("locked");
+      expect(get().api.token).toBe("");
+      // Rejected on this tab's own check, so it drops the token for everyone.
+      expect(window.localStorage.getItem(ACCESS_TOKEN_KEY)).toBeNull();
+    });
+
+    it("ignores a re-store of the token it already holds", async () => {
+      const { get } = await mountUnlocked();
+      const verifies = () =>
+        apiFetch.mock.calls.filter((call) => call[0] === "/api/v1/auth/verify").length;
+      const before = verifies();
+
+      // Another tab re-verified or re-entered the SAME password. Nothing changed here, and
+      // demoting to "pending" over it would re-block a live shell and cost a needless POST.
+      act(() => otherTabSets("shared-token"));
+      await settle();
+
+      expect(get().api.gateStatus).toBe("open");
+      expect(verifies() - before).toBe(0);
+    });
+
+    it("ignores storage events for other keys", async () => {
+      const { get } = await mountUnlocked();
+
+      act(() => {
+        window.localStorage.setItem("sceneworks-theme", "dark");
+        window.dispatchEvent(
+          new StorageEvent("storage", { key: "sceneworks-theme", newValue: "dark" }),
+        );
+      });
+      await settle();
+
+      expect(get().api.gateStatus).toBe("open");
+      expect(get().api.token).toBe("shared-token");
+    });
+
+    it("stops listening once the gate unmounts", async () => {
+      await mountUnlocked();
+      // Spy on the window, not on "did it throw": React 18 made setState on an unmounted
+      // component a silent no-op, so a leaked subscriber throws nothing and changes nothing
+      // observable — it just keeps the dead hook's closures alive for the life of the page.
+      // The detach is the ONLY thing that can fail here, and it only happens because the
+      // effect returns its unsubscribe.
+      const remove = vi.spyOn(window, "removeEventListener");
+      act(() => root.unmount());
+      root = null;
+
+      expect(remove.mock.calls.some((call) => call[0] === "storage")).toBe(true);
+      remove.mockRestore();
     });
   });
 
@@ -583,6 +870,149 @@ describe("useAccessGate (sc-9750)", () => {
       // The desktop counterpart (no handler at all) is pinned in
       // useAccessGate.desktop.test.jsx, which mocks isDesktop true.
       expect(typeof unauthorizedHandler).toBe("function");
+    });
+  });
+
+  // sc-15223: the SAME-TAB half of the sc-15165 divergence. `storeAccessToken` swallows a
+  // rejected write by design (private mode / storage disabled / over quota), and `saveToken`
+  // never looked at whether it landed — so the gate opened on a proven token while storage
+  // stayed empty and every `readAccessToken()` caller (`serverToken()`, `uiPreferences.js`)
+  // sent "". No storage event can ever correct that one: storage is never going to hold the
+  // value, so it lasts the whole session.
+  describe("storage-rejected writes (sc-15223)", () => {
+    const restores = [];
+    // WebKit private mode / an over-quota origin: reads and removes work, writes throw. The
+    // posture is shared with accessToken.test.js so the two suites cannot drift on what
+    // "private mode" means (see testUtils/storage.js).
+    function breakWrites() {
+      restores.push(installWriteRejectingStorage());
+    }
+
+    afterEach(() => {
+      while (restores.length) {
+        restores.pop()();
+      }
+    });
+
+    it("keeps readAccessToken() on the accepted token when the write is rejected", async () => {
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      breakWrites();
+      const { get } = mount();
+      await settle();
+
+      act(() => get().api.setPasswordDraft("private-mode-password"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+
+      // The gate is fully open on a token the host proved...
+      expect(get().api.gateStatus).toBe("open");
+      expect(get().api.token).toBe("private-mode-password");
+      // ...and the OTHER reader of that same credential must agree. Before sc-15223 this
+      // was "": every ui-preference / credential / worker-restart write in the session went
+      // out unauthenticated, 401'd, and (correctly, sc-15105) never raised the gate.
+      expect(readAccessToken()).toBe("private-mode-password");
+    });
+
+    it("forgets the token in memory too when a rejected-write session locks", async () => {
+      // The mirror case, and the one that actually matters for safety: if `clearAccessToken`
+      // only tried storage, "lock" would leave the live value behind and `readAccessToken()`
+      // would keep handing the forgotten password to every caller.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      breakWrites();
+      const { get } = mount();
+      await settle();
+
+      act(() => get().api.setPasswordDraft("private-mode-password"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+      expect(readAccessToken()).toBe("private-mode-password");
+
+      act(() => get().api.lockRemote());
+      await settle();
+
+      expect(get().api.gateStatus).toBe("locked");
+      expect(get().api.token).toBe("");
+      expect(readAccessToken()).toBe("");
+    });
+
+    it("drops the live value when the host rejects a token it could not persist", async () => {
+      // The re-verify effect's rejection path calls `clearAccessToken()` for the same reason
+      // lock does — a token the host has disowned must stop being sent. With storage refusing
+      // writes, the in-memory value is the only thing holding it, so it is the only thing
+      // that can be wrong here.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      let verify = { ok: true };
+      apiResponders.set("/api/v1/auth/verify", () => verify);
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      breakWrites();
+      const { get } = mount();
+      await settle();
+
+      act(() => get().api.setPasswordDraft("rotated-away"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+      expect(get().api.gateStatus).toBe("open");
+
+      // The host rotates its password mid-session; the 401 demotes and the re-verify rejects.
+      verify = { ok: false };
+      const stale = await unauthorizedError();
+      apiResponders.set("/api/v1/jobs", () => stale);
+      await act(async () => {
+        await apiFetch("/api/v1/jobs", "rotated-away").catch(() => {});
+      });
+      await settle();
+
+      expect(get().api.gateStatus).toBe("locked");
+      expect(readAccessToken()).toBe("");
+    });
+
+    it("still adopts a cross-tab forget after this tab unlocked (sc-15165 composition)", async () => {
+      // The two stories composed, on a WORKING store — the sequence neither suite covered on
+      // its own. Every sc-15165 test seeds storage raw, so the live value stays unset and only
+      // the read-through path runs; here `saveToken` sets it first, which is what could pin
+      // the token and make the tab permanently deaf to storage events.
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      apiResponders.set("/api/v1/files/ticket", { ticket: "media-1", expiresInSeconds: 300 });
+      const { get } = mount();
+      await settle();
+
+      act(() => get().api.setPasswordDraft("unlocked-here"));
+      await act(async () => {
+        await get().api.saveToken({ preventDefault: () => {} });
+      });
+      await settle();
+      expect(get().api.gateStatus).toBe("open");
+      expect(readAccessToken()).toBe("unlocked-here");
+
+      // Another tab hits forget.
+      act(() => {
+        window.localStorage.removeItem(ACCESS_TOKEN_KEY);
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: ACCESS_TOKEN_KEY,
+            newValue: null,
+            storageArea: window.localStorage,
+          }),
+        );
+      });
+      await settle();
+
+      expect(get().api.gateStatus).toBe("locked");
+      expect(get().api.token).toBe("");
+      // Both readers, as ever: a live value left behind here would keep handing the forgotten
+      // password to serverToken() / uiPreferences.js for the rest of the session.
+      expect(readAccessToken()).toBe("");
     });
   });
 

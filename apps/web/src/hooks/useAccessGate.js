@@ -7,7 +7,12 @@ import {
   setUnauthorizedHandler,
 } from "../api.js";
 import { isDesktop as isDesktopShell } from "../runtime.js";
-import { readAccessToken, storeAccessToken, clearAccessToken } from "../accessToken.js";
+import {
+  readAccessToken,
+  storeAccessToken,
+  clearAccessToken,
+  subscribeAccessToken,
+} from "../accessToken.js";
 import { recordStartupMark } from "../startupTiming.js";
 
 // Owns the remote-access gate (epic 4484): the /api/v1/access probe, the host
@@ -61,9 +66,13 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // App.jsx follows for its own live-value refs, sc-8940 / sc-9641).
   const tokenStatusRef = useRef(tokenStatus);
   const authRequiredRef = useRef(false);
+  // sc-15165: the cross-tab subscriber below runs outside render too, and has to compare
+  // the incoming storage value against the live token to decide whether anything changed.
+  const tokenRef = useRef(token);
   useLayoutEffect(() => {
     tokenStatusRef.current = tokenStatus;
     authRequiredRef.current = access.authRequired === true;
+    tokenRef.current = token;
   });
 
   // The desktop shell reaches its own API over loopback, which the API trusts
@@ -289,6 +298,55 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
     return setUnauthorizedHandler(handleUnauthorized);
   }, [handleUnauthorized]);
 
+  // Adopt a token change made in ANOTHER tab (sc-15165). `token` used to be seeded from
+  // storage once at mount, so the two readers of the same credential — this state and
+  // `readAccessToken()`, which `serverToken()` / `uiPreferences.js` call fresh every time —
+  // could disagree for the rest of the session. Subscribing collapses them back onto one
+  // value: a "forget" in tab A now locks tab B (instead of leaving it live but writing
+  // credential-less), and an unlock in tab A now opens tab B (instead of stranding its
+  // prompt). Storage events never fire in the tab that made the change, so this only ever
+  // sees external mutations and can't race `saveToken`/`lockRemote`'s own state writes.
+  //
+  // An adopted token is "pending", not "accepted": it was proven against the host by the
+  // OTHER tab, and this tab must clear the same sc-15102 bar as one restored from storage
+  // before it authenticates — the re-verify effect below picks it up and promotes it. The
+  // cost is real and accepted: "pending" means `authenticated` is false for one
+  // /auth/verify round-trip, and App renders the gate INSTEAD of either shell, so an
+  // already-open tab tears its tree down and back up (losing drawer state, unsent prompt
+  // drafts, scroll) on a benign cross-tab unlock. Trusting the other tab's word instead
+  // would re-open the exact hole sc-15102 closed — a token the host has since rotated,
+  // authenticated on sight, 401ing every request behind a shell that looks merely broken.
+  //
+  // No `isDesktopShell` guard, unlike the effects either side: the desktop shell is
+  // loopback-trusted, and both `authenticated` and `gateStatus` short-circuit on
+  // `isDesktopShell` before they ever read `tokenStatus`, so a cross-tab change cannot
+  // gate it. (It can leave `tokenStatus` parked at "pending" there — the re-verify effect
+  // below bails on desktop and nothing else moves it — so a future `tokenStatus` branch
+  // must not assume desktop reaches a terminal value.)
+  useEffect(
+    () =>
+      subscribeAccessToken((next) => {
+        if (next === tokenRef.current) {
+          // A re-store of the same token (another tab re-verified it, or unlocked with the
+          // same password). Nothing changed here, and demoting an accepted token to
+          // "pending" over it would re-block this shell and cost a needless verify POST.
+          return;
+        }
+        // Eager write, same rule as `handleUnauthorized` above: a burst of storage events
+        // must all compare against the newest value, not the last committed render's.
+        tokenRef.current = next;
+        setToken(next);
+        setTokenStatus(next ? "pending" : "none");
+        setPasswordDraft("");
+        setAuthError("");
+        // The re-verify loop is about to be torn down by the token change, so its
+        // "retrying in the background" notice would be a lie (same reasoning as
+        // `lockRemote`).
+        dismissNoticeKind("access-verify");
+      }),
+    [dismissNoticeKind],
+  );
+
   // Re-verify a token restored from localStorage before trusting it (sc-15102). The host
   // password can change (or be cleared, or the host can be a different machine at the same
   // LAN address) between visits, and nothing in the client re-prompts on a 401 — so an
@@ -356,8 +414,16 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
   // promoting it to the live `token`, so a wrong password keeps the gate up with an
   // inline error (instead of saving a bad token and silently failing every subsequent
-  // request). A correct password is stored to localStorage and unlocks the app; it
-  // persists across reloads. Promoting the token here flips `authenticated`, and the
+  // request). A correct password is promoted to the live token and unlocks the app.
+  //
+  // `storeAccessToken` is not checked, and deliberately so (sc-15223): persisting is
+  // best-effort — a private-mode / over-quota browser refuses the write, and refusing to
+  // unlock there would be worse than not surviving a reload. What used to make that a bug was
+  // `readAccessToken()` reading storage back, so the session's own writes went out
+  // credential-less; accessToken.js now serves the live value, so the unlock is whole either
+  // way and only the across-reloads part is lost.
+  //
+  // Promoting the token here flips `authenticated`, and the
   // [authenticated, token] effects perform the initial data load and SSE connect
   // exactly once — no explicit refreshData() call, or it would double-fetch (sc-8808).
   const saveToken = useCallback(
