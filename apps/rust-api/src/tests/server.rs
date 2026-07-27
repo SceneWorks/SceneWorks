@@ -36,6 +36,30 @@ fn api_timing_route_labels_exclude_ids_queries_and_unknown_path_tails() {
     assert_eq!(normalized_api_route("/assets/index.js", None), None);
 }
 
+#[test]
+fn successful_idle_claim_poll_does_not_emit_request_duration_noise() {
+    assert!(
+        !should_log_api_request_duration("/api/v1/jobs/claim", StatusCode::OK, 0.91),
+        "the worker's one-second successful claim poll must not flood session logs"
+    );
+    assert!(
+        should_log_api_request_duration(
+            "/api/v1/jobs/claim",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            0.91
+        ),
+        "failed claims remain observable"
+    );
+    assert!(
+        should_log_api_request_duration("/api/v1/jobs/claim", StatusCode::OK, 1_000.0),
+        "unexpectedly slow claims remain observable"
+    );
+    assert!(
+        should_log_api_request_duration("/api/v1/jobs", StatusCode::OK, 0.91),
+        "ordinary API request timing remains unchanged"
+    );
+}
+
 #[tokio::test]
 async fn api_timing_adds_numeric_server_timing_to_success_and_error_responses() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

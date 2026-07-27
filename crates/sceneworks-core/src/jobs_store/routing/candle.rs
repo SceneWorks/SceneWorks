@@ -319,9 +319,10 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     }
     // Lens / Lens-Turbo and Krea 2 Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays
     // on the candle lane for them (Krea gained Q4/Q8 in sc-9607, joining Lens in the both-set — sc-9983).
-    // SD3.5 (sc-7880), the Ideogram/Boogu packed families (sc-9607), and Qwen-Image (sc-11020, its
-    // turnkey q4/q8/bf16 tiers) advertise Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers). Every
-    // other candle family advertises neither and defers both. The
+    // Z-Image (Turbo/base), SD3.5 (sc-7880), the Ideogram/Boogu packed families (sc-9607), and Qwen-Image
+    // (sc-11020) accept Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers). Z-Image's value is a
+    // pre-packed tier SELECT, not an on-the-fly quantization request; the shared gate intentionally
+    // covers both forms. Every other candle family advertises neither and defers both. The
     // two capabilities are decoupled: `supports_lora` and `supports_quant` each consult the both-set plus
     // their own list.
     let supports_lora =
@@ -347,12 +348,12 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     if has_poses {
         return false;
     }
-    // On-the-fly quantization (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
+    // A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
     // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
     // an explicit quant request can't be honored — refuse it rather than silently running dense
     // (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
-    // families (sc-9607), and Qwen-Image (sc-11020) advertise Q4/Q8, so their quant requests stay on
-    // candle. For the packed families
+    // families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
+    // stay on candle. For the packed families
     // the `mlxQuantize` value is a turnkey tier-SELECT (which pre-quantized q4/q8 subdir to load), a no-op
     // on the loader rather than a runtime quantize — but the gate is the same: quant-capable → stay.
     if !supports_quant && candle_request_wants_quant(payload) {
