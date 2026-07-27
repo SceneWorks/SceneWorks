@@ -1324,7 +1324,7 @@ def test_z_image_turbo_manifest_has_mlx_block():
 
 
 def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
-    """sc-12126/sc-13108: never regress the directly measured standard-tier peaks."""
+    """sc-12126/sc-13108/sc-15206: pin resident peaks and every measured Turbo ladder tier."""
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     measured_tiers = {
@@ -1335,6 +1335,38 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "q4": 25.7,
         "q8": 35.2,
         "bf16": 47.2,
+    }
+    turbo_fit = krea["candle"]["turboFit"]
+    assert turbo_fit["maxMeasuredPixels"] == 1024 * 1024
+    assert set(turbo_fit["phaseCurvesByTier"]) == {"q4", "q8", "bf16"}
+    for tier in ("q4", "q8", "bf16"):
+        assert set(turbo_fit["phaseCurvesByTier"][tier]) == {
+            "threeStage",
+            "tiledVae",
+            "chunkedAttention",
+            "streamedBlocks",
+        }
+    assert turbo_fit["phaseCurvesByTier"]["bf16"] == {
+        "threeStage": {
+            "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 23.83, "perMpxGb": 7.90},
+            "decode": {"fixedGb": 26.55, "perMpxGb": 0.00},
+        },
+        "tiledVae": {
+            "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 23.83, "perMpxGb": 7.90},
+            "decode": {"fixedGb": 26.55, "perMpxGb": 0.00},
+        },
+        "chunkedAttention": {
+            "text": {"fixedGb": 8.63, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 27.53, "perMpxGb": 0.22},
+            "decode": {"fixedGb": 26.52, "perMpxGb": 0.00},
+        },
+        "streamedBlocks": {
+            "text": {"fixedGb": 8.64, "perMpxGb": 0.00},
+            "denoise": {"fixedGb": 8.64, "perMpxGb": 0.00},
+            "decode": {"fixedGb": 0.30, "perMpxGb": 3.27},
+        },
     }
 
 

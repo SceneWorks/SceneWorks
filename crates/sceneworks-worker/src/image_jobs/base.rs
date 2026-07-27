@@ -4901,13 +4901,54 @@ fn capability_downtier_floor<'a>(
     }
 }
 
+/// Truthful Krea Turbo capability-clamp rejection. The ladder's same-tier floor prevents a silent
+/// quality downgrade, but lower installed tiers remain a valid MANUAL escape and must be named when
+/// lowering resolution cannot cross the measured fixed-weight floor.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_turbo_capability_reject_message(
+    model: &str,
+    tier: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    gpu_id: &str,
+    lower_resolution: Option<(u32, u32)>,
+    installed_smaller: &[&str],
+) -> String {
+    let mut options = Vec::new();
+    if let Some((smaller_w, smaller_h)) = lower_resolution {
+        options.push(format!(
+            "lower the output resolution to {smaller_w}x{smaller_h} or below"
+        ));
+    }
+    if !installed_smaller.is_empty() {
+        options.push(format!(
+            "select a smaller installed tier ({})",
+            installed_smaller
+                .iter()
+                .map(|candidate| candidate.to_uppercase())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ));
+    }
+    options.push("run on a GPU with more VRAM".to_owned());
+    format!(
+        "{model} at its {tier} precision floor needs {needed_gb:.2} GiB of VRAM even after every \
+         measured constrained-memory rung, but GPU {gpu_id} has {available_gb:.2} GiB available. \
+         {options}.",
+        options = options.join(", or "),
+    )
+}
+
 #[cfg(all(
     test,
     not(target_os = "macos"),
     feature = "backend-candle"
 ))]
 mod krea_turbo_memory_route_tests {
-    use super::{capability_downtier_floor, krea_turbo_memory_route};
+    use super::{
+        capability_downtier_floor, krea_turbo_capability_reject_message,
+        krea_turbo_memory_route,
+    };
 
     #[test]
     fn only_plain_turbo_text_to_image_uses_the_memory_ladder() {
@@ -4987,6 +5028,105 @@ mod krea_turbo_memory_route_tests {
             choose_downtier("q8", &candidates),
             DowntierPick::Reject { tier: "q8", .. }
         ));
+    }
+
+    #[test]
+    fn constrained_bf16_reject_never_capability_downtiers_to_q8_or_q4() {
+        use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
+        use crate::vram_gate::{krea_turbo_fit, KreaTurboFit, VramBudget};
+        use serde_json::Value;
+
+        let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+        let manifest = parsed["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
+            .and_then(Value::as_object)
+            .expect("Krea 2 Turbo manifest entry");
+        let available_gb = 10.63;
+        let budget = Some(VramBudget {
+            free_gb: available_gb,
+            total_gb: available_gb,
+        });
+        let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
+            .expect("BF16, Q8, and Q4 have measured ladder curves")
+        {
+            KreaTurboFit::Fits { .. } => TierFit::Fits,
+            KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
+                needed_gb,
+                available_gb,
+            },
+        };
+        assert!(matches!(fit("bf16"), TierFit::TooBig { .. }));
+        assert_eq!(fit("q8"), TierFit::Fits);
+        assert_eq!(fit("q4"), TierFit::Fits);
+
+        let floor = capability_downtier_floor(true, "bf16", None).expect("BF16 precision floor");
+        let candidates: Vec<_> = ["bf16", "q8", "q4"]
+            .into_iter()
+            .filter(|tier| tier_quality_rank(tier) >= tier_quality_rank(floor))
+            .map(|tier| (tier, fit(tier)))
+            .collect();
+        assert!(matches!(
+            choose_downtier("bf16", &candidates),
+            DowntierPick::Reject { tier: "bf16", .. }
+        ));
+    }
+
+    #[test]
+    fn constrained_bf16_capability_reject_offers_only_truthful_manual_escapes() {
+        let immediate_below = krea_turbo_capability_reject_message(
+            "Krea 2 Turbo",
+            "bf16",
+            10.64,
+            10.63,
+            "0",
+            None,
+            &["q8", "q4"],
+        );
+        assert!(
+            immediate_below.contains("bf16 precision floor"),
+            "{immediate_below}"
+        );
+        assert!(
+            immediate_below.contains("smaller installed tier (Q8 / Q4)"),
+            "{immediate_below}"
+        );
+        assert!(
+            immediate_below.contains("needs 10.64 GiB")
+                && immediate_below.contains("has 10.63 GiB available"),
+            "immediate-below copy must preserve the measured distinction: {immediate_below}"
+        );
+        assert!(
+            !immediate_below.contains("lower the output resolution"),
+            "the fixed BF16 text floor makes resolution advice false: {immediate_below}"
+        );
+        assert!(
+            !immediate_below.contains("smallest installed tier"),
+            "{immediate_below}"
+        );
+
+        let geometry_limited = krea_turbo_capability_reject_message(
+            "Krea 2 Turbo",
+            "bf16",
+            12.0,
+            11.0,
+            "0",
+            Some((768, 768)),
+            &[],
+        );
+        assert!(
+            geometry_limited.contains("lower the output resolution to 768x768 or below"),
+            "{geometry_limited}"
+        );
+        assert!(
+            !geometry_limited.contains("select a smaller installed tier"),
+            "{geometry_limited}"
+        );
     }
 }
 
@@ -5515,24 +5655,35 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
-                let resolution_option = if krea_turbo_ladder {
-                    crate::vram_gate::krea_turbo_smaller_fit(
-                            &request.model_manifest_entry,
+                if krea_turbo_ladder {
+                    let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit(
+                        &request.model_manifest_entry,
+                        smallest,
+                        width,
+                        height,
+                        budget,
+                        krea_allow_streamed_blocks,
+                    );
+                    let installed_smaller: Vec<&'static str> =
+                        installed_tier_keys(request, settings)
+                            .into_iter()
+                            .filter(|candidate| {
+                                tier_quality_rank(candidate) < tier_quality_rank(smallest)
+                            })
+                            .collect();
+                    return Err(WorkerError::InvalidPayload(
+                        krea_turbo_capability_reject_message(
+                            &request.model,
                             smallest,
-                            width,
-                            height,
-                            budget,
-                            krea_allow_streamed_blocks,
-                        )
-                    .map(|(smaller_w, smaller_h)| {
-                        format!(
-                            "Lower the output resolution to {smaller_w}x{smaller_h} or below, or "
-                        )
-                    })
-                    .unwrap_or_default()
-                } else {
-                    "Lower the output resolution, or ".to_owned()
-                };
+                            needed_gb,
+                            available_gb,
+                            &settings.gpu_id,
+                            lower_resolution,
+                            &installed_smaller,
+                        ),
+                    ));
+                }
+                let resolution_option = "Lower the output resolution, or ";
                 return Err(WorkerError::InvalidPayload(format!(
                     "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
                      ({smallest}) but GPU {gpu} has ~{available} GB available. {resolution_option}Run \
