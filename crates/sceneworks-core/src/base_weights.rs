@@ -199,7 +199,31 @@ pub enum BaseWeightDetection {
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
 /// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
 /// with `MLX_ROUTED_FAMILIES` (routing).
-pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the two single-file
+/// families, a loadable Mage-Flow backbone is a diffusers **transformer component directory**
+/// ([`is_mage_flow_transformer_dir`]) — `config.json` plus its weight file — because the loader
+/// reads its architecture from that config rather than inferring it from a base tier. A bare
+/// `.safetensors` with no config sibling is therefore refused, which is what the arm below says.
+pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+
+/// The file a Mage-Flow transformer component directory carries its weights in (the diffusers
+/// name the trainer's full-fine-tune writer emits).
+pub const MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// The architecture config a Mage-Flow transformer component directory carries.
+pub const MAGE_FLOW_TRANSFORMER_CONFIG_FILE: &str = "config.json";
+
+/// Whether `dir` is a **loadable** Mage-Flow transformer component directory (sc-15036) — the shape
+/// a full base fine-tune (sc-14056) emits and the only shape `mlx_gen_mage::load_finetuned` can
+/// read: the architecture `config.json` plus the diffusers weight file, both present.
+///
+/// Shared deliberately by the model-import gate and the worker's `mage_finetuned` render lane, so
+/// "what the app will accept" and "what the engine can load" cannot drift apart. A directory that
+/// carries only one of the two is a torn or partial artifact and is refused, loudly, before any
+/// compute — not probed for at load time.
+pub fn is_mage_flow_transformer_dir(dir: &Path) -> bool {
+    dir.join(MAGE_FLOW_TRANSFORMER_CONFIG_FILE).is_file()
+        && dir.join(MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE).is_file()
+}
 
 /// Whether an imported community single-file **base checkpoint** described by `verdict` can be
 /// assembled and run by a real engine today (sc-14019, epic 14015) — the compatibility gate behind
@@ -229,6 +253,10 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             ComponentRole::Checkpoint,
             QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
         ) => Ok(()),
+        // sc-15036: a dense Mage-Flow DiT. Loadable only as a transformer component DIRECTORY —
+        // the caller must additionally pass the directory shape through
+        // [`is_mage_flow_transformer_dir`]; this triple gate cannot see the config sibling.
+        (Some("mage-flow"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
         (None, _, _) => Err(
@@ -248,6 +276,12 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the 'sdxl' family requires a fused checkpoint containing the UNet, \
              both text encoders, and VAE, not a {component} file."
         )),
+        (Some("mage-flow"), component, _) if component != ComponentRole::Transformer => {
+            Err(format!(
+                "Model import for the 'mage-flow' family requires a diffusion transformer, not a \
+                 {component} file."
+            ))
+        }
         (Some("krea_2"), _, quant) => Err(format!(
             "Model import for the 'krea_2' family supports dense bf16 or descriptor-gated \
              int8-per-row weights, not {quant}. Re-export the checkpoint in bf16."
@@ -255,6 +289,11 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         (Some("sdxl"), _, quant) => Err(format!(
             "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
              not {quant}."
+        )),
+        (Some("mage-flow"), _, quant) => Err(format!(
+            "Model import for the 'mage-flow' family supports a dense bf16 transformer, not \
+             {quant}. A pre-quantized q4/q8 Mage-Flow tier is installed through the model catalog, \
+             not imported."
         )),
         (Some(family), _, _) => Err(format!(
             "Model import has no compatible loader arm for the '{family}' family."
@@ -1484,6 +1523,95 @@ mod tests {
             QuantFormat::Bf16,
         ));
         assert!(import_detection_supported(&detection).is_ok());
+    }
+
+    /// sc-15036 — Mage-Flow is the DIRECTORY-shaped member of the import gate. The triple gate
+    /// accepts a dense bf16 transformer (the shape a full base fine-tune writes) and refuses the
+    /// wrong component and the pre-quantized tiers, each with its own reason.
+    #[test]
+    fn import_supported_accepts_a_dense_mage_flow_transformer_and_names_every_refusal() {
+        assert!(import_supported(&verdict(
+            Some("mage-flow"),
+            ComponentRole::Transformer,
+            QuantFormat::Bf16
+        ))
+        .is_ok());
+
+        let wrong_component = import_supported(&verdict(
+            Some("mage-flow"),
+            ComponentRole::Vae,
+            QuantFormat::Bf16,
+        ))
+        .expect_err("a VAE is not a Mage-Flow backbone");
+        assert!(
+            wrong_component.contains("transformer"),
+            "reason: {wrong_component}"
+        );
+
+        for quant in [
+            QuantFormat::Fp8E4m3,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Gguf,
+        ] {
+            let refused = import_supported(&verdict(
+                Some("mage-flow"),
+                ComponentRole::Transformer,
+                quant,
+            ))
+            .expect_err("only dense bf16 is loadable");
+            assert!(
+                refused.contains(quant.as_str()),
+                "the refusal must name the encoding it saw: {refused}"
+            );
+        }
+    }
+
+    /// sc-15036 — the directory-shape probe the import gate and the worker's render lane SHARE.
+    /// Discriminating in three directions: both files present is accepted, and EITHER one missing
+    /// is refused — a torn artifact must not register as a model that then fails at load.
+    #[test]
+    fn is_mage_flow_transformer_dir_requires_both_the_config_and_the_weights() {
+        let root = std::env::temp_dir().join(format!(
+            "mage-dir-probe-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        ));
+        let case = |name: &str, files: &[&str]| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            for file in files {
+                fs::write(dir.join(file), b"x").unwrap();
+            }
+            dir
+        };
+
+        assert!(is_mage_flow_transformer_dir(&case(
+            "complete",
+            &[
+                MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
+                MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE
+            ]
+        )));
+        assert!(
+            !is_mage_flow_transformer_dir(&case(
+                "weights-only",
+                &[MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE]
+            )),
+            "weights without the architecture config cannot be loaded"
+        );
+        assert!(
+            !is_mage_flow_transformer_dir(&case(
+                "config-only",
+                &[MAGE_FLOW_TRANSFORMER_CONFIG_FILE]
+            )),
+            "a config with no weights is a torn run, not a checkpoint"
+        );
+        assert!(!is_mage_flow_transformer_dir(&case("empty", &[])));
+        assert!(!is_mage_flow_transformer_dir(&root.join("absent")));
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -369,10 +369,83 @@ pub fn apply_model_manifest_defaults(
 /// (the `edit_image` capability is stamped by `model_capabilities_for_type_and_family`). The
 /// `editReferences` copy mirrors the builtin Turbo entry (image 1 required + image 2 optional, fixed
 /// order).
+///
+/// **`mage-flow`** (sc-15036) mirrors the builtin `mage_flow_base` entry: its 13-bucket ÷16-aligned
+/// 512–2048 resolution ladder, the 1024² default, the binding `requiresDimensionsMultipleOf: 16`
+/// stride (NR-MMDiT patch=1 over a 16×-downsampled latent — without it the free Width/Height
+/// override would offer sizes the engine rejects), and the 30-step / CFG-5 undistilled Base
+/// sampling defaults a fine-tune inherits. It deliberately declares **no** `mlx.quantize`: a
+/// fine-tuned checkpoint is DENSE bf16 and the builtin q4/q8 tiers are pre-quantized artifacts with
+/// an 8-bit floor on `norm_out.linear` and the text-encoder decoder layers (sc-15071) that a naive
+/// load-time quantize does not reproduce — so packing one at load would render a tiled texture
+/// rather than the prompt. No `ui.img2img` and no `ui.editReferences`: the non-edit Mage variants
+/// advertise no conditioning at all.
 fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: &str) {
-    if family != "krea-2" {
-        return;
+    match family {
+        "krea-2" => apply_krea_2_studio_surface_defaults(entry),
+        "mage-flow" => apply_mage_flow_studio_surface_defaults(entry),
+        _ => {}
     }
+}
+
+/// The `mage-flow` Studio surface — see [`apply_family_studio_surface_defaults`].
+fn apply_mage_flow_studio_surface_defaults(entry: &mut Map<String, Value>) {
+    if let Some(limits) = entry
+        .entry("limits".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        limits.entry("resolutions".to_owned()).or_insert_with(|| {
+            json!([
+                "512x512",
+                "768x768",
+                "1024x1024",
+                "1536x1536",
+                "2048x2048",
+                "1280x720",
+                "1536x1024",
+                "2048x1024",
+                "2048x512",
+                "720x1280",
+                "1024x1536",
+                "1024x2048",
+                "512x2048"
+            ])
+        });
+        limits
+            .entry("count".to_owned())
+            .or_insert_with(|| json!([1, 2, 4]));
+        // Binding, not advisory: both sides must be a multiple of 16 or the engine refuses the
+        // geometry. An imported entry without it would let the Width/Height override offer sizes
+        // that fail at generate time.
+        limits
+            .entry("requiresDimensionsMultipleOf".to_owned())
+            .or_insert_with(|| json!(16));
+    }
+    if let Some(defaults) = entry
+        .entry("defaults".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        defaults
+            .entry("resolution".to_owned())
+            .or_insert_with(|| json!("1024x1024"));
+        // The undistilled Base regime a fine-tune inherits (the distilled Turbo checkpoints are a
+        // different starting point and are not a training target).
+        defaults
+            .entry("steps".to_owned())
+            .or_insert_with(|| json!(30));
+        defaults
+            .entry("guidanceScale".to_owned())
+            .or_insert_with(|| json!(5));
+        defaults
+            .entry("count".to_owned())
+            .or_insert_with(|| json!(1));
+    }
+}
+
+/// The `krea-2` Studio surface — see [`apply_family_studio_surface_defaults`].
+fn apply_krea_2_studio_surface_defaults(entry: &mut Map<String, Value>) {
     if let Some(limits) = entry
         .entry("limits".to_owned())
         .or_insert_with(|| json!({}))
@@ -455,6 +528,11 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
+        // Mage-Flow is macOS-only native MLX (epic 14034): there is no Torch/diffusers adapter.
+        // Like bernini / sd3 this label is recorded in recipe/lineage only — the job is MLX-routed
+        // by engine id (builtins) or by family (a full base fine-tune, sc-15036), never
+        // instantiated through a Torch adapter. Matches the builtin entries' `"adapter"`.
+        "mage-flow" => Some("mlx_mage"),
         // SD3 / SD3.5 is the native-MLX port (epic 7841); there is no Torch/diffusers
         // adapter wired in SceneWorks. This label is recorded in recipe/lineage only —
         // the job is MLX-routed by engine id, never instantiated through a Torch adapter
@@ -527,6 +605,12 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // default only affects imported/user krea_2 models; the builtin krea_2 entries declare their
         // own `capabilities` explicitly, so `apply_model_manifest_defaults` never changes them.
         ("image", "krea-2") => vec!["text_to_image", "edit_image", "style_variations"],
+        // Mage-Flow (epic 14034). The non-edit variants — the only ones that are a training target,
+        // and therefore the only ones a full base fine-tune (sc-15036) can be derived from —
+        // advertise NO conditioning on their descriptor: no reference, no multi-reference, no edit.
+        // So text-to-image plus style variations, and deliberately not `edit_image` (that needs an
+        // `mage_flow_edit*` checkpoint) nor `character_image` (no identity surface).
+        ("image", "mage-flow") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -4268,6 +4352,96 @@ mod tests {
             entry["ui"]["editReferences"]["secondaryLabel"],
             json!("Image 2 (optional)")
         );
+    }
+
+    /// sc-15036 (epic 14034 F6) — a full base fine-tune lands in the model catalog as a bare
+    /// entry: an id, a name, a family, and `paths.model`. Without the family defaults it would be
+    /// adapter-less with an EMPTY `capabilities` array, and the Image Studio picker (which filters
+    /// on `text_to_image`) would hide the model the user just spent hours training.
+    ///
+    /// Also pins the Studio surface it inherits from its base: the 13-bucket resolution ladder, the
+    /// 1024² default, the undistilled Base 30-step / CFG-5 regime, and — load-bearing — the BINDING
+    /// `requiresDimensionsMultipleOf: 16` stride, without which the free Width/Height override
+    /// offers geometry the engine rejects.
+    #[test]
+    fn a_fine_tuned_mage_flow_base_gets_the_family_surface_it_needs_to_be_selectable() {
+        let mut entry = serde_json::Map::new();
+        apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
+
+        assert_eq!(entry["adapter"], "mlx_mage");
+        // Text-to-image + style variations. NOT `edit_image` (that needs an `mage_flow_edit*`
+        // checkpoint, which is not a training target) and NOT `character_image` (no identity
+        // surface) — the non-edit Mage descriptors advertise no conditioning at all.
+        assert_eq!(
+            entry["capabilities"],
+            json!(["text_to_image", "style_variations"])
+        );
+        assert_eq!(entry["loraCompatibility"]["families"], json!(["mage-flow"]));
+
+        assert_eq!(
+            entry["limits"]["resolutions"],
+            json!([
+                "512x512",
+                "768x768",
+                "1024x1024",
+                "1536x1536",
+                "2048x2048",
+                "1280x720",
+                "1536x1024",
+                "2048x1024",
+                "2048x512",
+                "720x1280",
+                "1024x1536",
+                "1024x2048",
+                "512x2048"
+            ])
+        );
+        assert_eq!(entry["defaults"]["resolution"], "1024x1024");
+        assert_eq!(entry["defaults"]["steps"], json!(30));
+        assert_eq!(entry["defaults"]["guidanceScale"], json!(5));
+        assert_eq!(
+            entry["limits"]["requiresDimensionsMultipleOf"],
+            json!(16),
+            "the ÷16 stride is BINDING on Mage geometry, not advisory"
+        );
+        // Deliberately NO `mlx.quantize`: a fine-tune is dense bf16 and the pre-quantized tiers
+        // carry an 8-bit floor (sc-15071) that a load-time quantize does not reproduce, so packing
+        // one at load would render a tiled texture rather than the prompt.
+        assert!(
+            entry
+                .get("mlx")
+                .and_then(Value::as_object)
+                .is_none_or(|mlx| !mlx.contains_key("quantize")),
+            "a fine-tuned Mage checkpoint must not be load-time quantized by default"
+        );
+        // No conditioning surface is invented for it either.
+        let ui = entry["ui"].as_object().expect("ui object");
+        assert!(!ui.contains_key("img2img"), "Mage advertises no img2img");
+        assert!(
+            !ui.contains_key("editReferences"),
+            "the non-edit Mage variants take no reference images"
+        );
+    }
+
+    /// sc-15036 — an author-supplied value always wins over the family default, so the stamping can
+    /// never overwrite a catalog entry that already declares its own surface. Discriminating: the
+    /// author's one-bucket list survives while the untouched sibling keys are still filled.
+    #[test]
+    fn mage_flow_studio_defaults_never_overwrite_author_supplied_values() {
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "limits".to_owned(),
+            json!({ "resolutions": ["768x768"], "requiresDimensionsMultipleOf": 32 }),
+        );
+        entry.insert("defaults".to_owned(), json!({ "steps": 8 }));
+        apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
+
+        assert_eq!(entry["limits"]["resolutions"], json!(["768x768"]));
+        assert_eq!(entry["limits"]["requiresDimensionsMultipleOf"], json!(32));
+        assert_eq!(entry["defaults"]["steps"], json!(8));
+        // ...and the gaps are still filled.
+        assert_eq!(entry["defaults"]["resolution"], "1024x1024");
+        assert_eq!(entry["limits"]["count"], json!([1, 2, 4]));
     }
 
     #[test]

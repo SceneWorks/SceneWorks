@@ -517,6 +517,103 @@ pub(crate) fn seed_installed_base_model(data_dir: &std::path::Path) {
         .expect("model marker writes");
 }
 
+/// Seed the installed-base marker for an arbitrary training base model id (sc-15036) — the
+/// `base_model`-keyed fallback `training_base_model_installed` checks last, so it is repo-rehost
+/// proof. [`seed_installed_base_model`] is the `z_image_turbo` special case of this.
+pub(crate) fn seed_installed_training_base(data_dir: &std::path::Path, base_model: &str) {
+    let model_dir = data_dir.join("models").join(safe_download_dir(base_model));
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("model marker writes");
+}
+
+/// Submit a real **FULL base fine-tune** (sc-15036, epic 14034 F6) against the Mage-Flow Base
+/// target — the only target that offers `networkType: "full"` — and return
+/// `(job_id, output_dir)`.
+///
+/// Distinct from [`submit_real_training_job`] in exactly the way that matters: the SAME target
+/// with `advanced.networkType = "full"` must resolve its output into the model tree
+/// (`<data>/models/finetunes/<id>`) rather than the LoRA tree, so the returned `output_dir` is
+/// itself part of what the caller asserts.
+pub(crate) async fn submit_full_finetune_job(
+    app: axum::Router,
+    project_id: &str,
+    data_dir: &std::path::Path,
+) -> (String, std::path::PathBuf) {
+    seed_installed_training_base(data_dir, "mage_flow_base");
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Aurora set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["baseModel"] == "mage_flow_base")
+        .expect("the Mage-Flow Base training target is registered")
+        .clone();
+    let mut config = target["defaults"].clone();
+    config["triggerWord"] = json!("auroraStyle");
+    config["advanced"]["networkType"] = json!("full");
+    // The full-tune memory envelope scales with the training resolution; keep the submit gate
+    // out of the way so this test is about registration, not about the gate (which sc-14056 pins).
+    config["resolution"] = json!(256);
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset_id,
+            "config": config,
+            "outputName": "Aurora Base",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "submit failed: {job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    (job_id, output_dir)
+}
+
+/// Write the two files a full base fine-tune emits into its output dir — the diffusers transformer
+/// component pair `mlx_gen_mage::load_finetuned` reads.
+pub(crate) fn stage_trained_base_checkpoint(output_dir: &std::path::Path) {
+    std::fs::create_dir_all(output_dir).expect("output dir creates");
+    std::fs::write(
+        output_dir.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        br#"{"_class_name":"MageFlow"}"#,
+    )
+    .expect("config writes");
+    write_test_safetensors(
+        &output_dir.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+    );
+}
+
 /// Drives a project-scoped training job from submission to a completed result
 /// and asserts the produced adapter is registered as a normal SceneWorks LoRA.
 /// Seeds the base model so the real-run guardrails pass.
@@ -664,6 +761,36 @@ pub(crate) async fn claim_training_job(app: &axum::Router, job_id: &str) {
         &["gpu", "lora_train", "lora_train_execute"],
     )
     .await;
+}
+
+/// Claim a training job as the **mlx** worker (sc-15036). A Mage training kernel is MLX-only and
+/// MLX-routed, so a generic `test-gpu` worker correctly defers it — the gpu id is what marks the
+/// worker as the MLX lane, exactly as `register_gpu_worker(&store, "worker-mlx", "mlx", …)` does in
+/// the jobs-store suite.
+pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id: &str) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "gpuId": "mlx",
+            "gpuName": "Apple Silicon",
+            "capabilities": ["gpu", "lora_train", "lora_train_execute"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": TEST_TRAINING_WORKER_ID }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], job_id);
 }
 
 /// Complete a magic-prompt job through the same claim + worker-owned progress

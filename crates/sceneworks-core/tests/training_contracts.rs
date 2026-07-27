@@ -958,6 +958,77 @@ fn training_plan_fixture_pins_current_plan_version() {
     );
 }
 
+/// sc-15036 — the plan's declared `outputKind` must describe THIS JOB, not what its target usually
+/// produces. The Mage target's own `output_kind` is `Lora` and its `limits.networkTypes` offers
+/// `"full"`, so the same target yields an adapter or an ~8 GB base checkpoint depending on one
+/// config value. Copying `target.output_kind` — what the builder did before — makes every full
+/// fine-tune declare itself a LoRA, which is precisely what routed it to the LoRA registrar and left
+/// the checkpoint with no home.
+///
+/// Discriminating: two plans built from the SAME target and the SAME dataset, differing ONLY in
+/// `advanced.networkType`, must declare DIFFERENT kinds. A builder that copies the target cannot
+/// tell them apart, and neither can one that keys off the target id.
+#[test]
+fn build_training_plan_derives_the_output_kind_from_the_run_not_the_target() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.base_model == "mage_flow_base")
+        .expect("the Mage-Flow Base training target is registered");
+    assert_eq!(
+        target.output_kind,
+        TrainingOutputKind::Lora,
+        "fixture sanity: the target itself declares an adapter — that is the whole point"
+    );
+    assert!(
+        target
+            .limits
+            .get("networkTypes")
+            .and_then(|value| value.as_array())
+            .is_some_and(|types| types.iter().any(|value| value.as_str() == Some("full"))),
+        "fixture sanity: this target offers a full fine-tune"
+    );
+
+    let kind_for = |network_type: &str| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert(
+            "networkType".to_owned(),
+            serde_json::Value::String(network_type.to_owned()),
+        );
+        build_training_plan(BuildTrainingPlan {
+            job_id: "job_kind",
+            target,
+            dataset: &dataset,
+            config,
+            preset: None,
+            lora_id: "out_kind",
+            base_model_path: "/data/cache/huggingface/SceneWorks/Mage-Flow-Base".to_owned(),
+            dataset_root: Path::new("/data/training/ds_abc123"),
+            output_dir: Path::new("/data/models/finetunes/out_kind"),
+            file_name: "out.safetensors".to_owned(),
+            created_at: "2026-07-27T00:00:00Z".to_owned(),
+        })
+        .expect("plan resolves")
+        .target
+        .output_kind
+    };
+
+    assert_eq!(kind_for("lora"), TrainingOutputKind::Lora);
+    assert_eq!(
+        kind_for("lokr"),
+        TrainingOutputKind::Lora,
+        "a LoKr is an adapter too — only \"full\" changes the artifact class"
+    );
+    assert_eq!(
+        kind_for("full"),
+        TrainingOutputKind::BaseCheckpoint,
+        "a full base fine-tune produces a base checkpoint; the plan is what the worker and the \
+         completion registrar read to decide where the artifact goes"
+    );
+}
+
 fn dataset_fixture() -> TrainingDataset {
     serde_json::from_value(load_fixture("dataset.json")).expect("dataset fixture parses")
 }

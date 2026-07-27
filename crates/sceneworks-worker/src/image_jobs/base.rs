@@ -116,6 +116,14 @@ enum ImageRoute {
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
     SdxlImported,
+    /// This app's OWN full base fine-tune of Mage-Flow Base (sc-15036, epic 14034 F6): a non-builtin
+    /// `mage-flow`-family catalog entry whose `paths.model` is a complete diffusers transformer
+    /// component dir → the bespoke fine-tuned lane, which stages the installed base's shared text
+    /// encoder + VAE and loads through `mage::load_finetuned`. A builtin Mage id never reaches here
+    /// (`resolve_mage_finetuned_transformer` returns `None` for a `MODEL_TABLE` id), so the tiered
+    /// snapshot path is untouched. txt2img only — the non-edit Mage variants advertise no
+    /// conditioning and the fine-tuned entrypoint refuses adapters.
+    MageFinetuned,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -230,6 +238,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::KreaImported)
     } else if sdxl_imported_available(request, settings) {
         Some(ImageRoute::SdxlImported)
+    } else if mage_finetuned_available(request, settings) {
+        // A fine-tuned Mage-Flow base (sc-15036). The fine-tune's id is in no `MODEL_TABLE`, so
+        // `mlx_available` is `false` for it — this arm is what routes it to real MLX generation at
+        // all. A builtin Mage id is claimed by the generic `mlx_available` arm below, unchanged.
+        Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if pulid_flux_available(request, settings) {
@@ -313,6 +326,9 @@ impl ImageRoute {
             // seed. No angle/pose grouping (a bare imported DiT carries no conditioning).
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
+            // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
+            // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
+            | ImageRoute::MageFinetuned
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
@@ -327,6 +343,7 @@ impl ImageRoute {
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
             ImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
+            ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             ImageRoute::InstantId => INSTANTID_ENGINE,
             ImageRoute::PulidFlux => PULID_ADAPTER_LABEL,
             ImageRoute::PoseControlBaseMissing | ImageRoute::PoseReject => STUB_ADAPTER,

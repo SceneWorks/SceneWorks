@@ -242,6 +242,20 @@ describe("configValidation", () => {
     expect(issues.find((entry) => entry.field === "outputName").message).toBe("Name the LoRA output");
   });
 
+  // sc-15036: the output kind is a per-RUN property. The SAME target produces an adapter or a full
+  // base checkpoint depending on `networkType`, so the requirement must name what THIS run will
+  // produce. Discriminating: one draft, one field flipped, two different messages.
+  it("names a full base fine-tune's output a base checkpoint, not a LoRA", () => {
+    const messageFor = (networkType) =>
+      configValidation({ ...wholeDraft, outputName: "", networkType }, ctx).find(
+        (entry) => entry.field === "outputName",
+      ).message;
+    expect(messageFor("lora")).toBe("Name the LoRA output");
+    expect(messageFor("lokr")).toBe("Name the LoRA output");
+    expect(messageFor("full")).toBe("Name the base checkpoint output");
+    expect(messageFor("  FULL ")).toBe("Name the base checkpoint output");
+  });
+
   // A broken value and an unfilled field at once: the chip row shows one and stays silent on the
   // other. This is the pairing sc-10492 collapsed and sc-10501 restored.
   it("surfaces the broken value alone when both kinds are live", () => {
