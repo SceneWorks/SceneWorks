@@ -9352,6 +9352,255 @@
         }
       }
     },
+    // Krea Realtime 14B (epic 8431, sc-8444 S11): krea/krea-realtime-video, Apache-2.0 — the
+    // Wan 2.1 T2V 14B backbone distilled via Self-Forcing into an AUTOREGRESSIVE generator. It
+    // renders frame-blocks left-to-right against a rolling causal KV cache at ~6 few-step
+    // denoises per block instead of one whole-clip diffusion, which is why it is its own engine
+    // (mlx-gen-krea-realtime) rather than a Wan variant. macOS-only native MLX; there is no
+    // candle path (the worker fails a non-mac job loudly, `video_jobs/mod.rs`).
+    //
+    // Distinct from the existing `krea_*` IMAGE lane (Krea 2 Turbo / Raw, engine `mlx-gen-krea`).
+    // Same vendor, unrelated architecture — do not merge their ids, families, or LoRA families.
+    {
+      "id": "krea_realtime_14b",
+      "name": "Krea Realtime 14B",
+      "family": "krea-realtime",
+      "type": "video",
+      "adapter": "krea_realtime",
+      // The engine routes purely on the conditioning the worker hands it (`pipeline::run`):
+      // nothing → t2v, a Reference still → i2v (VAE-encoded to warm the AR KV cache), a
+      // VideoClip source → v2v (a strength-controlled AR init). Those are exactly the three
+      // capabilities declared here; the descriptor advertises no first/last-frame, clip-extend,
+      // bridge, or person-replace surface, so none is claimed.
+      "capabilities": [
+        "text_to_video",
+        "image_to_video",
+        "video_to_video"
+      ],
+      "downloads": [
+        // macOS quant matrix (epic 8506 shape, mirroring scail2_14b): each tier is a SEPARATE
+        // user-selectable artifact tagged with a `variant`; `q4` (default) installs when no tier
+        // is chosen. Every tier subdir is fully self-contained — the Krea DiT at that tier's
+        // precision plus the STOCK Wan 2.1 companions the engine reuses verbatim (z16 VAE, UMT5
+        // text encoder, tokenizer) and a `config.json` carrying the AR fields — so the dense
+        // companions repeat per tier and a tier dir is a complete `from_snapshot` tree.
+        // Companions are byte-identical across all three tiers: t5_encoder 11,361,845,504 ·
+        // vae 507,591,212 · tokenizer 16,837,417. Sizes below are the exact hosted byte counts
+        // read back from the published repo tree, so `estimatedSizeBytes` is not an estimate.
+        //
+        // ⚠️ `files` are EXPLICIT PATHS, deliberately not a `<tier>/*` glob. The worker's glob
+        // (`imports.rs::pattern_matches`, Rust `glob` with default MatchOptions) lets `*` cross
+        // `/`, so `bf16/*` WOULD reach the nested `bf16/transformer/` shards — the download
+        // itself is not the exposure. The exposure is CACHE HEALTH: `snapshot_contains_pattern`
+        // (apps/rust-api/src/models.rs) treats a glob as satisfied by ANY one matching file, and
+        // this repo ships no `model_index.json`, so the diffusers per-component augmentation is
+        // a no-op for it — a tier that lost 6 of its 7 DiT shards would still read `installed`
+        // and then die at load. Explicit paths make every file its own presence check (exact
+        // `path_is_readable_file`) and its own download-time claim (sc-12283's per-pattern
+        // hard-fail), so a torn tier reports `incomplete` and names the missing shard.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "variant": "q4",
+          "default": true,
+          "files": [
+            "q4/config.json",
+            "q4/dit.safetensors",
+            "q4/t5_encoder.safetensors",
+            "q4/tokenizer.json",
+            "q4/vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          // Q4 DiT 8,378,982,809 + the shared dense companions. The default tier for this dense
+          // 14B video engine (sc-10750's dense-video convention) — a bf16 DiT is ~28 GB resident
+          // before the AR KV cache, so the quantized tiers are the practically usable ones.
+          "estimatedSizeBytes": 20265258499,
+          // residentMemoryBytes/peakMemoryBytes stay null until MEASURED on-device: the
+          // real-weight run is sc-8446 (S13). See the mlx.minMemoryGb note for the derivation
+          // that stands in until then — a derived number must not masquerade as a measured one.
+          "footprint": { "diskSizeBytes": 20265258499, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "variant": "q8",
+          "files": [
+            "q8/config.json",
+            "q8/dit.safetensors",
+            "q8/t5_encoder.safetensors",
+            "q8/tokenizer.json",
+            "q8/vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          // Q8 DiT 15,404,443,762 + the shared dense companions.
+          "estimatedSizeBytes": 27290719452,
+          "footprint": { "diskSizeBytes": 27290719452, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "variant": "bf16",
+          // The bf16 DiT is SHARDED one level deeper (`bf16/transformer/dit-0000N-of-00007`),
+          // because a single 28.58 GB bf16 file is above the practical single-blob limit the
+          // rehost emits; the q4/q8 DiTs are packed small enough to stay flat as `dit.safetensors`.
+          // The engine handles either layout (`t2v::open_transformer_weights` takes a flat
+          // `dit.safetensors` OR a `transformer/` dir), so this is a hosting shape, not a second
+          // load path. All 7 shards are listed individually — see the glob note above.
+          "files": [
+            "bf16/config.json",
+            "bf16/t5_encoder.safetensors",
+            "bf16/tokenizer.json",
+            "bf16/vae.safetensors",
+            "bf16/transformer/dit-00001-of-00007.safetensors",
+            "bf16/transformer/dit-00002-of-00007.safetensors",
+            "bf16/transformer/dit-00003-of-00007.safetensors",
+            "bf16/transformer/dit-00004-of-00007.safetensors",
+            "bf16/transformer/dit-00005-of-00007.safetensors",
+            "bf16/transformer/dit-00006-of-00007.safetensors",
+            "bf16/transformer/dit-00007-of-00007.safetensors"
+          ],
+          "platforms": ["macos"],
+          // 7 DiT shards totalling 28,577,095,227 + the shared dense companions.
+          "estimatedSizeBytes": 40463370856,
+          "footprint": { "diskSizeBytes": 40463370856, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/krea-realtime-14b-mlx"
+      },
+      "defaults": {
+        // 24 fps: the model's own cadence (the card's reference driver exports at
+        // `fps=24`), NOT the 16 the rehost's emitted `config.json` inherits from Wan.
+        // See the limits note for why 24 is also the only cadence that keeps every
+        // advertised duration on the AR block lattice.
+        "duration": 4,
+        "fps": 24,
+        "resolution": "832x480",
+        "quality": "balanced",
+        // 6 few-step denoises per frame-block — the reference driver's own
+        // `num_inference_steps=6`, exposed through the Advanced steps control.
+        "steps": 6,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // ---- fps + duration lattice (DERIVED, not inherited) --------------------------------
+        // Three facts compose into the lattice:
+        //   1. The z16 Wan VAE is 4x temporal, so an output frame count must satisfy
+        //      `frames = 4k + 1` (core's `wan_frame_count` FLOORS to the largest such value).
+        //   2. The AR loop consumes `num_frames_per_block = 3` LATENT frames per block, and a
+        //      latent count is `(frames - 1) / 4 + 1`. A whole number of blocks therefore wants
+        //      that latent count to be a multiple of 3 — i.e. `frames = 12k - 3`. A partial
+        //      trailing block is handled (`generate.rs::chunk_frame_counts`), it is just wasted
+        //      work rendering frames the clip then trims.
+        //   3. Krea Realtime is a 24 fps model.
+        // At 24 fps, `wan_frame_count(24 * d) = 24d - 3 = 12(2d) - 3` for every integer d — so
+        // EVERY advertised duration lands on an exact 2d-block boundary: 2s -> 45 frames / 4
+        // blocks, 3s -> 69 / 6, 4s -> 93 / 8, 5s -> 117 / 10. At the config's inherited 16 fps
+        // it does not: 4s -> 61 frames -> 16 latent frames, which is 5 blocks plus a 1-frame
+        // remainder. That is the derivation, and `krea_realtime_durations_are_on_the_ar_block_
+        // lattice` (video_request.rs) pins it.
+        //
+        // `hardMaxDuration` 5 is a stability ceiling, not a memory one: the shipped checkpoint
+        // runs `sink_size = 0`, so a bounded-window AR clip drifts as it lengthens (sc-15127
+        // tracks the non-zero-sink fix). 5s / 10 blocks is just past the reference driver's own
+        // 9-block example.
+        "durations": [2, 3, 4, 5],
+        "recommendedMaxDuration": 5,
+        "hardMaxDuration": 5,
+        "fps": [24],
+        // ---- geometry -----------------------------------------------------------------------
+        // Stride 16 = the z16 Wan 2.1 VAE's 8px spatial stride x the DiT's patch 2, the same
+        // lattice the rest of the Wan-14B family renders on. The engine derives its per-frame
+        // token count from the REQUESTED size (`t2v::resolve_request_config` recomputes
+        // `frame_seq_length` from the latent dims), so the reference's baked 1560 (= 52x30 for
+        // 832x480) is a default, not a constraint — every bucket below is genuinely renderable.
+        //
+        // NO `maxPixels`: unlike the Wan/bernini/scail2 14B engines, mlx-gen-krea-realtime
+        // declares no area check — its descriptor bounds each EDGE (`max_size: 1280`) and
+        // gen-core's `validate_request` has no area term. A model with no engine cap must not
+        // invent one (the `ENGINE_GEOMETRY` contract), so this stays absent rather than
+        // borrowing the 14B family's 921,600.
+        //
+        // 832x480 is the reference bucket and the default. The 720p pair is legal geometry and
+        // renders, but it is ~2.3x the tokens per frame and therefore ~2.3x the AR KV cache
+        // (~17.7 GB vs ~7.7 GB bf16) — see mlx.minMemoryGb.
+        "requiresDimensionsMultipleOf": 16,
+        "resolutions": ["832x480", "480x832", "1280x720", "720x1280"],
+        // Sealed sampler surface: the engine advertises exactly one sampler, its fixed
+        // Self-Forcing few-step renoise schedule (`SELF_FORCING_SAMPLER`), and no scheduler
+        // axis at all. There is nothing to choose, so this declares the sealed-adapter
+        // `["default"]` (the schema's own convention) rather than inventing a `self_forcing`
+        // menu entry the worker would never send — it passes `sampler: None` / `scheduler: None`.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        // Krea Realtime gets its OWN family token. The DiT is Wan 2.1 T2V 14B weight-for-weight,
+        // so Wan-family style/motion LoRAs do install on it (sc-15015 wired the dense
+        // forward-time residual path, tier-agnostic over the packed Q4/Q8 bases) — but declaring
+        // `wan-video` HERE would make this entry a member of the Wan family for every other
+        // family-keyed gate too (training bases, tier layout, repo resolution), which it is not.
+        // The one-directional "also accepts wan-video LoRAs" relation belongs in the
+        // `extra_compatible_lora_families` registry (sceneworks-core `lora_family.rs`), where it
+        // is now declared, and which is the same registry that lets a checkpoint DETECTED as
+        // `wan-video` satisfy this declared family (it is, byte-for-byte).
+        "families": ["krea-realtime"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "mlx": {
+        // Turnkey pre-converted MLX repo (no requiresConversion). The worker resolves env
+        // override (SCENEWORKS_MLX_KREA_REALTIME_DIR) -> app-managed <data>/models/mlx/
+        // krea_realtime -> this download-on-first-use snapshot, mirroring bernini/scail2.
+        //
+        // minMemoryGb 64 is DERIVED, not measured (sc-8446 / S13 measures it on-device):
+        //   Q4 DiT ~7.8 GiB + the bounded AR KV cache + the z16 VAE ~0.5 GiB, at the default
+        //   832x480 bucket. The KV cache is the term that makes this engine different from a
+        //   block-diffusion Wan: a rolling `kv_cache_num_frames + num_frames_per_block` = 6
+        //   latent-frame window at 1560 tokens/frame over 40 layers x 40 heads x 128 dims x
+        //   {k,v} in bf16 is ~7.7 GB (~7.1 GiB) — bounded, but resident for the whole clip.
+        //   That is ~15.5 GiB steady plus VAE-decode scratch, and MLX's wired-memory ceiling is
+        //   roughly 63% of physical, so a 32 GB Mac (~20 GB wired) cannot hold it and a 48 GB
+        //   Mac (~30 GB) has no headroom. 64 is the first tier that does.
+        //   The ladder above the floor, same derivation: Q8 ~+6.5 GiB of weights, bf16 ~+19 GiB,
+        //   and the 720p buckets ~+9.4 GiB of KV — a bf16 720p clip wants a 128 GB machine. The
+        //   UMT5 text encoder (11.4 GB bf16) is NOT additive: it is loaded, used, and freed
+        //   before the DiT stages, and the engine floors it to Q8 (~5.7 GB) whenever the DiT
+        //   tier is quantized, so it never sets the peak on the q4/q8 tiers.
+        "minMemoryGb": 64,
+        "repo": "SceneWorks/krea-realtime-14b-mlx",
+        // Declares Q4 as this model's default tier, matching the `default: true` q4 download.
+        // ⚠️ This key does NOT select the tier for a video job: `mlx.quantize` is read by the
+        // IMAGE lane (`resolve_quant`, image_jobs/base.rs); the video lane reads only
+        // `advanced.mlxQuantize` (`resolve_mlx_dense_quant`, video_jobs/mod.rs) and today hands
+        // the engine the snapshot ROOT rather than a `<tier>/` subdir. Wiring the video lane to
+        // honor a declared default tier + descend into the tier subdir is sc-15258 (S20), which
+        // is blocked by this story. Declared here so S20 has the manifest fact to read.
+        "quantize": 4,
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      "ui": {
+        "label": "Krea Realtime 14B",
+        "description": "Krea Realtime 14B: a Wan 2.1 14B backbone distilled with Self-Forcing into an autoregressive video generator. It renders frame-blocks left-to-right against a rolling causal KV cache at ~6 steps per block, so it produces a finished clip in far fewer total denoises than a whole-clip 14B diffusion. Text-to-video, image-to-video (a reference still warms the cache), and video-to-video (a source clip drives the init). macOS native MLX only; CFG-off, so there is no negative prompt or guidance control.",
+        "recommendedFor": ["text_to_video", "video_to_video"],
+        "durationHint": "Generates at 24fps on a 3-frame autoregressive block lattice — every duration here lands on a whole number of blocks (2s = 45 frames, 5s = 117). Keep clips at 5s or less: the shipped checkpoint has no attention sink, so longer clips drift.",
+        "promptGuide": {
+          "title": "Krea Realtime 14B Prompt Guide",
+          "path": "/prompt-guides/krea-realtime.md",
+          "sources": [
+            { "label": "Krea Realtime 14B model card", "url": "https://huggingface.co/krea/krea-realtime-video" },
+            { "label": "Krea Realtime technical blog post", "url": "https://www.krea.ai/blog/krea-realtime-14b" },
+            { "label": "krea-ai/realtime-video inference code", "url": "https://github.com/krea-ai/realtime-video" }
+          ]
+        }
+      }
+    },
     {
       "id": "real_esrgan",
       "recommended": true,
