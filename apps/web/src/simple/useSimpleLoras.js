@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import {
   MAX_USER_JOB_LORAS,
   loraHasResolvableFamily,
@@ -7,6 +7,12 @@ import {
   serializeLora,
 } from "../presetUtils.js";
 import { terminalStatuses } from "../jobTypes.js";
+import { useStudioState } from "./useStudioState.js";
+
+// Module-level so the "first time this key is seen" initial is referentially stable — a
+// fresh [] / {} per render would make the effects below see a new value every time.
+const EMPTY_IDS = [];
+const EMPTY_WEIGHTS = {};
 
 // LoRA selection for the Simple studios (epic 15404).
 //
@@ -30,14 +36,16 @@ export function loraMeta(lora) {
  * @param {string|null} [input.excludeLoraId] - a LoRA the studio applies itself and must not
  *   also offer in the picker (Simple's edit mode auto-applies Krea's managed `image_edit`
  *   LoRA — the advanced studio hides it from its picker the same way).
+ * @param {string} input.scope - the owning studio ("image" | "video"), so the picks survive
+ *   that studio's unmount on navigation without colliding with the other's.
  */
-export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLoraId = null }) {
-  const [selectedLoraIds, setSelectedLoraIds] = useState([]);
-  const [weightOverrides, setWeightOverrides] = useState({});
+export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLoraId = null, scope }) {
+  const [selectedLoraIds, setSelectedLoraIds] = useStudioState(scope, "selectedLoraIds", EMPTY_IDS);
+  const [weightOverrides, setWeightOverrides] = useStudioState(scope, "loraWeights", EMPTY_WEIGHTS);
   // Only the IDS of imports started from this studio's sheet. Status, progress and the
   // detected family are read LIVE off the job feed on every render — the pending slot must
   // not carry a second, drifting copy of what the Queue already knows.
-  const [importJobIds, setImportJobIds] = useState([]);
+  const [importJobIds, setImportJobIds] = useStudioState(scope, "loraImportJobIds", EMPTY_IDS);
 
   const compatibleLoras = useMemo(
     () =>
@@ -94,7 +102,7 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
       const kept = ids.filter((id) => compatibleLoras.some((lora) => lora.id === id));
       return kept.length === ids.length ? ids : kept;
     });
-  }, [loras.length, selectedModel, compatibleLoraKey, compatibleLoras]);
+  }, [loras.length, selectedModel, compatibleLoraKey, compatibleLoras, setSelectedLoraIds]);
 
   const effectiveLoraWeight = useCallback(
     (lora) => {
@@ -106,7 +114,7 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
 
   const addLora = useCallback((lora) => {
     setSelectedLoraIds((ids) => (ids.includes(lora.id) ? ids : [...ids, lora.id]));
-  }, []);
+  }, [setSelectedLoraIds]);
 
   const removeLora = useCallback((lora) => {
     setSelectedLoraIds((ids) => ids.filter((id) => id !== lora.id));
@@ -120,17 +128,17 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
       delete next[lora.id];
       return next;
     });
-  }, []);
+  }, [setSelectedLoraIds, setWeightOverrides]);
 
   const setLoraWeight = useCallback((id, value) => {
     setWeightOverrides((current) => ({ ...current, [id]: value }));
-  }, []);
+  }, [setWeightOverrides]);
 
   const noteImportJob = useCallback((job) => {
     if (job?.id) {
       setImportJobIds((ids) => (ids.includes(job.id) ? ids : [...ids, job.id]));
     }
-  }, []);
+  }, [setImportJobIds]);
 
   // Resolved against the live feed each render, so a slot disappears the moment the import
   // reaches a terminal status — no local progress model, no polling.

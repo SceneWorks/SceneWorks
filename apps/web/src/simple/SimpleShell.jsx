@@ -9,6 +9,7 @@ import { breakpointFor, contentMaxWidth } from "./breakpoint.js";
 import { ADVANCED_MODE } from "./uiMode.js";
 import { useContainerWidth } from "./useContainerWidth.js";
 import { SimpleUiContext } from "./SimpleUiContext.js";
+import { createStudioStateStore } from "./useStudioState.js";
 import { SimpleSheet, SimpleSheetOptions } from "./SimpleSheet.jsx";
 import { PromptGuideSheet } from "./PromptGuideSheet.jsx";
 import { SimplePreview } from "./SimplePreview.jsx";
@@ -106,6 +107,13 @@ export function SimpleShell({
     setDismissedJobIds((current) => new Set(current).add(id));
   }, []);
   const toastTimer = useRef(null);
+  // The studios' own knobs (model, prompt, resolution, LoRA picks, …), kept alive across the
+  // same unmount. A ref, not state: this is written on every keystroke and must never
+  // re-render the shell. See useStudioState.js.
+  const studioStateRef = useRef(null);
+  if (studioStateRef.current === null) {
+    studioStateRef.current = createStudioStateStore();
+  }
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
   useEffect(() => {
@@ -176,6 +184,7 @@ export function SimpleShell({
       clearReferenceRequest: () => setReferenceRequest(null),
       dismissedJobIds,
       dismissJob,
+      studioState: studioStateRef.current,
     }),
     [
       breakpoint,

@@ -8,6 +8,7 @@ import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
@@ -54,14 +55,15 @@ export function SimpleVideoStudio() {
   const { openSheet, closeSheet, openGuide, toast } = useSimpleUi();
   const refine = useSimpleRefine("video");
 
-  const [mode, setMode] = useState("text_to_video");
-  const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [resolution, setResolution] = useState("");
-  const [duration, setDuration] = useState(5);
-  const [styleId, setStyleId] = useState(null);
-  const [sourceAssetId, setSourceAssetId] = useState(null);
-  const [refineOpen, setRefineOpen] = useState(false);
+  // Sticky across navigation — see the same block in SimpleImageStudio.
+  const [mode, setMode] = useStudioState("video", "mode", "text_to_video");
+  const [prompt, setPrompt] = useStudioState("video", "prompt", "");
+  const [model, setModel] = useStudioState("video", "model", "");
+  const [resolution, setResolution] = useStudioState("video", "resolution", "");
+  const [duration, setDuration] = useStudioState("video", "duration", 5);
+  const [styleId, setStyleId] = useStudioState("video", "styleId", null);
+  const [sourceAssetId, setSourceAssetId] = useStudioState("video", "sourceAssetId", null);
+  const [refineOpen, setRefineOpen] = useStudioState("video", "refineOpen", false);
   const [submitting, setSubmitting] = useState(false);
 
   const models = useMemo(
@@ -77,7 +79,7 @@ export function SimpleVideoStudio() {
     if (models.length && !models.some((entry) => entry.id === model)) {
       setModel(models[0].id);
     }
-  }, [models, model]);
+  }, [models, model, setModel]);
 
   const resolutions = selectedModel?.limits?.resolutions?.length
     ? selectedModel.limits.resolutions
@@ -102,7 +104,7 @@ export function SimpleVideoStudio() {
     if (resolutions.length && !resolutions.includes(resolution)) {
       setResolution(preferredVideoResolution(selectedModel, resolutions));
     }
-  }, [resolutions, resolution, selectedModel]);
+  }, [resolutions, resolution, selectedModel, setResolution]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -111,7 +113,7 @@ export function SimpleVideoStudio() {
     if (durations.length && !durations.includes(duration)) {
       setDuration(preferredDuration(selectedModel, durations));
     }
-  }, [durations, duration, selectedModel]);
+  }, [durations, duration, selectedModel, setDuration]);
 
   const sourceAsset = useMemo(
     () => recentImageAssets.find((asset) => asset.id === sourceAssetId) ?? null,
@@ -120,7 +122,7 @@ export function SimpleVideoStudio() {
 
   // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
   // the video lane just has no auto-applied managed LoRA to exclude.
-  const lora = useSimpleLoras({ loras, selectedModel, jobs });
+  const lora = useSimpleLoras({ loras, selectedModel, jobs, scope: "video" });
   const openLoraPicker = () =>
     openSheet({
       title: "Add LoRA",
