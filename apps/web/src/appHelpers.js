@@ -41,6 +41,29 @@ export function failedJobNotice(job) {
   return `${label}: ${detail}`;
 }
 
+/// sc-15036: a completed `lora_train` job produces EITHER a LoRA/LoKr adapter or a FULL base
+/// checkpoint, and each registrar reports under its own result key (`loraRegistered` /
+/// `baseCheckpointRegistered`) — only one of which is present on any given run.
+///
+/// Returns the failure message when THIS run's registration failed, else `null`. Reading only
+/// `loraRegistered === false` (what the notice branch did before) meant a failed base-checkpoint
+/// registration — where `loraRegistered` is `undefined` — fell into the success path, so the run
+/// reported success while its own result said the ~8 GB checkpoint had not been registered.
+///
+/// Strict `=== false` on both keys, deliberately: an ABSENT key means "that registrar did not
+/// claim this job", which is the normal case for the other kind and must never read as a failure.
+export function trainingRegistrationFailure(result) {
+  const failed = result?.loraRegistered === false || result?.baseCheckpointRegistered === false;
+  if (!failed) {
+    return null;
+  }
+  return (
+    result?.loraRegistrationError ??
+    result?.baseCheckpointRegistrationError ??
+    "Completed training but could not register the result."
+  );
+}
+
 export function isImageGenerationJob(job) {
   return ["image_generate", "image_edit"].includes(job.type);
 }
