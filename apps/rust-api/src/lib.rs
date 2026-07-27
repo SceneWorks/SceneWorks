@@ -428,12 +428,17 @@ fn open_bind_override_enabled(value: &str) -> bool {
 /// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` value (sc-10212).
 ///
 /// An explicit, non-empty override marks an operator-owned config dir — a repo checkout or a Compose
-/// bind mount — which must stay authoritative, so seed `IfMissing` (fill gaps, never clobber an edited
-/// copy or dirty a checked-out `config/`). Unset or blank means `config_dir` fell back to the
-/// platform-default app-owned dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there
-/// refreshes the builtin catalog on launch instead of serving a stale seed after an upgrade — the
-/// sc-10193 img2img flag was invisible on a directly-launched API because the months-old seed was
-/// never rewritten. Pure so the choice is unit-tested without touching process env or the filesystem.
+/// bind mount / RunPod persistent volume — so seed `SyncFromEmbedded`: refresh each builtin manifest
+/// when it is missing or has drifted from the binary's embedded copy, but leave a byte-identical file
+/// untouched so a matching checkout is never dirtied. The builtin manifests are app-owned (nothing
+/// edits them at runtime — customizations live in `user.*.jsonc`), so a persisted copy that no longer
+/// matches the running binary is always stale and must be refreshed. The old `IfMissing` behavior —
+/// never rewriting an existing file — left an upgraded binary serving a months-old `builtin.models.jsonc`
+/// off a persisted volume: it hid the sc-10193 img2img flag once and the Krea Turbo memory-ladder curves
+/// again (the ladder was bypassed, so a 24 GB card wrongly rejected a q4/1024² render). Unset or blank
+/// means `config_dir` fell back to the platform-default app-owned dir (the same one the desktop seeds
+/// `Overwrite`), so `Overwrite` there refreshes the builtin catalog unconditionally on launch. Pure so
+/// the choice is unit-tested without touching process env or the filesystem.
 ///
 /// The trim/non-empty rule mirrors [`env_path_or`] exactly, so the seed mode and the resolved
 /// `config_dir` always agree on whether the override was actually applied.
@@ -442,7 +447,7 @@ fn seed_mode_for_config_dir(
 ) -> sceneworks_core::builtin_manifests::SeedMode {
     use sceneworks_core::builtin_manifests::SeedMode;
     match config_dir_env.map(str::trim) {
-        Some(value) if !value.is_empty() => SeedMode::IfMissing,
+        Some(value) if !value.is_empty() => SeedMode::SyncFromEmbedded,
         _ => SeedMode::Overwrite,
     }
 }

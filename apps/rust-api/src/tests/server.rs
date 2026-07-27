@@ -140,14 +140,16 @@ fn validate_model_id_rejects_traversal_and_separators() {
 fn seed_mode_refreshes_the_app_owned_default_but_not_an_explicit_config_dir() {
     use sceneworks_core::builtin_manifests::SeedMode;
     // sc-10212: an explicit, non-empty SCENEWORKS_CONFIG_DIR marks an operator-owned dir (repo
-    // checkout / Compose bind mount) → stay authoritative (IfMissing), never dirty a checkout.
+    // checkout / Compose bind mount / RunPod volume) → SyncFromEmbedded: refresh a drifted or missing
+    // builtin manifest so an upgraded binary is never served a stale seed, but leave a byte-identical
+    // file untouched so a matching checkout is not dirtied.
     assert_eq!(
         seed_mode_for_config_dir(Some("/srv/sceneworks/config")),
-        SeedMode::IfMissing
+        SeedMode::SyncFromEmbedded
     );
     assert_eq!(
         seed_mode_for_config_dir(Some("./config")),
-        SeedMode::IfMissing
+        SeedMode::SyncFromEmbedded
     );
     // Unset, or blank/whitespace (env_path_or treats those as unset) → the platform-default
     // app-owned dir → Overwrite so a directly-launched API refreshes its builtin catalog on launch.
