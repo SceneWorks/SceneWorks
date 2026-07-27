@@ -301,14 +301,20 @@ export function SimpleShell({
 
         {sheet ? (
           <SimpleSheet onClose={() => setSheet(null)} phone={phone} title={sheet.title}>
-            <SimpleSheetOptions
-              kind={sheet.kind}
-              onSelect={(value) => {
-                sheet.onSelect(value);
-                setSheet(null);
-              }}
-              options={sheet.options}
-            />
+            {/* A screen may supply its own body (the Add LoRA picker + import, epic 15404)
+                instead of the three option shapes. The chrome — bottom sheet vs centered card,
+                Escape, backdrop, focus — is the same either way, which is the point: Simple
+                has ONE sheet. */}
+            {sheet.body ?? (
+              <SimpleSheetOptions
+                kind={sheet.kind}
+                onSelect={(value) => {
+                  sheet.onSelect(value);
+                  setSheet(null);
+                }}
+                options={sheet.options}
+              />
+            )}
           </SimpleSheet>
         ) : null}
 

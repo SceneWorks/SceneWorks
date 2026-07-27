@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import { terminalStatuses } from "../constants.js";
+import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
 import {
   extractFamilies,
@@ -20,11 +20,6 @@ import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
 import { suggestTier, tierFits } from "../tierSuggestion.js";
 import { safeExternalUrl } from "../urls.js";
-
-// Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
-// base models accept the optional low-noise expert upload (sc-1991). The 5B model
-// (wan_2_2) is dense and takes a single-file LoRA.
-const WAN_MOE_BASE_MODELS = new Set(["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -802,7 +797,7 @@ export function ModelManagerScreen() {
   // upload the low-noise expert half alongside the high-noise primary.
   const wanBaseModelOptions = models.filter((model) => model.family === "wan-video");
   const showBaseModelSelect = importForm.family === "wan-video" && wanBaseModelOptions.length > 0;
-  const isMoeBaseModel = WAN_MOE_BASE_MODELS.has(importForm.baseModel);
+  const isMoeBaseModel = WAN_MOE_PAIRED_LORA_MODEL_IDS.has(importForm.baseModel);
   const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
   const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
 

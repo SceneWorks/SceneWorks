@@ -243,6 +243,40 @@ describe("buildSimpleImageRequest", () => {
     expect(request.loras).toEqual([]);
   });
 
+  // The Simple LoRA field (epic 15404) hands over already-serialized entries, so the builder's
+  // only job is to carry them and stack the managed edit LoRA on top.
+  const PICKED = { id: "lora_grain", name: "Cinematic Grain 35mm", scope: "global", weight: 1.25 };
+
+  it("carries the picked LoRAs onto a text run", () => {
+    const request = buildSimpleImageRequest({ ...base, loras: [PICKED] });
+    expect(request.loras).toEqual([PICKED]);
+  });
+
+  it("stacks the managed edit LoRA on top of the user's picks", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      mode: "edit_image",
+      referenceAssetId: "asset-7",
+      editLora: KREA_EDIT_LORA,
+      loras: [PICKED],
+    });
+    expect(request.loras.map((entry) => entry.id)).toEqual(["lora_grain", "krea2_identity_edit"]);
+  });
+
+  // The picker hides the managed edit LoRA, but a payload rebuilt from a restored selection
+  // could still carry it — sending it twice would burn a second of the run's five slots on a
+  // duplicate. Mirrors ImageStudio's `buildLorasPayload` dedupe.
+  it("does not send the managed edit LoRA twice when it is already in the picks", () => {
+    const request = buildSimpleImageRequest({
+      ...base,
+      mode: "edit_image",
+      referenceAssetId: "asset-7",
+      editLora: KREA_EDIT_LORA,
+      loras: [{ id: "krea2_identity_edit", weight: 0.9 }],
+    });
+    expect(request.loras).toEqual([{ id: "krea2_identity_edit", weight: 0.9 }]);
+  });
+
   it("emits no img2img fields at all when nothing is armed", () => {
     const request = buildSimpleImageRequest({ ...base, supportsImg2img: true });
     expect(request.referenceAssetId).toBeNull();
@@ -338,6 +372,12 @@ describe("buildSimpleVideoRequest", () => {
     const request = buildSimpleVideoRequest(base);
     expect(Object.keys(request.advanced)).toEqual(["resolution"]);
     expect(request.presetPromptResolvedClientSide).toBeUndefined();
+  });
+
+  it("carries the picked LoRAs, and still sends an empty array when there are none", () => {
+    const picked = { id: "lora_dolly", name: "Slow Dolly Push", scope: "global", weight: 0.75 };
+    expect(buildSimpleVideoRequest({ ...base, loras: [picked] }).loras).toEqual([picked]);
+    expect(buildSimpleVideoRequest(base).loras).toEqual([]);
   });
 });
 
