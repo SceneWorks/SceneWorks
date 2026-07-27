@@ -5,6 +5,7 @@ import { App } from "./main.jsx";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
 import { click } from "./testUtils/dom.js";
 import { resetStartupTimingForTests } from "./startupTiming.js";
+import { resetAccessTokenForTests } from "./accessToken.js";
 
 // sc-15136 — the durable UI-preference writes must be AUTHENTICATED on the wire.
 //
@@ -68,6 +69,10 @@ describe("App — durable UI preference writes carry the access token (sc-15136)
     FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     window.localStorage.clear();
+    // sc-15223: the live token is module state that outlives a test, and tests here mount
+    // the gate, whose saveToken/lockRemote/re-verify paths move it. Clearing storage alone
+    // would leave that value in place and the raw seeding below would be ignored.
+    resetAccessTokenForTests();
     // A remote browser that already unlocked the host: the verified password is the live token.
     window.localStorage.setItem("sceneworks-token", TOKEN);
     window.innerWidth = 1440;

@@ -471,8 +471,8 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 /// unchanged — this struct is purely the single source those constants are generated from.
 ///
 /// **Superset invariant (enforced):** `candle_quant`, `candle_lora`, and `candle_quant_lora` all
-/// imply `candle_routed` — a model can only advertise on-the-fly quant / inference LoRA on the candle
-/// lane if it is candle-routed at all. Encoded structurally by [`ModelCaps::new`] (a `debug_assert`
+/// imply `candle_routed` — a model can only advertise a quant tier/select or inference LoRA on the
+/// candle lane if it is candle-routed at all. Encoded structurally by [`ModelCaps::new`] (a `debug_assert`
 /// on every constructed row) and asserted exhaustively over the table by the
 /// `quant_and_lora_columns_are_candle_routed_supersets` test.
 #[derive(Clone, Copy)]
@@ -483,11 +483,13 @@ pub(crate) struct ModelCaps {
     pub(crate) mlx_routed: bool,
     /// The candle (Windows/CUDA) lane serves this model's base txt2img (was `CANDLE_ROUTED_MODELS`).
     pub(crate) candle_routed: bool,
-    /// Candle advertises on-the-fly Q4/Q8 quant but NOT inference LoRA (was `CANDLE_QUANT_MODELS`).
+    /// Candle accepts Q4/Q8 generation requests (either a packed-tier select or load-time quant) but
+    /// NOT inference LoRA (was `CANDLE_QUANT_MODELS`).
     pub(crate) candle_quant: bool,
     /// Candle advertises inference LoRA/LoKr but NOT on-the-fly quant (was `CANDLE_LORA_MODELS`).
     pub(crate) candle_lora: bool,
-    /// Candle advertises BOTH on-the-fly quant AND inference LoRA (was `CANDLE_QUANT_LORA_MODELS`).
+    /// Candle accepts BOTH Q4/Q8 generation requests AND inference LoRA
+    /// (was `CANDLE_QUANT_LORA_MODELS`).
     pub(crate) candle_quant_lora: bool,
 }
 
@@ -580,7 +582,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
     // MLX-routed families (grows one family story at a time as each lands real generation in
     // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
-    ModelCaps::new("z_image_turbo", true, true, false, false, false),
+    //
+    // Z-Image's candle descriptor deliberately keeps `supported_quants: []`: it does not quantize a
+    // dense checkpoint on the fly. That is NOT the capability this routing bit represents for its
+    // turnkey. `advanced.mlxQuantize` selects an already-packed q4/q8/bf16 directory, and
+    // candle-gen-z-image packed-detects those components from their config. The manifests advertise
+    // `standardTierLayout` and measured candle Q4/BF16 VRAM. Keeping `candle_quant = false` therefore
+    // rejected a valid Q4 tier select as `candle_unsupported` before the worker could load it.
+    ModelCaps::new("z_image_turbo", true, true, true, false, false),
     // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img). MLX-routed
     // on macOS AND candle-routed off-Mac. The worker registers a real `z_image` MLX engine (MODEL_TABLE:
     // shift-6.0 / ~50-step / real CFG, `mlx_z_image` adapter) plus base strict-control on Mac
@@ -589,7 +598,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // here was a wiring gap left by sc-8320/sc-8251 (the base MLX engine + control landed, but this row
     // and `image_request_mlx_eligible` were never updated), so `model_mac_support` hid the model behind
     // "Not available on Mac (MLX only)" even though the Mac worker fully supports it.
-    ModelCaps::new("z_image", true, true, false, false, false),
+    ModelCaps::new("z_image", true, true, true, false, false),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
     ModelCaps::new("flux_schnell", true, true, false, false, false),
@@ -1118,11 +1127,10 @@ derive_model_list! {
 }
 
 derive_model_list! {
-    /// The candle image families that advertise on-the-fly Q4/Q8 quant but NOT inference LoRA — Stable
-    /// Diffusion 3.5, Ideogram 4 (+Turbo), and Boogu (Base/Turbo/Edit) (derived from
-    /// [`IMAGE_MODEL_CAPS`]`.candle_quant`, sc-9495; the ideogram/boogu packed families added sc-9983 once
-    /// sc-9607 flipped their `supported_quants`). Quant stays on candle; a LoRA is refused and remains
-    /// queued.
+    /// The candle image families that accept Q4/Q8 generation requests but NOT inference LoRA —
+    /// either by selecting a pre-packed tier (including Z-Image) or by honoring load-time quant.
+    /// Derived from [`IMAGE_MODEL_CAPS`]`.candle_quant` (sc-9495). Quant stays on candle; a LoRA is
+    /// refused and remains queued.
     /// Disjoint from [`CANDLE_QUANT_LORA_MODELS`]; both are consulted by the gate. Subset of
     /// [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_MODELS, IMAGE_MODEL_CAPS, candle_quant
@@ -1426,11 +1434,15 @@ mod tests {
         "krea_2_raw",
     ];
 
+    // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
+    // but it is still a valid `mlxQuantize` request and therefore belongs in the quant routing set.
     // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
     // `supported_quants` to [Q4, Q8]; no inference LoRA on candle). sc-10819: kolors joins the quant-only
     // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
     // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
+        "z_image_turbo",
+        "z_image",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",

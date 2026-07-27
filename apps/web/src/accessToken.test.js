@@ -1,13 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCESS_TOKEN_KEY,
   clearAccessToken,
   readAccessToken,
+  resetAccessTokenForTests,
   storeAccessToken,
   subscribeAccessToken,
 } from "./accessToken.js";
+import { installUnavailableStorage, installWriteRejectingStorage } from "./testUtils/storage.js";
 
 describe("accessToken (sc-8880)", () => {
+  beforeEach(() => {
+    // sc-15223: the live token is module state that outlives a test. Reset it so each test
+    // starts from the fresh-page-load state (nothing in memory, read through to storage).
+    resetAccessTokenForTests();
+  });
+
   afterEach(() => {
     // Restore any storage descriptor a test replaced, and clear the key.
     if (originalStorageDescriptor) {
@@ -51,10 +59,15 @@ describe("accessToken (sc-8880)", () => {
         throw new Error("storage disabled");
       },
     });
-    // No throw from any helper; read yields the empty-token default.
-    expect(() => storeAccessToken("x")).not.toThrow();
+    // No throw from any helper, and nothing to read before a write.
     expect(readAccessToken()).toBe("");
+    // sc-15223: the token still goes live even though it cannot be persisted. It used to
+    // read back as "" here — the divergence that left the gate open while every
+    // `readAccessToken()` caller sent an empty credential.
+    expect(() => storeAccessToken("x")).not.toThrow();
+    expect(readAccessToken()).toBe("x");
     expect(() => clearAccessToken()).not.toThrow();
+    expect(readAccessToken()).toBe("");
   });
 
   it("degrades gracefully when individual storage operations throw", () => {
@@ -75,7 +88,126 @@ describe("accessToken (sc-8880)", () => {
     });
     expect(readAccessToken()).toBe("");
     expect(() => storeAccessToken("x")).not.toThrow();
+    // Same sc-15223 contract with the store present but hostile on every operation.
+    expect(readAccessToken()).toBe("x");
     expect(() => clearAccessToken()).not.toThrow();
+    expect(readAccessToken()).toBe("");
+  });
+
+  // sc-15223: `localStorage` is the PERSISTENCE CACHE, not the source. A write the browser
+  // refuses must not be able to desync the session — the same-tab remainder of the sc-15165
+  // divergence, and the one no `storage` event can ever repair.
+  describe("live value vs persistence cache (sc-15223)", () => {
+    // One slot per installed fixture rather than a shared variable: a test that installs
+    // twice would otherwise overwrite the real descriptor with a broken one and leak it into
+    // every later test in the file.
+    const restores = [];
+    function rejectWrites() {
+      restores.push(installWriteRejectingStorage());
+    }
+
+    afterEach(() => {
+      while (restores.length) {
+        restores.pop()();
+      }
+    });
+
+    it("serves the live token when the store refused to persist it", () => {
+      rejectWrites();
+      storeAccessToken("private-mode-password");
+      // The store really is empty — this is what made the old read return "".
+      expect(window.localStorage.getItem(ACCESS_TOKEN_KEY)).toBeNull();
+      expect(readAccessToken()).toBe("private-mode-password");
+    });
+
+    it("forgets a live token the store never held", () => {
+      rejectWrites();
+      storeAccessToken("private-mode-password");
+      clearAccessToken();
+      // The higher-consequence direction: `removeItem` on an empty store is a no-op, so the
+      // in-memory reset is the ONLY thing that can stop a forgotten password being sent.
+      expect(readAccessToken()).toBe("");
+    });
+
+    it("distinguishes 'this session forgot it' from 'this session never set one'", () => {
+      // A cleared session must NOT fall back to whatever storage still holds — otherwise a
+      // "lock" that could not reach the store would resurrect the password on the next read.
+      window.localStorage.setItem(ACCESS_TOKEN_KEY, "left-behind");
+      clearAccessToken();
+      window.localStorage.setItem(ACCESS_TOKEN_KEY, "left-behind");
+      expect(readAccessToken()).toBe("");
+
+      // ...while a session that has set nothing DOES read through, which is the reload path
+      // the persistence cache exists for.
+      resetAccessTokenForTests();
+      expect(readAccessToken()).toBe("left-behind");
+    });
+
+    it("lets a cross-tab change overwrite the live value (sc-15165 still wins)", () => {
+      // Pinning the live value would make the tab deaf to every `storage` event, undoing the
+      // fix this one builds on. A test that only asserted the subscriber's argument would
+      // miss it — `readAccessToken()` is what the other callers use.
+      storeAccessToken("mine");
+      const seen = [];
+      const off = subscribeAccessToken((next) => seen.push(next));
+      window.localStorage.setItem(ACCESS_TOKEN_KEY, "theirs");
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: ACCESS_TOKEN_KEY,
+          newValue: "theirs",
+          storageArea: window.localStorage,
+        }),
+      );
+      off();
+
+      expect(seen).toEqual(["theirs"]);
+      expect(readAccessToken()).toBe("theirs");
+    });
+
+    it("adopts a peer tab's value over a live token the store itself never held", () => {
+      // The write-rejecting posture does NOT make this tab's live value untouchable. A real
+      // `storage` event means a peer DID write the shared store, so its value outranks ours —
+      // pinning the live token here would make a private-mode tab deaf to sc-15165 forever.
+      // (This is the case the `stored !== null` guard below does not cover, on purpose:
+      // `getItem` works here and answers null-for-absent, which is a real answer.)
+      rejectWrites();
+      storeAccessToken("never-persisted");
+      const seen = [];
+      const off = subscribeAccessToken((next) => seen.push(next));
+      // No `storageArea`: the installed store is a plain object, which jsdom refuses to
+      // accept as one. The handler lets a `storageArea`-less event through by design (real
+      // browsers always set it), which is the same allowance the sc-15165 tests above rely on.
+      window.dispatchEvent(new StorageEvent("storage", { key: null }));
+      off();
+
+      expect(seen).toEqual([""]);
+      expect(readAccessToken()).toBe("");
+    });
+
+    it("does not let an UNREADABLE store phantom-clear the live token", () => {
+      // The narrow case the guard is actually for: no browser dispatches a `storage` event
+      // while our own store is unreachable, so this is a synthetic/misdelivered one carrying
+      // no truth to adopt. Treating that as "" would lock a tab whose in-memory value is the
+      // only copy of the credential in existence.
+      storeAccessToken("only-copy");
+      const seen = [];
+      const off = subscribeAccessToken((next) => seen.push(next));
+      restores.push(installUnavailableStorage());
+      window.dispatchEvent(new StorageEvent("storage", { key: ACCESS_TOKEN_KEY }));
+      off();
+
+      expect(seen).toEqual(["only-copy"]);
+      expect(readAccessToken()).toBe("only-copy");
+    });
+
+    it("treats a nullish store argument as an empty token, not as 'unset'", () => {
+      // `null`/`undefined` is the module's "no helper has run this session" sentinel, so an
+      // uncoerced nullish store would silently mean "read through to storage" — the opposite
+      // of what storing a value means.
+      window.localStorage.setItem(ACCESS_TOKEN_KEY, "left-behind");
+      storeAccessToken(null);
+      expect(readAccessToken()).toBe("");
+    });
   });
 
   // sc-15165: storage is shared across tabs, the gate's React state is not. Without this

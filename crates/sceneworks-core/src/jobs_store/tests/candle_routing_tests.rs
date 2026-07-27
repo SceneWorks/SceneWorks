@@ -891,6 +891,30 @@ fn qwen_image_quant_tier_select_stays_on_candle() {
 }
 
 #[test]
+fn z_image_quant_tier_select_stays_on_candle() {
+    // Z-Image's q4/q8/bf16 turnkeys are already packed. `mlxQuantize` selects the directory; it does
+    // not ask candle-gen-z-image to quantize dense weights at load time. The engine intentionally
+    // keeps `supported_quants: []` for that unsupported on-the-fly operation while packed-detecting
+    // the chosen tier from its component configs. Routing must therefore admit the tier-select for
+    // both Turbo and the base model instead of enforce-failing it as a conditioned shape.
+    for model in ["z_image_turbo", "z_image"] {
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "{model} Q{bits} packed-tier select should stay on candle"
+            );
+        }
+        assert!(image_request_candle_eligible(
+            model,
+            &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": 0 } }))
+        ));
+    }
+}
+
+#[test]
 fn flux2_turnkey_quant_tier_select_stays_on_candle() {
     // sc-10222 (epic 9083): the LAST families carrying the "engine wired, router half missed" skew
     // (sc-9983 krea/ideogram/boogu, sc-11020 qwen). `flux2_klein_9b`/`_kv`/`flux2_dev` are worker
