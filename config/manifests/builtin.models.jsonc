@@ -1326,13 +1326,16 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120)
-      // at 1024² via the candle-gen VramProbe harness. q4 packed tier overall-peak 18.4 GB, bf16 dense
-      // 32.0 GB; minMemoryGb 40 covers the heaviest (bf16) tier with headroom. candle loads lazily, so
-      // load-peak is negligible — the denoise peak dominates.
+      // candle/CUDA VRAM gate (sc-15256, epic 10765) — MEASURED in fresh processes on an RTX PRO 6000
+      // (Blackwell sm_120), 1024²/8-step/count-1. Resident peaks: q4 18.4, q8 24.2, bf16 32.2 GB.
+      // Sequential Qwen→DiT→tiled-VAE phase peaks: q4 5.7, q8 9.8, bf16 13.9 GB. The generic gate adds
+      // its fixed 2 GB operational reserve, so q4 admits on an 8 GB budget at 7.7 GB. Q8 is the hosted
+      // packed Q8 tier (no fallback to the old 40 GB estimate). minMemoryGb remains the padded resident
+      // fallback; load-peak is negligible and denoise dominates.
       "candle": {
         "minMemoryGb": 40,
-        "vramGbByTier": { "q4": 18.4, "bf16": 32.0 },
+        "vramGbByTier": { "q4": 18.4, "q8": 24.2, "bf16": 32.2 },
+        "sequentialPeakGb": { "q4": 5.7, "q8": 9.8, "bf16": 13.9 },
         "measured": true
       },
       "ui": {
