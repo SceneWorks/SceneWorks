@@ -78,7 +78,11 @@ const UNDETERMINED = new Map([
   ],
   [
     "joycaption_beta_one",
-    "fancyfeast/llama-joycaption-beta-one-hf-llava declares no license; it is a Llama-3.1-8B-Instruct + SigLIP2 derivative, so Meta's Llama 3.1 Community License likely governs — needs confirmation. The same decision covers the JoyCaption PROMPT TAXONOMY reproduced in inference's caption crates (fancyfeast's joy-caption-beta-one Space app.py, CAPTION_TYPE_MAP/NAME_OPTION — see the crateDispositions entry for crates/media/candle-gen/candle-gen-joycaption); that Space likewise declares no license, so no notice text can be shipped honestly yet.",
+    // WEIGHTS ONLY. The reproduced JoyCaption prompt CONTENT is a separate question and is now
+    // SETTLED: it comes from github.com/fpgaminer/joycaption, which is Apache-2.0, and ships as the
+    // `joycaption-source` About component. Do not re-merge the two — an undetermined weights license
+    // is not evidence that the prompt text is unlicensed (sc-15191 review).
+    "fancyfeast/llama-joycaption-beta-one-hf-llava declares no license for its WEIGHTS; it is a Llama-3.1-8B-Instruct + SigLIP2 derivative, so Meta's Llama 3.1 Community License likely governs — needs confirmation.",
   ],
   [
     "prompt_refine_anubis_8b",

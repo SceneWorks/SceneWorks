@@ -33,8 +33,27 @@ nothing, and shipped invisible to the audit (sc-15138). So
 `config/inference-crate-prefixes.txt` lists every production-Rust **crate** in
 the pinned revision without reading a byte of source, and every prefix in it
 must be classified — covered by a `portedSourceAreas` entry, or given an
-explicit `crateDispositions` decision (`first-party-original` or
-`architecture-reimplementation-existing-terms`) with evidence. An unclassified
+explicit `crateDispositions` decision with evidence. There are exactly three
+decisions, and none of them is a catch-all:
+
+- `first-party-original` — there is no upstream work in the crate to attribute
+  at all. The strictest claim in the file, and the one most likely to be wrong
+  by omission.
+- `architecture-reimplementation-existing-terms` — the crate REIMPLEMENTS an
+  upstream architecture, backend or formula in files that simply never say so,
+  and the applicable upstream terms are already mapped in `manifest.json`.
+- `upstream-content-existing-terms` — the crate REPRODUCES upstream **content**
+  (prompt tables, token vocabularies, label lists) rather than reimplementing an
+  algorithm. Copied strings are not a reimplementation, and calling them
+  first-party is simply false. Use it when the bytes came from upstream; the
+  entry must name the About component carrying that upstream's terms via its
+  `component` field. `candle-gen-joycaption` is the worked example: its prompt
+  map is fpgaminer/joycaption's Apache-2.0 `CAPTION_TYPE_MAP`, mapped as the
+  `joycaption-source` component (sc-15191 review).
+
+The `-existing-terms` suffix on both of the latter two is a claim that the
+upstream terms ARE mapped somewhere in this corpus — not a way to say the
+question is unsettled. If nothing is mapped, the entry is wrong. An unclassified
 crate FAILS the check; there is no silent default (sc-15191). Regenerate both
 with:
 
