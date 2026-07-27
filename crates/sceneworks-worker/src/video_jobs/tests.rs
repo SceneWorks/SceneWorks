@@ -2746,7 +2746,20 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
 fn krea_fake_model_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("krea_{tag}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.json"), "{}").unwrap();
+    // A FLAT locally-converted snapshot: `config.json` is what `local_mlx_dir` counts, and
+    // `dit.safetensors` (+ the stock Wan companions) is what makes it actually loadable — the
+    // `krea_realtime_dir_has_transformer` probe the resolver runs, mirroring the engine's own
+    // `t2v::open_transformer_weights`. A `config.json`-only dir would resolve as a model dir and then
+    // die inside the loader, so the fixture must carry weights (sc-15258).
+    for file in [
+        "config.json",
+        "dit.safetensors",
+        "t5_encoder.safetensors",
+        "tokenizer.json",
+        "vae.safetensors",
+    ] {
+        std::fs::write(dir.join(file), "{}").unwrap();
+    }
     dir
 }
 
@@ -2987,7 +3000,11 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
     .expect("krea t2v generation runs through the funnel against the probe");
 
     // The clip came back through the funnel — the generate path structurally ran the heartbeat loop.
+    let (decoded, tier) = decoded;
     assert!(!decoded.frames.is_empty());
+    // The fixture is a flat snapshot with no explicit `mlxQuantize`, so the dense-video Q4 default
+    // is what loads — and the arm reports it for the asset stamp.
+    assert_eq!(tier, "q4");
 
     let seen = probe.request.lock().unwrap();
     let gen = seen.as_ref().expect("the arm reached the engine");
@@ -3007,6 +3024,928 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
 
     drop(seen);
     std::fs::remove_dir_all(&model_dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Krea Realtime quant matrix (sc-15258, S20): per-tier resolution + the one-decision quant.
+// ---------------------------------------------------------------------------
+
+/// A Krea Realtime `VideoRequest` carrying `advanced` — the tier selector's only input.
+#[cfg(target_os = "macos")]
+fn krea_tier_request(advanced: Value) -> VideoRequest {
+    request(json!({
+        "projectId": "p",
+        "model": "krea_realtime_14b",
+        "mode": "text_to_video",
+        "prompt": "p",
+        "advanced": advanced,
+    }))
+}
+
+/// The directory a `LoadSpec`'s weights point at. `WeightsSource` has no `PartialEq`, so the model
+/// dir that reached the engine is compared through this rather than `assert_eq!` on the enum.
+#[cfg(target_os = "macos")]
+fn spec_weights_dir(spec: &LoadSpec) -> PathBuf {
+    match &spec.weights {
+        WeightsSource::Dir(dir) => dir.clone(),
+        WeightsSource::File(file) => panic!("a video load is a Dir source, got the file {file:?}"),
+    }
+}
+
+/// Write a COMPLETE Krea Realtime tier subdir under `root` — every file in that tier's own
+/// `KREA_REALTIME_TIER_FILES` row, including the `bf16/` tier's NESTED seven-shard `transformer/`.
+#[cfg(target_os = "macos")]
+fn write_complete_krea_tier(root: &Path, tier: &str) {
+    let files = krea_realtime_tier_files(tier).expect("a published krea tier");
+    for file in files {
+        let path = root.join(tier).join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+}
+
+/// The worker's hard-coded tier table IS the shipped manifest — same repo, same pinned revision, same
+/// exact file paths per tier. The worker resolves a tier by checking those files on disk while the
+/// Model Manager downloads whatever `builtin.models.jsonc` declares, so any drift between the two
+/// silently produces a tier that installs but never resolves (or resolves while torn).
+///
+/// This is what closes the loop the sc-8444 layout test opened: that one pins the manifest against the
+/// PUBLISHED repo; this one pins the WORKER against the manifest.
+///
+/// Mutation checks (each verified RED): rename any `bf16/transformer/dit-…` shard in
+/// `KREA_REALTIME_BF16_TIER_FILES`; drop `config.json` from the packed row; change one hex digit of
+/// `KREA_REALTIME_REVISION`.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_worker_tier_table_matches_the_shipped_manifest() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    let model = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"].as_str() == Some("krea_realtime_14b"))
+        .expect("krea_realtime_14b present in the builtin catalog");
+
+    let downloads = model["downloads"]
+        .as_array()
+        .expect("krea_realtime_14b declares downloads");
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in downloads {
+        let variant = entry["variant"]
+            .as_str()
+            .expect("every krea download is a tier variant");
+        seen.push(variant);
+        assert_eq!(
+            entry["repo"].as_str(),
+            Some(KREA_REALTIME_REPO),
+            "{variant}: the worker fetches from KREA_REALTIME_REPO, so the manifest must install from it"
+        );
+        assert_eq!(
+            entry["revision"].as_str(),
+            Some(KREA_REALTIME_REVISION),
+            "{variant}: a worker pin that differs from the manifest's would materialize a SECOND \
+             snapshot dir beside the installed one"
+        );
+        let declared: Vec<String> = entry["files"]
+            .as_array()
+            .expect("explicit file paths")
+            .iter()
+            .map(|file| file.as_str().expect("a file path").to_owned())
+            .collect();
+        let expected: Vec<String> = krea_realtime_tier_files(variant)
+            .unwrap_or_else(|| panic!("{variant} is declared in the manifest but not in the worker's KREA_REALTIME_TIER_FILES"))
+            .iter()
+            .map(|file| format!("{variant}/{file}"))
+            .collect();
+        let (mut declared, mut expected) = (declared, expected);
+        declared.sort();
+        expected.sort();
+        assert_eq!(
+            declared, expected,
+            "{variant}: the worker's completeness predicate must check exactly the files the \
+             manifest installs"
+        );
+    }
+    seen.sort();
+    let mut tiers: Vec<&str> = KREA_REALTIME_TIER_FILES
+        .iter()
+        .map(|(tier, _)| *tier)
+        .collect();
+    tiers.sort();
+    assert_eq!(
+        seen, tiers,
+        "the worker must know every published tier and no others"
+    );
+
+    // The bf16 row is the structurally different one — assert its shape directly so a future edit
+    // that "simplifies" it to the flat packed row cannot pass by accident.
+    let bf16 = krea_realtime_tier_files("bf16").expect("bf16 is published");
+    assert_eq!(
+        bf16.iter()
+            .filter(|file| file.starts_with("transformer/"))
+            .count(),
+        7,
+        "the bf16 DiT is a 7-shard transformer/ directory, not a flat dit.safetensors"
+    );
+    assert!(
+        !bf16.contains(&"dit.safetensors"),
+        "the bf16 tier has no flat DiT"
+    );
+    assert!(
+        krea_realtime_tier_files("q4")
+            .expect("q4 is published")
+            .contains(&"dit.safetensors"),
+        "the packed tiers DO ship a flat single-file DiT"
+    );
+    assert_eq!(
+        krea_realtime_tier_files("q6"),
+        None,
+        "an unpublished tier must have NO file list — an empty one would read COMPLETE from an \
+         empty directory"
+    );
+}
+
+/// The tier search order comes from the SAME `resolve_mlx_dense_quant` decision that would pick a
+/// load-time quant, and — the sc-15258 trap — `bf16` is in EVERY order rather than only the explicit
+/// one. The Krea rehost has no flat root to fall back on (unlike SCAIL-2), so dropping `bf16` from the
+/// default order is exactly how a deliberately-installed bf16 tier becomes unreachable and gets
+/// silently re-quantized to the Q4 default.
+///
+/// Mutation checks (each verified RED): drop `"bf16"` from the default arm; flip the default arm to
+/// `bf16`-first; make the `Some(Q8)` arm fall back to `q8` only.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_tier_order_tracks_the_quant_and_never_drops_bf16() {
+    let default = krea_tier_request(json!({}));
+    let q4 = krea_tier_request(json!({ "mlxQuantize": 4 }));
+    let q8 = krea_tier_request(json!({ "mlxQuantize": 8 }));
+    let bf16 = krea_tier_request(json!({ "mlxQuantize": 0 }));
+
+    // The dense-video Q4 default (sc-10750) reaching the VIDEO lane: no explicit pick ⇒ q4-first.
+    assert_eq!(krea_realtime_tier_order(&default), &["q4", "q8", "bf16"]);
+    assert_eq!(krea_realtime_tier_order(&q4), &["q4", "q8", "bf16"]);
+    assert_eq!(krea_realtime_tier_order(&q8), &["q8", "q4", "bf16"]);
+    assert_eq!(krea_realtime_tier_order(&bf16), &["bf16", "q8", "q4"]);
+
+    // One decision: the order's head is the tier the shared resolver would have quantized to.
+    for (req, head) in [(&default, "q4"), (&q4, "q4"), (&q8, "q8"), (&bf16, "bf16")] {
+        assert_eq!(krea_realtime_tier_order(req)[0], head);
+    }
+    assert_eq!(resolve_mlx_dense_quant(&default), Some(Quant::Q4));
+    assert_eq!(resolve_mlx_dense_quant(&q8), Some(Quant::Q8));
+    assert_eq!(resolve_mlx_dense_quant(&bf16), None);
+
+    // EVERY order can still reach EVERY published tier — the no-silent-switch precondition.
+    for req in [&default, &q4, &q8, &bf16] {
+        let order = krea_realtime_tier_order(req);
+        for (tier, _) in KREA_REALTIME_TIER_FILES {
+            assert!(
+                order.contains(tier),
+                "{tier} must be reachable from every tier order — the Krea rehost has no flat root \
+                 fallback, so an omitted tier is an unloadable install"
+            );
+        }
+    }
+}
+
+/// Each tier resolves to its OWN subdir — including the bf16 tier, whose DiT lives one level deeper in
+/// a seven-shard `transformer/` dir — and a torn tier is skipped rather than half-loaded.
+///
+/// Mutation checks (each verified RED): resolve `root` instead of `root.join(tier)`; make
+/// `krea_realtime_tier_is_complete` return `true` for an unknown tier; drop the per-tier file lookup so
+/// bf16 is checked against the packed row (a bf16 dir would then read INCOMPLETE).
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_tier_subdir_resolves_each_tier_including_the_sharded_bf16() {
+    let root = std::env::temp_dir().join(format!("sw_krea_tier_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let default = krea_tier_request(json!({}));
+    let q8_req = krea_tier_request(json!({ "mlxQuantize": 8 }));
+    let bf16_req = krea_tier_request(json!({ "mlxQuantize": 0 }));
+
+    // A bare root (the published repo before any tier is installed) resolves nothing.
+    assert_eq!(krea_realtime_tier_subdir(&root, &default), None);
+
+    // q4 only: every request falls back to it (there is nothing else on disk).
+    write_complete_krea_tier(&root, "q4");
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &default),
+        Some(("q4", root.join("q4")))
+    );
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &q8_req),
+        Some(("q4", root.join("q4")))
+    );
+
+    // A torn q8 (config.json only) is skipped — not resolved and then failed inside the loader.
+    std::fs::create_dir_all(root.join("q8")).unwrap();
+    std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
+    assert!(!krea_realtime_tier_is_complete(&root, "q8"));
+    assert_eq!(
+        krea_realtime_missing_tier_files(&root, "q8"),
+        vec![
+            "q8/dit.safetensors",
+            "q8/t5_encoder.safetensors",
+            "q8/tokenizer.json",
+            "q8/vae.safetensors",
+        ],
+        "the loud-failure path must NAME what a torn tier is missing"
+    );
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &q8_req),
+        Some(("q4", root.join("q4")))
+    );
+
+    // Completed q8 wins for an explicit q8 pick; a default job still resolves q4-first.
+    write_complete_krea_tier(&root, "q8");
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &q8_req),
+        Some(("q8", root.join("q8")))
+    );
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &default),
+        Some(("q4", root.join("q4")))
+    );
+
+    // bf16: the nested transformer/ layout resolves to the TIER dir (what the engine's
+    // `open_transformer_weights` probes), and the shards really are one level below it.
+    write_complete_krea_tier(&root, "bf16");
+    let (name, resolved) = krea_realtime_tier_subdir(&root, &bf16_req).expect("bf16 resolves");
+    assert_eq!(
+        name, "bf16",
+        "the resolved tier names ITSELF — the asset records this"
+    );
+    assert_eq!(resolved, root.join("bf16"));
+    assert!(
+        resolved
+            .join("transformer/dit-00004-of-00007.safetensors")
+            .is_file(),
+        "the resolved dir must be the tier dir the sharded DiT hangs off"
+    );
+    assert!(
+        !resolved.join("dit.safetensors").exists(),
+        "the bf16 tier deliberately has no flat DiT — resolving the tier dir is what makes it loadable"
+    );
+    // Still q4-first for a default job even with all three installed: the tier order prefers the
+    // lean tier, it does not merely take whatever exists.
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &default),
+        Some(("q4", root.join("q4")))
+    );
+
+    // Losing ONE of the seven bf16 shards makes the tier incomplete — the sc-13513 "installed but
+    // unloadable" class — so an explicit bf16 pick falls through to q8 instead.
+    std::fs::remove_file(root.join("bf16/transformer/dit-00004-of-00007.safetensors")).unwrap();
+    assert!(!krea_realtime_tier_is_complete(&root, "bf16"));
+    assert_eq!(
+        krea_realtime_missing_tier_files(&root, "bf16"),
+        vec!["bf16/transformer/dit-00004-of-00007.safetensors"],
+        "a torn bf16 must name the exact missing shard, not just report incomplete"
+    );
+    assert_eq!(
+        krea_realtime_tier_subdir(&root, &bf16_req),
+        Some(("q8", root.join("q8")))
+    );
+
+    // An unpublished tier is never complete, even as a real (empty) directory.
+    std::fs::create_dir_all(root.join("q6")).unwrap();
+    assert!(!krea_realtime_tier_is_complete(&root, "q6"));
+    assert!(
+        !krea_realtime_missing_tier_files(&root, "q6").is_empty(),
+        "an unpublished tier must report ITSELF missing — an empty vec would read COMPLETE"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 🔴 The story's trap, end to end: a user who deliberately installed ONLY the **bf16** tier must get
+/// bf16 **dense**, never the Q4 default applied to it in memory. The tier dir and the load-time quant
+/// come out of ONE decision, so a resolved tier always loads exactly as it sits on disk
+/// (`quantize: None`) — `mlxQuantize` picks WHICH tier, never a requant.
+///
+/// Discriminating rather than "asserts None everywhere": the same default request against a q4 install
+/// resolves the q4 dir, and a FLAT snapshot in the same test does get `Some(Q4)` — so a resolver that
+/// simply always returned `None`, or always returned the root, fails here.
+///
+/// Mutation checks (each verified RED): return `resolve_mlx_dense_quant(request)` alongside a resolved
+/// tier; drop `"bf16"` from the default tier order (⇒ the bf16-only install falls to the root branch).
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_bf16_install_is_served_dense_not_downgraded_to_q4() {
+    let root = std::env::temp_dir().join(format!("sw_krea_bf16_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    // `local_mlx_dir` counts an override dir only when it holds a `config.json`; the tier matrix's
+    // own config.json files live inside the tier dirs, so the fixture carries a root marker.
+    std::fs::write(root.join("config.json"), "{}").unwrap();
+    write_complete_krea_tier(&root, "bf16");
+    let settings = Settings {
+        data_dir: root.join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let default = krea_tier_request(json!({}));
+
+    temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        root.to_str().unwrap(),
+        || {
+            let load = resolve_krea_realtime_tier_dir_and_quant(&settings, &default)
+                .expect("a bf16-only install is loadable");
+            assert_eq!(
+                load.dir,
+                root.join("bf16"),
+                "the ONLY installed tier must be the one resolved, even under the Q4 default"
+            );
+            assert_eq!(
+                load.quant, None,
+                "a deliberately-installed bf16 tier must load DENSE — quantizing it to Q4 in memory \
+                 is the silent creative-tier switch this story exists to prevent"
+            );
+            assert_eq!(
+                load.tier, "bf16",
+                "the asset must record the tier that LOADED — a default job's `advanced` says \
+                 nothing about bf16, so only this stamp tells the user what actually ran"
+            );
+            // An explicit bf16 pick agrees, and the route is live (not Stub).
+            let explicit = krea_tier_request(json!({ "mlxQuantize": 0 }));
+            let explicit_load =
+                resolve_krea_realtime_tier_dir_and_quant(&settings, &explicit).unwrap();
+            assert_eq!(explicit_load.dir, root.join("bf16"));
+            assert_eq!(explicit_load.quant, None);
+            assert_eq!(explicit_load.tier, "bf16");
+            assert!(krea_realtime_available(&default, &settings));
+
+            // Now install q4 too: the SAME default request moves to q4 — proving the bf16 answer
+            // above was the tier order resolving, not a constant.
+            write_complete_krea_tier(&root, "q4");
+            let load = resolve_krea_realtime_tier_dir_and_quant(&settings, &default).unwrap();
+            assert_eq!(load.dir, root.join("q4"));
+            assert_eq!(
+                load.quant, None,
+                "a packed tier is never asked to re-quantize"
+            );
+            assert_eq!(load.tier, "q4");
+
+            // 🔴 The provenance case this stamp exists for: an explicit `mlxQuantize: 8` with only
+            // q4/bf16 on disk FALLS BACK — so the asset's own `advanced` would claim 8 while the
+            // clip rendered at q4. The stamp must contradict the request, not echo it.
+            let asked_q8 = krea_tier_request(json!({ "mlxQuantize": 8 }));
+            let fell_back = resolve_krea_realtime_tier_dir_and_quant(&settings, &asked_q8).unwrap();
+            assert_eq!(fell_back.tier, "q4", "q8 was asked for; q4 is what loaded");
+            let raw = krea_realtime_raw_settings(&asked_q8, fell_back.tier);
+            assert_eq!(
+                raw.get("kreaRealtimeTier").and_then(Value::as_str),
+                Some("q4"),
+                "the sidecar must name the tier that ran, not the one requested"
+            );
+            assert_eq!(
+                raw.get("mlxQuantize").and_then(Value::as_i64),
+                Some(8),
+                "the request's own knob is still recorded verbatim — the tier stamp is what \
+                 disambiguates it, so both must be present and DIFFERENT here"
+            );
+        },
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A FLAT snapshot (a local convert / env override with the DiT at its root — the only layout that has
+/// no tier to speak for it) keeps the load-time quant path, and its default is **Q4**: sc-10750's
+/// dense-video convention, which reaches the video lane through `resolve_mlx_dense_quant` here.
+///
+/// This is the assertion that discriminates against the shipped behaviour before this story: the arm
+/// hard-coded `quant: None`, so a default job loaded a ~28 GB dense DiT. The end-to-end leg drives the
+/// real generate path and reads the `LoadSpec` that reached the engine, not just the resolver.
+///
+/// Mutation checks (each verified RED): restore `quant: None` in `generate_krea_realtime_using`; make
+/// the flat branch return `None` instead of `resolve_mlx_dense_quant(request)`.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
+    let flat = krea_fake_model_dir("flatquant");
+    let settings = Settings {
+        data_dir: flat.join("unused-data-dir"),
+        ..offline_settings()
+    };
+
+    let probe = ArmProbe::default();
+    let loader = probe.loader();
+    let job = krea_job_snapshot();
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_realtime_14b",
+        "mode": "text_to_video",
+        "prompt": "p",
+        "duration": 2.0,
+        "fps": 24
+    }));
+
+    let loaded_tier = temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        flat.to_str().unwrap(),
+        || {
+            // The resolver's own answers, across the whole `mlxQuantize` axis.
+            for (advanced, expected) in [
+                (json!({}), Some(Quant::Q4)),
+                (json!({ "mlxQuantize": 4 }), Some(Quant::Q4)),
+                (json!({ "mlxQuantize": 8 }), Some(Quant::Q8)),
+                (json!({ "mlxQuantize": 0 }), None),
+            ] {
+                let load = resolve_krea_realtime_tier_dir_and_quant(
+                    &settings,
+                    &krea_tier_request(advanced.clone()),
+                )
+                .expect("a flat snapshot is loadable");
+                assert_eq!(load.dir, flat, "a flat snapshot loads from its own root");
+                assert_eq!(
+                    load.quant, expected,
+                    "flat snapshot with advanced {advanced}: the load-time quant must follow \
+                     mlxQuantize, defaulting to Q4"
+                );
+                // A flat snapshot has no tier dir to name itself, so the stamp comes from the
+                // quant that will pack it — the `mochiTier` mapping.
+                assert_eq!(
+                    load.tier,
+                    match expected {
+                        Some(Quant::Q4) => "q4",
+                        Some(Quant::Q8) => "q8",
+                        _ => "bf16",
+                    },
+                    "flat snapshot with advanced {advanced}: the recorded tier must be the \
+                     precision the DiT actually runs at"
+                );
+            }
+
+            // …and what actually reaches the engine for a DEFAULT job.
+            let (_, tier) = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(generate_krea_realtime_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &job,
+                    &req,
+                    &flat,
+                    "krea_realtime_14b",
+                    "mlx",
+                    loader,
+                ))
+                .expect("krea t2v generation runs through the funnel against the probe");
+            tier
+        },
+    );
+    assert_eq!(
+        loaded_tier, "q4",
+        "the arm must report the tier it loaded so the caller can stamp the asset"
+    );
+
+    let seen = probe.spec.lock().unwrap();
+    let spec = seen.as_ref().expect("the arm loaded an engine");
+    assert_eq!(
+        spec.quantize,
+        Some(Quant::Q4),
+        "a default krea job must reach the engine at Q4 — the shipped arm hard-coded `quant: None`, \
+         so a default job loaded the dense ~28 GB DiT"
+    );
+    assert_eq!(spec_weights_dir(spec), flat);
+
+    drop(seen);
+    std::fs::remove_dir_all(&flat).ok();
+}
+
+/// A resolved TIER reaches the engine as the tier DIR with `quantize: None` — the loadability half of
+/// the release gate. Before this story the arm handed the engine the snapshot ROOT, where
+/// `t2v::open_transformer_weights` finds neither `dit.safetensors` nor `transformer/`, so nothing Krea
+/// shipped could load at all.
+///
+/// Mutation check (verified RED): hand `resolve_krea_realtime_model_dir(settings)?` to `VideoGenInput`
+/// instead of the tier-resolved dir.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_hands_the_engine_the_installed_tier_dir_not_the_snapshot_root() {
+    let root = std::env::temp_dir().join(format!("sw_krea_arm_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("config.json"), "{}").unwrap();
+    write_complete_krea_tier(&root, "q4");
+    let settings = Settings {
+        data_dir: root.join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let probe = ArmProbe::default();
+    let loader = probe.loader();
+    let job = krea_job_snapshot();
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_realtime_14b",
+        "mode": "text_to_video",
+        "prompt": "p",
+        "duration": 2.0,
+        "fps": 24
+    }));
+
+    temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        root.to_str().unwrap(),
+        || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(generate_krea_realtime_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &job,
+                    &req,
+                    &root,
+                    "krea_realtime_14b",
+                    "mlx",
+                    loader,
+                ))
+                .expect("krea t2v generation runs through the funnel against the probe");
+        },
+    );
+
+    let seen = probe.spec.lock().unwrap();
+    let spec = seen.as_ref().expect("the arm loaded an engine");
+    assert_eq!(
+        spec_weights_dir(spec),
+        root.join("q4"),
+        "the engine must be handed the installed TIER dir — every published Krea file lives under a \
+         q4/ / q8/ / bf16/ prefix, so the snapshot root holds no weights at all"
+    );
+    assert_eq!(
+        spec.quantize, None,
+        "a pre-packed tier loads exactly as it sits on disk"
+    );
+
+    drop(seen);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A tier-matrix root with NO complete tier fails loudly and actionably — it must never fall back to
+/// handing the engine the root, which holds no weights and would surface as an opaque loader error.
+/// The route degrades to `Stub`, whose fail-loud gate then reports it.
+///
+/// Mutation check (verified RED): add a `_ => Ok((root, resolve_mlx_dense_quant(request)))` fallback
+/// to `resolve_krea_realtime_tier_dir_and_quant`.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_torn_install_fails_loudly_instead_of_resolving_the_root() {
+    let root = std::env::temp_dir().join(format!("sw_krea_torn_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    // The published repo root: a card + tier dirs, no weights of its own. `config.json` is the
+    // `local_mlx_dir` marker so the ROOT resolves — the point is that resolving the root is not
+    // enough, which is exactly the bug this story fixes.
+    std::fs::write(root.join("config.json"), "{}").unwrap();
+    std::fs::write(root.join("README.md"), "# card").unwrap();
+    // A torn q4: everything but the DiT.
+    std::fs::create_dir_all(root.join("q4")).unwrap();
+    for file in ["config.json", "t5_encoder.safetensors", "tokenizer.json"] {
+        std::fs::write(root.join("q4").join(file), b"x").unwrap();
+    }
+    let settings = Settings {
+        data_dir: root.join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let req = krea_tier_request(json!({}));
+
+    temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        root.to_str().unwrap(),
+        || {
+            // The root itself DOES resolve — so a test that only checked `resolve_..._model_dir`
+            // would be green here. That is the false green this story was filed against.
+            assert!(resolve_krea_realtime_model_dir(&settings).is_ok());
+
+            let err = resolve_krea_realtime_tier_dir_and_quant(&settings, &req)
+                .expect_err("a torn install must not resolve");
+            let WorkerError::InvalidPayload(message) = err else {
+                panic!("expected an actionable InvalidPayload");
+            };
+            assert!(
+                message.contains("krea_realtime_14b")
+                    && message.contains("q4")
+                    && message.contains("bf16")
+                    && message.contains("Model Manager"),
+                "the error must name the model, the tiers, and what to do: {message}"
+            );
+            assert!(!krea_realtime_available(&req, &settings));
+            assert_eq!(resolve_video_route(&req, &settings), VideoRoute::Stub);
+            assert!(ensure_video_engine_weights(&req, &settings).is_err());
+
+            // Completing the tier flips every one of those.
+            write_complete_krea_tier(&root, "q4");
+            let load = resolve_krea_realtime_tier_dir_and_quant(&settings, &req).unwrap();
+            assert_eq!(load.dir, root.join("q4"));
+            assert_eq!(load.quant, None);
+            assert_eq!(load.tier, "q4");
+            assert!(krea_realtime_available(&req, &settings));
+        },
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The tier matrix installed the way users actually get it — the pinned HF snapshot under the data
+/// dir, with no env override in play. Pins that `resolve_krea_realtime_model_dir`'s HF branch feeds the
+/// tier descent (the production path), not just the override branch the other tests exercise.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_resolves_the_tier_from_a_downloaded_hf_snapshot() {
+    let hub = std::env::temp_dir().join(format!("sw_krea_hub_{}", Uuid::new_v4().simple()));
+    let repo_dir = hub.join(format!(
+        "models--{}",
+        sceneworks_core::hf_home::safe_repo_dir_name(KREA_REALTIME_REPO)
+            .expect("the krea repo slug")
+    ));
+    let snapshot = repo_dir.join("snapshots").join(KREA_REALTIME_REVISION);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(snapshot.join("README.md"), "# card").unwrap();
+    write_complete_krea_tier(&snapshot, "q8");
+    std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+    std::fs::write(repo_dir.join("refs").join("main"), KREA_REALTIME_REVISION).unwrap();
+
+    let settings = Settings {
+        data_dir: hub.join("data"),
+        ..offline_settings()
+    };
+    // The HF cache dir is its own axis: a pinned `data_dir` alone does NOT make it hermetic.
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_KREA_REALTIME_DIR", ""),
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ],
+        || {
+            // Only q8 is installed, so even a DEFAULT (q4-first) job resolves it — and dense-loads
+            // nothing: it is served as the packed tier it is.
+            let load =
+                resolve_krea_realtime_tier_dir_and_quant(&settings, &krea_tier_request(json!({})))
+                    .expect("the downloaded q8 tier resolves");
+            assert_eq!(load.dir, snapshot.join("q8"));
+            assert_eq!(load.quant, None);
+            assert_eq!(load.tier, "q8");
+            // The ROOT resolves too — which is precisely why resolving it was never enough.
+            assert_eq!(
+                resolve_krea_realtime_model_dir(&settings).unwrap(),
+                snapshot
+            );
+        },
+    );
+    std::fs::remove_dir_all(&hub).ok();
+}
+
+/// The on-demand tier fetch is gated on the request's tier toggle — the krea twin of
+/// `mochi_on_demand_tier_fetch_is_gated_on_the_toggle`, and it matters more here: krea's opt-in tiers
+/// are 27 GB (q8) and 40 GB (bf16), so a default job that wanted one would drag an enormous
+/// unrequested download into every generation.
+///
+/// This tests the decision DIRECTLY. Both end-to-end tests only ever reach
+/// `ensure_krea_realtime_tier_present`'s default arm — and their fixtures point `data_dir` at a
+/// non-existent dir, so `huggingface_snapshot_dir` returns `None` and the function exits before the
+/// tier mapping is even consulted. A mutation making a DEFAULT job want q8/bf16, or dropping the
+/// `{tier}/` prefix from the fetched paths, would stay GREEN through them.
+///
+/// Mutation checks (each verified RED): make the `_` arm return `Some("q8")`; swap the `None`/`Q8`
+/// arms; drop the `{tier}/` prefix in `krea_realtime_tier_fetch_files`.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_on_demand_tier_fetch_is_gated_on_the_toggle() {
+    // Default ⇒ nothing to fetch: q4 ships with the base install.
+    assert_eq!(
+        krea_realtime_on_demand_tier(&krea_tier_request(json!({}))),
+        None
+    );
+    // An explicit q4 pick is still the base install.
+    assert_eq!(
+        krea_realtime_on_demand_tier(&krea_tier_request(json!({ "mlxQuantize": 4 }))),
+        None
+    );
+    // q8 toggle ⇒ q8 ONLY (never bf16 too — that would drag 40 GB on a 27 GB request).
+    assert_eq!(
+        krea_realtime_on_demand_tier(&krea_tier_request(json!({ "mlxQuantize": 8 }))),
+        Some("q8")
+    );
+    // bf16 toggle ⇒ bf16 only.
+    assert_eq!(
+        krea_realtime_on_demand_tier(&krea_tier_request(json!({ "mlxQuantize": 0 }))),
+        Some("bf16")
+    );
+    // A numeric STRING is the same toggle (the shared resolver parses both forms).
+    assert_eq!(
+        krea_realtime_on_demand_tier(&krea_tier_request(json!({ "mlxQuantize": "8" }))),
+        Some("q8")
+    );
+
+    // The fetched paths are the tier's EXPLICIT file list, each prefixed with `<tier>/` — the same
+    // paths the manifest declares, not a `<tier>/*` glob.
+    assert_eq!(
+        krea_realtime_tier_fetch_files("q8").expect("q8 is published"),
+        vec![
+            "q8/config.json",
+            "q8/dit.safetensors",
+            "q8/t5_encoder.safetensors",
+            "q8/tokenizer.json",
+            "q8/vae.safetensors",
+        ]
+    );
+    // bf16 fetches its NESTED shards, individually — the packed row would miss the transformer/ dir
+    // entirely, leaving an "installed" tier with no DiT.
+    let bf16 = krea_realtime_tier_fetch_files("bf16").expect("bf16 is published");
+    assert_eq!(bf16.len(), 11);
+    assert!(bf16.contains(&"bf16/transformer/dit-00007-of-00007.safetensors".to_owned()));
+    assert!(
+        bf16.iter().all(|file| file.starts_with("bf16/")),
+        "every fetched path must be tier-prefixed, or the fetch pulls the wrong files: {bf16:?}"
+    );
+    assert_eq!(krea_realtime_tier_fetch_files("q6"), None);
+}
+
+/// 🔴 The guarantee the on-demand fetch's own doc makes, exercised against a stub hub whose `q8/` tier
+/// is MISSING its DiT — the "published but torn remotely" case.
+///
+/// This is the hole the fetch would otherwise have. `ensure_hf_files_cached` does NOT run the sc-12283
+/// `unmatched_patterns` per-pattern hard-fail (that lives in `model_jobs::run_model_download_job`), so
+/// a declared path matching nothing remotely is silently a no-op: the other four q8 files land, the
+/// tier reads INCOMPLETE, and `krea_realtime_tier_subdir` quietly serves q4 instead — the exact silent
+/// tier downgrade this lane exists to prevent, arriving through the back door. So the fetch verifies on
+/// disk afterwards and fails loud, NAMING the missing file.
+///
+/// The stub serves the HF tree + file bytes AND the worker's own progress endpoint, so the whole fetch
+/// path runs for real (resolve → download → verify) rather than being mocked out at the seam.
+///
+/// Mutation checks (each verified RED): delete the post-fetch verification block; make it `warn!`
+/// instead of returning `Err`; have it check the request's tier instead of the fetched one.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_fetch_of_a_remotely_torn_tier_fails_loudly_instead_of_downgrading() {
+    use axum::body::Body;
+    use axum::http::{Response, StatusCode};
+    use axum::Router;
+
+    let hub = std::env::temp_dir().join(format!("sw_krea_fetch_{}", Uuid::new_v4().simple()));
+    let repo_dir = hub.join(format!(
+        "models--{}",
+        sceneworks_core::hf_home::safe_repo_dir_name(KREA_REALTIME_REPO)
+            .expect("the krea repo slug")
+    ));
+    let snapshot = repo_dir.join("snapshots").join(KREA_REALTIME_REVISION);
+    // The repo IS downloaded (so `huggingface_snapshot_dir` resolves and the fetch is attempted) but
+    // holds only the default q4 tier — a q8 job must fetch q8.
+    std::fs::create_dir_all(&snapshot).unwrap();
+    write_complete_krea_tier(&snapshot, "q4");
+    std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+    std::fs::write(repo_dir.join("refs").join("main"), KREA_REALTIME_REVISION).unwrap();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime builds");
+
+    // A stub hub whose q8 tier is missing `dit.safetensors` — every other declared file resolves.
+    let served: Vec<String> = krea_realtime_tier_fetch_files("q8")
+        .expect("q8 is published")
+        .into_iter()
+        .filter(|file| file != "q8/dit.safetensors")
+        .collect();
+    let job_json = serde_json::to_string(&krea_job_snapshot()).expect("job snapshot serializes");
+    let address = runtime.block_on(async move {
+        let app = Router::new().fallback(move |uri: axum::http::Uri| {
+            let served = served.clone();
+            let job_json = job_json.clone();
+            async move {
+                let path = uri.path().to_owned();
+                if path.contains("/tree/") {
+                    let entries: Vec<Value> = served
+                        .iter()
+                        .map(|file| json!({ "type": "file", "path": file, "size": 4 }))
+                        .collect();
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_string(&entries).expect("tree serializes"),
+                        ))
+                        .expect("response");
+                }
+                if path.ends_with("/progress") {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(job_json))
+                        .expect("response");
+                }
+                if path.contains("/resolve/") {
+                    return Response::builder()
+                        .header("content-length", "4")
+                        .body(Body::from(b"xxxx".to_vec()))
+                        .expect("response");
+                }
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .expect("response")
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        address
+    });
+    let base = format!("http://{address}");
+
+    let settings = Settings {
+        data_dir: hub.join("data"),
+        api_url: base.clone(),
+        huggingface_base_url: base,
+        ..offline_settings()
+    };
+    let job = krea_job_snapshot();
+    let q8_req = krea_tier_request(json!({ "mlxQuantize": 8 }));
+
+    let error = temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_KREA_REALTIME_DIR", ""),
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ],
+        || {
+            runtime.block_on(ensure_krea_realtime_tier_present(
+                &ApiClient::new(&settings),
+                &settings,
+                &job,
+                &q8_req,
+            ))
+        },
+    )
+    .expect_err("a remotely-torn tier must not be accepted");
+
+    let WorkerError::InvalidPayload(message) = error else {
+        panic!("expected an actionable InvalidPayload, got {error:?}");
+    };
+    assert!(
+        message.contains("q8/dit.safetensors"),
+        "the failure must NAME the file that never arrived: {message}"
+    );
+    assert!(
+        message.contains("q8"),
+        "the failure must name the tier the user picked: {message}"
+    );
+    // The other four q8 files DID land — proving the fetch really ran and it is the verification,
+    // not a transport error, that refused the job.
+    for file in ["config.json", "tokenizer.json", "vae.safetensors"] {
+        assert!(
+            snapshot.join("q8").join(file).is_file(),
+            "the fetch should have downloaded q8/{file}"
+        );
+    }
+    std::fs::remove_dir_all(&hub).ok();
+}
+
+/// The Krea tier repo must pin an exact commit (not the mutable `main`) so an upstream re-push can't
+/// swap a checkpoint the on-demand fetch loads (mirrors the Wan / SCAIL-2 pins), and
+/// `krea_realtime_tier_repo` routes only the krea id to it.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_tier_revision_is_a_pinned_commit_not_main() {
+    assert_ne!(
+        KREA_REALTIME_REVISION, "main",
+        "the Krea tier repo must pin a fixed revision before release"
+    );
+    assert_eq!(
+        KREA_REALTIME_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        KREA_REALTIME_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned Krea revision must be lowercase hex"
+    );
+    assert_eq!(
+        krea_realtime_tier_repo("krea_realtime_14b"),
+        Some((KREA_REALTIME_REPO, KREA_REALTIME_REVISION))
+    );
+    for other in ["scail2_14b", "wan_2_2", "bernini", "krea_2_turbo"] {
+        assert_eq!(
+            krea_realtime_tier_repo(other),
+            None,
+            "{other} must not route to the Krea Realtime tier repo"
+        );
+    }
 }
 
 /// The on-demand tier fetches are gated on the request's tier toggle — the "fetched on demand if

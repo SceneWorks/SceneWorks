@@ -677,20 +677,23 @@ pub(crate) async fn run_video_generate_job(
                 // shipped checkpoint is Wan 2.1 T2V 14B weight-for-weight. `generate_krea_realtime` maps
                 // the supplied media to the engine conditioning (a reference still → i2v `Reference`,
                 // strength no-op; a source clip → v2v `VideoClip`, strength honored; else t2v) and drives
-                // the shared `generate_video` heartbeat funnel. CFG off; dense bf16; no LoRA yet (S15).
+                // the shared `generate_video` heartbeat funnel. CFG off; no LoRA yet (S15). It resolves
+                // the installed quant tier and returns which one LOADED, so the record names the tier
+                // that actually ran rather than the one the request asked for (sc-15258).
+                let (decoded, tier) = generate_krea_realtime(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
                 (
-                    generate_krea_realtime(
-                        api,
-                        settings,
-                        job,
-                        &request,
-                        &project_path,
-                        engine_id,
-                        backend,
-                    )
-                    .await?,
+                    decoded,
                     KREA_REALTIME_ADAPTER,
-                    krea_realtime_raw_settings(&request),
+                    krea_realtime_raw_settings(&request, tier),
                     None,
                 )
             }

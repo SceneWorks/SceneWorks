@@ -599,6 +599,67 @@ fn every_image_model_with_a_candle_vram_block_declares_mlx_quantize() {
     }
 }
 
+/// sc-15258 — the VIDEO-lane twin of the lint above, and it enforces the opposite thing: on a video
+/// entry `mlx.quantize` is **documentation, not a control**, so it may only ever restate the default
+/// the video resolver already produces.
+///
+/// The video lane never reads `manifest.mlx.quantize`. `resolve_quant` (`image_jobs/base.rs`) is the
+/// image lane; the video lane resolves through `video_jobs::resolve_mlx_dense_quant` (shared by
+/// bernini / scail2 / krea_realtime) and the per-family tier orders, all of which key on
+/// `advanced.mlxQuantize` alone and default to **Q4**. That is not an oversight to be fixed by wiring
+/// the manifest in: sc-10859 made the video lane's q4-first default an OWNED carve-out from epic
+/// 10721's app-wide Q8 default (there is no MLX video Q8 lever, so a silent Q8 only risks a
+/// video-runtime OOM at heavy res/frame counts), and letting a manifest key flip it would quietly undo
+/// that decision for all three families at once.
+///
+/// So the invariant a video entry must satisfy is agreement: declare `4`, or declare nothing. Anything
+/// else is a manifest that documents a default the product does not honour — a lie that reads as
+/// authoritative to the next engineer and to anyone inspecting the catalog. Today all three video
+/// entries that declare the key declare `4`.
+///
+/// Mutation check: set any video entry's `mlx.quantize` to `8` (or `0`) → RED naming it.
+#[test]
+fn video_models_may_only_declare_the_mlx_quantize_the_video_lane_actually_defaults_to() {
+    /// The tier `video_jobs::resolve_mlx_dense_quant` returns for a request with no explicit
+    /// `advanced.mlxQuantize` — the only value a video entry may restate.
+    const VIDEO_LANE_DEFAULT_BITS: u64 = 4;
+
+    let mut offenders = Vec::new();
+    let mut declaring = Vec::new();
+    for model in builtin_models_manifest() {
+        if model.get("type").and_then(Value::as_str) != Some("video") {
+            continue;
+        }
+        let Some(quantize) = model.get("mlx").and_then(|mlx| mlx.get("quantize")) else {
+            continue;
+        };
+        let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        declaring.push(id.to_owned());
+        if quantize.as_u64() != Some(VIDEO_LANE_DEFAULT_BITS) {
+            offenders.push(format!("{id} (declares {quantize})"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these `type: video` models declare an `mlx.quantize` other than {VIDEO_LANE_DEFAULT_BITS}: \
+         {offenders:?}. The video lane does NOT read `manifest.mlx.quantize` — it resolves through \
+         `resolve_mlx_dense_quant` / the per-family tier orders, which key on `advanced.mlxQuantize` \
+         and default to Q4 (sc-10750), a carve-out from epic 10721's app-wide Q8 that sc-10859 made \
+         deliberately (no MLX video Q8 lever ⇒ a silent Q8 only risks a video-runtime OOM). So a \
+         video entry may only RESTATE the Q4 default or say nothing; declaring anything else \
+         documents a default the product will not honour. If the video lane should start honouring \
+         the manifest, change the resolver and this guard together — do not change the manifest alone."
+    );
+
+    // Non-vacuity: the guard must actually be looking at entries. If a refactor moved the key or the
+    // `type` label, `declaring` would silently empty out and the assertion above would pass on air.
+    assert!(
+        declaring.contains(&"krea_realtime_14b".to_owned()),
+        "krea_realtime_14b declares mlx.quantize, so this guard must see it — an empty sweep would \
+         make the check vacuous; saw {declaring:?}"
+    );
+}
+
 /// sc-13533 — the sc-12155 lint above, strengthened from PRESENCE to COVERAGE: declaring
 /// `mlx.quantize` is not enough; the tier that declaration RESOLVES TO must itself have a measured
 /// `candle.vramGbByTier` row.

@@ -13,9 +13,9 @@ use super::wan::{generate_video_using, local_mlx_dir, VideoGenInput};
 // cache — not its weights, so the DiT / z16 VAE / UMT5 text encoder / RoPE / schedulers are all reused
 // from stock Wan inside the engine.
 //
-// Surface (descriptor `pipeline::descriptor`, sc-8440 S7): CFG-OFF video (no negative-prompt / guidance
-// / true-cfg axis — the AR few-step denoise runs a single batch-1 forward per step), sampler
-// `self_forcing`, `supported_quants = []` (dense bf16 load — no load-time quant tier wired yet),
+// Surface (descriptor `pipeline::descriptor`, sc-8440 S7 + sc-15203 S19): CFG-OFF video (no
+// negative-prompt / guidance / true-cfg axis — the AR few-step denoise runs a single batch-1 forward
+// per step), sampler `self_forcing`, `supported_quants = [Q4, Q8]` (bf16 = their absence),
 // `supports_lora = false`, `mac_only = true`. It advertises two conditioning shapes the worker maps its
 // own reference inputs onto here:
 //   * i2v — a `Reference` still VAE-encoded to WARM the AR KV cache from clean context. The engine's
@@ -54,30 +54,362 @@ pub(super) fn krea_realtime_engine_id(model: &str) -> Option<&'static str> {
     (model == KREA_REALTIME_MODEL_ID).then_some(KREA_REALTIME_MODEL_ID)
 }
 
-/// Whether the linked Krea Realtime engine can serve this request now (resolvable weights). `mac_only`
-/// is implicit — this fn is macOS-only, and a non-mac job never reaches the route (it is rejected
-/// loudly in `run_video_generate_job`). Routed by weight availability like the other MLX engines: an
-/// unresolved snapshot falls to `VideoRoute::Stub`, whose fail-loud gate (`ensure_video_engine_
-/// weights`) then surfaces the resolver's precise error instead of a procedural fake clip.
+/// Whether the linked Krea Realtime engine can serve this request now (a resolvable, LOADABLE tier).
+/// `mac_only` is implicit — this fn is macOS-only, and a non-mac job never reaches the route (it is
+/// rejected loudly in `run_video_generate_job`). Routed by weight availability like the other MLX
+/// engines: an unresolved snapshot falls to `VideoRoute::Stub`, whose fail-loud gate
+/// (`ensure_video_engine_weights`) then surfaces the resolver's precise error instead of a procedural
+/// fake clip.
+///
+/// It asks the FULL [`resolve_krea_realtime_tier_dir_and_quant`], not just
+/// [`resolve_krea_realtime_model_dir`] (sc-15258): every published Krea file lives under a `q4/`/`q8/`/
+/// `bf16/` tier prefix, so the turnkey snapshot ROOT resolving is not evidence that anything is
+/// loadable — a repo dir holding only `README.md` (or a torn tier) would otherwise route to the engine
+/// and die inside the loader with a message about a missing `dit.safetensors`.
 #[cfg(target_os = "macos")]
-pub(super) fn krea_realtime_available(_request: &VideoRequest, settings: &Settings) -> bool {
-    resolve_krea_realtime_model_dir(settings).is_ok()
+pub(super) fn krea_realtime_available(request: &VideoRequest, settings: &Settings) -> bool {
+    resolve_krea_realtime_tier_dir_and_quant(settings, request).is_ok()
 }
 
-/// The turnkey SceneWorks Krea Realtime MLX repo (the converted transformer-only DiT snapshot +
-/// the stock Wan `t5_encoder`/`vae`/`tokenizer`). **Provisional**: the MLX rehost to the SceneWorks HF
-/// org is the gated S2 remainder (sc-8435), so the repo may not be published yet — `resolve_krea_
-/// realtime_model_dir` only ever LOOKS UP an already-downloaded snapshot in the local cache (no
-/// network fetch here; there is no on-demand quant-tier fetch because the engine advertises
-/// `supported_quants = []` and loads dense bf16), so an absent repo simply means the env override /
-/// app-managed dir are the resolvable sources until the rehost + download lands.
+/// The turnkey SceneWorks Krea Realtime MLX repo (sc-8435 S2b): the converted Krea DiT at three
+/// precisions plus the stock Wan `t5_encoder`/`vae`/`tokenizer` companions, laid out as the epic-8506
+/// quant matrix — self-contained `q4/` (default) + `q8/` + `bf16/` tier subdirs, NOT a flat root.
+/// `resolve_krea_realtime_model_dir` only ever LOOKS UP an already-downloaded snapshot in the local
+/// cache; the on-demand fetch of an explicitly-picked non-default tier is
+/// [`ensure_krea_realtime_tier_present`].
 #[cfg(target_os = "macos")]
 pub(super) const KREA_REALTIME_REPO: &str = "SceneWorks/krea-realtime-14b-mlx";
 
-/// Resolve the Krea Realtime MLX snapshot dir: env override (`SCENEWORKS_MLX_KREA_REALTIME_DIR`) →
+/// Pinned revision for [`KREA_REALTIME_REPO`] (mirrors [`SCAIL2_REVISION`](super::scail2)). The repo is
+/// a hard-coded const — no manifest/payload override reaches the on-demand `q8/` + `bf16/` fetches — so
+/// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
+/// This is the S2b rehost commit, and it MUST equal the `revision` every `krea_realtime_14b` download
+/// entry in `builtin.models.jsonc` pins, or the on-demand fetch would materialize a SECOND snapshot dir
+/// beside the one the Model Manager installed
+/// (`krea_realtime_worker_tier_table_matches_the_shipped_manifest` pins the equality). The native
+/// downloader still verifies each file's own hash on download.
+#[cfg(target_os = "macos")]
+pub(super) const KREA_REALTIME_REVISION: &str = "e68e9a3d98187fdf6936838ffcf6df5aa48d6626";
+
+/// The files that make a **packed** (`q4/`, `q8/`) Krea Realtime tier subdir COMPLETE: the single-file
+/// packed DiT plus the stock dense Wan companions the engine opens by name
+/// (`t2v::load_text_encoder`/`load_vae`) and the `config.json` carrying the quantization manifest.
+#[cfg(target_os = "macos")]
+const KREA_REALTIME_PACKED_TIER_FILES: &[&str] = &[
+    "config.json",
+    "dit.safetensors",
+    "t5_encoder.safetensors",
+    "tokenizer.json",
+    "vae.safetensors",
+];
+
+/// The files that make the **`bf16/`** tier COMPLETE. Structurally different from the packed tiers:
+/// its DiT is a SEVEN-shard `transformer/` directory one level deeper, because a single 28.58 GB bf16
+/// blob is above the practical single-file limit the rehost emits. The engine's
+/// `t2v::open_transformer_weights` probes both layouts (`dit.safetensors` OR a `transformer/` dir), so
+/// this is a hosting shape rather than a second load path — but the *directory* handed to it must be
+/// the tier dir either way. Every shard is listed individually so a torn download (6 of 7 shards) reads
+/// INCOMPLETE and falls through, instead of resolving a tier that then dies inside the loader.
+#[cfg(target_os = "macos")]
+const KREA_REALTIME_BF16_TIER_FILES: &[&str] = &[
+    "config.json",
+    "t5_encoder.safetensors",
+    "tokenizer.json",
+    "vae.safetensors",
+    "transformer/dit-00001-of-00007.safetensors",
+    "transformer/dit-00002-of-00007.safetensors",
+    "transformer/dit-00003-of-00007.safetensors",
+    "transformer/dit-00004-of-00007.safetensors",
+    "transformer/dit-00005-of-00007.safetensors",
+    "transformer/dit-00006-of-00007.safetensors",
+    "transformer/dit-00007-of-00007.safetensors",
+];
+
+/// The published Krea Realtime quant matrix: each tier subdir keyed to the files that make it COMPLETE
+/// (mirrors [`SCAIL2_TIER_FILES`](super::scail2), but per-tier because the `bf16/` DiT is sharded a
+/// level deeper while `q4/`/`q8/` ship a flat `dit.safetensors`). Kept in lockstep with the
+/// `krea_realtime_14b` manifest `downloads[].files` — same repo, same revision, same paths — so the
+/// worker's completeness predicate cannot drift from what the Model Manager actually installs.
+#[cfg(target_os = "macos")]
+pub(super) const KREA_REALTIME_TIER_FILES: &[(&str, &[&str])] = &[
+    ("q4", KREA_REALTIME_PACKED_TIER_FILES),
+    ("q8", KREA_REALTIME_PACKED_TIER_FILES),
+    ("bf16", KREA_REALTIME_BF16_TIER_FILES),
+];
+
+/// The files that make `tier` COMPLETE, or `None` for a tier this repo does not publish. Deliberately
+/// an `Option` rather than an empty-slice fallback: `[].iter().all(..)` is `true`, so an unknown tier
+/// would otherwise read COMPLETE from an empty (or absent) directory.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_files(tier: &str) -> Option<&'static [&'static str]> {
+    KREA_REALTIME_TIER_FILES
+        .iter()
+        .find(|(name, _)| *name == tier)
+        .map(|(_, files)| *files)
+}
+
+/// Map a Krea Realtime model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier
+/// fetch, or `None` for any other id (mirrors [`scail2_tier_repo`](super::scail2)). Keyed here so the
+/// whole tier-resolve/fetch path routes on `krea_realtime_tier_repo(..).is_some()`.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
+    (model == KREA_REALTIME_MODEL_ID).then_some((KREA_REALTIME_REPO, KREA_REALTIME_REVISION))
+}
+
+/// The Krea Realtime tier search order for a request — the preferred tier first, then the fallbacks,
+/// derived from the SAME [`resolve_mlx_dense_quant`] decision that would pick a load-time quant
+/// (sc-15258). `mlxQuantize <= 0` ⇒ `bf16`-first; `>= 5` ⇒ `q8`-first; no explicit pick OR an explicit
+/// `q4` ⇒ **`q4`-first** — the dense-video Q4 default (sc-10750), which reaches the video lane here
+/// because this order is what the resolver consults, not the image lane's `manifest.mlx.quantize`.
+///
+/// **`bf16` is the last fallback in EVERY order, never omitted** — the one deliberate divergence from
+/// [`scail2_tier_order`](super::scail2), and the whole point of the story. SCAIL-2 can leave `bf16` out
+/// of the default order because a repo with no matching tier still has a legacy FLAT root to fall back
+/// on; the Krea rehost has no flat root at all. Dropping `bf16` from the default order would mean a
+/// user who deliberately installed ONLY the `bf16/` tier gets "no tier found" and then either a hard
+/// failure or — far worse — a root fallback that quantizes their dense weights to Q4 in memory. That is
+/// the silent creative-tier switch the "quant tier is a CREATIVE choice, never switch it" convention
+/// forbids. Listing it LAST keeps the other half of the guarantee: a default job never prefers the
+/// ~40 GB dense tier while a leaner one is installed, and the tier is only ever *fetched* on an
+/// explicit pick ([`ensure_krea_realtime_tier_present`]).
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    match resolve_mlx_dense_quant(request) {
+        None => &["bf16", "q8", "q4"],
+        Some(Quant::Q8) => &["q8", "q4", "bf16"],
+        // No explicit pick OR an explicit `q4` ⇒ q4-first (the sc-10750 dense-video default).
+        _ => &["q4", "q8", "bf16"],
+    }
+}
+
+/// The declared files of `tier` that are NOT present under `root/<tier>`, as repo-relative paths.
+/// Empty ⇒ the tier is complete. An unknown tier reports ITSELF missing rather than reporting nothing,
+/// so it can never read as complete through the empty-vec path.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_missing_tier_files(root: &Path, tier: &str) -> Vec<String> {
+    let Some(files) = krea_realtime_tier_files(tier) else {
+        return vec![format!("{tier}/ (not a published tier)")];
+    };
+    let dir = root.join(tier);
+    files
+        .iter()
+        .filter(|file| !dir.join(file).is_file())
+        .map(|file| format!("{tier}/{file}"))
+        .collect()
+}
+
+/// Whether `root/<tier>` is a COMPLETE self-contained Krea Realtime tier snapshot (all of
+/// [`krea_realtime_tier_files`]). A partially-downloaded tier — including a `bf16/` missing one of its
+/// seven DiT shards — fails this, so [`krea_realtime_tier_subdir`] falls through to another complete
+/// tier rather than half-loading. Unknown tiers are never complete.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_is_complete(root: &Path, tier: &str) -> bool {
+    krea_realtime_missing_tier_files(root, tier).is_empty()
+}
+
+/// Descend a resolved Krea Realtime repo `root` into the tier subdir this request should load: the
+/// first COMPLETE tier in [`krea_realtime_tier_order`], as `(tier name, dir)`. `None` when no tier
+/// subdir is complete — a locally converted FLAT snapshot (or nothing usable at all), which the caller
+/// distinguishes.
+///
+/// The NAME rides along because the caller records it on the asset: the tier that actually loaded is
+/// not always the one the request asked for (the order falls back), and the dir's last path component
+/// is not a substitute — a flat snapshot has no tier component at all.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_subdir(
+    root: &Path,
+    request: &VideoRequest,
+) -> Option<(&'static str, PathBuf)> {
+    krea_realtime_tier_order(request)
+        .iter()
+        .find(|tier| krea_realtime_tier_is_complete(root, tier))
+        .map(|tier| (*tier, root.join(tier)))
+}
+
+/// Whether `dir` itself carries a Krea Realtime DiT — i.e. it is a FLAT snapshot rather than a
+/// tier-matrix root. It asks the same two questions the engine's `t2v::open_transformer_weights` asks
+/// (a single-file `dit.safetensors` OR a sharded `transformer/` dir), so the two agree about what
+/// "loadable" means — but strictly TIGHTER, not identical: the engine probes the DiT with `exists()`
+/// while this uses `is_file()`, so a *directory* named `dit.safetensors` would satisfy the engine's
+/// check and not this one. That asymmetry runs in the safe direction (this can only refuse things the
+/// engine would fail on anyway, never admit something it would reject) and matches the per-file
+/// `is_file()` the tier-completeness check uses.
+///
+/// Only a locally converted snapshot (the `SCENEWORKS_MLX_KREA_REALTIME_DIR` override or the
+/// app-managed convert output) is ever flat; the published repo root holds only tier subdirs, so it
+/// correctly fails this and the resolver errors instead of handing the engine a dir with no weights in
+/// it.
+#[cfg(target_os = "macos")]
+fn krea_realtime_dir_has_transformer(dir: &Path) -> bool {
+    dir.join("dit.safetensors").is_file() || dir.join("transformer").is_dir()
+}
+
+/// Everything a Krea Realtime load must settle before the engine is asked for anything, resolved as
+/// ONE unit by [`resolve_krea_realtime_tier_dir_and_quant`] (sc-15258). The three travel together on
+/// purpose: splitting them back into independent lookups is exactly how the tier and the quantization
+/// come apart, which is the silent creative-tier switch this story exists to prevent.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KreaRealtimeLoad {
+    /// The directory handed to the engine — an installed tier subdir, or a flat snapshot root.
+    pub(super) dir: PathBuf,
+    /// The load-time quant. Always `None` for a resolved tier (the tier on disk IS the quantization).
+    pub(super) quant: Option<Quant>,
+    /// The precision the DiT will actually run at (`q4` / `q8` / `bf16`) — recorded on the asset.
+    pub(super) tier: &'static str,
+}
+
+/// Resolve the Krea Realtime model dir, load-time quant and tier label for a generation — the ONE
+/// decision that picks them together (sc-15258), which is what makes the creative-tier choice
+/// unswitchable:
+///
+/// * A COMPLETE tier subdir wins and loads with **`quant = None`**. The tier on disk IS the
+///   quantization: `q4/`/`q8/` are pre-packed (the engine recovers `bits`/`group_size` from the packed
+///   shapes and cross-checks `config.json`), and `bf16/` is dense. `mlxQuantize` selects WHICH tier,
+///   never a load-time requant — so a deliberately-installed `bf16/` is served dense even under the Q4
+///   default, and a packed tier is never asked to re-quantize (which the engine would reject loudly
+///   anyway, `load::resolve_load_time_quant`).
+/// * A FLAT snapshot (a local convert / env override with a `dit.safetensors` or `transformer/` at its
+///   root — the published repo is never flat) keeps the load-time path: the root plus
+///   [`resolve_mlx_dense_quant`], i.e. **Q4 by default** (sc-10750's dense-video convention), which the
+///   engine applies in memory after the build.
+/// * Otherwise a LOUD error naming the tiers. There is deliberately no "just hand it the root" fallback:
+///   every published file lives under a tier prefix, so a root fallback could only fail deeper inside
+///   the loader with a less actionable message.
+///
+/// `tier` names the precision that will actually run in both branches — the resolved subdir's own name,
+/// or (flat) the tier the load-time quant packs to. It is the request's ASKED-FOR tier only when those
+/// coincide, which is the point: the asset records what loaded.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_krea_realtime_tier_dir_and_quant(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<KreaRealtimeLoad> {
+    let root = resolve_krea_realtime_model_dir(settings)?;
+    if let Some((tier, dir)) = krea_realtime_tier_subdir(&root, request) {
+        return Ok(KreaRealtimeLoad {
+            dir,
+            quant: None,
+            tier,
+        });
+    }
+    if krea_realtime_dir_has_transformer(&root) {
+        let quant = resolve_mlx_dense_quant(request);
+        return Ok(KreaRealtimeLoad {
+            dir: root,
+            quant,
+            tier: krea_realtime_quant_tier(quant),
+        });
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "krea_realtime_14b: no complete MLX tier under {}. Install the model (or one of its q4 / q8 / \
+         bf16 quality tiers) via the Model Manager — a partially-downloaded tier is skipped, so \
+         re-running the download repairs it.",
+        root.display(),
+    )))
+}
+
+/// The tier label a LOAD-TIME quant packs a dense snapshot to (mirrors `mochi_raw_settings`'s mapping):
+/// `Q4` ⇒ `q4`, `Q8` ⇒ `q8`, no quant ⇒ the dense `bf16`. Only the flat-snapshot branch needs this — a
+/// resolved tier subdir already knows its own name.
+#[cfg(target_os = "macos")]
+fn krea_realtime_quant_tier(quant: Option<Quant>) -> &'static str {
+    match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        _ => "bf16",
+    }
+}
+
+/// The tier an explicit `mlxQuantize` pick would FETCH on demand, or `None` for a default / `q4` job —
+/// `q4` ships with the base install, so nothing to fetch. Split out from
+/// [`ensure_krea_realtime_tier_present`] so the "which tier does this job want?" decision is directly
+/// testable without a network or an HF cache (the sibling `mochi_wants_q8` / `mochi_wants_bf16` seam).
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_on_demand_tier(request: &VideoRequest) -> Option<&'static str> {
+    match resolve_mlx_dense_quant(request) {
+        None => Some("bf16"),
+        Some(Quant::Q8) => Some("q8"),
+        _ => None,
+    }
+}
+
+/// The repo-relative paths the on-demand fetch asks for — the tier's EXPLICIT file list, each prefixed
+/// with `<tier>/`, matching the manifest rather than a `<tier>/*` glob. `None` for an unpublished tier.
+#[cfg(target_os = "macos")]
+pub(super) fn krea_realtime_tier_fetch_files(tier: &str) -> Option<Vec<String>> {
+    Some(
+        krea_realtime_tier_files(tier)?
+            .iter()
+            .map(|file| format!("{tier}/{file}"))
+            .collect(),
+    )
+}
+
+/// On-demand fetch of a non-default Krea Realtime tier subdir (mirrors
+/// [`ensure_scail2_tier_present`](super::scail2)). The macOS default install is the lean `q4/` tier; a
+/// job that explicitly opts into a heavier one ([`krea_realtime_on_demand_tier`]) pulls just that
+/// subdir from the FIXED [`KREA_REALTIME_REVISION`] the first time it is requested, so
+/// [`krea_realtime_tier_subdir`] can resolve it instead of silently falling back to a leaner tier — the
+/// creative-tier switch again, now on the fetch side. No-op for a non-Krea model, a `q4`/default job,
+/// an already-complete tier, or a repo that isn't downloaded at all (an env-override / local-convert
+/// install has no repo to fetch from, and resolve surfaces its own clear error).
+///
+/// **Then it VERIFIES, because the fetch itself makes no per-file promise.**
+/// `ensure_hf_files_cached` does not run the sc-12283 `unmatched_patterns` per-pattern hard-fail — that
+/// lives in the user-facing model-download job (`model_jobs::run_model_download_job`) — so a pattern
+/// matching nothing remotely is silently a no-op here. Left alone, an explicitly-picked tier whose
+/// remote copy is missing a shard would download the other ten files, read INCOMPLETE, and fall back to
+/// a leaner tier: precisely the silent downgrade this function exists to prevent. So after the fetch it
+/// re-checks completeness on disk and fails loud, NAMING the missing files. That is a stronger check
+/// than the per-pattern one (it tests what actually landed, not what the remote listing matched), and
+/// it is scoped to this lane rather than changing `ensure_hf_files_cached` for the Wan / SCAIL-2 /
+/// Bernini / Mochi callers, whose documented contract is to fall back when a tier is unpublished.
+#[cfg(target_os = "macos")]
+pub(super) async fn ensure_krea_realtime_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    let Some((repo, revision)) = krea_realtime_tier_repo(&request.model) else {
+        return Ok(());
+    };
+    let Some(tier) = krea_realtime_on_demand_tier(request) else {
+        return Ok(());
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) else {
+        return Ok(());
+    };
+    if krea_realtime_tier_is_complete(&root, tier) {
+        return Ok(());
+    }
+    let Some(files) = krea_realtime_tier_fetch_files(tier) else {
+        return Ok(());
+    };
+    crate::model_jobs::ensure_hf_files_cached(api, settings, job, repo, revision, &files).await?;
+    // Re-resolve: the fetch may have materialized a NEW snapshot dir for the pinned revision.
+    let root = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(root);
+    let missing = krea_realtime_missing_tier_files(&root, tier);
+    if !missing.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "krea_realtime_14b: the {tier} tier is still incomplete after downloading it from {repo} \
+             — missing {}. Falling back to a different tier would silently change the quality tier \
+             you picked, so the job stops here.",
+            missing.join(", "),
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the Krea Realtime MLX snapshot ROOT: env override (`SCENEWORKS_MLX_KREA_REALTIME_DIR`) →
 /// app-managed `<data>/models/mlx/krea_realtime` → the turnkey `SceneWorks/krea-realtime-14b-mlx`
 /// snapshot if already downloaded (mirrors `resolve_bernini_model_dir`). Errors clearly if none is
 /// present (no stub fallback).
+///
+/// This is the repo/override root, NOT the directory the engine loads: the published layout is a quant
+/// matrix, so callers go through [`resolve_krea_realtime_tier_dir_and_quant`], which descends into the
+/// installed tier.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_krea_realtime_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Some(dir) = local_mlx_dir(
@@ -119,8 +451,15 @@ pub(super) fn krea_realtime_video_task(request: &VideoRequest) -> &'static str {
 }
 
 /// Raw-settings recorded on a real MLX Krea Realtime asset (mirrors `bernini_raw_settings`).
+///
+/// `kreaRealtimeTier` names the tier that actually **LOADED**, not the one the request asked for — the
+/// `mochiTier` convention (sc-15258). The two genuinely diverge now that this lane resolves tiers: an
+/// explicit `mlxQuantize: 8` with only `q4/` on disk falls back to q4, and a DEFAULT job with only
+/// `bf16/` installed loads bf16 dense. Without this stamp the sidecar would still carry the request's
+/// verbatim `advanced.mlxQuantize`, so an asset could claim `8` for a clip rendered at q4 — provenance
+/// drift on a field a user reads to reproduce a result.
 #[cfg(target_os = "macos")]
-pub(super) fn krea_realtime_raw_settings(request: &VideoRequest) -> Value {
+pub(super) fn krea_realtime_raw_settings(request: &VideoRequest, tier: &str) -> Value {
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
@@ -129,6 +468,11 @@ pub(super) fn krea_realtime_raw_settings(request: &VideoRequest) -> Value {
     raw.insert(
         "kreaRealtimeTask".to_owned(),
         Value::String(krea_realtime_video_task(request).to_owned()),
+    );
+    // The precision the DiT actually ran at — authoritative over the request's `mlxQuantize`.
+    raw.insert(
+        "kreaRealtimeTier".to_owned(),
+        Value::String(tier.to_owned()),
     );
     Value::Object(raw)
 }
@@ -218,9 +562,15 @@ pub(super) async fn resolve_krea_realtime_conditioning(
 /// shared `generate_video` heartbeat funnel. The supplied media resolves to the engine conditioning
 /// ([`resolve_krea_realtime_conditioning`]) — empty for t2v, a `Reference` still for i2v (strength
 /// no-op), a `VideoClip` source for v2v (strength honored). CFG off: no negative prompt / guidance
-/// (the engine advertises none), `steps` from the advanced `steps` knob (else the engine default),
-/// dense bf16 load (`supported_quants = []`, so `quant = None`). Frame count uses the Wan 1-mod-4
-/// stride coercion — the DiT + z16 VAE ARE stock Wan 2.1, so the Wan stride is exactly right.
+/// (the engine advertises none), `steps` from the advanced `steps` knob (else the engine default).
+/// The model dir, the load-time `quant` and the tier label come from the single
+/// [`resolve_krea_realtime_tier_dir_and_quant`] decision (sc-15258): the installed tier subdir with
+/// `quant = None`, or a flat local snapshot with the Q4-default load-time quant. Frame count uses the
+/// Wan 1-mod-4 stride coercion — the DiT + z16 VAE ARE stock Wan 2.1, so the Wan stride is exactly
+/// right.
+///
+/// Returns the decoded clip plus the tier that actually LOADED, so the caller records it on the asset
+/// without re-resolving (the `generate_scail2` → `lightning` shape).
 ///
 /// Runs through the `generate_video` → `generate_video_using` funnel so a long/multi-minute AR job
 /// drives `heartbeat(...)` and is NOT marked `interrupted` by the ~90 s API stale-sweep, and so the
@@ -242,7 +592,7 @@ pub(super) async fn generate_krea_realtime(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<DecodedVideo> {
+) -> WorkerResult<(DecodedVideo, &'static str)> {
     generate_krea_realtime_using(
         api,
         settings,
@@ -273,18 +623,22 @@ pub(super) async fn generate_krea_realtime_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-) -> WorkerResult<DecodedVideo> {
+) -> WorkerResult<(DecodedVideo, &'static str)> {
     let conditioning =
         resolve_krea_realtime_conditioning(api, settings, job, request, project_path).await?;
-    let model_dir = resolve_krea_realtime_model_dir(settings)?;
+    // Krea Realtime quant matrix (sc-15258, epic 8506 shape): an explicitly picked q8/bf16 tier is
+    // fetched on demand before resolving (no-op for a default job or an already-present tier), then the
+    // tier subdir AND the load-time quant come out of ONE decision — a resolved tier loads exactly as
+    // it sits on disk (`quant = None`), a flat local snapshot keeps the Q4-default load-time quant.
+    ensure_krea_realtime_tier_present(api, settings, job, request).await?;
+    let load = resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
+    let tier = load.tier;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir,
-        // Dense bf16 load: the engine advertises `supported_quants = []`, so never request a load-time
-        // quant (a Q4/Q8 request would be capability-dishonest until a tier is wired).
-        quant: None,
+        model_dir: load.dir,
+        quant: load.quant,
         conditioning,
         prompt: request.prompt.clone(),
         // CFG off: the engine advertises no negative-prompt / guidance axis, so leave both unset.
@@ -299,7 +653,7 @@ pub(super) async fn generate_krea_realtime_using(
         // No adapters: `supports_lora = false` (LoRA is the S15 seam — see the doc comment).
         ..VideoGenInput::default()
     };
-    generate_video_using(
+    let decoded = generate_video_using(
         api,
         settings,
         job,
@@ -308,5 +662,6 @@ pub(super) async fn generate_krea_realtime_using(
         input,
         load_generator,
     )
-    .await
+    .await?;
+    Ok((decoded, tier))
 }
