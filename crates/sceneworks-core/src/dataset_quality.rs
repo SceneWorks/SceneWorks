@@ -1904,7 +1904,8 @@ pub struct IdentityEvaluation {
 ///   `same_person_cosine`); the LARGEST cluster is the intended subject, and every detected face
 ///   outside it is a different person. Skipped below `min_cluster_items` (no stable "main identity").
 ///   Clustering (not centroid distance) is deliberate: one wrong-person image is a singleton outside
-///   the main cluster rather than a contaminant that drags a centroid.
+///   the main cluster rather than a contaminant that drags a centroid. The flag carries the item's
+///   best cosine to any main-cluster member as `value` — the measured evidence behind the rejection.
 pub fn evaluate_identity(
     items: &[FaceItem],
     thresholds: &IdentityThresholds,
@@ -1973,10 +1974,21 @@ pub fn evaluate_identity(
         let main_set: std::collections::HashSet<usize> = main.iter().copied().collect();
         for &i in &detected {
             if !main_set.contains(&i) {
+                // The closest this face got to the intended subject — the same pairwise cosine the
+                // union-find judged, so Advanced can show the measured evidence next to the threshold
+                // that rejected it (sc-6534) instead of a bare "identity cosine: —". Always strictly
+                // below `same_person_cosine`: at or above it, the item would have been unioned into
+                // the main cluster. `None` only when the embedding doesn't normalize (all-zero) or
+                // there is no main cluster to compare against.
+                let value = normalized[i].as_ref().and_then(|a| {
+                    main.iter()
+                        .filter_map(|&m| normalized[m].as_ref().map(|b| dot(a, b)))
+                        .reduce(f64::max)
+                });
                 per_item[i].flags.push(QualityFlag {
                     check: QualityCheck::IdentityMismatch,
                     severity: Severity::Warn,
-                    value: None,
+                    value,
                     threshold: Some(thresholds.same_person_cosine),
                     peers: Vec::new(),
                     acknowledged: false,
@@ -3069,6 +3081,38 @@ mod tests {
         );
         // Consistency = 6 main-cluster / 7 detected faces.
         assert!((eval.identity.unwrap() - 6.0 / 7.0).abs() < 1e-9);
+
+        // sc-6534: the flag carries the measured evidence — the best cosine to the main cluster —
+        // so Advanced shows a number rather than "identity cosine: —". Strictly below the
+        // same-person threshold by construction, and non-zero (a real face, just a different one).
+        let id_thresholds = IdentityThresholds::default_person();
+        let cosine = eval
+            .items
+            .iter()
+            .find(|entry| entry.item_id == "wrong")
+            .and_then(|entry| {
+                entry
+                    .flags
+                    .iter()
+                    .find(|flag| flag.check == QualityCheck::IdentityMismatch)
+            })
+            .expect("identity mismatch flag")
+            .value
+            .expect("identity cosine recorded");
+        assert!(
+            cosine > 0.0 && cosine < id_thresholds.same_person_cosine,
+            "cosine {cosine} must sit below the same-person threshold {}",
+            id_thresholds.same_person_cosine
+        );
+        // NoFace is the absence of a measurement — it stays value-less.
+        assert!(eval
+            .items
+            .iter()
+            .find(|entry| entry.item_id == "noface")
+            .expect("noface entry")
+            .flags
+            .iter()
+            .all(|flag| flag.value.is_none()));
     }
 
     #[test]
@@ -3134,10 +3178,18 @@ mod tests {
             .iter()
             .find(|entry| entry.item_id == "wrong")
             .unwrap();
-        assert!(wrong
+        let mismatch = wrong
             .flags
             .iter()
-            .any(|flag| flag.check == QualityCheck::IdentityMismatch));
+            .find(|flag| flag.check == QualityCheck::IdentityMismatch)
+            .expect("identity mismatch flag");
+        // sc-6534: the measured cosine survives the fold into the report — this is the value the
+        // Advanced surface renders, so asserting it here (not just on `evaluate_identity`) is what
+        // proves it actually reaches the client.
+        let id_thresholds = IdentityThresholds::default_person();
+        let cosine = mismatch.value.expect("identity cosine reaches the report");
+        assert!(cosine < id_thresholds.same_person_cosine);
+        assert_eq!(mismatch.threshold, Some(id_thresholds.same_person_cosine));
         assert_eq!(report.gate, ReadinessGate::NeedsAttention);
         assert!((report.sub_scores.identity.unwrap() - 4.0 / 5.0).abs() < 1e-9);
         // Identity is a usefulness check — it must not drag the technical share down.
