@@ -9552,10 +9552,14 @@
           // 14B video engine (sc-10750's dense-video convention) — a bf16 DiT is ~28 GB resident
           // before the AR KV cache, so the quantized tiers are the practically usable ones.
           "estimatedSizeBytes": 20265258499,
-          // residentMemoryBytes/peakMemoryBytes stay null until MEASURED on-device: the
-          // real-weight run is sc-8446 (S13). See the mlx.minMemoryGb note for the derivation
-          // that stands in until then — a derived number must not masquerade as a measured one.
-          "footprint": { "diskSizeBytes": 20265258499, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // MEASURED on-device by sc-8446 (S13), Apple M5 Max, 832x480 / 81 frames / 24 fps, the
+          // shipped Self-Forcing schedule. `resident` is the steady-state AR-loop MLX-active
+          // plateau (Q4 DiT ~7.8 GiB + the 7.14 GiB KV cache + the z16 VAE + per-step
+          // activations); `peak` is the whole-run MLX-active high-water mark, which the terminal
+          // VAE decode sets (+10.5 GiB over the AR loop). Both are MLX **active** — the
+          // allocator's reclaimable buffer cache took the same run to ~90 GiB and is deliberately
+          // not counted (see mlx.minMemoryGb).
+          "footprint": { "diskSizeBytes": 20265258499, "residentMemoryBytes": 18694744473, "peakMemoryBytes": 29957689344 }
         },
         {
           "provider": "huggingface",
@@ -9572,7 +9576,11 @@
           "platforms": ["macos"],
           // Q8 DiT 15,404,443,762 + the shared dense companions.
           "estimatedSizeBytes": 27290719452,
-          "footprint": { "diskSizeBytes": 27290719452, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // DERIVED from the measured Q4 figures by weight-size substitution (the only term that
+          // changes between tiers): the Q8 DiT is 15,404,443,762 B vs Q4's 8,378,982,809, i.e.
+          // +6.54 GiB resident. The KV cache does NOT change — it holds bf16 activations, so it is
+          // 7.14 GiB on every tier. Marked derived, not measured: only Q4 was run on-device.
+          "footprint": { "diskSizeBytes": 27290719452, "residentMemoryBytes": 25717886976, "peakMemoryBytes": 36980832256 }
         },
         {
           "provider": "huggingface",
@@ -9601,7 +9609,10 @@
           "platforms": ["macos"],
           // 7 DiT shards totalling 28,577,095,227 + the shared dense companions.
           "estimatedSizeBytes": 40463370856,
-          "footprint": { "diskSizeBytes": 40463370856, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // DERIVED the same way: the bf16 DiT is 28,577,095,227 B, i.e. +18.81 GiB over Q4.
+          // This tier is what sets `mlx.minMemoryGb` — its ~47 GiB active peak is the largest any
+          // installable tier reaches, and a single per-model floor has to admit it.
+          "footprint": { "diskSizeBytes": 40463370856, "residentMemoryBytes": 38891536384, "peakMemoryBytes": 50154536960 }
         }
       ],
       "paths": {
@@ -9692,34 +9703,43 @@
         // override (SCENEWORKS_MLX_KREA_REALTIME_DIR) -> app-managed <data>/models/mlx/
         // krea_realtime -> this download-on-first-use snapshot, mirroring bernini/scail2.
         //
-        // ⚠️ minMemoryGb 64 is a CONSERVATIVE PLACEHOLDER, not a closed derivation. sc-8446 (S13)
-        // measures the real figure on-device; replace this with it.
+        // minMemoryGb 64 — a CLOSED DERIVATION as of sc-8446 (S13), measured on-device. It keeps the
+        // same value it had as a placeholder, but for a materially different reason.
         //
-        // What IS accounted for, at the default 832x480 bucket on the default Q4 tier:
-        //   * Q4 DiT ~7.8 GiB.
-        //   * The AR KV cache ~7.1 GiB — the term that makes this engine unlike a block-diffusion
-        //     Wan. A rolling `kv_cache_num_frames + num_frames_per_block` = 6 latent-frame window
-        //     at 1560 tokens/frame over 40 layers x 40 heads x 128 dims x {k,v} in bf16. Bounded,
-        //     but resident for the whole clip.
-        //   * The z16 VAE ~0.5 GiB.
-        // That is ~15.4 GiB of steady residency, which on its own would fit a 32 GB Mac (MLX's
-        // wired ceiling is roughly 63% of physical, so ~20 GB there). The component sum does NOT
-        // by itself justify 64 — saying otherwise would be arithmetic that does not close.
+        // MEASURED (Apple M5 Max, Q4 tier, 832x480 / 81 frames / 24 fps, shipped Self-Forcing
+        // schedule). Cumulative MLX **active** peak by phase:
+        //     through the first denoise step   9.6 GiB
+        //     after the AR denoise loop       17.4 GiB
+        //     after the terminal VAE decode   27.9 GiB   <- the whole-run ceiling
+        // The AR plateau closes against the components: Q4 DiT ~7.8 + KV 7.14 + VAE ~0.5 = ~15.4 GiB.
+        // The KV figure is measured, not modelled: 40 layers x 9360 tokens (a 6-latent-frame window at
+        // 1560 tok/frame) x 40 heads x 128 dims x {k,v} x bf16 = 7.14 GiB, flat from chunk 2 on. It
+        // holds ACTIVATIONS, so it does not shrink with the weight tier.
         //
-        // What is NOT quantified is the transient peak on top of it: the VAE decode of a 93-frame
-        // clip, whose Metal conv scratch has historically run ~2x the active allocation on this
-        // family (the MEASURED scail2 case: a 33 GB MLX-active decode inside a ~76 GB process
-        // footprint), plus the per-step AR activations. That term is what actually decides whether
-        // a 32 or 48 GB machine survives, and it has never been measured for THIS engine. 64 is
-        // chosen to sit safely above any plausible value of it — presenting a guess as a
-        // derivation is how a model ships that OOMs on a machine we told the user was enough.
+        // The transient this comment used to hedge against is now quantified, and it is SMALLER than
+        // feared: the VAE decode adds +10.5 GiB over the AR loop, not the ~2x assumed from the scail2
+        // case. It also does not grow with clip length (33- and 81-frame clips both peak at 27.6-27.9
+        // GiB), because the decode is temporally tiled.
         //
-        // The relative ladder is on firmer ground, because those deltas are pure weight/cache
-        // arithmetic: Q8 ~+6.5 GiB of weights over Q4, bf16 ~+19 GiB, and the 720p buckets
-        // ~+9.4 GiB of KV (3600 vs 1560 tokens/frame) — so a bf16 720p clip wants a 128 GB
-        // machine. The UMT5 text encoder (11.4 GB bf16) is NOT additive: it is loaded, used, and
-        // freed before the DiT stages, and the engine floors it to Q8 (~5.7 GB) whenever the DiT
-        // tier is quantized, so it never sets the peak on the q4/q8 tiers.
+        // So what justifies 64 is the TIER LADDER, not the decode. A single per-model floor must admit
+        // the heaviest INSTALLABLE tier, and bf16 swaps a 7.8 GiB DiT for a 26.6 GiB one (exact hosted
+        // byte counts) => ~47 GiB active peak. 64 covers that with OS/app headroom. Per tier it would
+        // be Q4 ~40 / Q8 ~48 / bf16 64 — the per-download `footprint` blocks now carry those numbers;
+        // this single field cannot express them.
+        //
+        // ⚠️ Two caveats, so these are not over-trusted:
+        //   * They are MLX **active**. The allocator's reclaimable buffer cache took the same run to
+        //     ~90 GiB on a 128 GB host. Active is the right basis for a floor (MLX frees cache under
+        //     pressure), but `get_peak_memory` must never be quoted as "the memory this uses".
+        //   * They were measured with the CURRENT decode tiling, which sc-15325 shows is visibly
+        //     corrupting the output. Fixing it costs real memory (a 4-latent-frame decode tile measured
+        //     38.5 GiB, an 8-frame tile 75.8 GiB, vs 19.8 GiB today), so resolving sc-15325 WILL
+        //     re-open this number. Do not treat 64 as settled across that change.
+        //
+        // The 720p buckets add ~9.4 GiB of KV (3600 vs 1560 tokens/frame) on top of any tier — that,
+        // not the weight tier, is the memory-relevant resolution jump. The UMT5 text encoder (11.4 GB
+        // bf16) is NOT additive: loaded, used and freed before the DiT stages, and floored to Q8
+        // (~5.7 GB) whenever the DiT tier is quantized, so it never sets the peak on q4/q8.
         "minMemoryGb": 64,
         "repo": "SceneWorks/krea-realtime-14b-mlx",
         // Declares Q4 as this model's default tier, matching the `default: true` q4 download.
