@@ -12928,7 +12928,10 @@ fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
 /// unavailable reference subject. This measures within-run deltas on one reference at fixed seeds.
 ///
 /// Writes `<AB_OUT>/<arm>/<angle>_s<seed>.png`, `<AB_OUT>/ref/reference.png`, and a
-/// `<AB_OUT>/prompts.json` (`{stem: prompt}`) ready for `lora_eval_harness`:
+/// `<AB_OUT>/prompts.json` ready for `lora_eval_harness`. That file is keyed by **angle**, not by
+/// image stem: the harness groups outputs by `prompt_id` to compute `same_prompt_spread`, so a
+/// per-image key would give every output its own group of one and silently report `null` — no
+/// seed-variance measure, which is the whole point of the spread arm.
 ///
 /// ```text
 /// cargo test -p sceneworks-worker --lib -- --ignored --nocapture sc_8253_8278_identity_angle_ab
@@ -13078,7 +13081,7 @@ fn sc_8253_8278_identity_angle_ab() {
                 done += 1;
                 if path.exists() {
                     eprintln!("[sc-8253/8278] {done}/{total} skip {arm}/{stem} (exists)");
-                    prompts.insert(stem, prompt.clone());
+                    prompts.insert(angle.clone(), prompt.clone());
                     continue;
                 }
                 let cancel = gen_core::CancelFlag::new();
@@ -13104,7 +13107,7 @@ fn sc_8253_8278_identity_angle_ab() {
                     .unwrap()
                     .save(&path)
                     .unwrap();
-                prompts.insert(stem, prompt.clone());
+                prompts.insert(angle.clone(), prompt.clone());
                 eprintln!("[sc-8253/8278] {done}/{total} {arm}/{}", path.display());
             }
         }
