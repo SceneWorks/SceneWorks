@@ -1078,6 +1078,15 @@ mod tests {
         // own `DIM_ALIGN = 32` tiling grid (mlx-gen-scail2/src/generate.rs:73) — NOT the VAE stride
         // — so 720 is off ITS lattice even though the area now fits.
         ("scail2_14b", None, Some(921_600)),
+        // Krea Realtime 14B (epic 8431) renders on the Wan-14B ÷16 lattice — its z16 Wan 2.1 VAE's
+        // 8px spatial stride × the DiT's patch 2 (`mlx-gen-krea-realtime/src/t2v.rs` derives the
+        // latent size as `pixels / SPATIAL_STRIDE` and then requires the patch to divide it; the
+        // descriptor's `min_size: 16` agrees) — but it declares NO area cap: unlike the
+        // wan/bernini/scail2 engines it has no `reject_over_area`, and gen-core's
+        // `validate_request` has no area term either. Only each EDGE is bounded
+        // (`max_size: 1280`). So `None` here is the load-bearing half: the manifest must not
+        // borrow the 14B family's 921,600 just because the backbone is a Wan 14B.
+        ("krea_realtime_14b", Some(16), None),
     ];
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds.
@@ -1225,6 +1234,10 @@ mod tests {
         ("wan_2_2_vace_fun_14b", 5.0),
         ("bernini", 5.0),
         ("scail2_14b", 5.0),
+        // Krea Realtime's 5 s ceiling is a STABILITY bound, not a memory one: the shipped
+        // checkpoint runs `sink_size = 0`, so a bounded-window AR clip drifts as it lengthens
+        // (sc-15127). 5 s = 10 AR blocks, just past the reference driver's 9-block example.
+        ("krea_realtime_14b", 5.0),
     ];
 
     #[test]
@@ -1312,6 +1325,135 @@ mod tests {
             });
             assert!(message.contains(id), "{id}: names the model: {message}");
         }
+    }
+
+    /// sc-8444 (epic 8431) — Krea Realtime's advertised fps + durations must land on its
+    /// AUTOREGRESSIVE BLOCK lattice, and that is why it ships at 24 fps.
+    ///
+    /// The engine renders `num_frames_per_block = 3` LATENT frames per autoregressive block, and its
+    /// z16 Wan VAE makes a clip's latent count `(frames - 1) / 4 + 1` (core floors an off-lattice
+    /// request to `4k + 1` via [`wan_frame_count`]). So a whole number of blocks needs that latent
+    /// count to be a multiple of 3.
+    ///
+    /// At 24 fps — the model's own cadence, per its reference driver's `export_to_video(..., fps=24)`
+    /// — `wan_frame_count(24·d) = 24d − 3 = 12·(2d) − 3` for every integer `d`, i.e. exactly `2d`
+    /// blocks, with no partial trailing block: 2 s → 45 frames / 4 blocks, 3 s → 69 / 6, 4 s → 93 / 8,
+    /// 5 s → 117 / 10.
+    ///
+    /// DISCRIMINATING, which is the point — the rehost's emitted `config.json` inherits Wan's
+    /// `sample_fps: 16`, and adopting it would pass a "does the manifest say something" check while
+    /// putting half the dropdown off-lattice (at 16 fps, 4 s → 61 frames → 16 latent frames → 5
+    /// blocks plus a 1-frame remainder). This test fails on that value, and on 16 appearing in the
+    /// advertised `fps` menu at all.
+    #[test]
+    fn krea_realtime_durations_are_on_the_ar_block_lattice() {
+        /// The engine's `num_frames_per_block` (`mlx-gen-krea-realtime` `config.rs`, from the
+        /// reference `modular_model_index.json`). Latent frames per autoregressive block.
+        const FRAMES_PER_BLOCK: u32 = 3;
+
+        let models = builtin_video_models();
+        let entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("krea_realtime_14b"))
+            .expect("krea_realtime_14b present in builtin.models.jsonc")
+            .as_object()
+            .expect("model entry object");
+        let limits = entry
+            .get("limits")
+            .and_then(Value::as_object)
+            .expect("krea_realtime_14b has limits");
+
+        // Exactly one advertised cadence, and it is the model's, not the config's.
+        let fps: Vec<u64> = limits
+            .get("fps")
+            .and_then(Value::as_array)
+            .expect("krea_realtime_14b advertises fps")
+            .iter()
+            .map(|f| f.as_u64().expect("integer fps"))
+            .collect();
+        assert_eq!(
+            fps,
+            vec![24],
+            "Krea Realtime is a 24 fps model; the rehost's config.json carries Wan's inherited 16 \
+             and must NOT be adopted here"
+        );
+        let default_fps = entry
+            .get("defaults")
+            .and_then(Value::as_object)
+            .and_then(|d| d.get("fps"))
+            .and_then(Value::as_u64)
+            .expect("krea_realtime_14b has a default fps");
+        assert_eq!(
+            default_fps, 24,
+            "the shipped default must be the one advertised cadence"
+        );
+
+        // `limits.fps` is BINDING (the API and worker reject an off-menu request), so this is also
+        // the assertion that 16 fps cannot reach the engine.
+        assert_eq!(allowed_fps(entry), Some(vec![24]));
+        assert!(
+            fps_limit_error("krea_realtime_14b", 16, entry).is_some(),
+            "16 fps must be rejected — it is Wan's cadence, not Krea Realtime's"
+        );
+        assert_eq!(fps_limit_error("krea_realtime_14b", 24, entry), None);
+
+        let durations: Vec<f64> = limits
+            .get("durations")
+            .and_then(Value::as_array)
+            .expect("krea_realtime_14b advertises durations")
+            .iter()
+            .map(|d| d.as_f64().expect("numeric duration"))
+            .collect();
+        let default_duration = entry
+            .get("defaults")
+            .and_then(Value::as_object)
+            .and_then(|d| d.get("duration"))
+            .and_then(Value::as_f64)
+            .expect("krea_realtime_14b has a default duration");
+        assert!(
+            durations.contains(&default_duration),
+            "the default duration must be one of the advertised buckets"
+        );
+
+        for duration in durations.iter().copied().chain([default_duration]) {
+            let raw = (duration * default_fps as f64).round() as u32;
+            let frames = wan_frame_count(raw);
+            // The z16 VAE lattice core already enforces...
+            assert_eq!(
+                (frames - 1) % 4,
+                0,
+                "{duration}s → {frames} frames must satisfy the Wan 4k+1 rule"
+            );
+            // ...and the AR block lattice this model adds on top of it.
+            let latent_frames = (frames - 1) / 4 + 1;
+            assert_eq!(
+                latent_frames % FRAMES_PER_BLOCK,
+                0,
+                "{duration}s at {default_fps}fps → {frames} frames → {latent_frames} latent \
+                 frames, which is not a whole number of {FRAMES_PER_BLOCK}-frame autoregressive \
+                 blocks; the trailing partial block renders frames the clip then trims"
+            );
+            // The closed form the fps choice rests on: `24d − 3 = 12·(2d) − 3`.
+            assert_eq!(frames, 24 * (duration as u32) - 3);
+            assert_eq!(latent_frames / FRAMES_PER_BLOCK, 2 * duration as u32);
+        }
+
+        // MUTATION CHECK: the lattice is a real constraint, not something every cadence satisfies.
+        // At Wan's inherited 16 fps the same dropdown goes off-lattice, so a future edit that
+        // "harmonizes" the fps with the sibling Wan entries cannot pass the loop above.
+        let off_lattice = durations
+            .iter()
+            .copied()
+            .filter(|duration| {
+                let frames = wan_frame_count((duration * 16.0).round() as u32);
+                ((frames - 1) / 4 + 1) % FRAMES_PER_BLOCK != 0
+            })
+            .count();
+        assert!(
+            off_lattice > 0,
+            "the 24fps choice must be load-bearing: at 16fps some advertised duration has to fall \
+             off the AR block lattice, else this test proves nothing"
+        );
     }
 
     /// The house message convention (`mlx_fit_gate::too_big_error_names_model_budget_and_optional_staged`):
@@ -1466,9 +1608,10 @@ mod tests {
             }
         }
 
-        // The blanket duration was over-cap for a MAJORITY of shipped models — the same 7-of-10
-        // shape as the fps blanket, and the reason this is a generalized invariant rather than two
+        // The blanket duration was over-cap for a MAJORITY of shipped models — the same shape as
+        // the fps blanket, and the reason this is a generalized invariant rather than two
         // coincidences. Pinned as a number so reintroducing a blanket default fails here.
+        // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group).
         let over_cap: Vec<&str> = FPS_MENUS
             .iter()
             .filter_map(|(id, ..)| {
@@ -1481,7 +1624,7 @@ mod tests {
             .collect();
         assert_eq!(
             over_cap.len(),
-            6,
+            7,
             "the blanket {DEFAULT_DURATION}s is past the cap of these models: {over_cap:?} — if this \
              count moved, re-read why resolve_duration consults defaults.duration before changing it"
         );
@@ -1509,7 +1652,7 @@ mod tests {
             .collect();
         assert_eq!(
             unadvertised.len(),
-            7,
+            8,
             "the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} is not advertised by these models: \
              {unadvertised:?}"
         );
@@ -1580,6 +1723,11 @@ mod tests {
         ("wan_2_2_vace_fun_14b", &[16], 16),
         ("bernini", &[16], 16),
         ("scail2_14b", &[16], 16),
+        // The one 24-only menu among the Wan-derived engines: Krea Realtime is a 24 fps model, and
+        // 24 is also the only cadence that keeps every advertised duration on its 3-latent-frame
+        // autoregressive block lattice — see
+        // [`krea_realtime_durations_are_on_the_ar_block_lattice`].
+        ("krea_realtime_14b", &[24], 24),
     ];
 
     /// The fps the API blanket-defaulted to before sc-12347, kept as a named constant because the
@@ -1610,6 +1758,9 @@ mod tests {
         ("wan_2_2_vace_fun_14b", 832, 480),
         ("bernini", 848, 480),
         ("scail2_14b", 832, 480),
+        // The reference bucket: 832x480 is exactly the 52x30 = 1560 tokens/frame the shipped
+        // AR config bakes as `frame_seq_length` (the engine still recomputes it per request).
+        ("krea_realtime_14b", 832, 480),
     ];
 
     /// sc-12347 — the temporal invariant's other half: **what a video model advertises is what it
@@ -1707,7 +1858,7 @@ mod tests {
             .collect();
         assert_eq!(
             rejecting_the_blanket.len(),
-            6,
+            7,
             "the blanket {THE_BLANKET_FPS} fps is off-menu for these models: {rejecting_the_blanket:?} \
              — if this count moved, re-read why resolve_fps consults defaults.fps before changing it"
         );
