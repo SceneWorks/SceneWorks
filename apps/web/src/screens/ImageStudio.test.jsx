@@ -2684,4 +2684,51 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     expect(defaults.negativePrompt ?? "").toBe("");
     expect(defaults.guidanceScale).toBeUndefined();
   });
+
+  // `PresetStackPreview` is captioned "Prompt sent" and exists so the user sees exactly what the
+  // run will produce. Once submit started blanking `negativePrompt` for a CFG-free engine, the
+  // preview's `Negative:` line became a promise the payload does not keep — hence the
+  // `supportsNegativePrompt && stackAddsNegative` AND at the call site. General presets are
+  // filtered on `kind === "general"` alone, so a preset carrying `defaults.negativePrompt` is
+  // offered on every model, CFG-free included. Both directions are pinned: the SAME stack keeps
+  // the line on a negative-taking model and loses it on the CFG-free one.
+  it("drops the stack preview's Negative line on a CFG-free engine but keeps it otherwise", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const stackPreset = {
+      id: "film_look",
+      name: "Film Look",
+      kind: "general",
+      prompt: { suffix: "Kodak Portra 400" },
+      defaults: { negativePrompt: "blurry, low quality" },
+    };
+    await render(
+      baseContext({ createImageJob, imageModels: [GUIDED, CFG_FREE], presets: [stackPreset] }),
+    );
+
+    const chip = [...container.querySelectorAll(".general-preset-chips .preset-chip")].find(
+      (el) => el.textContent.trim() === "Film Look",
+    );
+    expect(chip, "the general preset must be offered").toBeTruthy();
+    await click(chip);
+
+    // SDXL takes a negative prompt, so the preview states the contribution AND the run sends it.
+    let preview = container.querySelector(".preset-stack-preview");
+    expect(preview.textContent).toContain("Kodak Portra 400");
+    expect(preview.textContent).toContain("Negative: blurry, low quality");
+    await generate();
+    expect(createImageJob.mock.calls[0][0].negativePrompt).toBe("blurry, low quality");
+
+    // Same stack, CFG-free engine: the composed PROMPT is still shown (it is still sent), but the
+    // Negative line is gone — because the payload no longer carries it.
+    await act(async () => setSelect(field(container, "Model"), "flux_schnell"));
+    await act(async () => {});
+    preview = container.querySelector(".preset-stack-preview");
+    expect(preview.textContent).toContain("Kodak Portra 400");
+    expect(preview.textContent).not.toContain("Negative:");
+
+    await generate();
+    const payload = createImageJob.mock.calls[1][0];
+    expect(payload.model).toBe("flux_schnell");
+    expect(payload.negativePrompt).toBe("");
+  });
 });
