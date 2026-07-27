@@ -41,6 +41,7 @@ const MAX_FACET_LIMIT: u32 = 100;
 const SCHEDULED_SCAN_PASS_ROWS: u64 = 25_000;
 const PARQUET_SCAN_CHECKPOINT_KEY: &str = "scanner.parquet.checkpoint.v1";
 const CATALOG_SCAN_START_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const CATALOG_SCAN_MAX_CONTENTION_RETRIES: u8 = 6;
 const CATALOG_PREFLIGHT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const CATALOG_PREFLIGHT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1155,6 +1156,10 @@ async fn schedule_catalog_scan(
     let terminal_exit_reached = state.catalog_scan_terminal_exit_reached.clone();
     #[cfg(test)]
     let terminal_exit_release = state.catalog_scan_terminal_exit_release.clone();
+    #[cfg(test)]
+    let injected_sqlite_busy_failures = state.catalog_scan_injected_sqlite_busy_failures.clone();
+    #[cfg(test)]
+    let contention_backoff_started = state.catalog_scan_contention_backoff_started.clone();
     let work_slots = state.catalog_scan_work_slots.clone();
     let log_catalog_id = catalog_id.clone();
     let rejected_config_dir = config_dir.clone();
@@ -1178,7 +1183,9 @@ async fn schedule_catalog_scan(
                 }
             }
             let mut retry_delay = std::time::Duration::from_millis(10);
-            let mut driver = loop {
+            let mut contention_retries = 0_u8;
+            'driver_session: loop {
+                let mut driver = loop {
                 if cancellation.is_cancelled() {
                     reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
                     return;
@@ -1194,6 +1201,30 @@ async fn schedule_catalog_scan(
                 .await;
                 match start {
                     Ok(Some(Ok(driver))) => break driver,
+                    Ok(Some(Err(error))) if error.is_retryable_contention() => {
+                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                            publish_catalog_scan_contention_exhausted(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        contention_retries = contention_retries.saturating_add(1);
+                        tokio::select! {
+                            _ = tokio::time::sleep(retry_delay) => {}
+                            _ = cancellation.cancelled() => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                ).await;
+                                return;
+                            },
+                        }
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                    }
                     Ok(Some(Err(CatalogParquetScanError::Busy(_)))) => {
                         let retry_config_dir = config_dir.clone();
                         let retry_catalog_id = catalog_id.clone();
@@ -1295,12 +1326,33 @@ async fn schedule_catalog_scan(
                         return;
                     }
                 }
-            };
-            loop {
+                };
+                loop {
                 let pass_source = plan.source.clone();
                 let pass_options = plan.options.clone();
                 let pass_cancellation = cancellation.clone();
+                #[cfg(test)]
+                let pass_injected_sqlite_busy_failures = injected_sqlite_busy_failures.clone();
                 let result = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                    #[cfg(test)]
+                    if pass_injected_sqlite_busy_failures
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |remaining| remaining.checked_sub(1),
+                        )
+                        .is_ok()
+                    {
+                        return (
+                            driver,
+                            Err(CatalogParquetScanError::Catalog(CatalogError::Sqlite(
+                                rusqlite::Error::SqliteFailure(
+                                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                                    Some("injected scheduler contention".to_owned()),
+                                ),
+                            ))),
+                        );
+                    }
                     let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
                         pass_cancellation.is_cancelled()
                     });
@@ -1319,6 +1371,8 @@ async fn schedule_catalog_scan(
                     }
                     Ok(Some((next_driver, Ok(report)))) => {
                         driver = next_driver;
+                        contention_retries = 0;
+                        retry_delay = std::time::Duration::from_millis(10);
                         if report.paused || report.checkpoint.complete {
                             drop(driver);
                             #[cfg(test)]
@@ -1336,15 +1390,15 @@ async fn schedule_catalog_scan(
                                 )
                                 .await;
                             }
-                            break;
+                            break 'driver_session;
                         }
                         #[cfg(test)]
                         if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            break;
+                            break 'driver_session;
                         }
                         if cancellation.is_cancelled() {
                             driver.publish_interrupted();
-                            break;
+                            break 'driver_session;
                         }
                     }
                     Ok(Some((_next_driver, Err(CatalogParquetScanError::Interrupted(error))))) => {
@@ -1354,7 +1408,52 @@ async fn schedule_catalog_scan(
                             error,
                             "catalog Parquet scanner stopped for server shutdown"
                         );
-                        break;
+                        break 'driver_session;
+                    }
+                    Ok(Some((next_driver, Err(error)))) if error.is_retryable_contention() => {
+                        tracing::debug!(
+                            event = "catalog_parquet_scan_contention_retry",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner will retry transient SQLite contention"
+                        );
+                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                            if let Err(publish_error) = next_driver.publish_contention_exhausted() {
+                                tracing::error!(
+                                    event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
+                                    catalog_id,
+                                    error = %publish_error,
+                                    "catalog Parquet scanner could not publish contention exhaustion"
+                                );
+                            }
+                            break 'driver_session;
+                        }
+                        contention_retries = contention_retries.saturating_add(1);
+                        drop(next_driver);
+                        #[cfg(test)]
+                        contention_backoff_started.notify_waiters();
+                        if cancellation.is_cancelled() {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                            break 'driver_session;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(retry_delay) => {}
+                            _ = cancellation.cancelled() => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                ).await;
+                                break 'driver_session;
+                            },
+                        }
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                        continue 'driver_session;
                     }
                     Ok(Some((_next_driver, Err(error)))) => {
                         tracing::error!(
@@ -1363,14 +1462,15 @@ async fn schedule_catalog_scan(
                             error = %error,
                             "catalog Parquet scanner stopped"
                         );
-                        break;
+                        break 'driver_session;
                     }
                     Ok(None) => {
                         reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
                             .await;
-                        break;
+                        break 'driver_session;
                     }
                 }
+            }
             }
         })
         .await;
@@ -1389,6 +1489,49 @@ async fn schedule_catalog_scan(
                 event = "catalog_parquet_scan_rejected_during_shutdown",
                 catalog_id = log_catalog_id,
                 "catalog Parquet scan was not started because the server is shutting down"
+            );
+        }
+    }
+}
+
+async fn publish_catalog_scan_contention_exhausted(config_dir: PathBuf, catalog_id: String) {
+    let log_catalog_id = catalog_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&catalog_id)?;
+        let _lease = CatalogProcessingLease::try_acquire(&catalog)?;
+        let mut progress = catalog.contract_state()?.processing;
+        progress.state = CatalogProcessingState::Failed;
+        progress.message = Some(
+            "Catalog scan stopped after repeated database contention; restart it to resume."
+                .to_owned(),
+        );
+        progress.updated_at = sceneworks_core::catalog_store::catalog_timestamp_now();
+        catalog.set_processing_progress(&progress)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhausted",
+                catalog_id = log_catalog_id,
+                "catalog Parquet scanner exhausted bounded SQLite contention retries"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scanner exhausted retries and could not publish terminal state"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhaustion_task_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scanner exhaustion publisher stopped"
             );
         }
     }
@@ -1413,9 +1556,14 @@ async fn reconcile_cancelled_catalog_scan(config_dir: PathBuf, catalog_id: Strin
         if control.desired_state != CatalogProcessingDesiredState::Running
             || matches!(
                 progress.state,
-                CatalogProcessingState::Completed | CatalogProcessingState::Failed
+                CatalogProcessingState::Paused
+                    | CatalogProcessingState::Completed
+                    | CatalogProcessingState::Failed
             )
         {
+            // A paused processor already published a clean durable boundary.
+            // If shutdown races with its queued successor, preserve that state
+            // and desired=running so a new AppState can discover and resume it.
             return Ok(false);
         }
         progress.state = CatalogProcessingState::Failed;

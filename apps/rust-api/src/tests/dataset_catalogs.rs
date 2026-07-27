@@ -1282,13 +1282,12 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     assert_eq!(shutdown.joined, 1);
     let registry = CatalogRegistry::new(temporary.path().join("config"));
     let stranded = registry.open_attached(&id).expect("catalog opens");
+    let stranded_contract = stranded.contract_state().expect("contract reads");
     assert_eq!(
-        stranded
-            .contract_state()
-            .expect("contract reads")
-            .processing
-            .state,
-        CatalogProcessingState::Paused
+        stranded_contract.processing.state,
+        CatalogProcessingState::Paused,
+        "{:?}",
+        stranded_contract.processing
     );
     assert_eq!(
         stranded
@@ -1324,6 +1323,190 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     .await;
     assert_eq!(completed["processing"]["state"], "completed", "{completed}");
     assert_eq!(completed["counts"]["recordCount"], 100_000);
+}
+
+#[tokio::test]
+async fn transient_sqlite_contention_retries_and_completes_exactly() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 1_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_injected_sqlite_busy_failures
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Contention retry",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 1_000);
+    assert_eq!(
+        state
+            .catalog_scan_injected_sqlite_busy_failures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn exhausted_sqlite_contention_is_visible_and_actionable() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 10);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state.catalog_scan_injected_sqlite_busy_failures.store(
+        u64::from(crate::catalogs::CATALOG_SCAN_MAX_CONTENTION_RETRIES) + 1,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Contention exhaustion",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, failed) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(failed["processing"]["state"], "failed", "{failed}");
+    assert!(
+        failed["processing"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("database contention")),
+        "{failed}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 100_000);
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Backoff shutdown",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+    let mut running = None;
+    for _ in 0..1_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "running" {
+            running = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let running = running.expect("scan starts");
+    let (pause_status, paused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/pause"),
+        json!({"expectedRevision": running["processingControl"]["revision"]}),
+    )
+    .await;
+    assert_eq!(pause_status, StatusCode::OK, "{paused}");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, durable_pause) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(durable_pause["processing"]["state"], "paused");
+
+    state
+        .catalog_scan_injected_sqlite_busy_failures
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let backoff_started = state.catalog_scan_contention_backoff_started.notified();
+    tokio::pin!(backoff_started);
+    backoff_started.as_mut().enable();
+    let (resume_status, resumed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({"expectedRevision": durable_pause["processingControl"]["revision"]}),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+    tokio::time::timeout(Duration::from_secs(60), backoff_started)
+        .await
+        .expect("injected contention enters backoff");
+    let shutdown = state.catalog_scan_supervisor.shutdown().await;
+    assert_eq!(shutdown.requested, 1);
+    assert_eq!(shutdown.joined, 1);
+
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let catalog = registry.open_attached(&id).expect("catalog opens");
+    let contract = catalog.contract_state().expect("contract reads");
+    assert_eq!(contract.processing.state, CatalogProcessingState::Paused);
+    assert_eq!(
+        catalog.processing_control().unwrap().desired_state,
+        sceneworks_core::catalog_store::CatalogProcessingDesiredState::Running
+    );
 }
 
 #[tokio::test]

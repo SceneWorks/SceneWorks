@@ -1247,6 +1247,10 @@ fn create_app_with_state_mode(
         #[cfg(test)]
         catalog_scan_preflight_test_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(test)]
+        catalog_scan_injected_sqlite_busy_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(test)]
+        catalog_scan_contention_backoff_started: Arc::new(tokio::sync::Notify::new()),
+        #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),

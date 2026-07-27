@@ -46,6 +46,7 @@ const MAX_SAVED_VIEWS: u64 = 200;
 const MAX_REJECTION_REASON_BYTES: usize = 2_048;
 const CATALOG_WAL_AUTOCHECKPOINT_PAGES: u32 = 20_000;
 const CATALOG_HEIGHT_INDEX_NAME: &str = "idx_catalog_search_height";
+const CATALOG_RECORD_LOOKUP_BATCH_SIZE: usize = 400;
 
 #[derive(Clone, Copy)]
 struct CatalogIndexSpec {
@@ -759,19 +760,58 @@ impl Catalog {
         records: &[NewCatalogRecord],
         metadata: &[(&str, &str)],
     ) -> CatalogResult<usize> {
+        self.append_records_metadata_and_progress(records, metadata, None)
+    }
+
+    /// Atomically appends a bounded scanner batch, advances its caller-owned
+    /// checkpoint metadata, and publishes typed processing progress.
+    ///
+    /// Reserved catalog metadata remains inaccessible through `metadata`;
+    /// processor progress can only be written through its validated type.
+    pub fn append_records_and_metadata_with_progress(
+        &mut self,
+        records: &[NewCatalogRecord],
+        metadata: &[(&str, &str)],
+        progress: &CatalogProcessingProgress,
+    ) -> CatalogResult<usize> {
+        self.append_records_metadata_and_progress(records, metadata, Some(progress))
+    }
+
+    fn append_records_metadata_and_progress(
+        &mut self,
+        records: &[NewCatalogRecord],
+        metadata: &[(&str, &str)],
+        progress: Option<&CatalogProcessingProgress>,
+    ) -> CatalogResult<usize> {
         for record in records {
             validate_record(record)?;
         }
         for (key, value) in metadata {
             validate_metadata_entry(key, value)?;
         }
+        if let Some(progress) = progress {
+            validate_processing_progress(progress)?;
+        }
+        let progress_payload = progress.map(serde_json::to_string).transpose()?;
+        let mut transaction_metadata =
+            Vec::with_capacity(metadata.len() + usize::from(progress_payload.is_some()));
+        transaction_metadata.extend_from_slice(metadata);
+        if let Some(progress_payload) = progress_payload.as_deref() {
+            transaction_metadata.push((PROGRESS_METADATA_KEY, progress_payload));
+        }
         let database_path = self.database_path();
         let transaction = self
             .connection
-            .transaction()
+            // Acquire the WAL writer slot before the existing-id read. A
+            // deferred read transaction can otherwise lose a snapshot upgrade
+            // race and fail immediately with SQLITE_BUSY_SNAPSHOT.
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&database_path, error))?;
-        let existing_record_ids =
-            existing_record_ids(&transaction, &database_path, records.iter())?;
+        let existing_record_ids = query_existing_record_ids(
+            &transaction,
+            &database_path,
+            records.iter().map(|record| record.id.as_str()),
+        )?;
         let mut unique_record_ids = HashSet::with_capacity(records.len());
         let added_record_count = records
             .iter()
@@ -787,7 +827,12 @@ impl Catalog {
             records.iter(),
             Some(&existing_record_ids),
         )?;
-        upsert_catalog_metadata(&transaction, &database_path, metadata, added_record_count)?;
+        upsert_catalog_metadata(
+            &transaction,
+            &database_path,
+            &transaction_metadata,
+            added_record_count,
+        )?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
@@ -807,11 +852,7 @@ impl Catalog {
     }
 
     pub fn contains_record_id(&self, record_id: &str) -> CatalogResult<bool> {
-        if record_id.trim().is_empty() || record_id.len() > 512 || record_id.contains('\0') {
-            return Err(CatalogError::InvalidCatalog(
-                "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
-            ));
-        }
+        validate_record_id(record_id)?;
         self.connection
             .query_row(
                 "select exists(select 1 from catalog_records where id = ?1)",
@@ -819,6 +860,17 @@ impl Catalog {
                 |row| row.get(0),
             )
             .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    pub fn existing_record_ids(&self, record_ids: &[String]) -> CatalogResult<HashSet<String>> {
+        for record_id in record_ids {
+            validate_record_id(record_id)?;
+        }
+        query_existing_record_ids(
+            &self.connection,
+            &self.database_path(),
+            record_ids.iter().map(String::as_str),
+        )
     }
 
     pub fn record_by_id(&self, record_id: &str) -> CatalogResult<CatalogRecord> {
@@ -2295,11 +2347,7 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
-    if record.id.trim().is_empty() || record.id.len() > 512 || record.id.contains('\0') {
-        return Err(CatalogError::InvalidCatalog(
-            "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
-        ));
-    }
+    validate_record_id(&record.id)?;
     validate_catalog_relative_path(&record.image_path, "image")?;
     for path in [
         record.thumbnail_path.as_deref(),
@@ -2634,25 +2682,25 @@ fn upsert_catalog_metadata(
     Ok(())
 }
 
-fn existing_record_ids<'a>(
-    transaction: &Transaction<'_>,
+fn query_existing_record_ids<'a>(
+    connection: &Connection,
     database_path: &Path,
-    records: impl IntoIterator<Item = &'a NewCatalogRecord>,
+    record_ids: impl IntoIterator<Item = &'a str>,
 ) -> CatalogResult<HashSet<String>> {
-    let records = records.into_iter().collect::<Vec<_>>();
+    let record_ids = record_ids.into_iter().collect::<Vec<_>>();
     let mut existing = HashSet::new();
-    for records in records.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
+    for record_ids in record_ids.chunks(CATALOG_RECORD_LOOKUP_BATCH_SIZE) {
         let mut sql = String::from("select id from catalog_records where id in (");
-        let mut bindings = Vec::with_capacity(records.len());
-        for (index, record) in records.iter().enumerate() {
+        let mut bindings = Vec::with_capacity(record_ids.len());
+        for (index, record_id) in record_ids.iter().enumerate() {
             if index > 0 {
                 sql.push(',');
             }
             sql.push('?');
-            bindings.push(SqlValue::Text(record.id.clone()));
+            bindings.push(SqlValue::Text((*record_id).to_owned()));
         }
         sql.push(')');
-        let mut statement = transaction
+        let mut statement = connection
             .prepare_cached(&sql)
             .map_err(|error| map_sqlite_error(database_path, error))?;
         let ids = statement
@@ -5864,6 +5912,50 @@ mod tests {
         for (key, expected) in original {
             assert_eq!(reopened.metadata(key).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn scanner_records_checkpoint_and_progress_roll_back_together() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Atomic scanner state").unwrap();
+        let original_progress = catalog.contract_state().unwrap().processing;
+        catalog
+            .connection
+            .execute_batch(
+                "create trigger fail_scanner_progress
+                 before insert on catalog_metadata
+                 when new.key = 'processing_progress'
+                 begin
+                     select raise(abort, 'injected scanner progress failure');
+                 end;",
+            )
+            .unwrap();
+        let progress = CatalogProcessingProgress {
+            state: CatalogProcessingState::Running,
+            candidate_count: 1,
+            processed_count: 1,
+            accepted_count: 1,
+            message: Some("scanner batch".to_owned()),
+            updated_at: catalog_timestamp_now(),
+            ..CatalogProcessingProgress::default()
+        };
+
+        assert!(matches!(
+            catalog.append_records_and_metadata_with_progress(
+                &[record("atomic-scanner-record")],
+                &[("scanner.test.checkpoint", r#"{"row":1}"#)],
+                &progress,
+            ),
+            Err(CatalogError::Sqlite(_))
+        ));
+        assert!(!catalog.contains_record_id("atomic-scanner-record").unwrap());
+        assert_eq!(catalog.metadata("scanner.test.checkpoint").unwrap(), None);
+        assert_eq!(
+            catalog.contract_state().unwrap().processing,
+            original_progress
+        );
+        assert_eq!(catalog.record_count().unwrap(), 0);
     }
 
     #[test]

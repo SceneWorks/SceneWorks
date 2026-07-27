@@ -23,6 +23,10 @@ use std::time::UNIX_EPOCH;
 const CHECKPOINT_KEY: &str = "scanner.parquet.checkpoint.v1";
 const DEFAULT_BATCH_SIZE: usize = 1_000;
 const MAX_BATCH_SIZE: usize = 10_000;
+/// Normal running checkpoints never span more source rows than this. Pause,
+/// cancellation, row-budget yield, row-group/shard boundaries, and completion
+/// flush sooner.
+const MAX_DURABLE_REPLAY_ROWS: usize = 500;
 const MAX_CAPTION_CHARS: usize = 2_048;
 const MAX_IMAGE_EDGE: u32 = 16_384;
 const MAX_COLUMN_NAME_CHARS: usize = 256;
@@ -60,6 +64,23 @@ impl std::fmt::Display for CatalogParquetScanError {
 }
 
 impl std::error::Error for CatalogParquetScanError {}
+
+impl CatalogParquetScanError {
+    /// SQLite may reject a read-to-write transition immediately when another
+    /// catalog connection wins the WAL snapshot race. The scheduler can safely
+    /// retry because scanner records, checkpoint, and progress share one
+    /// transaction.
+    pub fn is_retryable_contention(&self) -> bool {
+        matches!(
+            self,
+            Self::Catalog(CatalogError::Sqlite(error))
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                )
+        )
+    }
+}
 
 impl From<std::io::Error> for CatalogParquetScanError {
     fn from(error: std::io::Error) -> Self {
@@ -101,7 +122,11 @@ pub struct CatalogParquetScanOptions {
     pub require_people: bool,
     pub max_unsafe_score: Option<f64>,
     pub min_aesthetic_score: Option<f64>,
-    /// Transaction size. This does not change the semantic scan identity.
+    /// Cooperative decode/control interval exposed as `batchSize`. Pause and
+    /// cancellation are checked at every interval. Normal running checkpoints
+    /// are independently capped at `MAX_DURABLE_REPLAY_ROWS`; row-budget yield,
+    /// row-group/shard boundaries, and lifecycle transitions flush immediately.
+    /// This operational setting does not change the semantic scan identity.
     pub batch_size: usize,
     /// Optional per-invocation row budget, used by schedulers to yield and
     /// resume long scans. This does not change the semantic scan identity.
@@ -178,6 +203,8 @@ pub struct AttachedCatalogParquetScanDriver {
     after_initial_enumeration: Option<TestPathHook>,
     #[cfg(test)]
     before_shard_open: Option<TestPathHook>,
+    #[cfg(test)]
+    fail_before_durable_flush_after_rows: Option<u64>,
 }
 
 impl AttachedCatalogParquetScanDriver {
@@ -203,6 +230,8 @@ impl AttachedCatalogParquetScanDriver {
             after_initial_enumeration: None,
             #[cfg(test)]
             before_shard_open: None,
+            #[cfg(test)]
+            fail_before_durable_flush_after_rows: None,
         })
     }
 
@@ -214,9 +243,9 @@ impl AttachedCatalogParquetScanDriver {
         self.scan_pass_with_cancel(source, options, || false)
     }
 
-    /// Runs one bounded pass and observes process cancellation at every durable
-    /// batch boundary. The checkpoint is committed before interruption is
-    /// published, so a later public restart resumes without replaying rows.
+    /// Runs one bounded pass and observes process cancellation at every
+    /// cooperative control interval. Pending rows and their checkpoint are
+    /// committed together before interruption is published.
     pub fn scan_pass_with_cancel<F>(
         &mut self,
         source: &Path,
@@ -226,6 +255,7 @@ impl AttachedCatalogParquetScanDriver {
     where
         F: Fn() -> bool,
     {
+        let progress_before = self.catalog.contract_state()?.processing;
         let result = (|| {
             match self.prepared.as_mut() {
                 Some(prepared) => prepared.verify_pass(source, options, &should_cancel)?,
@@ -250,10 +280,12 @@ impl AttachedCatalogParquetScanDriver {
                     .expect("prepared scan is initialized above"),
                 options,
                 &should_cancel,
+                #[cfg(test)]
+                self.fail_before_durable_flush_after_rows.take(),
             )
         })();
         if let Err(error) = &result {
-            publish_scan_failure(&self.catalog, error);
+            publish_scan_failure(&self.catalog, error, Some(&progress_before));
         }
         result
     }
@@ -281,6 +313,25 @@ impl AttachedCatalogParquetScanDriver {
         self.before_shard_open = Some(Box::new(hook));
     }
 
+    #[cfg(test)]
+    fn fail_before_durable_flush_after_rows(&mut self, rows: u64) {
+        self.fail_before_durable_flush_after_rows = Some(rows);
+    }
+
+    /// Publishes terminal state after the scheduler exhausts bounded retries
+    /// for transient SQLite contention.
+    pub fn publish_contention_exhausted(&self) -> CatalogParquetScanResult<()> {
+        let mut progress = self.catalog.contract_state()?.processing;
+        progress.state = CatalogProcessingState::Failed;
+        progress.message = Some(
+            "Catalog scan stopped after repeated database contention; restart it to resume."
+                .to_owned(),
+        );
+        progress.updated_at = catalog_timestamp_now();
+        self.catalog.set_processing_progress(&progress)?;
+        Ok(())
+    }
+
     /// Marks a between-pass cancellation durably before releasing the lease.
     pub fn publish_interrupted(&self) {
         publish_scan_failure(
@@ -288,6 +339,7 @@ impl AttachedCatalogParquetScanDriver {
             &CatalogParquetScanError::Interrupted(
                 "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
             ),
+            None,
         );
     }
 }
@@ -611,13 +663,33 @@ fn scan_parquet_catalog(
     })?;
     let result = scan_parquet_catalog_under_lease(catalog, source, options, &|| false);
     if let Err(error) = &result {
-        publish_scan_failure(catalog, error);
+        publish_scan_failure(catalog, error, None);
     }
     result
 }
 
-fn publish_scan_failure(catalog: &Catalog, error: &CatalogParquetScanError) {
+fn publish_scan_failure(
+    catalog: &Catalog,
+    error: &CatalogParquetScanError,
+    progress_before: Option<&CatalogProcessingProgress>,
+) {
+    if error.is_retryable_contention() {
+        return;
+    }
     if let Ok(mut progress) = catalog.contract_state().map(|state| state.processing) {
+        if matches!(error, CatalogParquetScanError::Interrupted(_)) {
+            if let Some(previous) = progress_before.filter(|previous| {
+                previous.state == CatalogProcessingState::Paused
+                    && progress.processed_count == previous.processed_count
+            }) {
+                // A queued successor can be canceled by server shutdown before
+                // it advances its first durable batch. Restore the
+                // predecessor's clean Paused boundary so desired=running
+                // remains discoverable instead of publishing a false failure.
+                let _ = catalog.set_processing_progress(previous);
+                return;
+            }
+        }
         progress.state = CatalogProcessingState::Failed;
         progress.message = Some(match error {
             CatalogParquetScanError::Interrupted(detail) => detail.clone(),
@@ -646,7 +718,7 @@ fn scan_parquet_catalog_under_lease(
         #[cfg(test)]
         None,
     )?;
-    scan_prepared_parquet_catalog_under_lease(catalog, &mut prepared, options, should_cancel)
+    scan_prepared_parquet_catalog_under_lease(catalog, &mut prepared, options, should_cancel, None)
 }
 
 fn scan_prepared_parquet_catalog_under_lease(
@@ -654,6 +726,7 @@ fn scan_prepared_parquet_catalog_under_lease(
     prepared: &mut PreparedCatalogParquetScan,
     options: &CatalogParquetScanOptions,
     should_cancel: &dyn Fn() -> bool,
+    #[cfg(test)] fail_before_durable_flush_after_rows: Option<u64>,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
     let mut checkpoint = load_checkpoint(
         catalog,
@@ -686,23 +759,30 @@ fn scan_prepared_parquet_catalog_under_lease(
             paused: true,
         });
     }
-    publish_progress(
-        catalog,
-        &checkpoint,
-        CatalogProcessingState::Running,
-        Some("Scanning Parquet metadata"),
-    )?;
     if should_cancel() {
         return Err(CatalogParquetScanError::Interrupted(
             "Catalog scan interrupted by server shutdown; restart it to continue.".to_owned(),
         ));
     }
+    // A queued resume retains its last durable Paused boundary until the first
+    // atomic records/checkpoint/progress commit. New and yielded scans still
+    // publish Running promptly for public observability.
+    let previous_progress = catalog.contract_state()?.processing;
+    let candidate_count_floor = previous_progress.candidate_count;
+    if previous_progress.state != CatalogProcessingState::Paused {
+        publish_progress(
+            catalog,
+            &checkpoint,
+            CatalogProcessingState::Running,
+            Some("Scanning Parquet metadata"),
+        )?;
+    }
 
-    let batch_size = options.batch_size.clamp(1, MAX_BATCH_SIZE);
+    let cooperative_control_rows = options.batch_size.clamp(1, MAX_BATCH_SIZE);
     let row_budget = options.max_rows.unwrap_or(u64::MAX);
     let mut rows_this_pass = 0_u64;
-    let mut pending = Vec::with_capacity(batch_size);
-    let mut pending_ids = HashSet::with_capacity(batch_size);
+    let mut pending = Vec::with_capacity(MAX_DURABLE_REPLAY_ROWS);
+    let mut pending_ids = HashSet::with_capacity(MAX_DURABLE_REPLAY_ROWS);
 
     for shard_index in checkpoint.shard..prepared.shards.len() {
         let shard = prepared.shards[shard_index].path.clone();
@@ -723,20 +803,24 @@ fn scan_prepared_parquet_catalog_under_lease(
             let rows = row_group.get_row_iter(None)?;
             for (row_index, row) in rows.enumerate().skip(row_start as usize) {
                 if rows_this_pass >= row_budget {
-                    let paused = flush_batch(catalog, &mut pending, &checkpoint)?;
+                    let pause_requested = catalog.processing_control()?.desired_state
+                        == CatalogProcessingDesiredState::Paused;
+                    let paused = flush_batch(
+                        catalog,
+                        &mut pending,
+                        &mut checkpoint,
+                        candidate_count_floor,
+                        if pause_requested {
+                            FlushDisposition::Pause
+                        } else {
+                            FlushDisposition::Yield
+                        },
+                    )?;
                     if should_cancel() && !paused {
                         return Err(CatalogParquetScanError::Interrupted(
                             "Catalog scan interrupted by server shutdown; restart it to continue."
                                 .to_owned(),
                         ));
-                    }
-                    if !paused {
-                        publish_progress(
-                            catalog,
-                            &checkpoint,
-                            CatalogProcessingState::Running,
-                            Some("Parquet scan queued for its next bounded pass"),
-                        )?;
                     }
                     return Ok(CatalogParquetScanReport {
                         checkpoint,
@@ -760,12 +844,9 @@ fn scan_prepared_parquet_catalog_under_lease(
                         options,
                     ) {
                         RowOutcome::Accept(record) => {
-                            if pending_ids.contains(&record.id)
-                                || catalog.contains_record_id(&record.id)?
-                            {
+                            if !pending_ids.insert(record.id.clone()) {
                                 increment_duplicate(&mut checkpoint.counts);
                             } else {
-                                pending_ids.insert(record.id.clone());
                                 pending.push(record);
                                 checkpoint.counts.accepted =
                                     checkpoint.counts.accepted.saturating_add(1);
@@ -781,9 +862,24 @@ fn scan_prepared_parquet_catalog_under_lease(
                     Err(_) => increment_malformed(&mut checkpoint.counts, "row_decode"),
                 }
 
-                if pending.len() >= batch_size || checkpoint.counts.scanned % batch_size as u64 == 0
-                {
-                    if flush_batch(catalog, &mut pending, &checkpoint)? {
+                #[cfg(test)]
+                if fail_before_durable_flush_after_rows == Some(rows_this_pass) {
+                    return Err(CatalogParquetScanError::Interrupted(
+                        "Injected crash before the next durable scanner checkpoint.".to_owned(),
+                    ));
+                }
+
+                if checkpoint.counts.scanned % cooperative_control_rows as u64 == 0 {
+                    let pause_requested = catalog.processing_control()?.desired_state
+                        == CatalogProcessingDesiredState::Paused;
+                    if pause_requested {
+                        flush_batch(
+                            catalog,
+                            &mut pending,
+                            &mut checkpoint,
+                            candidate_count_floor,
+                            FlushDisposition::Pause,
+                        )?;
                         return Ok(CatalogParquetScanReport {
                             checkpoint,
                             source_shards: prepared.shard_paths(),
@@ -791,17 +887,47 @@ fn scan_prepared_parquet_catalog_under_lease(
                         });
                     }
                     if should_cancel() {
+                        flush_batch(
+                            catalog,
+                            &mut pending,
+                            &mut checkpoint,
+                            candidate_count_floor,
+                            FlushDisposition::Continue,
+                        )?;
                         return Err(CatalogParquetScanError::Interrupted(
                             "Catalog scan interrupted by server shutdown; restart it to continue."
                                 .to_owned(),
                         ));
                     }
+                }
+                if checkpoint.counts.scanned % MAX_DURABLE_REPLAY_ROWS as u64 == 0
+                    || pending.len() >= MAX_DURABLE_REPLAY_ROWS
+                {
+                    flush_batch(
+                        catalog,
+                        &mut pending,
+                        &mut checkpoint,
+                        candidate_count_floor,
+                        FlushDisposition::Continue,
+                    )?;
                     pending_ids.clear();
                 }
             }
             checkpoint.row_group = row_group_index + 1;
             checkpoint.row = 0;
-            if flush_batch(catalog, &mut pending, &checkpoint)? {
+            let pause_requested = catalog.processing_control()?.desired_state
+                == CatalogProcessingDesiredState::Paused;
+            if flush_batch(
+                catalog,
+                &mut pending,
+                &mut checkpoint,
+                candidate_count_floor,
+                if pause_requested {
+                    FlushDisposition::Pause
+                } else {
+                    FlushDisposition::Continue
+                },
+            )? {
                 return Ok(CatalogParquetScanReport {
                     checkpoint,
                     source_shards: prepared.shard_paths(),
@@ -819,7 +945,19 @@ fn scan_prepared_parquet_catalog_under_lease(
         checkpoint.shard = shard_index + 1;
         checkpoint.row_group = 0;
         checkpoint.row = 0;
-        if flush_batch(catalog, &mut pending, &checkpoint)? {
+        let pause_requested =
+            catalog.processing_control()?.desired_state == CatalogProcessingDesiredState::Paused;
+        if flush_batch(
+            catalog,
+            &mut pending,
+            &mut checkpoint,
+            candidate_count_floor,
+            if pause_requested {
+                FlushDisposition::Pause
+            } else {
+                FlushDisposition::Continue
+            },
+        )? {
             return Ok(CatalogParquetScanReport {
                 checkpoint,
                 source_shards: prepared.shard_paths(),
@@ -835,12 +973,12 @@ fn scan_prepared_parquet_catalog_under_lease(
     }
 
     checkpoint.complete = true;
-    flush_batch(catalog, &mut pending, &checkpoint)?;
-    publish_progress(
+    flush_batch(
         catalog,
-        &checkpoint,
-        CatalogProcessingState::Completed,
-        Some("Parquet scan complete"),
+        &mut pending,
+        &mut checkpoint,
+        candidate_count_floor,
+        FlushDisposition::Complete,
     )?;
     Ok(CatalogParquetScanReport {
         checkpoint,
@@ -982,7 +1120,7 @@ fn preflight_interrupted() -> CatalogParquetScanError {
 fn validate_options(options: &CatalogParquetScanOptions) -> CatalogParquetScanResult<()> {
     if options.batch_size == 0 || options.batch_size > MAX_BATCH_SIZE {
         return Err(CatalogParquetScanError::InvalidSource(format!(
-            "Parquet catalog batch size must be between 1 and {MAX_BATCH_SIZE}."
+            "Parquet catalog batchSize control interval must be between 1 and {MAX_BATCH_SIZE}."
         )));
     }
     if options.max_rows == Some(0) {
@@ -1096,30 +1234,59 @@ fn load_checkpoint(
     Ok(checkpoint)
 }
 
+#[derive(Clone, Copy)]
+enum FlushDisposition {
+    Continue,
+    Pause,
+    Yield,
+    Complete,
+}
+
 fn flush_batch(
     catalog: &mut Catalog,
     pending: &mut Vec<NewCatalogRecord>,
-    checkpoint: &CatalogParquetCheckpoint,
+    checkpoint: &mut CatalogParquetCheckpoint,
+    candidate_count_floor: u64,
+    disposition: FlushDisposition,
 ) -> CatalogParquetScanResult<bool> {
+    let candidate_ids = pending
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    let existing = catalog.existing_record_ids(&candidate_ids)?;
+    if !existing.is_empty() {
+        let duplicate_count = existing.len() as u64;
+        checkpoint.counts.accepted = checkpoint.counts.accepted.saturating_sub(duplicate_count);
+        checkpoint.counts.duplicate = checkpoint.counts.duplicate.saturating_add(duplicate_count);
+        let duplicate_reason = checkpoint
+            .counts
+            .reasons
+            .entry("duplicate_url".to_owned())
+            .or_default();
+        *duplicate_reason = duplicate_reason.saturating_add(duplicate_count);
+        pending.retain(|record| !existing.contains(&record.id));
+    }
+    let paused = matches!(disposition, FlushDisposition::Pause);
+    let (state, message) = if matches!(disposition, FlushDisposition::Complete) {
+        (CatalogProcessingState::Completed, "Parquet scan complete")
+    } else if paused {
+        (CatalogProcessingState::Paused, "Paused by user")
+    } else if matches!(disposition, FlushDisposition::Yield) {
+        (
+            CatalogProcessingState::Running,
+            "Parquet scan queued for its next bounded pass",
+        )
+    } else {
+        (CatalogProcessingState::Running, "Scanning Parquet metadata")
+    };
+    let progress = progress_for_checkpoint(checkpoint, candidate_count_floor, state, Some(message));
     let payload = serde_json::to_string(checkpoint)?;
-    catalog.append_records_and_metadata(pending, &[(CHECKPOINT_KEY, payload.as_str())])?;
-    pending.clear();
-    let paused =
-        catalog.processing_control()?.desired_state == CatalogProcessingDesiredState::Paused;
-    publish_progress(
-        catalog,
-        checkpoint,
-        if paused {
-            CatalogProcessingState::Paused
-        } else {
-            CatalogProcessingState::Running
-        },
-        Some(if paused {
-            "Paused by user"
-        } else {
-            "Scanning Parquet metadata"
-        }),
+    catalog.append_records_and_metadata_with_progress(
+        pending,
+        &[(CHECKPOINT_KEY, payload.as_str())],
+        &progress,
     )?;
+    pending.clear();
     Ok(paused)
 }
 
@@ -1128,11 +1295,26 @@ fn publish_progress(
     checkpoint: &CatalogParquetCheckpoint,
     state: CatalogProcessingState,
     message: Option<&str>,
-) -> CatalogParquetScanResult<()> {
+) -> CatalogParquetScanResult<u64> {
     let previous = catalog.contract_state()?.processing;
-    catalog.set_processing_progress(&CatalogProcessingProgress {
+    catalog.set_processing_progress(&progress_for_checkpoint(
+        checkpoint,
+        previous.candidate_count,
         state,
-        candidate_count: previous.candidate_count.max(checkpoint.counts.scanned),
+        message,
+    ))?;
+    Ok(previous.candidate_count)
+}
+
+fn progress_for_checkpoint(
+    checkpoint: &CatalogParquetCheckpoint,
+    candidate_count_floor: u64,
+    state: CatalogProcessingState,
+    message: Option<&str>,
+) -> CatalogProcessingProgress {
+    CatalogProcessingProgress {
+        state,
+        candidate_count: candidate_count_floor.max(checkpoint.counts.scanned),
         processed_count: checkpoint.counts.scanned,
         accepted_count: checkpoint.counts.accepted,
         rejected_count: checkpoint
@@ -1142,8 +1324,7 @@ fn publish_progress(
         error_count: checkpoint.counts.malformed,
         message: message.map(str::to_owned),
         updated_at: catalog_timestamp_now(),
-    })?;
-    Ok(())
+    }
 }
 
 enum RowOutcome {
@@ -1775,6 +1956,64 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_busy_and_locked_extended_codes_are_the_only_retryable_scanner_errors() {
+        let sqlite_error = |code| {
+            CatalogParquetScanError::Catalog(CatalogError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some("message text is irrelevant".to_owned()),
+            )))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            rusqlite::ffi::SQLITE_LOCKED,
+            rusqlite::ffi::SQLITE_LOCKED_SHAREDCACHE,
+        ] {
+            assert!(sqlite_error(code).is_retryable_contention());
+        }
+        assert!(!sqlite_error(rusqlite::ffi::SQLITE_CONSTRAINT).is_retryable_contention());
+        assert!(
+            !CatalogParquetScanError::InvalidSource("not contention".to_owned())
+                .is_retryable_contention()
+        );
+    }
+
+    #[test]
+    fn non_retryable_driver_error_publishes_failed_state() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        write_rows(&source, &[vec![row("https://example.com/one.jpg", "one")]]);
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Terminal failure")
+            .unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let mut driver =
+            AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id).unwrap();
+
+        let error = driver
+            .scan_pass(
+                &source,
+                &CatalogParquetScanOptions {
+                    batch_size: 0,
+                    ..CatalogParquetScanOptions::default()
+                },
+            )
+            .expect_err("invalid options are terminal");
+        assert!(matches!(error, CatalogParquetScanError::InvalidSource(_)));
+        drop(driver);
+        let progress = registry
+            .open_attached(&catalog_id)
+            .unwrap()
+            .contract_state()
+            .unwrap()
+            .processing;
+        assert_eq!(progress.state, CatalogProcessingState::Failed);
+        assert!(progress.message.unwrap().contains("worker logs"));
+    }
+
+    #[test]
     fn catalog_scan_lease_is_exclusive_and_releases_for_same_or_changed_options() {
         let temporary = tempfile::tempdir().expect("temp directory");
         let source = temporary.path().join("source.parquet");
@@ -1968,11 +2207,14 @@ mod tests {
         );
         assert_eq!(first.checkpoint.counts.accepted, 3);
         let yielded_catalog = registry.open_attached(&catalog_id).unwrap();
+        let yielded_progress = yielded_catalog.contract_state().unwrap().processing;
         assert_eq!(
-            yielded_catalog.contract_state().unwrap().processing.state,
+            yielded_progress.state,
             CatalogProcessingState::Running,
             "incomplete bounded work remains durably recoverable as running"
         );
+        assert_eq!(yielded_progress.processed_count, 3);
+        assert_eq!(yielded_catalog.record_count().unwrap(), 3);
         yielded_catalog.close();
 
         let mismatch = scan_attached_parquet_catalog(
@@ -2012,6 +2254,255 @@ mod tests {
         let page = catalog.page_records_after(None, 10).expect("records page");
         assert_eq!(page.records[2].metadata["source"]["rowGroup"], 1);
         assert_eq!(page.records[2].metadata["source"]["row"], 0);
+    }
+
+    #[test]
+    fn cancellation_after_flush_leaves_exact_resumable_noncompleted_state() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        let urls = (0..50)
+            .map(|index| format!("https://example.com/{index}.jpg"))
+            .collect::<Vec<_>>();
+        let rows = urls
+            .iter()
+            .map(|url| TestRow {
+                url,
+                caption: "image",
+                width: 1024,
+                height: 1024,
+                unsafe_score: 0.01,
+                aesthetic: 7.0,
+                marker: 0,
+            })
+            .collect::<Vec<_>>();
+        write_rows(&source, &[rows]);
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Cancellation")
+            .unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+        let catalog_root = catalog.root().to_path_buf();
+        catalog.close();
+        let mut driver = AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id)
+            .expect("driver starts");
+
+        let interrupted = driver
+            .scan_pass_with_cancel(
+                &source,
+                &CatalogParquetScanOptions {
+                    batch_size: 25,
+                    ..CatalogParquetScanOptions::default()
+                },
+                || {
+                    Catalog::open(&catalog_root)
+                        .ok()
+                        .and_then(|catalog| catalog.contract_state().ok())
+                        .is_some_and(|state| {
+                            state.processing.state == CatalogProcessingState::Running
+                        })
+                },
+            )
+            .expect_err("shutdown observes the first cooperative control boundary");
+        assert!(matches!(
+            interrupted,
+            CatalogParquetScanError::Interrupted(_)
+        ));
+        drop(driver);
+
+        let interrupted_catalog = registry.open_attached(&catalog_id).unwrap();
+        let checkpoint: CatalogParquetCheckpoint = serde_json::from_str(
+            &interrupted_catalog
+                .metadata(CHECKPOINT_KEY)
+                .unwrap()
+                .expect("checkpoint persists"),
+        )
+        .unwrap();
+        assert_eq!(checkpoint.counts.scanned, 25);
+        assert_eq!(checkpoint.counts.accepted, 25);
+        assert!(!checkpoint.complete);
+        let interrupted_progress = interrupted_catalog.contract_state().unwrap().processing;
+        assert_eq!(interrupted_progress.processed_count, 25);
+        assert_ne!(
+            interrupted_progress.state,
+            CatalogProcessingState::Completed
+        );
+        assert_eq!(interrupted_catalog.record_count().unwrap(), 25);
+        interrupted_catalog.close();
+
+        let resumed = scan_attached_parquet_catalog(
+            &registry,
+            &catalog_id,
+            &source,
+            &CatalogParquetScanOptions {
+                batch_size: 25,
+                ..CatalogParquetScanOptions::default()
+            },
+        )
+        .expect("restart resumes at the exact committed boundary");
+        assert!(resumed.checkpoint.complete);
+        assert_eq!(resumed.checkpoint.counts.scanned, 50);
+        assert_eq!(resumed.checkpoint.counts.accepted, 50);
+        assert_eq!(
+            registry
+                .open_attached(&catalog_id)
+                .unwrap()
+                .record_count()
+                .unwrap(),
+            50
+        );
+    }
+
+    #[test]
+    fn pause_requested_at_a_control_boundary_flushes_within_one_interval() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        let urls = (0..100)
+            .map(|index| format!("https://example.com/{index}.jpg"))
+            .collect::<Vec<_>>();
+        let rows = urls
+            .iter()
+            .map(|url| TestRow {
+                url,
+                caption: "image",
+                width: 1024,
+                height: 1024,
+                unsafe_score: 0.01,
+                aesthetic: 7.0,
+                marker: 0,
+            })
+            .collect::<Vec<_>>();
+        write_rows(&source, &[rows]);
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Pause boundary")
+            .unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+        let catalog_root = catalog.root().to_path_buf();
+        catalog.close();
+        let requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let requested_for_scan = requested.clone();
+        let mut driver = AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id)
+            .expect("driver starts");
+
+        let paused = driver
+            .scan_pass_with_cancel(
+                &source,
+                &CatalogParquetScanOptions {
+                    batch_size: 25,
+                    ..CatalogParquetScanOptions::default()
+                },
+                || {
+                    if !requested_for_scan.load(std::sync::atomic::Ordering::SeqCst) {
+                        let catalog = Catalog::open(&catalog_root).expect("catalog opens");
+                        if catalog.contract_state().unwrap().processing.state
+                            == CatalogProcessingState::Running
+                        {
+                            catalog
+                                .request_processing_control(
+                                    0,
+                                    CatalogProcessingDesiredState::Paused,
+                                )
+                                .expect("pause request persists");
+                            requested_for_scan.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    false
+                },
+            )
+            .expect("scanner acknowledges pause");
+        assert!(requested.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(paused.paused);
+        assert_eq!(
+            paused.checkpoint.counts.scanned, 50,
+            "the request issued at row 25 is observed and flushed by row 50"
+        );
+        assert_eq!(paused.checkpoint.counts.accepted, 50);
+        assert_eq!(
+            registry
+                .open_attached(&catalog_id)
+                .unwrap()
+                .record_count()
+                .unwrap(),
+            50
+        );
+    }
+
+    #[test]
+    fn crash_replays_only_the_bounded_window_with_exact_duplicate_accounting() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("source.parquet");
+        let urls = (0..1_000)
+            .map(|index| format!("https://example.com/{}.jpg", index % 900))
+            .collect::<Vec<_>>();
+        let rows = urls
+            .iter()
+            .map(|url| TestRow {
+                url,
+                caption: "image",
+                width: 1024,
+                height: 1024,
+                unsafe_score: 0.01,
+                aesthetic: 7.0,
+                marker: 0,
+            })
+            .collect::<Vec<_>>();
+        write_rows(&source, &[rows]);
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Crash recovery")
+            .unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+        catalog.close();
+        let mut driver = AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id)
+            .expect("driver starts");
+        driver.fail_before_durable_flush_after_rows(800);
+        let options = CatalogParquetScanOptions {
+            batch_size: 25,
+            ..CatalogParquetScanOptions::default()
+        };
+
+        let error = driver
+            .scan_pass(&source, &options)
+            .expect_err("injected crash interrupts before the next checkpoint");
+        assert!(matches!(error, CatalogParquetScanError::Interrupted(_)));
+        drop(driver);
+
+        let interrupted = registry.open_attached(&catalog_id).unwrap();
+        let checkpoint: CatalogParquetCheckpoint = serde_json::from_str(
+            &interrupted
+                .metadata(CHECKPOINT_KEY)
+                .unwrap()
+                .expect("first durable checkpoint persists"),
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint.counts.scanned, 500,
+            "the 300 uncommitted rows are replayed from the last bounded checkpoint"
+        );
+        assert_eq!(checkpoint.counts.accepted, 500);
+        assert_eq!(interrupted.record_count().unwrap(), 500);
+        let progress = interrupted.contract_state().unwrap().processing;
+        assert_eq!(
+            progress.processed_count, 500,
+            "progress cannot advance beyond committed records and checkpoint"
+        );
+        assert_ne!(progress.state, CatalogProcessingState::Completed);
+        interrupted.close();
+
+        let resumed =
+            scan_attached_parquet_catalog(&registry, &catalog_id, &source, &options).unwrap();
+        assert!(resumed.checkpoint.complete);
+        assert_eq!(resumed.checkpoint.counts.scanned, 1_000);
+        assert_eq!(resumed.checkpoint.counts.accepted, 900);
+        assert_eq!(resumed.checkpoint.counts.duplicate, 100);
+        assert_eq!(resumed.checkpoint.counts.reasons["duplicate_url"], 100);
+        let completed = registry.open_attached(&catalog_id).unwrap();
+        assert_eq!(completed.record_count().unwrap(), 900);
+        let progress = completed.contract_state().unwrap().processing;
+        assert_eq!(progress.state, CatalogProcessingState::Completed);
+        assert_eq!(progress.processed_count, 1_000);
+        assert_eq!(progress.accepted_count, 900);
+        assert_eq!(progress.rejected_count, 100);
     }
 
     #[test]
@@ -2086,6 +2577,59 @@ mod tests {
         assert_eq!(counts.reasons["invalid_width"], 1);
         assert_eq!(counts.reasons["invalid_safety"], 1);
         assert_eq!(counts.reasons["invalid_aesthetic"], 1);
+    }
+
+    #[test]
+    fn batched_duplicate_lookup_counts_persisted_and_in_batch_ids_exactly() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("duplicates.parquet");
+        let persisted_url = "https://example.com/persisted.jpg";
+        let new_url = "https://example.com/new.jpg";
+        write_rows(
+            &source,
+            &[vec![
+                row(persisted_url, "persisted duplicate one"),
+                row(persisted_url, "persisted duplicate two"),
+                row(new_url, "new one"),
+                row(new_url, "new duplicate"),
+            ]],
+        );
+        let persisted_digest = Sha256::digest(persisted_url.as_bytes());
+        let persisted_id = format!("pq_{}", hex_prefix(&persisted_digest, 32));
+        let mut catalog = Catalog::create(temporary.path().join("catalog"), "Duplicates").unwrap();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: persisted_id.clone(),
+                image_path: format!("images/{persisted_id}"),
+                thumbnail_path: None,
+                embedding_path: None,
+                artifact_path: None,
+                metadata: json!({"caption": "preexisting"}),
+            }])
+            .unwrap();
+
+        let report = scan_parquet_catalog(
+            &mut catalog,
+            &source,
+            &CatalogParquetScanOptions {
+                batch_size: 4,
+                ..CatalogParquetScanOptions::default()
+            },
+        )
+        .expect("duplicate batch scans");
+        assert_eq!(report.checkpoint.counts.scanned, 4);
+        assert_eq!(report.checkpoint.counts.accepted, 1);
+        assert_eq!(report.checkpoint.counts.duplicate, 3);
+        assert_eq!(
+            report.checkpoint.counts.reasons["duplicate_url"], 3,
+            "persisted and repeated pending ids share exact duplicate accounting"
+        );
+        assert_eq!(catalog.record_count().unwrap(), 2);
+        assert_eq!(
+            catalog.record_by_id(&persisted_id).unwrap().metadata["caption"],
+            "preexisting",
+            "scanner duplicates must not overwrite an existing record"
+        );
     }
 
     #[test]
@@ -2219,6 +2763,18 @@ mod tests {
             ),
             (1, 0, 0)
         );
+        let first_boundary = registry.open_attached(&catalog_id).unwrap();
+        assert_eq!(first_boundary.record_count().unwrap(), 1);
+        assert_eq!(
+            first_boundary
+                .contract_state()
+                .unwrap()
+                .processing
+                .processed_count,
+            1,
+            "shard transition flushes records, checkpoint, and progress immediately"
+        );
+        first_boundary.close();
         let resumed = scan_attached_parquet_catalog(
             &registry,
             &catalog_id,
