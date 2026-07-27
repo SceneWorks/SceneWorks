@@ -414,8 +414,16 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
   // promoting it to the live `token`, so a wrong password keeps the gate up with an
   // inline error (instead of saving a bad token and silently failing every subsequent
-  // request). A correct password is stored to localStorage and unlocks the app; it
-  // persists across reloads. Promoting the token here flips `authenticated`, and the
+  // request). A correct password is promoted to the live token and unlocks the app.
+  //
+  // `storeAccessToken` is not checked, and deliberately so (sc-15223): persisting is
+  // best-effort — a private-mode / over-quota browser refuses the write, and refusing to
+  // unlock there would be worse than not surviving a reload. What used to make that a bug was
+  // `readAccessToken()` reading storage back, so the session's own writes went out
+  // credential-less; accessToken.js now serves the live value, so the unlock is whole either
+  // way and only the across-reloads part is lost.
+  //
+  // Promoting the token here flips `authenticated`, and the
   // [authenticated, token] effects perform the initial data load and SSE connect
   // exactly once — no explicit refreshData() call, or it would double-fetch (sc-8808).
   const saveToken = useCallback(

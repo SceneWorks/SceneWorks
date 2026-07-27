@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAccessGate } from "./useAccessGate.js";
+import { resetAccessTokenForTests } from "../accessToken.js";
 
 const apiResponders = new Map();
 let unauthorizedHandler = null;
@@ -47,6 +48,10 @@ describe("useAccessGate on the desktop shell (sc-15105)", () => {
     apiResponders.clear();
     unauthorizedHandler = null;
     window.localStorage.clear();
+    // sc-15223: the live token is module state that outlives a test, and tests here mount
+    // the gate, whose saveToken/lockRemote/re-verify paths move it. Clearing storage alone
+    // would leave that value in place and the raw seeding below would be ignored.
+    resetAccessTokenForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
   });

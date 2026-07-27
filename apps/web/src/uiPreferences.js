@@ -33,18 +33,19 @@ import { readAccessToken } from "./accessToken.js";
 // cached one would leave every write in that session unauthenticated. (`credentials.js`'s
 // `serverToken()` is the same value under a different name — one source, in `accessToken.js`.)
 //
-// Reading storage is the right call rather than a bug to route around: it is strictly
-// fresher than the gate's state on promotion, which is the case that decides whether a
-// session's writes are authenticated at all.
+// Reading through the seam is the right call rather than a bug to route around: it is
+// strictly fresher than the gate's state on promotion, which is the case that decides whether
+// a session's writes are authenticated at all.
 //
-// The CROSS-TAB divergence that used to qualify that is closed (sc-15165): the gate now
-// subscribes to `storage` events via `subscribeAccessToken`, so a "forget" in a second tab
-// locks this one instead of leaving it live while writes here go out credential-less to a
-// 401 that (correctly) never raises the gate. One case survives, deliberately: a same-tab
-// `storeAccessToken` that the browser REJECTS (private-mode / quota — swallowed by design,
-// see the degradation note in `accessToken.js`) leaves the gate accepted with storage
-// empty, and writes here go out credential-less again. No `storage` event can fix that one;
-// it needs the gate to stop treating an unverifiable write as a successful one.
+// Both divergences this used to have with the gate's `token` state are now closed. CROSS-TAB
+// (sc-15165): the gate subscribes to `storage` events via `subscribeAccessToken`, so a
+// "forget" in a second tab locks this one instead of leaving it live while writes here go out
+// credential-less to a 401 that (correctly) never raises the gate. SAME-TAB (sc-15223):
+// `readAccessToken()` serves an in-memory live value with `localStorage` as its persistence
+// cache, so a `storeAccessToken` the browser REJECTS (private mode / quota — swallowed by
+// design, see the degradation note in `accessToken.js`) no longer leaves the gate accepted
+// while the writes here send "". No `storage` event could ever have repaired that one, which
+// is why it took a change to the read contract rather than another subscriber.
 //
 // On the desktop shell it is "" and the request still succeeds: `SCENEWORKS_TRUST_LOOPBACK`
 // bypasses the token check for loopback peers before any comparison, so local use stays
