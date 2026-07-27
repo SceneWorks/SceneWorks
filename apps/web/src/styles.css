@@ -2741,10 +2741,24 @@ label {
 }
 
 /* LoRAs are part of model configuration, so the shared picker lives inside the settings
-   container instead of the Advanced disclosure. Keep it visually grouped with the model row. */
+   container instead of the Advanced disclosure. It is a SECTION of that container, not a card
+   inside it (studio-cleanup sc-15370): same hairline separator the Style axis uses, so LoRAs,
+   Model and Style all read as peers. Other consumers (the editor rails) keep the card. */
 .settings-bar > .lora-picker {
-  border-color: var(--border);
-  background: var(--surface);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 0 0;
+  gap: 8px;
+}
+
+.lora-picker-head {
+  align-items: baseline;
+}
+
+.lora-picker-head > span:last-child {
+  font-size: 11px;
 }
 
 .settings-field-aspect {
@@ -8488,13 +8502,16 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
 }
 
+/* Tightened to the settings-bar type scale (studio-cleanup sc-15370): a selected LoRA is one
+   compact row of the model panel, not a card of its own. Applied to every consumer so the slot
+   reads the same in the editor rails. */
 .lora-slot {
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   background: var(--surface);
-  padding: 12px 14px;
+  padding: 9px 11px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .lora-slot-head {
@@ -8505,7 +8522,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-head strong {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -8528,8 +8545,8 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-remove {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   border-radius: var(--r-sm);
@@ -8558,7 +8575,7 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
@@ -8581,12 +8598,13 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 14px;
-  border: 1.5px dashed var(--border-strong);
-  border-radius: var(--r-md);
+  height: 34px;
+  padding: 0 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
   color: var(--text-muted);
   background: transparent;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
 }
@@ -8595,7 +8613,7 @@ details[open] > summary.lora-scope-group-heading::before,
   content: attr(data-count);
   opacity: 0.7;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 11px;
   margin-left: 4px;
 }
 
@@ -8616,11 +8634,11 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .lora-picker-panel {
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   background: var(--bg-2);
-  padding: 12px 14px;
+  padding: 8px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .lora-picker-panel > strong {
@@ -8638,12 +8656,12 @@ details[open] > summary.lora-scope-group-heading::before,
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface);
   text-align: left;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   transition: border-color var(--t-fast);
 }
@@ -8677,7 +8695,7 @@ details[open] > summary.lora-scope-group-heading::before,
 /* Mono weight readout in an added LoRA slot's Weight header row. */
 .lora-slot-weight-value {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text);
 }
 

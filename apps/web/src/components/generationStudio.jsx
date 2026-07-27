@@ -801,11 +801,14 @@ export function LoraPickerSection({
 
   return (
     <section className="lora-picker" aria-label="LoRA selection">
-      <div>
-        <strong>LoRAs</strong>
+      {/* Eyebrow + status, not a card heading (studio-cleanup sc-15370): inside the settings bar
+          this reads as a peer of the Model and Style sections, so the label uses the same
+          `.settings-bar-label` scale they do. */}
+      <div className="lora-picker-head">
+        <span className="settings-bar-label">LoRAs</span>
         <span>
           {selectedLoras.length
-            ? `${selectedLoras.length} selected`
+            ? `${selectedLoras.length} selected · installed and compatible`
             : selectedModel
               ? "Installed and compatible"
               : "Choose a model"}
