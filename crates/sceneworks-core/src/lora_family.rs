@@ -2168,6 +2168,46 @@ fn is_base_model_gated_family(family: &str) -> bool {
     family == "wan-video"
 }
 
+/// Whether a model id names a **14B-class** Wan-family backbone, by the catalog's own id
+/// convention: the 14B entries carry a `_14b` suffix (`wan_2_2_t2v_14b`, `wan_2_2_i2v_14b`,
+/// `wan_2_2_vace_fun_14b`, `scail2_14b`, `krea_realtime_14b`) and the 5B TI2V entry — the other
+/// side of the split [`is_base_model_gated_family`] exists for — does not (`wan_2_2`).
+///
+/// A convention rather than an enumerated list on purpose: a new Wan 14B entry must not have to be
+/// added here to keep working, and a hard-coded list would silently exclude it.
+fn is_wan_14b_class_id(id: &str) -> bool {
+    normalize_model_family(id).ends_with("-14b")
+}
+
+/// Whether a LoRA recording trained base model `base` may load on `model_id`, for a model whose own
+/// declared family is `model_family`. This is the base-model half of the compatibility gate; the
+/// family half is [`accepted_lora_families`].
+///
+/// **Exact id equality is the ordinary answer** and the only one for a genuine Wan model: `wan_2_2`
+/// (TI2V-5B) and the `*_14b` entries both declare `wan-video`, and cross-applying a LoRA between
+/// them garbles the output, so a LoRA that records its base pins to that base.
+///
+/// The second arm exists because of the extra-compatible relation (sc-15017). Krea Realtime 14B
+/// declares its OWN `krea-realtime` family and accepts `wan-video` LoRAs because its DiT is Wan 2.1
+/// T2V 14B weight-for-weight — but a Wan LoRA's recorded base is a Wan id, so it can NEVER equal
+/// `krea_realtime_14b`. Under exact equality alone, every base-model-stamped Wan LoRA would be
+/// refused on Krea and the relation would be dead on arrival for exactly the LoRAs the app itself
+/// stamps at import. So for a model that accepts `wan-video` through the registry, the gate is
+/// preserved rather than dropped: it still enforces the 5B-vs-14B split the gate exists for, by
+/// requiring the LoRA's base and the accepting model to be the same size class.
+///
+/// A LoRA that records NO base model is not this function's concern — the callers fall back to
+/// family gating for those, exactly as before.
+pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str) -> bool {
+    if base == model_id {
+        return true;
+    }
+    let normalized_family = normalize_model_family(model_family);
+    extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
+        && is_wan_14b_class_id(model_id)
+        && is_wan_14b_class_id(base)
+}
+
 /// A LoRA id for error messages: `id` / `loraId` / `lora_<n>`.
 fn lora_display_id(lora: &Value, index: usize) -> String {
     lora.get("id")
@@ -2215,7 +2255,11 @@ pub fn validate_lora_compatibility(
                 .any(|family| is_base_model_gated_family(family))
             {
                 if let Some(base) = lora_base_model(lora) {
-                    if base != model_id {
+                    // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
+                    // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
+                    // (sc-15017) — its base can never equal that model's own id.
+                    if !base_model_satisfies_gate(model_family.unwrap_or_default(), model_id, &base)
+                    {
                         return Err(format!(
                             "LoRA {lora_id} was trained for base model {base}, not {model_id}; \
                              Wan 5B and 14B LoRAs are not interchangeable."
@@ -4741,6 +4785,91 @@ mod tests {
             Some("krea-realtime"),
             "krea_realtime",
             Some("krea_realtime_14b"),
+        )
+        .is_ok());
+    }
+
+    /// 🔴 sc-15017: the family half of the gate was never the whole gate. `wan-video` is
+    /// base-model GATED, and that gate keys on the LORA's declared family — so it fires on a Krea
+    /// Realtime job too, where exact id equality can never hold (the LoRA records a Wan base,
+    /// the model is `krea_realtime_14b`). Left alone, every base-model-STAMPED Wan LoRA — which is
+    /// what SceneWorks' own importer writes — was refused on Krea while an unstamped one passed.
+    ///
+    /// The relaxation must not dissolve the gate: 5B and 14B stay non-interchangeable.
+    #[test]
+    fn base_model_gate_admits_wan_14b_on_krea_but_still_splits_5b_from_14b() {
+        // Exact equality is unchanged, and it is the ONLY answer for a genuine Wan model: the
+        // second arm cannot fire there, because `wan-video` has no extra-compatible entry.
+        assert!(base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_t2v_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        assert!(
+            !base_model_satisfies_gate("wan-video", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"),
+            "two 14B WAN models must still pin to their own base — the relaxation is only for the \
+             extra-compatible relation, not a blanket 14B pass"
+        );
+        assert!(!base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_t2v_14b",
+            "wan_2_2"
+        ));
+
+        // Krea Realtime accepts a Wan 14B base…
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_1_t2v_14b"
+        ));
+        // …and REFUSES the 5B TI2V base, which is the whole reason the gate exists.
+        assert!(
+            !base_model_satisfies_gate("krea-realtime", "krea_realtime_14b", "wan_2_2"),
+            "the 5B TI2V base has 48 latent channels — admitting it would garble the render"
+        );
+        // A model with no extra-compatible entry gets no relaxation, even between two 14B ids.
+        assert!(!base_model_satisfies_gate(
+            "scail2",
+            "scail2_14b",
+            "wan_2_2_t2v_14b"
+        ));
+
+        // End to end through the pre-flight the worker runs.
+        let stamped_14b = json!({
+            "id": "origami", "family": "wan-video", "baseModel": "wan_2_2_t2v_14b"
+        });
+        assert!(
+            validate_lora_compatibility(
+                std::slice::from_ref(&stamped_14b),
+                Some("krea-realtime"),
+                "krea_realtime",
+                Some("krea_realtime_14b"),
+            )
+            .is_ok(),
+            "a base-model-stamped Wan 14B LoRA must run on Krea Realtime"
+        );
+        let stamped_5b = json!({
+            "id": "ti2v_style", "family": "wan-video", "baseModel": "wan_2_2"
+        });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&stamped_5b),
+            Some("krea-realtime"),
+            "krea_realtime",
+            Some("krea_realtime_14b"),
+        )
+        .is_err());
+        // The same 5B LoRA is still fine on its own model — so the rejection above is the SIZE
+        // class, not the stamp merely being present.
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&stamped_5b),
+            Some("wan-video"),
+            "wan_video",
+            Some("wan_2_2"),
         )
         .is_ok());
     }
