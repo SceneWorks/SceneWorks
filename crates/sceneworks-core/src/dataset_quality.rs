@@ -268,17 +268,28 @@ pub fn evaluate_tier0(
         })
         .collect();
 
+    // Resolution runs for every item first, so the blur pass can see its verdict — used twice below:
+    // to suppress redundant blur findings, and to keep upscale-soft items out of the blur median.
+    for (idx, item) in items.iter().enumerate() {
+        push_resolution_flags(&mut per_item[idx].flags, item, bucket_edge, thresholds);
+    }
+
+    // The blur median excludes items a `Warn` resolution finding already condemns. Their blur
+    // reading measures the upscale-to-bucket, not focus, so leaving them in drags the median toward
+    // the artifact and raises the relative arm's bar for the items that still matter (sc-8563).
+    // Observed: a 5-image screencap set whose median is set by its four sub-bucket images leaves the
+    // one adequately-sized image a 0.5×median threshold it can essentially never trip — a false
+    // negative, the mirror of the false positive the suppression guard fixes.
     let blur_median = median(
         items
             .iter()
-            .filter_map(|item| item.scalars.as_ref().map(|s| s.blur_variance)),
+            .enumerate()
+            .filter(|(idx, _)| !has_upscale_soft_resolution(&per_item[*idx].flags))
+            .filter_map(|(_, item)| item.scalars.as_ref().map(|s| s.blur_variance)),
     );
 
-    // Per-image, dataset-independent checks.
     for (idx, item) in items.iter().enumerate() {
-        let flags = &mut per_item[idx].flags;
-        push_resolution_flags(flags, item, bucket_edge, thresholds);
-        push_scalar_flags(flags, item, blur_median, thresholds);
+        push_scalar_flags(&mut per_item[idx].flags, item, blur_median, thresholds);
     }
 
     // Relational checks: exact duplicates (content hash) then near duplicates (pHash).
@@ -436,6 +447,18 @@ fn window_origin(extent: u32, window: u32, bias: f64) -> u32 {
     center.round().clamp(0.0, f64::from(max_origin)) as u32
 }
 
+/// Does this item carry a `Resolution` finding severe enough to explain softness on its own?
+///
+/// `Resolution` fires for any sub-bucket image but splits severity at `min_resolution_ratio`: below
+/// the bucket is "a mild nudge" (`Info`), far below is "will be upscaled to mush" (`Warn`). Only the
+/// `Warn` case makes the blur reading a measurement of the upscale rather than of focus — so it is
+/// the only case that suppresses blur and the only one excluded from the blur median.
+fn has_upscale_soft_resolution(flags: &[QualityFlag]) -> bool {
+    flags
+        .iter()
+        .any(|flag| flag.check == QualityCheck::Resolution && flag.severity == Severity::Warn)
+}
+
 fn push_scalar_flags(
     flags: &mut Vec<QualityFlag>,
     item: &ItemQualityInput,
@@ -452,12 +475,17 @@ fn push_scalar_flags(
     // names the cause correctly ("may look soft at the training size"); adding `Blur` on top only
     // misattributes it to focus and double-counts the same image in the technical sub-score.
     //
-    // Calibration over 7 real training sets, 79 images (sc-8563): 38 were blur-flagged, and 33 of
-    // those (87%) were already resolution-flagged. The 5 that were not are all >= 790px short edge
-    // and genuinely soft — exactly the cases that should survive this guard.
-    let resolution_flagged = flags
-        .iter()
-        .any(|flag| flag.check == QualityCheck::Resolution);
+    // Only a *Warn* resolution finding suppresses blur. `Resolution` fires for any sub-bucket image,
+    // but splits severity at `min_resolution_ratio`: below the bucket is "a mild nudge" (Info), far
+    // below is "will be upscaled to mush" (Warn). Only the Warn case actually explains softness, so
+    // an image sitting slightly under the bucket keeps its blur finding — otherwise a 900px image
+    // 24px short of a 1024 bucket would have genuine softness silenced by a nudge.
+    //
+    // Calibration over 7 real training sets, 79 images (sc-8563): 38 were blur-flagged, 33 of those
+    // (87%) also carried a *Warn* resolution finding. The 5 survivors are 790–1440px and genuinely
+    // soft — exactly what should still be reported. (Keying on any resolution finding instead would
+    // suppress 36 of 38 and leave only 2, silencing three soft-but-adequately-sized images.)
+    let resolution_flagged = has_upscale_soft_resolution(flags);
 
     // Soft if below the absolute floor OR a clear outlier below the dataset median (the spike's
     // "floor AND relative" rule — relative alone would pass a uniformly-soft set). The relative arm
@@ -2175,6 +2203,76 @@ mod tests {
             !has(&eval, "small_and_soft", QualityCheck::Blur),
             "blur must not double-report the same softness the resolution finding explains"
         );
+    }
+
+    #[test]
+    fn a_mild_resolution_nudge_does_not_suppress_blur() {
+        // `Resolution` fires for anything under the bucket, but only `Warn` (below
+        // min_resolution_ratio × bucket) means upscale-to-mush. An image slightly under the bucket
+        // gets an Info nudge that does NOT explain softness, so its blur finding must survive —
+        // otherwise a nearly-bucket-sized but genuinely soft image is silenced by a technicality.
+        let mut slightly_small = item("slightly_small");
+        slightly_small.width = Some(450); // 384 (=0.75×512) <= 450 < 512 ⇒ Resolution at Info
+        slightly_small.height = Some(450);
+        slightly_small.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8]));
+
+        let eval = evaluate_tier0(std::slice::from_ref(&slightly_small), 512, 1, &thresholds());
+
+        let resolution = eval.items[0]
+            .flags
+            .iter()
+            .find(|flag| flag.check == QualityCheck::Resolution)
+            .expect("a sub-bucket image still reports resolution");
+        assert_eq!(
+            resolution.severity,
+            Severity::Info,
+            "a mild nudge, not mush"
+        );
+        assert!(
+            has(&eval, "slightly_small", QualityCheck::Blur),
+            "an Info-severity resolution nudge must not silence genuine softness"
+        );
+    }
+
+    #[test]
+    fn upscale_soft_items_are_excluded_from_the_blur_median() {
+        // sc-8563 follow-on: sub-bucket items read soft because of the upscale, so leaving them in
+        // the median drags it down and raises the relative arm's bar for the items that matter.
+        // Here three tiny items sit at 10.0. With them in the median (10.0) the adequately-sized
+        // 60.0 image clears 0.5×median easily; excluding them the median becomes 60.0 and the
+        // genuinely-soft-for-its-peers 25.0 image is caught.
+        let tiny = |id: &str| {
+            let mut it = item(id);
+            it.width = Some(100);
+            it.height = Some(100); // < 0.75×512 ⇒ Resolution at Warn
+            it.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8]));
+            it
+        };
+        let sized = |id: &str, v: f64, hash: u8| {
+            let mut it = item(id); // 512×512 ⇒ resolution-clear
+            it.scalars = Some(scalars(v, 0.0, 0.0, vec![hash; 8]));
+            it
+        };
+        let items = [
+            tiny("tiny_a"),
+            tiny("tiny_b"),
+            tiny("tiny_c"),
+            sized("sharp_peer", 200.0, 1),
+            sized("soft_peer", 25.0, 2),
+        ];
+
+        let eval = evaluate_tier0(&items, 512, 1, &thresholds());
+
+        // Median over resolution-clear items only = median(200, 25) = 112.5; 25 < 0.5×112.5.
+        assert!(
+            has(&eval, "soft_peer", QualityCheck::Blur),
+            "a soft outlier among adequately-sized peers is caught once the tiny items stop \
+             dragging the median down"
+        );
+        assert!(!has(&eval, "sharp_peer", QualityCheck::Blur));
+        // The tiny items still report the real cause, and only that.
+        assert!(has(&eval, "tiny_a", QualityCheck::Resolution));
+        assert!(!has(&eval, "tiny_a", QualityCheck::Blur));
     }
 
     #[test]
