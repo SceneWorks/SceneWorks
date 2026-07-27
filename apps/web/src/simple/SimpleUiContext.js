@@ -24,6 +24,9 @@ import { createContext, useContext } from "react";
 //   dismissedJobIds     — Set of failed-run ids the user has dismissed from a studio.
 //                         Shell-held, because the studios unmount on navigation.
 //   dismissJob(id)
+//   studioState         — Map backing `useStudioState`, so a studio's OWN knobs (model,
+//                         prompt, resolution, LoRA picks) survive that same unmount.
+//                         Shell-held for the same reason; see useStudioState.js.
 export const SimpleUiContext = createContext(null);
 
 export function useSimpleUi() {

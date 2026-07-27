@@ -75,6 +75,57 @@ pub(crate) struct UiPreferences {
     /// registry on load, so a detached or relocated catalog degrades to another item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_catalog_id: Option<String>,
+    /// Simple-UI studio settings — the DURABLE form of the Simple studios' own knobs (model,
+    /// prompt, resolution, LoRA picks, …). The Simple shell renders one screen at a time, so a
+    /// studio unmounts on navigation; the shell keeps a session copy, and this is what makes
+    /// that copy outlive a relaunch. The advanced studios solve the same problem with a
+    /// per-workspace `localStorage` blob (`hooks/useStudioSettings.js`), which is exactly what
+    /// the desktop shell's per-launch `127.0.0.1:<port>` origin wipes — hence the server copy
+    /// here rather than a second localStorage store.
+    ///
+    /// Shape: `{ [workspaceId]: { [studio]: { [field]: value } } }`. Keyed by WORKSPACE to match
+    /// the advanced studios: a prompt written for one project must not follow the user into
+    /// another. The field vocabulary is the frontend's and values are stored verbatim — this is
+    /// the same stance as `per_model_tier`, so adding a Simple knob needs no server change.
+    /// A PUT carrying this field replaces the whole map (the web sends the full merged map from
+    /// its cache), and a PUT without it leaves the stored map untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simple_studio: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// Retained workspaces in `simple_studio`. The map grows by one entry per workspace the user
+/// opens a Simple studio in and nothing ever removes an entry, so without a bound a long-lived
+/// install would carry every workspace it has ever seen — each holding a full prompt — in a file
+/// re-read and rewritten on every preference write. The web prunes to the same bound on its side;
+/// this is the backstop for a client that doesn't.
+const MAX_SIMPLE_STUDIO_WORKSPACES: usize = 24;
+
+/// Serialized bytes allowed for one workspace's studio snapshot. Prompts are free text, so this
+/// bounds what a single entry can cost; an oversized entry is DROPPED rather than truncated,
+/// because a half-parsed snapshot would restore a studio into a state the user never chose.
+const MAX_SIMPLE_STUDIO_ENTRY_BYTES: usize = 64 * 1024;
+
+/// Keep the well-formed, in-budget entries of a `simple_studio` map.
+///
+/// Entries must be JSON objects (the `{ [studio]: { … } }` shape the web writes); anything else is
+/// a client bug or a hand-edited file, and storing it would hand the web back something it can't
+/// read. Over-budget entries are dropped. When more than `MAX_SIMPLE_STUDIO_WORKSPACES` survive,
+/// the retained set is the first N by key order — arbitrary but STABLE, so repeated PUTs of the
+/// same oversized map converge instead of thrashing the file.
+fn normalize_simple_studio(
+    input: BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    input
+        .into_iter()
+        .filter(|(workspace, snapshot)| {
+            !workspace.trim().is_empty()
+                && snapshot.is_object()
+                && serde_json::to_string(snapshot)
+                    .map(|body| body.len() <= MAX_SIMPLE_STUDIO_ENTRY_BYTES)
+                    .unwrap_or(false)
+        })
+        .take(MAX_SIMPLE_STUDIO_WORKSPACES)
+        .collect()
 }
 
 /// User-selectable accent palettes. Keep in sync with web/src/accents.js.
@@ -242,6 +293,12 @@ pub(crate) async fn set_ui_preferences(
         if let Some(per_model_tier) = payload.per_model_tier {
             prefs.per_model_tier = Some(per_model_tier);
         }
+        // Replaced wholesale ONLY when the payload carries it, like `per_model_tier` above — the
+        // web sends the full merged map from its cache, so a theme- or view-only PUT never
+        // clobbers a stored snapshot.
+        if let Some(simple_studio) = payload.simple_studio {
+            prefs.simple_studio = Some(normalize_simple_studio(simple_studio));
+        }
         if let Some(active_view) = normalize_preference_id(payload.active_view.as_deref(), 48) {
             prefs.active_view = Some(active_view);
         }
@@ -272,9 +329,85 @@ pub(crate) async fn set_ui_preferences(
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_quality_to_auto, normalize_accent, normalize_generation_quality, normalize_theme,
-        UiPreferences,
+        migrate_quality_to_auto, normalize_accent, normalize_generation_quality,
+        normalize_simple_studio, normalize_theme, UiPreferences, MAX_SIMPLE_STUDIO_ENTRY_BYTES,
+        MAX_SIMPLE_STUDIO_WORKSPACES,
     };
+    use std::collections::BTreeMap;
+
+    fn snapshot(prompt: &str) -> serde_json::Value {
+        serde_json::json!({ "image": { "prompt": prompt, "model": "z_image" } })
+    }
+
+    #[test]
+    fn normalize_simple_studio_keeps_well_formed_entries_verbatim() {
+        let mut input = BTreeMap::new();
+        input.insert("project-1".to_owned(), snapshot("a lighthouse"));
+        let kept = normalize_simple_studio(input);
+        // Values are stored verbatim — the field vocabulary belongs to the frontend, so a new
+        // Simple knob must not need a server change to survive a round trip.
+        assert_eq!(kept.get("project-1"), Some(&snapshot("a lighthouse")));
+    }
+
+    #[test]
+    fn normalize_simple_studio_drops_malformed_and_oversized_entries() {
+        let mut input = BTreeMap::new();
+        input.insert("ok".to_owned(), snapshot("fine"));
+        // Not an object: a client bug or a hand-edited file. Storing it would hand the web back
+        // something it cannot read.
+        input.insert("scalar".to_owned(), serde_json::json!("not-an-object"));
+        input.insert("null".to_owned(), serde_json::Value::Null);
+        // Blank workspace key — nothing to key a restore on.
+        input.insert("   ".to_owned(), snapshot("blank key"));
+        // Over the per-entry budget: dropped whole, never truncated.
+        input.insert(
+            "huge".to_owned(),
+            snapshot(&"x".repeat(MAX_SIMPLE_STUDIO_ENTRY_BYTES + 1)),
+        );
+
+        let kept = normalize_simple_studio(input);
+        assert_eq!(kept.keys().collect::<Vec<_>>(), vec!["ok"]);
+    }
+
+    #[test]
+    fn normalize_simple_studio_bounds_the_workspace_count_stably() {
+        let over = MAX_SIMPLE_STUDIO_WORKSPACES + 5;
+        let build = || {
+            (0..over)
+                .map(|n| (format!("project-{n:03}"), snapshot("p")))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let kept = normalize_simple_studio(build());
+        assert_eq!(kept.len(), MAX_SIMPLE_STUDIO_WORKSPACES);
+        // Stable across repeated PUTs of the same map, so the file converges rather than
+        // thrashing a different retained set on every write.
+        assert_eq!(kept, normalize_simple_studio(build()));
+    }
+
+    #[test]
+    fn simple_studio_round_trips_through_serde_as_camel_case() {
+        let mut map = BTreeMap::new();
+        map.insert("project-1".to_owned(), snapshot("round trip"));
+        let prefs = UiPreferences {
+            simple_studio: Some(map),
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&prefs).expect("serialize");
+        assert!(body.contains("\"simpleStudio\""));
+        let parsed: UiPreferences = serde_json::from_str(&body).expect("deserialize");
+        assert_eq!(
+            parsed
+                .simple_studio
+                .and_then(|m| m.get("project-1").cloned()),
+            Some(snapshot("round trip"))
+        );
+    }
+
+    #[test]
+    fn an_absent_simple_studio_is_omitted_from_the_stored_file() {
+        let body = serde_json::to_string(&UiPreferences::default()).expect("serialize");
+        assert!(!body.contains("simpleStudio"));
+    }
 
     #[test]
     fn normalize_theme_accepts_only_known_themes() {

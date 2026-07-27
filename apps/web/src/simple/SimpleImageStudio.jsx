@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
@@ -11,6 +11,7 @@ import { preferredResolution } from "./modelDefaults.js";
 import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
@@ -55,14 +56,17 @@ export function SimpleImageStudio() {
   const unifiedMemoryGb = useUnifiedMemoryGb();
   const refine = useSimpleRefine("image");
 
-  const [mode, setMode] = useState("text_to_image");
-  const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [resolution, setResolution] = useState("");
-  const [variations, setVariations] = useState(1);
-  const [styleId, setStyleId] = useState(null);
-  const [referenceAssetId, setReferenceAssetId] = useState(null);
-  const [refineOpen, setRefineOpen] = useState(false);
+  // Sticky across navigation (this studio unmounts when you leave it) — everything the user
+  // set stays set. `submitting` stays local: it belongs to an in-flight submit, not to the
+  // form, and a studio that remounted mid-request must not come back looking busy.
+  const [mode, setMode] = useStudioState("image", "mode", "text_to_image");
+  const [prompt, setPrompt] = useStudioState("image", "prompt", "");
+  const [model, setModel] = useStudioState("image", "model", "");
+  const [resolution, setResolution] = useStudioState("image", "resolution", "");
+  const [variations, setVariations] = useStudioState("image", "variations", 1);
+  const [styleId, setStyleId] = useStudioState("image", "styleId", null);
+  const [referenceAssetId, setReferenceAssetId] = useStudioState("image", "referenceAssetId", null);
+  const [refineOpen, setRefineOpen] = useStudioState("image", "refineOpen", false);
   const [submitting, setSubmitting] = useState(false);
 
   // Models that serve the active tab, under the same capability + Mac-gating predicate
@@ -84,7 +88,7 @@ export function SimpleImageStudio() {
     if (!models.some((entry) => entry.id === model)) {
       setModel(models[0].id);
     }
-  }, [models, model]);
+  }, [models, model, setModel]);
 
   const resolutions = useMemo(() => {
     const declared = selectedModel?.limits?.resolutions?.length
@@ -110,7 +114,7 @@ export function SimpleImageStudio() {
     if (resolutions.length && !resolutions.includes(resolution)) {
       setResolution(preferredResolution(selectedModel, resolutions));
     }
-  }, [resolutions, resolution, selectedModel]);
+  }, [resolutions, resolution, selectedModel, setResolution]);
 
   // Resolved against the FULL catalog, not just the picker's recent-20 list: a reference
   // routed in from the Assets preview ("Use as reference") can be any library asset.
@@ -118,6 +122,24 @@ export function SimpleImageStudio() {
     () => assets.find((asset) => asset.id === referenceAssetId) ?? null,
     [assets, referenceAssetId],
   );
+
+  // A RESTORED reference can name an asset the user has since deleted — the id outlives the
+  // library now that the studio's settings are durable. Drop it once, when the catalog has
+  // actually loaded: `assets` is empty both before the fetch lands and when the library is
+  // genuinely empty, and pruning during that window would strip a perfectly good reference
+  // (the sc-11962 guard, in the shape VideoStudio's `restoredAssetsValidatedRef` uses).
+  // Without this the tile reads "attach an image" while `needsSource` still sees an id, so
+  // edit mode stays submittable and sends a dangling reference the job then fails on.
+  const restoredReferenceValidated = useRef(false);
+  useEffect(() => {
+    if (restoredReferenceValidated.current || !assets.length) {
+      return;
+    }
+    restoredReferenceValidated.current = true;
+    setReferenceAssetId((current) =>
+      current && !assets.some((asset) => asset.id === current) ? null : current,
+    );
+  }, [assets, setReferenceAssetId]);
 
   // "Use as reference" from an asset preview lands here. Keyed on the request token so a
   // repeat pick of the SAME asset still re-arms after the user cleared it.
@@ -163,6 +185,7 @@ export function SimpleImageStudio() {
     selectedModel,
     jobs,
     excludeLoraId: editLoraInstalled ? (editLora?.id ?? null) : null,
+    scope: "image",
   });
   const openLoraPicker = () =>
     openSheet({
