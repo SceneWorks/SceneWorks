@@ -568,6 +568,11 @@ def test_manifest_model_path_is_only_an_optional_override():
         "image_jobs/instantid.rs",
         "image_jobs/kolors_ipadapter.rs",
         "image_jobs/krea_imported.rs",
+        # sc-15036: the fine-tuned Mage-Flow base lane. Audited — `modelPath` is an optional
+        # FIRST preference here, falling through to the catalog entry's `paths.model` (which is
+        # what registration actually stamps) and then declining the lane entirely with `Ok(None)`
+        # when neither is present, so a normal install never reaches it.
+        "image_jobs/mage_finetuned.rs",
         "image_jobs/pulid.rs",
         "image_jobs/pulid_candle.rs",
         "image_jobs/qwen_edit_candle.rs",
