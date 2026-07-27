@@ -115,6 +115,54 @@
           "x-sceneworks-readers": [{ "path": "apps/web/src/samplerOptions.js", "anchor": "limits?.guidanceMethods" }]
         }
       }
+    },
+    "phaseVramCurve": {
+      "type": "object",
+      "required": ["fixedGb", "perMpxGb"],
+      "additionalProperties": false,
+      "description": "Conservative phase VRAM curve in base-10 GB: fixedGb + perMpxGb * output megapixels.",
+      "properties": {
+        "fixedGb": { "type": "number", "minimum": 0 },
+        "perMpxGb": { "type": "number", "minimum": 0 }
+      }
+    },
+    "memoryRungPhaseCurves": {
+      "type": "object",
+      "required": ["text", "denoise", "decode"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "$ref": "#/$defs/phaseVramCurve" },
+        "denoise": { "$ref": "#/$defs/phaseVramCurve" },
+        "decode": { "$ref": "#/$defs/phaseVramCurve" }
+      }
+    },
+    "kreaTurboFit": {
+      "type": "object",
+      "required": ["maxMeasuredPixels", "phaseCurvesByTier"],
+      "additionalProperties": false,
+      "properties": {
+        "maxMeasuredPixels": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Largest output pixel count covered by real rung measurements and output-parity validation. The worker must not extrapolate the constrained ladder beyond it."
+        },
+        "phaseCurvesByTier": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Measured phase curves by installed quant tier. Each tier must declare the complete quality-preserving ladder in increasing execution-cost order.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+            "additionalProperties": false,
+            "properties": {
+              "threeStage": { "$ref": "#/$defs/memoryRungPhaseCurves" },
+              "tiledVae": { "$ref": "#/$defs/memoryRungPhaseCurves" },
+              "chunkedAttention": { "$ref": "#/$defs/memoryRungPhaseCurves" },
+              "streamedBlocks": { "$ref": "#/$defs/memoryRungPhaseCurves" }
+            }
+          }
+        }
+      }
     }
   },
   "properties": {
@@ -440,6 +488,12 @@
                 "type": "object",
                 "description": "Measured candle/CUDA SEQUENTIAL-residency peak VRAM (GB) at 1024², keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this measured sequential peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
+              },
+              "turboFit": {
+                "$ref": "#/$defs/kreaTurboFit",
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/vram_gate.rs", "anchor": "get(\"turboFit\")?" }],
+                "description": "Resolution-aware, per-phase constrained-card fit evidence for ordinary Krea 2 Turbo. The worker selects the least-cost sufficient rung and fails closed to the established resident/sequential gate when a tier has no complete measured curves."
               },
               "measured": {
                 "type": "boolean",

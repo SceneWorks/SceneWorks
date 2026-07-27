@@ -461,24 +461,28 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     );
     assert_eq!(
         candle_stream.matches("installed_tier_keys(").count(),
-        2,
-        "the generic candle lane probes tiers only in its two reject arms"
+        3,
+        "the generic candle lane probes tiers only in its three reject arms"
     );
+    let krea_reject = candle_stream
+        .find("KreaTurboFit::Reject")
+        .expect("Krea ladder reject");
     let sequential_reject = candle_stream
         .find("if let Some(seq_gb) =")
         .expect("sequential overflow reject");
-    let first_probe = candle_stream
-        .find("installed_tier_keys(")
-        .expect("sequential reject tier probe");
     let too_big_reject = candle_stream
         .find("FitDecision::TooBig")
         .expect("resident reject");
-    let second_probe = candle_stream[first_probe + 1..]
-        .find("installed_tier_keys(")
-        .map(|offset| first_probe + 1 + offset)
-        .expect("resident reject tier probe");
+    let probes: Vec<usize> = candle_stream
+        .match_indices("installed_tier_keys(")
+        .map(|(offset, _)| offset)
+        .collect();
     assert!(
-        sequential_reject < first_probe && too_big_reject < second_probe,
+        krea_reject < probes[0]
+            && probes[0] < sequential_reject
+            && sequential_reject < probes[1]
+            && probes[1] < too_big_reject
+            && too_big_reject < probes[2],
         "installed-tier walks must stay below their reject decisions"
     );
 
@@ -2235,6 +2239,7 @@ fn smoke_generate_one(
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -2416,6 +2421,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         false,
+        None,
         None,
         &PromptEnhance::default(),
         &cancel,
@@ -2704,6 +2710,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2774,6 +2781,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2840,6 +2848,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2897,6 +2906,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         false,
+        None,
         None,
         &PromptEnhance::default(),
         &cancel,
@@ -3054,6 +3064,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -3108,6 +3119,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         false,
+        None,
         None,
         &PromptEnhance::default(),
         &cancel,
@@ -3480,6 +3492,7 @@ fn smoke_generate_one_true_cfg(
         None,
         false,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -3836,6 +3849,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         false,
+        None,
         None,
         &PromptEnhance::default(),
         &cancel,
@@ -8687,6 +8701,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             false,
             None,
+            None,
             &enhance,
             &cancel,
             &mut |p| {
@@ -8878,6 +8893,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             false,
             None,
+            None,
             &enhance,
             &cancel,
             &mut |_| {},
@@ -9000,6 +9016,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             false,
+            None,
             None,
             &enhance,
             &cancel,
@@ -9199,6 +9216,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             false,
+            None,
             None,
             &enhance,
             &cancel,
