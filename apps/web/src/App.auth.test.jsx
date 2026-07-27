@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { getMediaTicket, setMediaTicket } from "./api.js";
+import { resetAccessTokenForTests } from "./accessToken.js";
 import { FakeEventSource, response, errorResponse, settle, buttonInside, changeField } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
@@ -16,6 +17,10 @@ describe("SceneWorks app shell", () => {
     FakeEventSource.instances = [];
     window.EventSource = FakeEventSource;
     window.localStorage.clear();
+    // sc-15223: the live token is module state that outlives a test, and tests here mount
+    // the gate, whose saveToken/lockRemote/re-verify paths move it. Clearing storage alone
+    // would leave that value in place and the raw seeding below would be ignored.
+    resetAccessTokenForTests();
     global.fetch = vi.fn((url) => {
       const path = new URL(url).pathname;
       if (path.endsWith("/health")) {
