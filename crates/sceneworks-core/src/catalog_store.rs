@@ -31,7 +31,7 @@ pub fn catalog_timestamp_now() -> String {
 }
 
 const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
-const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 4;
+const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 5;
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAGE_SIZE: u32 = 10_000;
@@ -156,6 +156,7 @@ const PROCESSING_CONTROL_METADATA_KEY: &str = "processing_control";
 const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
 const CURATION_PROJECTION_CHECKPOINT_METADATA_KEY: &str = "curation_projection_v1_checkpoint";
 const CURATION_PROJECTION_COMPLETE_METADATA_KEY: &str = "curation_projection_v1_complete";
+const CATALOG_RECORD_COUNT_METADATA_KEY: &str = "catalog_record_count";
 const CURATION_BACKFILL_BATCH_SIZE: u32 = 1_000;
 const CATALOG_RECORD_WRITE_BATCH_SIZE: usize = 50;
 const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
@@ -176,6 +177,7 @@ const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
     ANALYZER_CONFIG_METADATA_KEY,
     CURATION_PROJECTION_CHECKPOINT_METADATA_KEY,
     CURATION_PROJECTION_COMPLETE_METADATA_KEY,
+    CATALOG_RECORD_COUNT_METADATA_KEY,
 ];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
@@ -770,6 +772,14 @@ impl Catalog {
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let existing_record_ids =
             existing_record_ids(&transaction, &database_path, records.iter())?;
+        let mut unique_record_ids = HashSet::with_capacity(records.len());
+        let added_record_count = records
+            .iter()
+            .filter(|record| {
+                !existing_record_ids.contains(record.id.as_str())
+                    && unique_record_ids.insert(record.id.as_str())
+            })
+            .count() as u64;
         upsert_catalog_records(&transaction, &database_path, records)?;
         upsert_search_projection(
             &transaction,
@@ -777,19 +787,7 @@ impl Catalog {
             records.iter(),
             Some(&existing_record_ids),
         )?;
-        {
-            let mut statement = transaction
-                .prepare_cached(
-                    "insert into catalog_metadata(key, value) values (?1, ?2)
-                     on conflict(key) do update set value = excluded.value",
-                )
-                .map_err(|error| map_sqlite_error(&database_path, error))?;
-            for (key, value) in metadata {
-                statement
-                    .execute(params![key, value])
-                    .map_err(|error| map_sqlite_error(&database_path, error))?;
-            }
-        }
+        upsert_catalog_metadata(&transaction, &database_path, metadata, added_record_count)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
@@ -1586,23 +1584,57 @@ impl Catalog {
     }
 
     pub fn contract_state(&self) -> CatalogResult<CatalogContractState> {
-        let mut processing: CatalogProcessingProgress = self
-            .read_contract_value(PROGRESS_METADATA_KEY)?
-            .unwrap_or_else(|| CatalogProcessingProgress {
-                updated_at: self.descriptor.created_at.clone(),
-                ..CatalogProcessingProgress::default()
-            });
+        let database_path = self.database_path();
+        let mut statement = self
+            .connection
+            .prepare(
+                "select key, value from catalog_metadata
+                 where key in (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let mut payloads = statement
+            .query_map(
+                params![
+                    SOURCE_CONFIG_METADATA_KEY,
+                    ANALYZER_VERSIONS_METADATA_KEY,
+                    CHECKPOINTS_METADATA_KEY,
+                    PROGRESS_METADATA_KEY
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let mut processing: CatalogProcessingProgress = parse_contract_payload(
+            &database_path,
+            PROGRESS_METADATA_KEY,
+            payloads.remove(PROGRESS_METADATA_KEY),
+        )?
+        .unwrap_or_else(|| CatalogProcessingProgress {
+            updated_at: self.descriptor.created_at.clone(),
+            ..CatalogProcessingProgress::default()
+        });
         if processing.updated_at.is_empty() {
             processing.updated_at = self.descriptor.created_at.clone();
         }
         Ok(CatalogContractState {
-            source_config: self.read_contract_value(SOURCE_CONFIG_METADATA_KEY)?,
-            analyzer_versions: self
-                .read_contract_value(ANALYZER_VERSIONS_METADATA_KEY)?
-                .unwrap_or_default(),
-            checkpoints: self
-                .read_contract_value(CHECKPOINTS_METADATA_KEY)?
-                .unwrap_or_default(),
+            source_config: parse_contract_payload(
+                &database_path,
+                SOURCE_CONFIG_METADATA_KEY,
+                payloads.remove(SOURCE_CONFIG_METADATA_KEY),
+            )?,
+            analyzer_versions: parse_contract_payload(
+                &database_path,
+                ANALYZER_VERSIONS_METADATA_KEY,
+                payloads.remove(ANALYZER_VERSIONS_METADATA_KEY),
+            )?
+            .unwrap_or_default(),
+            checkpoints: parse_contract_payload(
+                &database_path,
+                CHECKPOINTS_METADATA_KEY,
+                payloads.remove(CHECKPOINTS_METADATA_KEY),
+            )?
+            .unwrap_or_default(),
             processing,
         })
     }
@@ -1916,21 +1948,7 @@ impl Catalog {
             )
             .optional()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
-        let Some(payload) = payload else {
-            return Ok(None);
-        };
-        if payload.len() > MAX_CONTRACT_STATE_BYTES {
-            return Err(CatalogError::Corrupt {
-                path: database_path,
-                detail: format!("catalog metadata {key} exceeds its size limit"),
-            });
-        }
-        serde_json::from_str(&payload)
-            .map(Some)
-            .map_err(|error| CatalogError::Corrupt {
-                path: database_path,
-                detail: format!("catalog metadata {key} is invalid: {error}"),
-            })
+        parse_contract_payload(&database_path, key, payload)
     }
 
     pub fn storage_accounting(&self) -> CatalogResult<CatalogStorageAccounting> {
@@ -1938,10 +1956,7 @@ impl Catalog {
         let manifest_bytes = fs::metadata(self.root.join(CATALOG_MANIFEST_FILE))?.len();
         let total_bytes = directory_file_bytes(&self.root)?;
         let artifact_bytes = total_bytes.saturating_sub(database_bytes + manifest_bytes);
-        let record_count = self
-            .connection
-            .query_row("select count(*) from catalog_records", [], |row| row.get(0))
-            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        let record_count = catalog_record_count(&self.connection, &self.database_path())?;
         Ok(CatalogStorageAccounting {
             database_bytes,
             manifest_bytes,
@@ -2559,6 +2574,53 @@ fn upsert_catalog_records(
                 artifact_path = excluded.artifact_path,
                 metadata_json = excluded.metadata_json,
                 updated_at = excluded.updated_at",
+        );
+        transaction
+            .prepare_cached(&sql)
+            .and_then(|mut statement| statement.execute(params_from_iter(bindings)))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    Ok(())
+}
+
+fn upsert_catalog_metadata(
+    transaction: &Transaction<'_>,
+    database_path: &Path,
+    metadata: &[(&str, &str)],
+    added_record_count: u64,
+) -> CatalogResult<()> {
+    if metadata.is_empty() && added_record_count == 0 {
+        return Ok(());
+    }
+    let mut entries = metadata
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect::<Vec<_>>();
+    if added_record_count > 0 {
+        entries.push((
+            CATALOG_RECORD_COUNT_METADATA_KEY.to_owned(),
+            added_record_count.to_string(),
+        ));
+    }
+    for entries in entries.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
+        let mut sql = String::from("insert into catalog_metadata(key, value) values ");
+        let mut bindings = Vec::with_capacity(entries.len() * 2);
+        for (index, (key, value)) in entries.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?,?)");
+            bindings.extend([
+                SqlValue::Text(key.to_owned()),
+                SqlValue::Text(value.to_owned()),
+            ]);
+        }
+        sql.push_str(
+            " on conflict(key) do update set value =
+                case when excluded.key = 'catalog_record_count'
+                     then cast(cast(catalog_metadata.value as integer)
+                               + cast(excluded.value as integer) as text)
+                     else excluded.value end",
         );
         transaction
             .prepare_cached(&sql)
@@ -3310,9 +3372,14 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .pragma_update(None, "journal_mode", "wal")
+    let journal_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|error| map_sqlite_error(database_path, error))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        connection
+            .pragma_update(None, "journal_mode", "wal")
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
     connection
         .pragma_update(None, "synchronous", "normal")
         .map_err(|error| map_sqlite_error(database_path, error))?;
@@ -3491,6 +3558,12 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
     }
     if version < 4 {
         migrate_height_index_v4(connection, database_path)?;
+        version = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    if version < 5 {
+        migrate_record_count_v5(connection, database_path)?;
     }
     Ok(())
 }
@@ -3563,6 +3636,35 @@ fn migrate_height_index_v4(connection: &Connection, database_path: &Path) -> Cat
         .map_err(|error| map_sqlite_error(database_path, error))?;
     transaction
         .pragma_update(None, "user_version", 4)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(database_path, error))
+}
+
+fn migrate_record_count_v5(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let current_version: u32 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if current_version >= 5 {
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "insert into catalog_metadata(key, value)
+             select ?1, cast(count(*) as text) from catalog_records
+             where true
+             on conflict(key) do update set value = excluded.value",
+            [CATALOG_RECORD_COUNT_METADATA_KEY],
+        )
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    transaction
+        .pragma_update(None, "user_version", 5)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     transaction
         .commit()
@@ -3782,6 +3884,7 @@ fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResu
             ("revision", "INTEGER", 1, 0),
         ],
     )?;
+    catalog_record_count(connection, database_path)?;
     validate_curation_indexes(connection, database_path)?;
 
     let index_owner: Option<String> = connection
@@ -3810,6 +3913,45 @@ fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResu
     Ok(())
 }
 
+fn catalog_record_count(connection: &Connection, database_path: &Path) -> CatalogResult<u64> {
+    let value: Option<String> = connection
+        .query_row(
+            "select value from catalog_metadata where key = ?1",
+            [CATALOG_RECORD_COUNT_METADATA_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    value
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| CatalogError::Corrupt {
+            path: database_path.to_path_buf(),
+            detail: "catalog record count metadata is missing or invalid".to_owned(),
+        })
+}
+
+fn parse_contract_payload<T: for<'de> Deserialize<'de>>(
+    database_path: &Path,
+    key: &str,
+    payload: Option<String>,
+) -> CatalogResult<Option<T>> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    if payload.len() > MAX_CONTRACT_STATE_BYTES {
+        return Err(CatalogError::Corrupt {
+            path: database_path.to_path_buf(),
+            detail: format!("catalog metadata {key} exceeds its size limit"),
+        });
+    }
+    serde_json::from_str(&payload)
+        .map(Some)
+        .map_err(|error| CatalogError::Corrupt {
+            path: database_path.to_path_buf(),
+            detail: format!("catalog metadata {key} is invalid: {error}"),
+        })
+}
+
 fn normalize_index_sql(sql: &str) -> String {
     sql.chars()
         .filter(|character| !character.is_ascii_whitespace())
@@ -3818,31 +3960,51 @@ fn normalize_index_sql(sql: &str) -> String {
 }
 
 fn validate_curation_indexes(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    let mut statement = connection
+        .prepare(
+            "select master.name, master.tbl_name, master.sql, info.seqno, info.name
+             from sqlite_master master
+             left join pragma_index_info(master.name) info
+             where master.type = 'index'
+               and master.name glob 'idx_catalog_search_*'
+             order by master.name, info.seqno",
+        )
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let mut definitions = BTreeMap::<String, (String, Option<String>, Vec<String>)>::new();
+    for row in rows {
+        let (name, owner, sql, sequence, column) =
+            row.map_err(|error| map_sqlite_error(database_path, error))?;
+        let entry = definitions
+            .entry(name)
+            .or_insert_with(|| (owner, sql, Vec::new()));
+        if sequence == Some(entry.2.len() as i64) {
+            if let Some(column) = column {
+                entry.2.push(column);
+            }
+        }
+    }
     for spec in CURATION_INDEX_SPECS {
-        let definition: Option<(String, Option<String>)> = connection
-            .query_row(
-                "select tbl_name, sql from sqlite_master
-                 where type = 'index' and name = ?1",
-                [spec.name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| map_sqlite_error(database_path, error))?;
-        let indexed_columns = connection
-            .prepare(&format!("pragma index_info({})", spec.name))
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |row| row.get::<_, String>("name"))?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(|error| map_sqlite_error(database_path, error))?;
         let expected_sql = curation_index_sql(*spec);
-        let definition_matches = definition.as_ref().is_some_and(|(owner, sql)| {
-            owner == "catalog_record_search"
-                && sql.as_deref().is_some_and(|sql| {
-                    normalize_index_sql(sql) == normalize_index_sql(&expected_sql)
-                })
-        }) && indexed_columns == spec.columns;
+        let definition_matches = definitions
+            .get(spec.name)
+            .is_some_and(|(owner, sql, columns)| {
+                owner == "catalog_record_search"
+                    && sql.as_deref().is_some_and(|sql| {
+                        normalize_index_sql(sql) == normalize_index_sql(&expected_sql)
+                    })
+                    && columns == spec.columns
+            });
         if !definition_matches {
             return Err(CatalogError::Corrupt {
                 path: database_path.to_path_buf(),
@@ -4410,7 +4572,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            CATALOG_DATABASE_SCHEMA_VERSION
         );
         assert_eq!(
             upgraded
@@ -4505,7 +4667,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let upgraded = Catalog::open(&root).expect("v3 catalog upgrades to v4");
+        let upgraded = Catalog::open(&root).expect("v3 catalog upgrades");
         let height_sql: String = upgraded
             .connection
             .query_row(
@@ -4524,7 +4686,37 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            CATALOG_DATABASE_SCHEMA_VERSION
+        );
+        upgraded.close();
+    }
+
+    #[test]
+    fn v4_catalog_backfills_durable_record_count_during_v5_upgrade() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "V4 catalog").unwrap();
+        catalog.append_records(&[record("preserved")]).unwrap();
+        catalog.close();
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "delete from catalog_metadata where key = ?1",
+                [CATALOG_RECORD_COUNT_METADATA_KEY],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
+        drop(connection);
+
+        let upgraded = Catalog::open(&root).expect("v4 catalog upgrades to v5");
+        assert_eq!(upgraded.storage_accounting().unwrap().record_count, 1);
+        assert_eq!(
+            upgraded
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            CATALOG_DATABASE_SCHEMA_VERSION
         );
         upgraded.close();
     }
@@ -4631,6 +4823,28 @@ mod tests {
                  create index idx_catalog_search_height
                     on catalog_record_search(height, width, record_id)
                     where height is not null;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_current_record_count_is_reported_as_corrupt() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Record count schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute(
+                "update catalog_metadata set value = 'invalid' where key = ?1",
+                [CATALOG_RECORD_COUNT_METADATA_KEY],
             )
             .unwrap();
         drop(connection);
@@ -4975,6 +5189,7 @@ mod tests {
         let persisted = catalog.record_by_id("duplicate-across-chunks").unwrap();
         assert_eq!(persisted.image_path, "images/write-50.jpg");
         assert_eq!(persisted.metadata["caption"], "latest_duplicate_caption");
+        assert_eq!(catalog.storage_accounting().unwrap().record_count, 50);
         assert_eq!(
             catalog
                 .connection
@@ -5042,6 +5257,7 @@ mod tests {
         assert_ne!(persisted_existing.updated_at, "2000-01-01T00:00:00Z");
         let persisted_new = catalog.record_by_id("mixed-new-record").unwrap();
         assert_eq!(persisted_new.metadata["caption"], "mixed_new_insert");
+        assert_eq!(catalog.storage_accounting().unwrap().record_count, 51);
         assert_eq!(
             catalog
                 .connection
