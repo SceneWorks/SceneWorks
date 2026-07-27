@@ -943,7 +943,13 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
         macCapabilities: MAC_CAPS,
       }),
     );
+
+    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374) — no disclosure
+    // needs opening, and the abstract Fast/Balanced/Best segment no longer sits in that row.
+    expect(container.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
+    expect(container.querySelector(".settings-bar-row .quality-segment")).toBeNull();
     await openAdvanced();
+    expect(container.querySelector(".advanced-panel .quality-segment")).toBeTruthy();
 
     // All bits-based tiers appear (NVFP4 filtered on MLX); bf16 is declared-but-not-installed → disabled.
     expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);

@@ -2771,6 +2771,13 @@ label {
   min-width: 82px;
 }
 
+/* Quant tier sits with Model / Aspect / Variations (studio-cleanup sc-15374). Its warning wraps
+   full-width under the select rather than stretching the cell. */
+.settings-field-tier {
+  flex: 1 1 130px;
+  min-width: 120px;
+}
+
 .settings-field select,
 .settings-field input {
   width: 100%;

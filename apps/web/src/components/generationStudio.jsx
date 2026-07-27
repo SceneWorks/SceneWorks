@@ -96,9 +96,11 @@ export function useQuantTierPicker({
   };
 }
 
-export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning }) {
+// `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an
+// Advanced-panel label (studio-cleanup sc-15374) without a wrapper element around the <label>.
+export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning, className = "" }) {
   return (
-    <label className="quant-tier-picker" title={title}>
+    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
       <select onChange={(event) => onChange(event.target.value)} value={value}>
         {items.map((item) => (

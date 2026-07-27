@@ -1677,23 +1677,26 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              <label className="settings-field">
-                Quality
-                <div className="quality-segment" role="radiogroup" aria-label="Quality">
-                  {qualityChoices.map(([value, label]) => (
-                    <button
-                      aria-checked={quality === value}
-                      className={quality === value ? "active" : ""}
-                      key={value}
-                      onClick={() => setQuality(value)}
-                      role="radio"
-                      type="button"
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </label>
+              {/* Quant tier, not the abstract Fast/Balanced/Best segment (studio-cleanup
+                  sc-15374): the settings bar names the concrete thing that will load. Quality
+                  itself is still a live payload/preset field and moves to Advanced. */}
+              {showTierPicker ? (
+                <TierPickerField
+                  className="settings-field settings-field-tier"
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
+                  title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
+                  warning={tierHasMemoryRisk ? (
+                    <span className="field-hint quant-tier-memory-note">
+                      Higher MLX video tiers may run out of memory on long or high-resolution clips.
+                      Your pick is honored.
+                    </span>
+                  ) : null}
+                />
+              ) : null}
             </div>
             <LoraPickerSection
               selectedModel={selectedModel}
@@ -1947,22 +1950,23 @@ export function VideoStudio() {
                   ) : null}
                 </>
               ) : null}
-              {showTierPicker ? (
-                <TierPickerField
-                  value={quantTier}
-                  onChange={handleTierChange}
-                  items={tierPickerItems}
-                  tierSwitching={tierSwitching}
-                  tierLabel={tierLabel}
-                  title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
-                  warning={tierHasMemoryRisk ? (
-                    <span className="field-hint quant-tier-memory-note">
-                      Higher MLX video tiers may run out of memory on long or high-resolution clips.
-                      Your pick is honored.
-                    </span>
-                  ) : null}
-                />
-              ) : null}
+              <label className="video-quality-field">
+                Quality
+                <div className="quality-segment" role="radiogroup" aria-label="Quality">
+                  {qualityChoices.map(([value, label]) => (
+                    <button
+                      aria-checked={quality === value}
+                      className={quality === value ? "active" : ""}
+                      key={value}
+                      onClick={() => setQuality(value)}
+                      role="radio"
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </label>
               {showTorchQuantization ? (
                 <label>
                   Quantization

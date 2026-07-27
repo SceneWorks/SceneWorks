@@ -3094,6 +3094,26 @@ export function ImageStudio() {
                 Variations
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
+              {/* Quant tier belongs with the everyday model knobs, not buried in Advanced
+                  (studio-cleanup sc-15374): it names the build that will actually load. */}
+              {showTierPicker ? (
+                <TierPickerField
+                  className="settings-field settings-field-tier"
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
+                  title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
+                  warning={tierBelowFloor ? (
+                    <span className="field-hint quant-tier-floor-note">
+                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
+                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
+                      here (quantization error is amplified under CFG). Your pick is honored.
+                    </span>
+                  ) : null}
+                />
+              ) : null}
             </div>
             <LoraPickerSection
               selectedModel={selectedModel}
@@ -3368,23 +3388,6 @@ export function ImageStudio() {
                   />
                   Enhance prompt
                 </label>
-              ) : null}
-              {showTierPicker ? (
-                <TierPickerField
-                  value={quantTier}
-                  onChange={handleTierChange}
-                  items={tierPickerItems}
-                  tierSwitching={tierSwitching}
-                  tierLabel={tierLabel}
-                  title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
-                  warning={tierBelowFloor ? (
-                    <span className="field-hint quant-tier-floor-note">
-                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
-                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
-                      here (quantization error is amplified under CFG). Your pick is honored.
-                    </span>
-                  ) : null}
-                />
               ) : null}
               {precisionToggle && !showTierPicker ? (
                 <label

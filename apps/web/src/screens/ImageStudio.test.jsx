@@ -1109,8 +1109,9 @@ describe("ImageStudio model picker capability gating", () => {
 
   it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
-    await openAdvanced(container);
     await act(async () => {});
+    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374).
+    expect(document.body.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
     const picker = tierPicker(container);
     expect(picker).toBeTruthy();
     const options = [...picker.options].map((o) => o.value);
