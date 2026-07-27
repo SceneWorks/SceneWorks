@@ -584,6 +584,157 @@ async fn ui_preferences_per_model_tier_round_trips_and_merges() {
     assert_eq!(saved["perModelTier"]["image"]["flux_dev"], "q4");
 }
 
+/// The Simple studios' knobs persist server-side for the same reason as the tier sticky: the
+/// desktop shell's per-launch origin wipes localStorage, so a model/prompt/resolution the user
+/// chose would be forgotten every relaunch. Keyed by WORKSPACE, so a prompt written for one
+/// project never follows the user into another.
+#[tokio::test]
+async fn ui_preferences_simple_studio_round_trips_per_workspace_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({
+            "simpleStudio": {
+                "project-1": { "image": { "model": "z_image", "prompt": "a lighthouse" } }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        saved["simpleStudio"]["project-1"]["image"]["model"],
+        "z_image"
+    );
+
+    // Survives a "relaunch": read back from disk, which is the whole point of the field.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        prefs["simpleStudio"]["project-1"]["image"]["prompt"],
+        "a lighthouse"
+    );
+
+    // A theme-only PUT MERGES — it must not clobber the stored snapshot.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(
+        prefs["simpleStudio"]["project-1"]["image"]["model"],
+        "z_image"
+    );
+    assert_eq!(prefs["theme"], "dark");
+
+    // A second workspace arrives in the full merged map the web sends; both are kept, and the
+    // per-workspace keying means project-2's prompt is its own.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({
+            "simpleStudio": {
+                "project-1": { "image": { "model": "z_image", "prompt": "a lighthouse" } },
+                "project-2": { "video": { "model": "wan_2_2", "prompt": "a river" } }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        saved["simpleStudio"]["project-1"]["image"]["prompt"],
+        "a lighthouse"
+    );
+    assert_eq!(
+        saved["simpleStudio"]["project-2"]["video"]["prompt"],
+        "a river"
+    );
+
+    // A malformed entry is dropped rather than stored — the web must never be handed back a
+    // snapshot shape it cannot read.
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "simpleStudio": { "project-3": "not-an-object" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(saved["simpleStudio"].get("project-3").is_none());
+}
+
+/// sc-15425: the advanced studios get the same durable treatment, in their own field. The two
+/// maps must not clobber each other — the Simple shell and the advanced workspace write on
+/// independent schedules, and the server replaces each field wholesale.
+#[tokio::test]
+async fn ui_preferences_advanced_studio_is_independent_of_simple_studio() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "simpleStudio": { "p1": { "image": { "prompt": "from simple" } } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // An advanced-only PUT must leave the Simple map alone.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "advancedStudio": { "p1": { "video": { "prompt": "from advanced" } } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        saved["simpleStudio"]["p1"]["image"]["prompt"],
+        "from simple"
+    );
+    assert_eq!(
+        saved["advancedStudio"]["p1"]["video"]["prompt"],
+        "from advanced"
+    );
+
+    // Both survive a "relaunch".
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(
+        prefs["simpleStudio"]["p1"]["image"]["prompt"],
+        "from simple"
+    );
+    assert_eq!(
+        prefs["advancedStudio"]["p1"]["video"]["prompt"],
+        "from advanced"
+    );
+
+    // Malformed advanced entries are dropped, and dropping them does not touch Simple.
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "advancedStudio": { "p2": "not-an-object" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(saved["advancedStudio"].get("p2").is_none());
+    assert_eq!(
+        saved["simpleStudio"]["p1"]["image"]["prompt"],
+        "from simple"
+    );
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
     use axum::http::Method;

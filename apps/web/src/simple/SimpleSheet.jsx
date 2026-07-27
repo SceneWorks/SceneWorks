@@ -12,7 +12,10 @@ export function SimpleSheet({ title, onClose, phone, children, labelId = "su-she
   const panelRef = useRef(null);
 
   useEffect(() => {
-    panelRef.current?.focus();
+    // `preventScroll` matters: the panel is pinned in view by CSS, so it never needs
+    // scrolling into view — but the browser would still scroll the shell to "reveal" a
+    // tall panel, yanking the whole screen behind the sheet.
+    panelRef.current?.focus({ preventScroll: true });
   }, []);
 
   useEffect(() => {

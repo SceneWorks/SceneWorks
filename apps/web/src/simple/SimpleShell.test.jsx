@@ -115,6 +115,10 @@ describe("SimpleShell", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    // The Simple studios now persist their settings (localStorage cache + the durable
+    // ui-preferences copy), so without this a snapshot flushed by one case restores into
+    // the next and the catalog-default assertions read the previous test's picks.
+    window.localStorage.clear();
     // jsdom has no ResizeObserver; the shell's measurement hook degrades to the
     // unmeasured (desktop) band, which is what these tests exercise.
     ({ container, root } = mountRoot());

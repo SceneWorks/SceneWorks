@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { videoModelServesMode } from "../modelEligibility.js";
@@ -8,6 +8,7 @@ import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
@@ -54,14 +55,15 @@ export function SimpleVideoStudio() {
   const { openSheet, closeSheet, openGuide, toast } = useSimpleUi();
   const refine = useSimpleRefine("video");
 
-  const [mode, setMode] = useState("text_to_video");
-  const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [resolution, setResolution] = useState("");
-  const [duration, setDuration] = useState(5);
-  const [styleId, setStyleId] = useState(null);
-  const [sourceAssetId, setSourceAssetId] = useState(null);
-  const [refineOpen, setRefineOpen] = useState(false);
+  // Sticky across navigation — see the same block in SimpleImageStudio.
+  const [mode, setMode] = useStudioState("video", "mode", "text_to_video");
+  const [prompt, setPrompt] = useStudioState("video", "prompt", "");
+  const [model, setModel] = useStudioState("video", "model", "");
+  const [resolution, setResolution] = useStudioState("video", "resolution", "");
+  const [duration, setDuration] = useStudioState("video", "duration", 5);
+  const [styleId, setStyleId] = useStudioState("video", "styleId", null);
+  const [sourceAssetId, setSourceAssetId] = useStudioState("video", "sourceAssetId", null);
+  const [refineOpen, setRefineOpen] = useStudioState("video", "refineOpen", false);
   const [submitting, setSubmitting] = useState(false);
 
   const models = useMemo(
@@ -77,7 +79,7 @@ export function SimpleVideoStudio() {
     if (models.length && !models.some((entry) => entry.id === model)) {
       setModel(models[0].id);
     }
-  }, [models, model]);
+  }, [models, model, setModel]);
 
   const resolutions = selectedModel?.limits?.resolutions?.length
     ? selectedModel.limits.resolutions
@@ -102,7 +104,7 @@ export function SimpleVideoStudio() {
     if (resolutions.length && !resolutions.includes(resolution)) {
       setResolution(preferredVideoResolution(selectedModel, resolutions));
     }
-  }, [resolutions, resolution, selectedModel]);
+  }, [resolutions, resolution, selectedModel, setResolution]);
 
   useEffect(() => {
     if (!selectedModel) {
@@ -111,16 +113,34 @@ export function SimpleVideoStudio() {
     if (durations.length && !durations.includes(duration)) {
       setDuration(preferredDuration(selectedModel, durations));
     }
-  }, [durations, duration, selectedModel]);
+  }, [durations, duration, selectedModel, setDuration]);
 
+  // Resolved against the FULL catalog rather than the picker's recent-20 list. That list is
+  // what the PICKER offers; a source restored from a previous session can have aged out of it
+  // while the asset is still perfectly valid, and resolving against it would blank the tile
+  // (and, below, wrongly prune the id).
   const sourceAsset = useMemo(
-    () => recentImageAssets.find((asset) => asset.id === sourceAssetId) ?? null,
-    [recentImageAssets, sourceAssetId],
+    () => assets.find((asset) => asset.id === sourceAssetId) ?? null,
+    [assets, sourceAssetId],
   );
+
+  // Same one-shot validation as the Image studio: a restored source can name an asset the
+  // user has since deleted, and `needsSource` reads the id — so without this, Image→Video
+  // stays submittable with a reference that no longer exists. Guarded on a LOADED catalog.
+  const restoredSourceValidated = useRef(false);
+  useEffect(() => {
+    if (restoredSourceValidated.current || !assets.length) {
+      return;
+    }
+    restoredSourceValidated.current = true;
+    setSourceAssetId((current) =>
+      current && !assets.some((asset) => asset.id === current) ? null : current,
+    );
+  }, [assets, setSourceAssetId]);
 
   // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
   // the video lane just has no auto-applied managed LoRA to exclude.
-  const lora = useSimpleLoras({ loras, selectedModel, jobs });
+  const lora = useSimpleLoras({ loras, selectedModel, jobs, scope: "video" });
   const openLoraPicker = () =>
     openSheet({
       title: "Add LoRA",

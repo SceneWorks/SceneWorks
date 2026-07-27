@@ -6,6 +6,7 @@ import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { buildSimpleAudioRequest } from "./simpleJobs.js";
 import { SimpleAudioDeck, SimpleTakeCard, takeGridColumns } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useStudioState } from "./useStudioState.js";
 import { Chips, SheetSelect, StudioRunStatus, jobIsRunning, newestLocalJob } from "./studioParts.jsx";
 
 // Simple Audio Studio (design handoff → Audio Studio redesign, epic 14361 / sc-14365).
@@ -39,11 +40,12 @@ export function SimpleAudioStudio() {
   // One transport for the screen, so loading a take always pauses the previous one.
   const player = useAudioTakePlayer();
 
-  const [mode, setMode] = useState("music");
-  const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [voice, setVoice] = useState("");
-  const [duration, setDuration] = useState(8);
+  // Sticky across navigation — see the same block in SimpleImageStudio.
+  const [mode, setMode] = useStudioState("audio", "mode", "music");
+  const [prompt, setPrompt] = useStudioState("audio", "prompt", "");
+  const [model, setModel] = useStudioState("audio", "model", "");
+  const [voice, setVoice] = useStudioState("audio", "voice", "");
+  const [duration, setDuration] = useStudioState("audio", "duration", 8);
   const [submitting, setSubmitting] = useState(false);
 
   // Per-mode eligibility comes from the model's own `audio` sub-block, exactly as the
@@ -61,7 +63,7 @@ export function SimpleAudioStudio() {
     if (models.length && !models.some((entry) => entry.id === model)) {
       setModel(models[0].id);
     }
-  }, [models, model]);
+  }, [models, model, setModel]);
 
   // The Speech voice bank the selected model declares. A streaming / multi-speaker TTS
   // ships none, in which case the Voice row is simply absent (it speaks in its own voice).
@@ -74,7 +76,7 @@ export function SimpleAudioStudio() {
     if (voices.length && !voices.some((entry) => voiceId(entry) === voice)) {
       setVoice(voiceId(voices[0]));
     }
-  }, [voices, voice]);
+  }, [voices, voice, setVoice]);
 
   // Length is capped to the model's advertised `audio.maxDurationSecs` — never a hardcoded
   // ceiling. A model that declares no cap synthesizes its own natural length, so the control
@@ -95,7 +97,7 @@ export function SimpleAudioStudio() {
     if (durations.length && !durations.includes(duration)) {
       setDuration(durations[durations.length - 1]);
     }
-  }, [durations, duration]);
+  }, [durations, duration, setDuration]);
 
   const latestJob = newestLocalJob(audioLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);

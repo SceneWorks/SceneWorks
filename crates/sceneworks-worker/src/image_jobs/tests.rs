@@ -12905,3 +12905,223 @@ fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
          identity tensor, so that path can never serve one; got: {error}"
     );
 }
+
+/// sc-8253 + sc-8278 identity A/B over the FLUX.2-klein angle set — the measurement both
+/// stories' acceptances hang on, and the only thing keeping either In Review.
+///
+/// Three arms over one reference and one seed set, so the two stories share a cell:
+/// * `squish_off` — reference stretched to the square (the pre-sc-8253 behaviour), guidance off
+/// * `square_off` — reference fitted by the *production* `fit_engine_image` crop, guidance off
+/// * `square_on`  — same square reference, image-guidance at the production default (1.5)
+///
+/// **sc-8253 reads `squish_off` → `square_off`** (does aspect-correction recover identity).
+/// **sc-8278 reads `square_off` → `square_on`** (does identity-strength rescue the angle set).
+/// Square is production today (`fit_edit_references` is merged and default-on), which is why the
+/// squish arm has to be built by hand here — this driver constructs `Conditioning` directly and
+/// never routes through `fit_edit_references`, so nothing would otherwise reproduce the old path.
+///
+/// A spread arm re-runs one condition on extra seeds so the reported deltas can be read against
+/// generation noise rather than assumed to exceed it — the sc-6541 lesson, where the control's own
+/// identity swung more than the effects being measured.
+///
+/// Absolute numbers will NOT reproduce sc-8253's 0.469/0.597 or sc-8278's 0.38: those used an
+/// unavailable reference subject. This measures within-run deltas on one reference at fixed seeds.
+///
+/// Writes `<AB_OUT>/<arm>/<angle>_s<seed>.png`, `<AB_OUT>/ref/reference.png`, and a
+/// `<AB_OUT>/prompts.json` ready for `lora_eval_harness`. That file is keyed by **angle**, not by
+/// image stem: the harness groups outputs by `prompt_id` to compute `same_prompt_spread`, so a
+/// per-image key would give every output its own group of one and silently report `null` — no
+/// seed-variance measure, which is the whole point of the spread arm.
+///
+/// ```text
+/// cargo test -p sceneworks-worker --lib -- --ignored --nocapture sc_8253_8278_identity_angle_ab
+/// # then, per arm:
+/// REF_DIR=<AB_OUT>/ref GEN_DIR=<AB_OUT>/square_on PROMPTS_JSON=<AB_OUT>/prompts.json \
+///   EVAL_LABEL=square_on cargo test -p sceneworks-worker --lib -- --ignored --nocapture eval_lora_outputs
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "sc-8253/sc-8278 real-weight A/B: needs FLUX.2-klein-9b weights + Metal. Set AB_REF/AB_OUT"]
+fn sc_8253_8278_identity_angle_ab() {
+    const SIDE: u32 = 1024;
+    const STEPS: u32 = 4; // klein is a 4-step distill
+    const BASE: &str = "photorealistic portrait of the same person, plain background";
+
+    let ref_path = std::env::var("AB_REF")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("Datasets/Uhura/Uhura.jpg"));
+    let out = std::env::var("AB_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("sceneworks-identity-ab"));
+    let guidance: f32 = std::env::var("AB_GUIDANCE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.5);
+    let parse_seeds = |key: &str, default: &str| -> Vec<i64> {
+        std::env::var(key)
+            .unwrap_or_else(|_| default.to_owned())
+            .split(',')
+            .filter_map(|s| s.trim().parse::<i64>().ok())
+            .collect()
+    };
+    let seeds = parse_seeds("AB_SEEDS", "8001,8002");
+    let spread_seeds = parse_seeds("AB_SPREAD_SEEDS", "8003,8004");
+    // Subset for a cheap end-to-end proof before committing to the full sweep.
+    let angles: Vec<String> = std::env::var("AB_ANGLES")
+        .unwrap_or_else(|_| {
+            "front,three_quarter_left,three_quarter_right,left_profile,right_profile,up,down,\
+             up_left,up_right,down_left,down_right"
+                .to_owned()
+        })
+        .split(',')
+        .map(|a| a.trim().to_owned())
+        .filter(|a| !a.is_empty())
+        .collect();
+
+    assert!(
+        ref_path.exists(),
+        "missing AB_REF at {}",
+        ref_path.display()
+    );
+    let source = image::open(&ref_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", ref_path.display()))
+        .to_rgb8();
+    assert_ne!(
+        source.width(),
+        source.height(),
+        "AB_REF must be NON-square or the sc-8253 arm measures nothing (got {}×{})",
+        source.width(),
+        source.height()
+    );
+
+    // Arm A reference: naive stretch to the square — no aspect preservation. This is exactly what
+    // reached the engine before sc-8253, and the distortion the story measured.
+    let squished = gen_core::Image {
+        width: SIDE,
+        height: SIDE,
+        pixels: image::imageops::resize(&source, SIDE, SIDE, image::imageops::FilterType::Triangle)
+            .into_raw(),
+    };
+    // Arms B/C reference: the production fit — cover + center-crop for `crop` mode. Calling the real
+    // helper rather than reimplementing it keeps this an A/B of shipped behaviour.
+    let squared = fit_engine_image(
+        gen_core::Image {
+            width: source.width(),
+            height: source.height(),
+            pixels: source.clone().into_raw(),
+        },
+        SIDE,
+        SIDE,
+        "crop",
+    )
+    .expect("fit reference");
+
+    std::fs::create_dir_all(out.join("ref")).unwrap();
+    image::RgbImage::from_raw(squared.width, squared.height, squared.pixels.clone())
+        .unwrap()
+        .save(out.join("ref/reference.png"))
+        .unwrap();
+
+    // klein usually lives in the app-managed model dir rather than the HF cache, so prefer an
+    // explicit override, then the app dir, then the HF cache.
+    let snapshot = std::env::var("AB_KLEIN_WEIGHTS")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            let managed = dirs_home().join("Models/aether/flux2-klein-9b");
+            managed.join("model_index.json").exists().then_some(managed)
+        })
+        .unwrap_or_else(|| hf_snapshot("models--black-forest-labs--FLUX.2-klein-9b"));
+    assert!(
+        snapshot.join("transformer").is_dir(),
+        "klein snapshot at {} has no transformer/ — set AB_KLEIN_WEIGHTS",
+        snapshot.display()
+    );
+    eprintln!("[sc-8253/8278] klein weights: {}", snapshot.display());
+    let generator = load_engine(
+        "flux2_klein_9b_edit",
+        snapshot,
+        Some(gen_core::Quant::Q8),
+        Vec::new(),
+        None,
+    )
+    .expect("load klein edit engine");
+
+    // (arm, reference, image_guidance, seeds)
+    let mut plan: Vec<(&str, &gen_core::Image, Option<f32>, Vec<i64>)> = vec![
+        ("squish_off", &squished, None, seeds.clone()),
+        ("square_off", &squared, None, seeds.clone()),
+        ("square_on", &squared, Some(guidance), seeds.clone()),
+    ];
+    // Extra seeds on one arm → the generation-noise floor the deltas get compared against.
+    if !spread_seeds.is_empty() {
+        plan.push(("square_on", &squared, Some(guidance), spread_seeds.clone()));
+    }
+
+    let mut prompts = std::collections::BTreeMap::<String, String>::new();
+    let total: usize = plan.iter().map(|(_, _, _, s)| s.len() * angles.len()).sum();
+    eprintln!(
+        "[sc-8253/8278] {total} generations — {} angles × {} arms, ref {}",
+        angles.len(),
+        plan.len(),
+        ref_path.display()
+    );
+
+    let mut done = 0usize;
+    for (arm, reference, image_guidance, arm_seeds) in &plan {
+        let arm_dir = out.join(arm);
+        std::fs::create_dir_all(&arm_dir).unwrap();
+        for angle in &angles {
+            let augment = angle_prompt_augment(angle);
+            assert!(!augment.is_empty(), "unknown angle `{angle}`");
+            let prompt = format!("{BASE}, {augment}");
+            for seed in arm_seeds {
+                let stem = format!("{angle}_s{seed}");
+                let path = arm_dir.join(format!("{stem}.png"));
+                done += 1;
+                if path.exists() {
+                    eprintln!("[sc-8253/8278] {done}/{total} skip {arm}/{stem} (exists)");
+                    prompts.insert(angle.clone(), prompt.clone());
+                    continue;
+                }
+                let cancel = gen_core::CancelFlag::new();
+                let (w, h, pixels) = flux2_edit_generate_one(
+                    generator.as_ref(),
+                    &prompt,
+                    SIDE,
+                    SIDE,
+                    *seed,
+                    STEPS,
+                    Some(1.0),
+                    *image_guidance,
+                    vec![gen_core::Conditioning::Reference {
+                        image: (*reference).clone(),
+                        strength: None,
+                    }],
+                    &PromptEnhance::default(),
+                    &cancel,
+                    &mut |_| {},
+                )
+                .expect("klein edit generate");
+                image::RgbImage::from_raw(w, h, pixels)
+                    .unwrap()
+                    .save(&path)
+                    .unwrap();
+                prompts.insert(angle.clone(), prompt.clone());
+                eprintln!("[sc-8253/8278] {done}/{total} {arm}/{}", path.display());
+            }
+        }
+    }
+
+    std::fs::write(
+        out.join("prompts.json"),
+        serde_json::to_string_pretty(&prompts).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "[sc-8253/8278] done. Score each arm:\n  \
+         REF_DIR={0}/ref GEN_DIR={0}/<arm> PROMPTS_JSON={0}/prompts.json EVAL_LABEL=<arm> \\\n    \
+         cargo test -p sceneworks-worker --lib -- --ignored --nocapture eval_lora_outputs",
+        out.display()
+    );
+}
