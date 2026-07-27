@@ -9587,12 +9587,17 @@
         "minMemoryGb": 64,
         "repo": "SceneWorks/krea-realtime-14b-mlx",
         // Declares Q4 as this model's default tier, matching the `default: true` q4 download.
-        // ⚠️ This key does NOT select the tier for a video job: `mlx.quantize` is read by the
-        // IMAGE lane (`resolve_quant`, image_jobs/base.rs); the video lane reads only
-        // `advanced.mlxQuantize` (`resolve_mlx_dense_quant`, video_jobs/mod.rs) and today hands
-        // the engine the snapshot ROOT rather than a `<tier>/` subdir. Wiring the video lane to
-        // honor a declared default tier + descend into the tier subdir is sc-15258 (S20), which
-        // is blocked by this story. Declared here so S20 has the manifest fact to read.
+        // ⚠️ This key is DOCUMENTATION on a video entry, not the mechanism. `mlx.quantize` is read
+        // by the IMAGE lane (`resolve_quant`, image_jobs/base.rs); the video lane never consults it
+        // — and deliberately so. sc-10859 made the video lane's Q4-first default an owned carve-out
+        // from the app-wide Q8 default (there is no MLX video Q8 lever, so a silent Q8 only risks a
+        // video-runtime OOM), and letting a manifest key flip it would quietly undo that. What
+        // actually picks the tier is `krea_realtime_tier_order` (`video_jobs/krea_realtime.rs`,
+        // sc-15258), which reads `advanced.mlxQuantize` through the shared `resolve_mlx_dense_quant`
+        // and independently defaults to `q4`-first, then descends into the installed `<tier>/`
+        // subdir. The 4 here therefore AGREES with the resolver rather than driving it; a future
+        // edit to this number would NOT move the video lane. (bernini and scail2_14b declare the
+        // same thing for the same reason.)
         "quantize": 4,
         "limits": {
           "samplers": ["default"],

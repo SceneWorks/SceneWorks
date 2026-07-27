@@ -5,7 +5,7 @@ use super::prelude::*;
 #[cfg(target_os = "macos")]
 use super::{
     bernini::{bernini_engine_id, resolve_bernini_model_dir},
-    krea_realtime::{krea_realtime_engine_id, resolve_krea_realtime_model_dir},
+    krea_realtime::{krea_realtime_engine_id, resolve_krea_realtime_tier_dir_and_quant},
     ltx::{ltx_engine_id, resolve_keyframe_conditioning, resolve_ltx_model_dir},
     mochi::{mochi_engine_id, resolve_mochi_model_dir},
     scail2::{resolve_scail2_model_dir, scail2_engine_id},
@@ -153,9 +153,12 @@ pub(crate) fn ensure_video_engine_weights(
     // Krea Realtime 14B (epic 8431 / sc-8443). Without this arm a Krea job whose weights don't resolve
     // falls to `VideoRoute::Stub` and the user is handed a PROCEDURAL FAKE VIDEO instead of the
     // resolver's precise "download the snapshot" error — the silent degradation sc-4176 added this gate
-    // to prevent.
+    // to prevent. It asks the TIER resolver, not `resolve_krea_realtime_model_dir` (sc-15258): every
+    // published Krea file lives under a `q4/`/`q8/`/`bf16/` prefix, so a resolvable snapshot ROOT is no
+    // evidence of loadable weights — a torn install would otherwise pass this gate and, since
+    // `krea_realtime_available` refuses it, get the fake clip anyway.
     if krea_realtime_engine_id(&request.model).is_some() {
-        resolve_krea_realtime_model_dir(settings)?;
+        resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     }
     Ok(())
 }
