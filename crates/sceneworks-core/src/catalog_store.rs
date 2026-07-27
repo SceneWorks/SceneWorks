@@ -44,6 +44,7 @@ const MAX_FACET_VALUE_BYTES: u32 = 512;
 const MAX_SEARCH_QUERY_BYTES: usize = 1024;
 const MAX_SAVED_VIEWS: u64 = 200;
 const MAX_REJECTION_REASON_BYTES: usize = 2_048;
+const CATALOG_WAL_AUTOCHECKPOINT_PAGES: u32 = 20_000;
 const CATALOG_HEIGHT_INDEX_NAME: &str = "idx_catalog_search_height";
 
 #[derive(Clone, Copy)]
@@ -156,7 +157,7 @@ const ANALYZER_CONFIG_METADATA_KEY: &str = "analyzer_config";
 const CURATION_PROJECTION_CHECKPOINT_METADATA_KEY: &str = "curation_projection_v1_checkpoint";
 const CURATION_PROJECTION_COMPLETE_METADATA_KEY: &str = "curation_projection_v1_complete";
 const CURATION_BACKFILL_BATCH_SIZE: u32 = 1_000;
-const CURATION_PROJECTION_WRITE_BATCH_SIZE: usize = 50;
+const CATALOG_RECORD_WRITE_BATCH_SIZE: usize = 50;
 const PROCESSING_LEASE_FILE: &str = ".catalog-processing.lock";
 const CATALOG_ID_METADATA_KEY: &str = "catalog_id";
 const CATALOG_NAME_METADATA_KEY: &str = "name";
@@ -769,37 +770,7 @@ impl Catalog {
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let existing_record_ids =
             existing_record_ids(&transaction, &database_path, records.iter())?;
-        {
-            let mut statement = transaction
-                .prepare_cached(
-                    "insert into catalog_records (
-                        id, image_path, thumbnail_path, embedding_path, artifact_path,
-                        metadata_json, created_at, updated_at
-                     ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-                     on conflict(id) do update set
-                        image_path = excluded.image_path,
-                        thumbnail_path = excluded.thumbnail_path,
-                        embedding_path = excluded.embedding_path,
-                        artifact_path = excluded.artifact_path,
-                        metadata_json = excluded.metadata_json,
-                        updated_at = excluded.updated_at",
-                )
-                .map_err(|error| map_sqlite_error(&database_path, error))?;
-            for record in records {
-                let metadata = serde_json::to_string(&record.metadata)?;
-                statement
-                    .execute(params![
-                        record.id,
-                        record.image_path,
-                        record.thumbnail_path,
-                        record.embedding_path,
-                        record.artifact_path,
-                        metadata,
-                        utc_now(),
-                    ])
-                    .map_err(|error| map_sqlite_error(&database_path, error))?;
-            }
-        }
+        upsert_catalog_records(&transaction, &database_path, records)?;
         upsert_search_projection(
             &transaction,
             &database_path,
@@ -2541,6 +2512,62 @@ fn search_projection(record: &NewCatalogRecord) -> CatalogSearchProjection {
     }
 }
 
+fn upsert_catalog_records(
+    transaction: &Transaction<'_>,
+    database_path: &Path,
+    records: &[NewCatalogRecord],
+) -> CatalogResult<()> {
+    let timestamp = utc_now();
+    for records in records.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
+        let mut sql = String::from(
+            "insert into catalog_records (
+                id, image_path, thumbnail_path, embedding_path, artifact_path,
+                metadata_json, created_at, updated_at
+             ) values ",
+        );
+        let mut bindings = Vec::with_capacity(records.len() * 8);
+        for (index, record) in records.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?,?,?,?,?,?,?,?)");
+            bindings.extend([
+                SqlValue::Text(record.id.clone()),
+                SqlValue::Text(record.image_path.clone()),
+                record
+                    .thumbnail_path
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                record
+                    .embedding_path
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                record
+                    .artifact_path
+                    .clone()
+                    .map_or(SqlValue::Null, SqlValue::Text),
+                SqlValue::Text(serde_json::to_string(&record.metadata)?),
+                SqlValue::Text(timestamp.clone()),
+                SqlValue::Text(timestamp.clone()),
+            ]);
+        }
+        sql.push_str(
+            " on conflict(id) do update set
+                image_path = excluded.image_path,
+                thumbnail_path = excluded.thumbnail_path,
+                embedding_path = excluded.embedding_path,
+                artifact_path = excluded.artifact_path,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at",
+        );
+        transaction
+            .prepare_cached(&sql)
+            .and_then(|mut statement| statement.execute(params_from_iter(bindings)))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    Ok(())
+}
+
 fn existing_record_ids<'a>(
     transaction: &Transaction<'_>,
     database_path: &Path,
@@ -2548,7 +2575,7 @@ fn existing_record_ids<'a>(
 ) -> CatalogResult<HashSet<String>> {
     let records = records.into_iter().collect::<Vec<_>>();
     let mut existing = HashSet::new();
-    for records in records.chunks(CURATION_PROJECTION_WRITE_BATCH_SIZE) {
+    for records in records.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
         let mut sql = String::from("select id from catalog_records where id in (");
         let mut bindings = Vec::with_capacity(records.len());
         for (index, record) in records.iter().enumerate() {
@@ -2588,7 +2615,7 @@ fn upsert_search_projection<'a>(
         .filter(|record| seen.insert(record.id.as_str()))
         .collect::<Vec<_>>();
     unique.reverse();
-    for unique in unique.chunks(CURATION_PROJECTION_WRITE_BATCH_SIZE) {
+    for unique in unique.chunks(CATALOG_RECORD_WRITE_BATCH_SIZE) {
         let projected = unique
             .iter()
             .map(|record| search_projection(record))
@@ -3302,7 +3329,11 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
         .pragma_update(None, "cache_size", -65_536)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
-        .pragma_update(None, "wal_autocheckpoint", 2_000)
+        // Projection-heavy scanner batches dirty several indexes at once.
+        // Keep automatic checkpoints bounded (about 80 MiB at SQLite's
+        // default page size) without forcing checkpoint work into every few
+        // small scanner commits.
+        .pragma_update(None, "wal_autocheckpoint", CATALOG_WAL_AUTOCHECKPOINT_PAGES)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     Ok(())
 }
@@ -4226,6 +4257,13 @@ mod tests {
         assert_eq!(writer.sqlite_setting("busy_timeout").unwrap(), "5000");
         assert_eq!(writer.sqlite_setting("foreign_keys").unwrap(), "1");
         assert_eq!(
+            writer
+                .connection
+                .pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            CATALOG_WAL_AUTOCHECKPOINT_PAGES
+        );
+        assert_eq!(
             writer.sqlite_setting("temp_store").unwrap(),
             "1",
             "facet aggregation temp state must spill to files, not process memory"
@@ -4920,15 +4958,35 @@ mod tests {
                 } else {
                     format!("unique_caption_{index}")
                 };
-                curation_record(
+                let mut record = curation_record(
                     &id,
                     &caption,
                     &format!("sha256:{index}"),
                     &format!("dhash64:{index}"),
-                )
+                );
+                record.image_path = format!("images/write-{index}.jpg");
+                if index == 50 {
+                    record.metadata["analysis"]["medium"] = serde_json::json!("illustration");
+                }
+                record
             })
             .collect::<Vec<_>>();
         catalog.append_records(&records).unwrap();
+        let persisted = catalog.record_by_id("duplicate-across-chunks").unwrap();
+        assert_eq!(persisted.image_path, "images/write-50.jpg");
+        assert_eq!(persisted.metadata["caption"], "latest_duplicate_caption");
+        assert_eq!(
+            catalog
+                .connection
+                .query_row(
+                    "select medium, content_hash from catalog_record_search
+                     where record_id = 'duplicate-across-chunks'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            ("illustration".to_owned(), "sha256:50".to_owned())
+        );
         assert_eq!(
             catalog
                 .search_records(&CatalogSearchRequest {
@@ -4951,6 +5009,16 @@ mod tests {
             .records
             .is_empty());
 
+        catalog
+            .connection
+            .execute(
+                "update catalog_records
+                 set created_at = '2000-01-01T00:00:00Z',
+                     updated_at = '2000-01-01T00:00:00Z'
+                 where id = 'duplicate-across-chunks'",
+                [],
+            )
+            .unwrap();
         let mut existing = curation_record(
             "duplicate-across-chunks",
             "mixed_existing_update",
@@ -4965,6 +5033,30 @@ mod tests {
             "dhash64:mixed-new",
         );
         catalog.append_records(&[existing, new]).unwrap();
+        let persisted_existing = catalog.record_by_id("duplicate-across-chunks").unwrap();
+        assert_eq!(
+            persisted_existing.metadata["caption"],
+            "mixed_existing_update"
+        );
+        assert_eq!(persisted_existing.created_at, "2000-01-01T00:00:00Z");
+        assert_ne!(persisted_existing.updated_at, "2000-01-01T00:00:00Z");
+        let persisted_new = catalog.record_by_id("mixed-new-record").unwrap();
+        assert_eq!(persisted_new.metadata["caption"], "mixed_new_insert");
+        assert_eq!(
+            catalog
+                .connection
+                .query_row(
+                    "select medium, content_hash from catalog_record_search
+                     where record_id = 'duplicate-across-chunks'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            (
+                "illustration".to_owned(),
+                "sha256:existing-update".to_owned()
+            )
+        );
         for text in ["mixed_existing_update", "mixed_new_insert"] {
             assert_eq!(
                 catalog
@@ -4979,6 +5071,15 @@ mod tests {
                 1
             );
         }
+        assert!(catalog
+            .search_records(&CatalogSearchRequest {
+                limit: 10,
+                text: "latest_duplicate_caption".to_owned(),
+                ..CatalogSearchRequest::default()
+            })
+            .unwrap()
+            .records
+            .is_empty());
         let medium_index_sql: String = catalog
             .connection
             .query_row(
