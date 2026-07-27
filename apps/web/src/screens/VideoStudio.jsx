@@ -300,9 +300,9 @@ export function VideoStudio() {
   const [ltxVideoStg, setLtxVideoStg] = useState(saved.videoStgGuidanceScale ?? "");
   const [ltxVideoRescale, setLtxVideoRescale] = useState(saved.videoRescaleScale ?? "");
   // Clip-conditioning strengths for the LTX IC-LoRA extend/bridge paths (sc-3522,
-  // sc-3755). The worker reads these from `advanced` (default 1.0 when absent):
-  // the source/left clip uses videoConditioningStrength, the bridge right clip
-  // uses bridgeRightVideoConditioningStrength.
+  // sc-3755) and for Krea Realtime's video_to_video (sc-8445). The worker reads these from
+  // `advanced` (default 1.0 when absent): the source/left clip uses videoConditioningStrength,
+  // the bridge right clip uses bridgeRightVideoConditioningStrength.
   const [videoConditioningStrength, setVideoConditioningStrength] = useState(saved.videoConditioningStrength ?? "");
   const [bridgeRightVideoConditioningStrength, setBridgeRightVideoConditioningStrength] = useState(
     saved.bridgeRightVideoConditioningStrength ?? "",
@@ -364,6 +364,38 @@ export function VideoStudio() {
   // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
   const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
   const lightningActive = showLightning && lightning;
+  // Clip-conditioning strength (`advanced.videoConditioningStrength`). The LTX/Wan IC-LoRA clip
+  // modes always honor it, so those two modes show it for whichever model serves them. The
+  // `video_to_video` tab is different: the key is honored there ONLY by Krea Realtime, whose v2v
+  // drives a strength-controlled autoregressive init (`FewStepSchedule::for_strength`, wired in
+  // `video_jobs/krea_realtime.rs::krea_realtime_conditioning`). Bernini — the other v2v model —
+  // never reads the key, so gating on the ADAPTER keeps the control off a model that would
+  // silently ignore it, the same shape as the `adapter === "ltx_video"` guidance knobs below.
+  //
+  // Krea's image_to_video deliberately gets NO strength control: an i2v reference still only warms
+  // the AR KV cache and the engine reads the image alone, never `strength` — a documented no-op
+  // (sc-8440 / sc-8443), pinned worker-side by `krea_realtime_conditioning` emitting
+  // `strength: None`. Showing it there would be a knob that does nothing.
+  const showClipStrength =
+    ["extend_clip", "video_bridge"].includes(mode) ||
+    (mode === "video_to_video" && selectedModel?.adapter === "krea_realtime");
+  // Which generation axes the selected engine actually has, declared in the manifest `video`
+  // sub-block (sc-8445) — the video-lane mirror of how Audio Studio reads `audio.supportsGuidance`
+  // / `audio.supportsNegativePrompt`. Neither an id check nor an engine link: the catalog says it.
+  //
+  // ⚠️ ABSENT MEANS TRUE, the opposite polarity to the audio block. Every other video model takes
+  // both a CFG scale and a negative prompt and declares nothing, so `!== false` is what keeps them
+  // byte-identical to their pre-sc-8445 behaviour; only an engine that genuinely lacks the axis
+  // declares it false. Krea Realtime is the one that does: it is CFG-free (Self-Forcing baked
+  // guidance out), so `generate_krea_realtime` runs a single batch-1 forward, sets
+  // `negative_prompt: None`, and never forwards a guidance scale.
+  //
+  // HIDDEN, not disabled: the lightning precedent below disables Steps/Guidance because that
+  // inertness is TRANSIENT (turn Lightning off and the control works again). A missing axis is
+  // permanent for the model, so a forever-dead input is just clutter — Audio Studio hides these two
+  // for the same reason (`showGuidance` / `showNegative`).
+  const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1196,7 +1228,10 @@ export function VideoStudio() {
         // (stack-folded) prompt LAST — send that composed string verbatim. Falls back to the plain
         // stack-folded / raw prompt when no style is applied.
         prompt: styleApplied ? composedStylePrompt : stackActive ? composedStack.prompt : prompt,
-        negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
+        // An engine with no negative-prompt axis gets an empty one rather than whatever a preset
+        // stack composed — the field is hidden for it, so sending text the user cannot see or edit
+        // (and the worker discards anyway) would be a ghost input on the recipe.
+        negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
         duration: Number(duration),
         fps: Number(fps),
@@ -1297,7 +1332,10 @@ export function VideoStudio() {
           ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
-          ...(!lightningActive && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+          ...(supportsGuidance &&
+          !lightningActive &&
+          guidanceOverride !== "" &&
+          Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
@@ -1312,10 +1350,12 @@ export function VideoStudio() {
           ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
             ? { videoRescaleScale: Number(ltxVideoRescale) }
             : {}),
-          // LTX IC-LoRA clip-conditioning strengths (sc-3522, sc-3755). The worker
-          // reads these from `advanced`, defaulting to 1.0 when absent — extend uses
-          // the source-clip strength, bridge uses both left and right.
-          ...(["extend_clip", "video_bridge"].includes(mode) &&
+          // Clip-conditioning strengths (sc-3522, sc-3755; sc-8445 for Krea Realtime v2v). The
+          // worker reads these from `advanced`, defaulting to 1.0 when absent — extend uses the
+          // source-clip strength, bridge uses both left and right, and Krea Realtime's v2v uses
+          // the source-clip strength. `showClipStrength` is the same predicate that renders the
+          // control, so the payload can never carry a strength the user was never offered.
+          ...(showClipStrength &&
           videoConditioningStrength !== "" &&
           Number.isFinite(Number(videoConditioningStrength))
             ? { videoConditioningStrength: Number(videoConditioningStrength) }
@@ -1688,10 +1728,18 @@ export function VideoStudio() {
             presetLoraDetails={presetLoraDetails}
           />
 
+          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
+              panel is captioned "Prompt sent" and exists so the user sees exactly what will be
+              generated; general presets are filtered on `kind === "general"` alone, so a preset
+              carrying `defaults.negativePrompt` reaches a CFG-free model too. Since submit now sends
+              `negativePrompt: ""` for such a model, showing the stack's `Negative:` line here would
+              assert something that is NOT sent — the same false-copy class this story exists to
+              remove. (Only the negative needs the guard: the preview's other extras are aspect and
+              count, which every video engine honors.) */}
           <PresetStackPreview
             generalStack={generalStack}
             composed={composedStack}
-            stackAddsNegative={stackAddsNegative}
+            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
 
@@ -1842,7 +1890,7 @@ export function VideoStudio() {
                   </label>
                 </>
               ) : null}
-              {["extend_clip", "video_bridge"].includes(mode) ? (
+              {showClipStrength ? (
                 <>
                   <label>
                     {mode === "video_bridge" ? "Left clip strength" : "Clip strength"}
@@ -1966,23 +2014,25 @@ export function VideoStudio() {
                   value={lightningActive ? "" : stepsOverride}
                 />
               </label>
-              <label>
-                Guidance
-                <input
-                  min="0"
-                  max="30"
-                  disabled={lightningActive}
-                  onChange={(event) => setGuidanceOverride(event.target.value)}
-                  placeholder={lightningActive ? "off (Lightning)" : (() => {
-                    const value = guidanceDefaultFromModel(selectedModel);
-                    return value == null ? "" : String(value);
-                  })()}
-                  step="0.1"
-                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
-                  type="number"
-                  value={lightningActive ? "" : guidanceOverride}
-                />
-              </label>
+              {supportsGuidance ? (
+                <label>
+                  Guidance
+                  <input
+                    min="0"
+                    max="30"
+                    disabled={lightningActive}
+                    onChange={(event) => setGuidanceOverride(event.target.value)}
+                    placeholder={lightningActive ? "off (Lightning)" : (() => {
+                      const value = guidanceDefaultFromModel(selectedModel);
+                      return value == null ? "" : String(value);
+                    })()}
+                    step="0.1"
+                    title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
+                    type="number"
+                    value={lightningActive ? "" : guidanceOverride}
+                  />
+                </label>
+              ) : null}
               <label>
                 Character
                 <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
@@ -2005,10 +2055,12 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-              </label>
+              {supportsNegativePrompt ? (
+                <label className="prompt-field">
+                  Negative prompt
+                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                </label>
+              ) : null}
               <LoraPickerSection
                 selectedModel={selectedModel}
                 selectedLoras={selectedLoras}
