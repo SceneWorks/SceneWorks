@@ -31,7 +31,7 @@ pub fn catalog_timestamp_now() -> String {
 }
 
 const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
-const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 2;
+const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 3;
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAGE_SIZE: u32 = 10_000;
@@ -44,6 +44,100 @@ const MAX_FACET_VALUE_BYTES: u32 = 512;
 const MAX_SEARCH_QUERY_BYTES: usize = 1024;
 const MAX_SAVED_VIEWS: u64 = 200;
 const MAX_REJECTION_REASON_BYTES: usize = 2_048;
+
+#[derive(Clone, Copy)]
+struct CatalogIndexSpec {
+    name: &'static str,
+    columns: &'static [&'static str],
+    predicate: Option<&'static str>,
+}
+
+const CURATION_INDEX_SPECS: &[CatalogIndexSpec] = &[
+    CatalogIndexSpec {
+        name: "idx_catalog_search_medium",
+        columns: &["medium", "record_id"],
+        predicate: Some("medium is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_people",
+        columns: &["person_count", "record_id"],
+        predicate: Some("person_count is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_faces",
+        columns: &["face_count", "record_id"],
+        predicate: Some("face_count is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_full_body",
+        columns: &["full_body", "record_id"],
+        predicate: Some("full_body is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_qualified_full_body",
+        columns: &["qualified_single_full_body", "record_id"],
+        predicate: Some("qualified_single_full_body is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_pose",
+        columns: &["pose_coverage", "record_id"],
+        predicate: Some("pose_coverage is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_crop",
+        columns: &["crop_state", "record_id"],
+        predicate: Some("crop_state is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_subject_size",
+        columns: &["subject_size", "record_id"],
+        predicate: Some("subject_size is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_dimensions",
+        columns: &["width", "height", "record_id"],
+        predicate: None,
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_availability",
+        columns: &["availability", "record_id"],
+        predicate: None,
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_confidence",
+        columns: &["analyzer_confidence", "record_id"],
+        predicate: Some("analyzer_confidence is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_sample",
+        columns: &["sample_key", "record_id"],
+        predicate: None,
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_primary_flow",
+        columns: &[
+            "medium",
+            "person_count",
+            "qualified_single_full_body",
+            "sample_key",
+            "record_id",
+        ],
+        predicate: Some(
+            "medium is not null and person_count is not null \
+             and qualified_single_full_body is not null",
+        ),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_content_hash",
+        columns: &["content_hash", "record_id"],
+        predicate: Some("content_hash is not null"),
+    },
+    CatalogIndexSpec {
+        name: "idx_catalog_search_perceptual_hash",
+        columns: &["perceptual_hash", "record_id"],
+        predicate: Some("perceptual_hash is not null"),
+    },
+];
 
 const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
@@ -3206,7 +3300,7 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
 }
 
 fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
-    let version: u32 = connection
+    let mut version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| map_sqlite_error(database_path, error))?;
     if version > CATALOG_DATABASE_SCHEMA_VERSION {
@@ -3239,8 +3333,9 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
                  commit;",
             )
             .map_err(|error| map_sqlite_error(database_path, error))?;
+        version = 1;
     }
-    if version < CATALOG_DATABASE_SCHEMA_VERSION {
+    if version < 2 {
         connection
             .execute_batch(
                 "begin immediate;
@@ -3343,59 +3438,58 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
         connection
             .execute_batch(
                 "begin immediate;
-                 create index if not exists idx_catalog_search_medium
-                    on catalog_record_search(medium, record_id)
-                    where medium is not null;
-                 create index if not exists idx_catalog_search_people
-                    on catalog_record_search(person_count, record_id)
-                    where person_count is not null;
-                 create index if not exists idx_catalog_search_faces
-                    on catalog_record_search(face_count, record_id)
-                    where face_count is not null;
-                 create index if not exists idx_catalog_search_full_body
-                    on catalog_record_search(full_body, record_id)
-                    where full_body is not null;
-                 create index if not exists idx_catalog_search_qualified_full_body
-                    on catalog_record_search(qualified_single_full_body, record_id)
-                    where qualified_single_full_body is not null;
-                 create index if not exists idx_catalog_search_pose
-                    on catalog_record_search(pose_coverage, record_id)
-                    where pose_coverage is not null;
-                 create index if not exists idx_catalog_search_crop
-                    on catalog_record_search(crop_state, record_id)
-                    where crop_state is not null;
-                 create index if not exists idx_catalog_search_subject_size
-                    on catalog_record_search(subject_size, record_id)
-                    where subject_size is not null;
-                 create index if not exists idx_catalog_search_dimensions
-                    on catalog_record_search(width, height, record_id);
-                 create index if not exists idx_catalog_search_availability
-                    on catalog_record_search(availability, record_id);
-                 create index if not exists idx_catalog_search_confidence
-                    on catalog_record_search(analyzer_confidence, record_id)
-                    where analyzer_confidence is not null;
-                 create index if not exists idx_catalog_search_sample
-                    on catalog_record_search(sample_key, record_id);
-                 drop index if exists idx_catalog_search_primary_flow;
-                 create index idx_catalog_search_primary_flow
-                    on catalog_record_search(
-                        medium, person_count, qualified_single_full_body, sample_key, record_id
-                    )
-                    where medium is not null
-                      and person_count is not null
-                      and qualified_single_full_body is not null;
-                 create index if not exists idx_catalog_search_content_hash
-                    on catalog_record_search(content_hash, record_id)
-                    where content_hash is not null;
-                 create index if not exists idx_catalog_search_perceptual_hash
-                    on catalog_record_search(perceptual_hash, record_id)
-                    where perceptual_hash is not null;
                  pragma user_version = 2;
                  commit;",
             )
             .map_err(|error| map_sqlite_error(database_path, error))?;
+        version = 2;
+    }
+    if version < 3 {
+        migrate_curation_indexes_v3(connection, database_path)?;
     }
     Ok(())
+}
+
+fn curation_index_sql(spec: CatalogIndexSpec) -> String {
+    let mut sql = format!(
+        "create index {} on catalog_record_search({})",
+        spec.name,
+        spec.columns.join(", ")
+    );
+    if let Some(predicate) = spec.predicate {
+        sql.push_str(" where ");
+        sql.push_str(predicate);
+    }
+    sql
+}
+
+fn migrate_curation_indexes_v3(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let current_version: u32 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if current_version >= 3 {
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        return Ok(());
+    }
+    for spec in CURATION_INDEX_SPECS {
+        transaction
+            .execute_batch(&format!(
+                "drop index if exists {}; {}",
+                spec.name,
+                curation_index_sql(*spec)
+            ))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    transaction
+        .pragma_update(None, "user_version", 3)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(database_path, error))
 }
 
 fn table_has_column(
@@ -3611,6 +3705,7 @@ fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResu
             ("revision", "INTEGER", 1, 0),
         ],
     )?;
+    validate_curation_indexes(connection, database_path)?;
 
     let index_owner: Option<String> = connection
         .query_row(
@@ -3634,6 +3729,49 @@ fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResu
             path: database_path.to_path_buf(),
             detail: "catalog_records image-path index has the wrong definition".to_owned(),
         });
+    }
+    Ok(())
+}
+
+fn normalize_index_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn validate_curation_indexes(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    for spec in CURATION_INDEX_SPECS {
+        let definition: Option<(String, Option<String>)> = connection
+            .query_row(
+                "select tbl_name, sql from sqlite_master
+                 where type = 'index' and name = ?1",
+                [spec.name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        let indexed_columns = connection
+            .prepare(&format!("pragma index_info({})", spec.name))
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>("name"))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        let expected_sql = curation_index_sql(*spec);
+        let definition_matches = definition.as_ref().is_some_and(|(owner, sql)| {
+            owner == "catalog_record_search"
+                && sql.as_deref().is_some_and(|sql| {
+                    normalize_index_sql(sql) == normalize_index_sql(&expected_sql)
+                })
+        }) && indexed_columns == spec.columns;
+        if !definition_matches {
+            return Err(CatalogError::Corrupt {
+                path: database_path.to_path_buf(),
+                detail: format!("{} index has the wrong definition", spec.name),
+            });
+        }
     }
     Ok(())
 }
@@ -3862,6 +4000,22 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn replace_curation_indexes_with_dense_v2(connection: &Connection) {
+        connection.execute_batch("begin immediate;").unwrap();
+        for spec in CURATION_INDEX_SPECS {
+            connection
+                .execute_batch(&format!(
+                    "drop index if exists {}; create index {} on catalog_record_search({})",
+                    spec.name,
+                    spec.name,
+                    spec.columns.join(", ")
+                ))
+                .unwrap();
+        }
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection.execute_batch("commit;").unwrap();
+    }
 
     fn record(id: &str) -> NewCatalogRecord {
         NewCatalogRecord {
@@ -4144,6 +4298,85 @@ mod tests {
     }
 
     #[test]
+    fn dense_v2_curation_indexes_upgrade_once_to_exact_sparse_v3_definitions() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "V2 curation indexes").unwrap();
+        catalog
+            .append_records(&[curation_record(
+                "preserved-record",
+                "Preserved projection",
+                "sha256:preserved",
+                "dhash64:preserved",
+            )])
+            .unwrap();
+        catalog.close();
+
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path).unwrap();
+        replace_curation_indexes_with_dense_v2(&connection);
+        drop(connection);
+
+        let upgraded = Catalog::open(&root).expect("v2 catalog upgrades");
+        assert_eq!(
+            upgraded
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            upgraded
+                .connection
+                .query_row(
+                    "select medium from catalog_record_search where record_id = 'preserved-record'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+                .as_deref(),
+            Some("photograph")
+        );
+        for spec in CURATION_INDEX_SPECS {
+            let actual_sql: String = upgraded
+                .connection
+                .query_row(
+                    "select sql from sqlite_master where type = 'index' and name = ?1",
+                    [spec.name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                normalize_index_sql(&actual_sql),
+                normalize_index_sql(&curation_index_sql(*spec)),
+                "{} should have its canonical v3 definition",
+                spec.name
+            );
+        }
+        let query_plan = upgraded
+            .connection
+            .prepare("explain query plan select record_id from catalog_record_search where medium = 'photograph'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            query_plan.contains("idx_catalog_search_medium"),
+            "sparse medium index should remain usable: {query_plan}"
+        );
+        upgraded.close();
+
+        let writer = Connection::open(&database_path).unwrap();
+        writer.execute_batch("begin immediate;").unwrap();
+        Catalog::open(&root)
+            .expect("completed v3 open does not need a writer lock")
+            .close();
+        writer.execute_batch("rollback;").unwrap();
+    }
+
+    #[test]
     fn malformed_current_schema_is_reported_as_corrupt_during_open() {
         let temporary = tempdir().expect("temp directory");
         let root = temporary.path().join("catalog");
@@ -4197,6 +4430,30 @@ mod tests {
                 "create index idx_catalog_records_image_path
                  on catalog_metadata(value)",
                 [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn wrong_curation_index_predicate_is_reported_as_corrupt() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Curation index schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "drop index idx_catalog_search_medium;
+                 create index idx_catalog_search_medium
+                    on catalog_record_search(medium, record_id)
+                    where medium is null;",
             )
             .unwrap();
         drop(connection);
