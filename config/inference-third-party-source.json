@@ -1,6 +1,6 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "2e522ce5a87ab0a05b6dcecdd5042f3af3c34d87",
+  "inferenceRevision": "a481509629df82869271357e716fb9a6a052ef7b",
   "auditDigest": "f3c08d8cf08dbc129d47d6eadd943619371d52a8163a29aa474f7533296dd464",
   "artifacts": [
     {
