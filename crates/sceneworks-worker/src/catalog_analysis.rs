@@ -2183,8 +2183,10 @@ mod tests {
     #[test]
     fn per_page_callback_and_keyset_checkpoint_resume_counts_without_reanalysis() {
         let fixture = Fixture::new("controlled-resume", &["first", "second"]);
-        let mut config = CatalogAnalysisConfig::default();
-        config.page_size = 1;
+        let config = CatalogAnalysisConfig {
+            page_size: 1,
+            ..CatalogAnalysisConfig::default()
+        };
         let cancel = gen_core::CancelFlag::new();
 
         let catalog = fixture
