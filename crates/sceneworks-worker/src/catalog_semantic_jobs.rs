@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-const INFERENCE_RUNTIME_REVISION: &str = "1d80161ad9c4a86445725e4dab69ba7b460f4101";
+const INFERENCE_RUNTIME_REVISION: &str = "72c2bdf8d18a56ef8b710a0da2e6b913e523884f";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -1689,6 +1689,22 @@ pub(crate) async fn run_catalog_analysis_job(
 mod tests {
     use super::*;
     use sceneworks_core::catalog_store::CatalogRecordFilter;
+
+    #[test]
+    fn semantic_provenance_matches_linked_inference_revision() {
+        let manifest = include_str!("../Cargo.toml");
+        for dependency in ["sceneworks-gen-core", "runtime-macos", "runtime-cuda"] {
+            let prefix = format!("{dependency} =");
+            let declaration = manifest
+                .lines()
+                .find(|line| line.trim_start().starts_with(&prefix))
+                .unwrap_or_else(|| panic!("missing {dependency} dependency declaration"));
+            assert!(
+                declaration.contains(&format!("rev = \"{INFERENCE_RUNTIME_REVISION}\"")),
+                "{dependency} must stay pinned to the semantic provenance revision"
+            );
+        }
+    }
 
     fn survivor_record(id: &str) -> CatalogRecord {
         CatalogRecord {
