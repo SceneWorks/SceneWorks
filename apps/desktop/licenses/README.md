@@ -25,6 +25,25 @@ for a later revision without falsely claiming that source is already shipped.
 The inventory digest makes additions, deletions, and changed dispositions fail
 until the complete audit is intentionally regenerated.
 
+Two inventories back that audit, and they fail in different directions.
+`config/inference-provenance-candidates.tsv` is produced by a marker regex over
+doc comments — a heuristic, and one with a proven hole: `mlx-gen-krea-realtime`
+described itself honestly as a port in words the regex did not know, matched
+nothing, and shipped invisible to the audit (sc-15138). So
+`config/inference-crate-prefixes.txt` lists every production-Rust **crate** in
+the pinned revision without reading a byte of source, and every prefix in it
+must be classified — covered by a `portedSourceAreas` entry, or given an
+explicit `crateDispositions` decision (`first-party-original` or
+`architecture-reimplementation-existing-terms`) with evidence. An unclassified
+crate FAILS the check; there is no silent default (sc-15191). Regenerate both
+with:
+
+```
+node scripts/scan-inference-provenance.mjs --repo <inference> \
+  --write config/inference-provenance-candidates.tsv \
+  --write-crates config/inference-crate-prefixes.txt
+```
+
 The executable guard also pins the packaging path: `api:build:embedded` must
 build the web app with the raw notice imports and compile `apps/web/dist` into
 the Rust API sidecar, while Tauri must package that sidecar. A production web

@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
   "inferenceRevision": "1deefff6ceb664aa97da6a34a60d21961718b7d9",
-  "auditDigest": "470b60f5488f5a3225aa7d63eff1c3f916304c40800e9ee417b017c301a41143",
+  "auditDigest": "19015aea8ef6e80a62a5464fc9e1e52f1e3b6330f998157efc77ddc2d39daf25",
   "artifacts": [
     {
       "id": "cmudict",
@@ -19,10 +19,10 @@
     "candidateList": "config/inference-provenance-candidates.tsv",
     "revision": "1deefff6ceb664aa97da6a34a60d21961718b7d9",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
-    "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
+    "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated from, from the reference, based on ... <port-object>, follow(s|ing|ed) ... reference|upstream (case-insensitive; <port-object> = reference|upstream|original|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 548,
-    "populationSha256": "30b1031e1aaa9a48cf26713c35767a21ce8302d9605416654469a62e241a4740"
+    "matchedFiles": 610,
+    "populationSha256": "df880febf16985708fca5ea719f0532e1a7e110bcc36cc1dfb0bf94d69658cf1"
   },
   "portedSourceAreas": [
     {
@@ -66,6 +66,20 @@
     {
       "id": "architecture:crates/audio/candle-audio-moss-sfx",
       "pathPrefix": "crates/audio/candle-audio-moss-sfx/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-moss-tts",
+      "pathPrefix": "crates/audio/candle-audio-moss-tts/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-moss-tts-realtime",
+      "pathPrefix": "crates/audio/candle-audio-moss-tts-realtime/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -467,6 +481,16 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-mage",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mage/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are mapped in the About manifest (the microsoft/Mage MIT component); the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ]
+    },
+    {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-mochi/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
@@ -511,6 +535,13 @@
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-sana",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-sana/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-scail2",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-scail2/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -577,6 +608,15 @@
       "component": "candle-transformers-source"
     },
     {
+      "id": "cephes-source",
+      "paths": [
+        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
+      ],
+      "provenance": "The Mage latent module transcribes the Cephes ndtri/erf/erfc routines and coefficient tables (Stephen L. Moshier, BSD-3-Clause).",
+      "disposition": "about-license",
+      "component": "cephes"
+    },
+    {
       "id": "cfgpp-formula",
       "paths": [
         "crates/contracts/gen-core/src/sampling/cfgpp.rs"
@@ -612,25 +652,6 @@
       "provenance": "InstantID keypoint rasterizers faithfully port OpenCV drawing primitives and the literal SinTable.",
       "disposition": "about-license",
       "component": "opencv-source"
-    },
-    {
-      "id": "architecture:crates/media/mlx-gen/mlx-gen-mage",
-      "pathPrefix": "crates/media/mlx-gen/mlx-gen-mage/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are mapped in the About manifest (the microsoft/Mage MIT component); the candidate inventory pins the exact source blob and normalized provenance markers.",
-      "excludePaths": [
-        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
-      ]
-    },
-    {
-      "id": "cephes-source",
-      "paths": [
-        "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
-      ],
-      "provenance": "The Mage latent module transcribes the Cephes ndtri/erf/erfc routines and coefficient tables (Stephen L. Moshier, BSD-3-Clause).",
-      "disposition": "about-license",
-      "component": "cephes"
     }
   ],
   "includeSites": [
@@ -768,6 +789,96 @@
       "included": "OUT_DIR/*.ptx",
       "disposition": "generated-build-output",
       "evidence": "Eleven include_str! calls embed PTX generated by this crate's build script from its already-licensed kernel sources; they introduce no independent source/data."
+    }
+  ],
+  "crateCoverage": {
+    "scanner": "scripts/scan-inference-provenance.mjs",
+    "crateList": "config/inference-crate-prefixes.txt",
+    "revision": "1deefff6ceb664aa97da6a34a60d21961718b7d9",
+    "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
+    "cratePrefixes": 94,
+    "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"
+  },
+  "crateDispositions": [
+    {
+      "prefix": "crates/audio/candle-audio",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Shared candle audio commons. src/mel.rs reconstructs the HTK mel filterbank and src/dsp.rs the librosa/torch `center=True` STFT conventions for preprocessing parity with the audio models' reference implementations. No upstream source is copied and no marker sentence appears, so it needs an explicit decision rather than an inferred one; the applicable model terms are already mapped in the About manifest via the consuming provider crates."
+    },
+    {
+      "prefix": "crates/audio/candle-audio-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks composition root for the Candle audio lane (sc-12835): provider registration and stable ordering only. No model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/audio/candle-audio-clap",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "LAION CLAP (`laion/clap-htsat-unfused`) audio+text embedder — an architecture reimplementation of the CLAP towers and projection in candle (sc-12851). Its headers describe it as a port in prose the marker vocabulary does not match, so it is classified here explicitly; the CLAP model terms are mapped in the About manifest."
+    },
+    {
+      "prefix": "crates/bundles/runtime-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks bundle composition contract — validates that a platform bundle's registries belong to the declared backend. Tensor-neutral, no upstream source."
+    },
+    {
+      "prefix": "crates/bundles/runtime-cpu",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks CPU runtime bundle: composition of first-party registries. No model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/bundles/runtime-cuda",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks CUDA runtime bundle: composition of first-party registries. No model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/bundles/runtime-macos",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks macOS runtime bundle: composition of first-party registries. No model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/core-llm/core-llm-testkit",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored conformance harness for the core-llm TextLlm contract. Tensor-free, drives providers through the public trait only; no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-testkit",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source — which is why the marker vocabulary deliberately anchors `derived from` to a port object."
+    },
+    {
+      "prefix": "crates/llm/mlx-llm/server",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored HTTP server that speaks the OpenAI chat-completions WIRE FORMAT. An API request/response shape is an interface, not upstream source; the transforms and the socket wiring are first-party."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks composition root for the Candle media lane: provider registration and ordering only."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-joycaption",
+      "disposition": "first-party-original",
+      "evidence": "Thin consumer seam (story 7692): SceneWorks caption product policy (prompt map, length templates, capability bounds) plus contract adaptation. The JoyCaption model implementation lives in candle-llm's `candle-llava` provider, outside this repository, and the model's own terms are mapped in the About manifest."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-mage",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Candle/CUDA Mage-Flow provider — the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks composition root for the MLX media lane: provider registration and ordering only."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-clip",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "OpenAI CLIP ViT-L/14 image embedder (`openai/clip-vit-large-patch14`): the transformer body and preprocessing are reused from the audited `architecture:crates/media/mlx-gen/mlx-gen-sdxl` area, and this crate adds the projection head — an architecture reimplementation with no copied source. CLIP's upstream terms are tracked with the model entry."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
+      "disposition": "first-party-original",
+      "evidence": "Thin consumer seam (story 7265): SceneWorks caption product policy plus contract adaptation. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
     }
   ]
 }

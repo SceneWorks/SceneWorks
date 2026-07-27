@@ -29,6 +29,10 @@
 //                      and its license text file exists on disk. A component whose text
 //                      is missing renders as an EMPTY license — worse than absent,
 //                      because the page then asserts coverage it does not have.
+//   5. Crate coverage — every production-Rust CRATE in the pinned inference revision is
+//                      classified: covered by a ported-source area, or given an explicit
+//                      crateDispositions decision with evidence. Fail-closed (sc-15191);
+//                      see validateCrateCoverage for why the marker regex is not enough.
 //
 // UNDETERMINED UPSTREAM LICENSES are listed explicitly below rather than silently
 // skipped, so the remaining decision is visible in code review instead of invisible.
@@ -40,7 +44,9 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   parse as parseProvenanceCandidates,
+  parseCrates as parseCratePrefixes,
   populationSha256,
+  cratePopulationSha256,
 } from "./scan-inference-provenance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,6 +56,7 @@ const LICENSES_DIR = path.join(ROOT, "apps/desktop/licenses");
 const BUNDLED_JS = path.join(ROOT, "apps/web/src/data/bundledLicenses.js");
 const SOURCE_AUDIT = path.join(ROOT, "config/inference-third-party-source.json");
 const PROVENANCE_CANDIDATES = path.join(ROOT, "config/inference-provenance-candidates.tsv");
+const CRATE_PREFIXES = path.join(ROOT, "config/inference-crate-prefixes.txt");
 const WORKER_CARGO = path.join(ROOT, "crates/sceneworks-worker/Cargo.toml");
 const ROOT_CARGO = path.join(ROOT, "Cargo.toml");
 const CARGO_LOCK = path.join(ROOT, "Cargo.lock");
@@ -106,7 +113,98 @@ const components = new Map(
   (manifest.components ?? []).map((component) => [component.id, component]),
 );
 
-function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText) {
+// Dispositions a crate with NO marker-bearing file may carry. Both demand evidence; neither is a
+// catch-all. `first-party-original` asserts there is no upstream source to attribute at all;
+// `architecture-reimplementation-existing-terms` (the same word the ported areas use) asserts the
+// crate IS a port whose files simply never say so, and that its upstream terms are already mapped.
+const CRATE_DISPOSITIONS = new Set([
+  "first-party-original",
+  "architecture-reimplementation-existing-terms",
+]);
+
+/**
+ * FAIL-CLOSED crate coverage (sc-15191).
+ *
+ * The marker regex in scan-inference-provenance.mjs is a heuristic, and heuristics have holes:
+ * `mlx-gen-krea-realtime` entered as a WHOLE NEW CRATE whose headers honestly described a port in
+ * words the regex did not know (`mirroring`, `from the reference`), matched nothing, and was
+ * therefore invisible to the audit — this gate went green on a crate nobody had classified
+ * (sc-15138). Broadening the vocabulary narrows that hole but cannot close it, because the hole is
+ * "a human has to have anticipated the phrasing".
+ *
+ * This closes it from the other side. The crate-prefix inventory is scanned from the pinned
+ * revision WITHOUT reading a byte of source, so a crate is in the population because it exists.
+ * Every prefix must then be claimed by a ported-source area or by an explicit disposition. A new
+ * crate that is neither FAILS — silence is no longer a passing answer.
+ */
+function validateCrateCoverage(audit, componentIndex, crateText, pinnedRev) {
+  const coverageErrors = [];
+  const coverage = audit.crateCoverage;
+  if (!coverage) {
+    coverageErrors.push("inference source audit has no `crateCoverage` block — the fail-closed crate guard cannot run.");
+    return coverageErrors;
+  }
+  if (pinnedRev && coverage.revision !== pinnedRev) {
+    coverageErrors.push(
+      `crate-prefix inventory was scanned at ${coverage.revision ?? "(unset)"}, but Cargo pins ${pinnedRev}. Re-run \`node scripts/scan-inference-provenance.mjs --repo <inference> --write-crates config/inference-crate-prefixes.txt\`, classify any new crate, then update crateCoverage + auditDigest.`,
+    );
+  }
+  let crates = [];
+  try {
+    crates = parseCratePrefixes(crateText);
+  } catch (error) {
+    coverageErrors.push(`crate-prefix inventory is malformed: ${error.message}`);
+  }
+  if (coverage.cratePrefixes !== crates.length) {
+    coverageErrors.push(`crate-prefix population count changed: audit says ${coverage.cratePrefixes}, inventory has ${crates.length}.`);
+  }
+  const computed = cratePopulationSha256(crates);
+  if (coverage.cratePopulationSha256 !== computed) {
+    coverageErrors.push(`crate-prefix population hash changed: audit says ${coverage.cratePopulationSha256}, inventory computes ${computed}.`);
+  }
+
+  const areas = audit.portedSourceAreas ?? [];
+  const portedCrate = (crate) => areas.some((area) =>
+    (area.pathPrefix && (area.pathPrefix === crate || area.pathPrefix.startsWith(`${crate}/`))) ||
+    (area.paths ?? []).some((candidatePath) => candidatePath.startsWith(`${crate}/`)));
+
+  const declared = new Map();
+  for (const entry of audit.crateDispositions ?? []) {
+    if (!entry.prefix) {
+      coverageErrors.push("crate disposition entry has no `prefix`.");
+      continue;
+    }
+    if (declared.has(entry.prefix)) {
+      coverageErrors.push(`duplicate crate disposition for "${entry.prefix}".`);
+    }
+    declared.set(entry.prefix, entry);
+    if (!CRATE_DISPOSITIONS.has(entry.disposition)) {
+      coverageErrors.push(`crate disposition "${entry.prefix}" has invalid disposition "${entry.disposition ?? "(unset)"}" (expected one of: ${[...CRATE_DISPOSITIONS].join(", ")}).`);
+    }
+    // An allowlist without a reason is a catch-all wearing a decision's clothes.
+    if (!entry.evidence) {
+      coverageErrors.push(`crate disposition "${entry.prefix}" has no evidence — every exemption must be justifiable in review.`);
+    }
+    if (entry.component && !componentIndex.has(entry.component)) {
+      coverageErrors.push(`crate disposition "${entry.prefix}" maps to missing About component "${entry.component}".`);
+    }
+    if (!crates.includes(entry.prefix)) {
+      coverageErrors.push(`crate disposition "${entry.prefix}" is not a production-Rust crate in the pinned revision (renamed, removed, or never existed?) — drop or repoint it.`);
+    } else if (portedCrate(entry.prefix)) {
+      coverageErrors.push(`crate "${entry.prefix}" is BOTH covered by a ported-source area and given a crateDispositions decision — the classification must be unambiguous.`);
+    }
+  }
+
+  for (const crate of crates) {
+    if (portedCrate(crate) || declared.has(crate)) continue;
+    coverageErrors.push(
+      `production-Rust crate "${crate}" in the pinned inference revision is UNCLASSIFIED: it has no portedSourceAreas coverage and no crateDispositions decision. Classify it — add a ported-source area if it ports upstream work, or a crateDispositions entry (${[...CRATE_DISPOSITIONS].join(" | ")}) with evidence if it does not.`,
+    );
+  }
+  return coverageErrors;
+}
+
+function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText, crateText) {
   const auditErrors = [];
   const inferencePins = new Set(
     [...pinText.matchAll(/github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g)]
@@ -137,6 +235,8 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
     prospectiveDisclosures: audit.prospectiveDisclosures,
     provenanceScan: audit.provenanceScan,
     portedSourceAreas: audit.portedSourceAreas,
+    crateCoverage: audit.crateCoverage,
+    crateDispositions: audit.crateDispositions,
     includeSites: audit.includeSites,
   });
   const digest = crypto.createHash("sha256").update(canonical).digest("hex");
@@ -253,6 +353,12 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
   for (const area of areas.keys()) {
     if (!usedAreas.has(area)) auditErrors.push(`ported-source area "${area}" has no candidates.`);
   }
+  auditErrors.push(...validateCrateCoverage(
+    audit,
+    componentIndex,
+    crateText,
+    inferencePins.size === 1 ? [...inferencePins][0] : undefined,
+  ));
   return auditErrors;
 }
 
@@ -363,7 +469,8 @@ const pinSources = [
 ].join("\n");
 const lock = fs.readFileSync(CARGO_LOCK, "utf8");
 const provenanceCandidates = fs.readFileSync(PROVENANCE_CANDIDATES, "utf8");
-errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock, provenanceCandidates));
+const cratePrefixes = fs.readFileSync(CRATE_PREFIXES, "utf8");
+errors.push(...validateSourceAudit(sourceAudit, components, pinSources, lock, provenanceCandidates, cratePrefixes));
 const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
 const tauriConfig = JSON.parse(fs.readFileSync(TAURI_CONFIG, "utf8"));
 const rustApiSource = fs.readFileSync(RUST_API_LIB, "utf8");
@@ -377,19 +484,19 @@ errors.push(...validateDesktopNoticeContract(
 if (process.argv.includes("--self-test")) {
   const withoutSite = structuredClone(sourceAudit);
   withoutSite.includeSites.pop();
-  if (!validateSourceAudit(withoutSite, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("digest mismatch"))) {
+  if (!validateSourceAudit(withoutSite, components, pinSources, lock, provenanceCandidates, cratePrefixes).some((error) => error.includes("digest mismatch"))) {
     console.error("self-test: deleting an audited include site did not fail closed");
     process.exit(1);
   }
   const addedSite = structuredClone(sourceAudit);
   addedSite.includeSites.push({ source: "new.rs:1", included: "new.dat", disposition: "first-party-source", evidence: "mutation" });
-  if (!validateSourceAudit(addedSite, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("digest mismatch"))) {
+  if (!validateSourceAudit(addedSite, components, pinSources, lock, provenanceCandidates, cratePrefixes).some((error) => error.includes("digest mismatch"))) {
     console.error("self-test: adding an unaudited include site did not fail closed");
     process.exit(1);
   }
   const staleRevision = structuredClone(sourceAudit);
   staleRevision.inferenceRevision = "0".repeat(40);
-  if (!validateSourceAudit(staleRevision, components, pinSources, lock, provenanceCandidates).some((error) => error.includes("but Cargo pins"))) {
+  if (!validateSourceAudit(staleRevision, components, pinSources, lock, provenanceCandidates, cratePrefixes).some((error) => error.includes("but Cargo pins"))) {
     console.error("self-test: stale inference revision did not fail closed");
     process.exit(1);
   }
@@ -431,12 +538,181 @@ if (process.argv.includes("--self-test")) {
     "matches 2 disposition areas",
   ]);
   for (const [label, mutatedAudit, mutatedCandidates, expected] of provenanceMutations) {
-    if (!validateSourceAudit(mutatedAudit, components, pinSources, lock, mutatedCandidates)
+    if (!validateSourceAudit(mutatedAudit, components, pinSources, lock, mutatedCandidates, cratePrefixes)
         .some((error) => error.includes(expected))) {
       console.error(`self-test: ${label} mutation did not fail closed with "${expected}"`);
       process.exit(1);
     }
   }
+  // --- fail-closed crate coverage (sc-15191) ----------------------------------------------------
+  //
+  // The point of these mutations is that a GREEN result on today's tree proves nothing: the guard
+  // has to REJECT the situation that shipped mlx-gen-krea-realtime unclassified. So each case
+  // constructs the world as it would look after the next pin bump and asserts a non-empty error.
+  //
+  // A mutated crate inventory necessarily breaks the count/hash/digest assertions too, so the
+  // helper re-stamps them — otherwise the test would "pass" on an incidental hash error while the
+  // classification check silently did nothing.
+  const withCrateInventory = (audit, crates) => {
+    const restamped = structuredClone(audit);
+    restamped.crateCoverage = {
+      ...restamped.crateCoverage,
+      cratePrefixes: crates.length,
+      cratePopulationSha256: cratePopulationSha256(crates),
+    };
+    return restamped;
+  };
+  const committedCrates = parseCratePrefixes(cratePrefixes);
+  const renderCrates = (crates) => `${["# self-test", ...crates].join("\n")}\n`;
+
+  const crateMutations = [];
+
+  // 1. A brand-new crate lands in the pinned rev and nobody classifies it — the sc-15138 case.
+  //    This MUST fail. It is the whole reason the guard exists.
+  {
+    const crates = [...committedCrates, "crates/media/mlx-gen/mlx-gen-brand-new"].sort();
+    crateMutations.push([
+      "unclassified new crate",
+      withCrateInventory(sourceAudit, crates),
+      renderCrates(crates),
+      'crate "crates/media/mlx-gen/mlx-gen-brand-new" in the pinned inference revision is UNCLASSIFIED',
+    ]);
+  }
+  // 2. …and the SAME new crate, once given a disposition with evidence, passes. Without this the
+  //    guard could be a constant `fail` and case 1 would still look green.
+  {
+    const crates = [...committedCrates, "crates/media/mlx-gen/mlx-gen-brand-new"].sort();
+    const classified = withCrateInventory(sourceAudit, crates);
+    classified.crateDispositions = [
+      ...classified.crateDispositions,
+      {
+        prefix: "crates/media/mlx-gen/mlx-gen-brand-new",
+        disposition: "first-party-original",
+        evidence: "self-test fixture",
+      },
+    ];
+    if (validateCrateCoverage(classified, components, renderCrates(crates), null)
+        .some((error) => error.includes("UNCLASSIFIED"))) {
+      console.error("self-test: a classified crate was still reported unclassified (guard is not discriminating)");
+      process.exit(1);
+    }
+    // …and covered by a ported-source area instead of a disposition, it must ALSO pass.
+    const ported = withCrateInventory(sourceAudit, crates);
+    ported.portedSourceAreas = [
+      ...ported.portedSourceAreas,
+      {
+        id: "architecture:crates/media/mlx-gen/mlx-gen-brand-new",
+        pathPrefix: "crates/media/mlx-gen/mlx-gen-brand-new/src/",
+        provenance: "self-test fixture",
+        disposition: "architecture-reimplementation-existing-terms",
+        evidence: "self-test fixture",
+      },
+    ];
+    if (validateCrateCoverage(ported, components, renderCrates(crates), null)
+        .some((error) => error.includes("UNCLASSIFIED"))) {
+      console.error("self-test: a ported-area-covered crate was still reported unclassified");
+      process.exit(1);
+    }
+  }
+  // 3. Dropping a decision for a crate that is still there must fail — exemptions cannot rot away.
+  {
+    const stripped = structuredClone(sourceAudit);
+    const dropped = stripped.crateDispositions.pop();
+    crateMutations.push([
+      "dropped crate disposition",
+      stripped,
+      cratePrefixes,
+      `crate "${dropped.prefix}" in the pinned inference revision is UNCLASSIFIED`,
+    ]);
+  }
+  // 4. An exemption with no evidence is a catch-all, not a decision.
+  {
+    const unjustified = structuredClone(sourceAudit);
+    delete unjustified.crateDispositions[0].evidence;
+    crateMutations.push([
+      "crate disposition without evidence",
+      unjustified,
+      cratePrefixes,
+      "has no evidence",
+    ]);
+  }
+  // 5. An invented disposition word must not widen the vocabulary.
+  {
+    const invented = structuredClone(sourceAudit);
+    invented.crateDispositions[0].disposition = "probably-fine";
+    crateMutations.push([
+      "invalid crate disposition",
+      invented,
+      cratePrefixes,
+      'invalid disposition "probably-fine"',
+    ]);
+  }
+  // 6. A stale exemption for a crate that no longer exists must be pruned, not left as cover.
+  {
+    const stale = structuredClone(sourceAudit);
+    stale.crateDispositions = [
+      ...stale.crateDispositions,
+      { prefix: "crates/gone/away", disposition: "first-party-original", evidence: "stale" },
+    ];
+    crateMutations.push([
+      "stale crate disposition",
+      stale,
+      cratePrefixes,
+      'is not a production-Rust crate in the pinned revision',
+    ]);
+  }
+  // 7. Claiming a crate BOTH ways is ambiguous attribution, the same defect the model-id duplicate
+  //    check guards against.
+  {
+    const ambiguous = structuredClone(sourceAudit);
+    ambiguous.crateDispositions = [
+      ...ambiguous.crateDispositions,
+      { prefix: "crates/audio/candle-audio-kokoro", disposition: "first-party-original", evidence: "ambiguous" },
+    ];
+    crateMutations.push([
+      "doubly-classified crate",
+      ambiguous,
+      cratePrefixes,
+      "is BOTH covered by a ported-source area and given a crateDispositions decision",
+    ]);
+  }
+  // 8. A pin bump that never re-scanned the crate inventory must fail on the revision label alone.
+  {
+    const staleCrateScan = structuredClone(sourceAudit);
+    staleCrateScan.crateCoverage.revision = "0".repeat(40);
+    crateMutations.push([
+      "stale crate-scan revision",
+      staleCrateScan,
+      cratePrefixes,
+      "crate-prefix inventory was scanned at",
+    ]);
+  }
+  // 9. Deleting the whole block must not silently disable the guard.
+  {
+    const noBlock = structuredClone(sourceAudit);
+    delete noBlock.crateCoverage;
+    crateMutations.push([
+      "missing crateCoverage block",
+      noBlock,
+      cratePrefixes,
+      "has no `crateCoverage` block",
+    ]);
+  }
+  // 10. Editing the inventory file without re-stamping the audit must fail on count and hash.
+  crateMutations.push([
+    "unstamped crate inventory edit",
+    sourceAudit,
+    renderCrates([...committedCrates, "crates/sneaky/crate"].sort()),
+    "crate-prefix population count changed",
+  ]);
+  for (const [label, mutatedAudit, mutatedCrates, expected] of crateMutations) {
+    if (!validateSourceAudit(mutatedAudit, components, pinSources, lock, provenanceCandidates, mutatedCrates)
+        .some((error) => error.includes(expected))) {
+      console.error(`self-test: ${label} mutation did not fail closed with "${expected}"`);
+      process.exit(1);
+    }
+  }
+
   const missingMapping = bundledJs.replace('"cmudict-bsd-2-clause"', '"removed-cmudict-key"');
   if (!validateDesktopNoticeContract(packageJson, tauriConfig, rustApiSource, missingMapping, desktopPackage, buildSidecar, buildPlan)
       .some((error) => error.includes("cmudict-bsd-2-clause"))) {
@@ -457,7 +733,7 @@ if (process.argv.includes("--self-test")) {
       process.exit(1);
     }
   }
-  console.log("[license-coverage] self-test PASS — provenance population/dispositions, audit, and every Tauri→sidecar→embedded-web packaging-link mutation were rejected.");
+  console.log("[license-coverage] self-test PASS — provenance population/dispositions, fail-closed crate coverage (unclassified/stale/unjustified/doubly-classified/unscanned), audit, and every Tauri→sidecar→embedded-web packaging-link mutation were rejected.");
 }
 
 for (const [id] of shipped) {
