@@ -4279,11 +4279,11 @@
         // remain close in size once their text encoders are dropped, so their sequential peaks converge.
         "sequentialPeakGb": { "q4": 21.9, "q8": 29.4, "bf16": 39.4, "int8-convrot": 28.6 },
         // sc-15117: quality-preserving Q4 constrained-card fit ladder. Each phase is
-        // `fixedGb + perMpxGb * megapixels`; the worker adds its normal 2 GB safety reserve and selects
-        // the first sufficient rung in declaration order. Curves are conservative upper fits (+~0.1 GB
+        // `fixedGb + perMpxGb * megapixels`; the worker adds its normal 2 GiB safety reserve and selects
+        // the first sufficient rung in declaration order. Curves are conservative upper fits (+~0.1 GiB
         // calibration allowance) to rendered-device samples at 768² and 1024², seed 42, on an exclusive
         // RTX PRO 6000 Blackwell with the public q4 turnkey. Step count does not change the working set.
-        // Raw sample peaks (GB):
+        // Raw sample peaks (GiB):
         //   threeStage       768² text/denoise/decode 3.895/11.747/10.843;
         //                    1024²                         3.895/15.405/15.440
         //   tiledVae        768²                           3.895/11.747/9.702;
@@ -4293,7 +4293,7 @@
         //   streamedBlocks  768²                           3.895/3.761/4.736;
         //                    1024²                         3.895/4.063/5.676
         // sc-15205 adds the equivalent Q8 matrix from the same exclusive hardware/methodology; no Q4
-        // curve was scaled or reused. Raw Q8 phase samples (GB):
+        // curve was scaled or reused. Raw Q8 phase samples (GiB):
         //   threeStage       768² text/denoise/decode 6.345/18.357/16.514;
         //                    1024²                         6.345/22.015/16.514
         //   tiledVae         768²                          6.345/18.357/16.548;
@@ -4302,9 +4302,18 @@
         //                    1024²                         6.345/18.156/16.512
         //   streamedBlocks   768²                          6.345/6.211/4.837;
         //                    1024²                         6.847/6.757/4.132
-        // Tiled decode is a measured no-op for Q8's denoise-owned peak, so its curve intentionally
-        // cannot displace the cheaper three-stage rung. BF16 retains the established gate until it has
-        // equivalent tier-specific evidence.
+        // sc-15206 adds the dense BF16 matrix, again from direct production-weight measurements rather
+        // than scaling either packed tier. Raw BF16 phase samples (GiB):
+        //   threeStage       768² text/denoise/decode 8.694/28.390/26.413;
+        //                    1024²                         8.694/32.014/26.446
+        //   tiledVae         768²                          8.694/28.390/26.446;
+        //                    1024²                         8.560/32.014/26.446
+        //   chunkedAttention 768²                          8.527/27.552/26.414;
+        //                    1024²                         8.526/27.652/26.413
+        //   streamedBlocks   768²                          8.535/8.533/2.130;
+        //                    1024²                         8.526/8.526/3.629
+        // Tiled decode is a measured no-op for the denoise-owned Q8/BF16 peaks, so those curves
+        // intentionally cannot displace the cheaper three-stage rung.
         "turboFit": {
           // Do not extrapolate these curves into unvalidated attention shapes. In particular, 2048²
           // requires per-head query-row fallback whose CUDA byte identity has not been established.
@@ -4352,6 +4361,28 @@
                 "text": { "fixedGb": 5.80, "perMpxGb": 1.10 },
                 "denoise": { "fixedGb": 5.61, "perMpxGb": 1.20 },
                 "decode": { "fixedGb": 4.94, "perMpxGb": 0.00 }
+              }
+            },
+            "bf16": {
+              "threeStage": {
+                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
+                "decode": { "fixedGb": 26.55, "perMpxGb": 0.00 }
+              },
+              "tiledVae": {
+                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
+                "decode": { "fixedGb": 26.55, "perMpxGb": 0.00 }
+              },
+              "chunkedAttention": {
+                "text": { "fixedGb": 8.63, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 27.53, "perMpxGb": 0.22 },
+                "decode": { "fixedGb": 26.52, "perMpxGb": 0.00 }
+              },
+              "streamedBlocks": {
+                "text": { "fixedGb": 8.64, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 8.64, "perMpxGb": 0.00 },
+                "decode": { "fixedGb": 0.30, "perMpxGb": 3.27 }
               }
             }
           }

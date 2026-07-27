@@ -461,11 +461,15 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     );
     assert_eq!(
         candle_stream.matches("installed_tier_keys(").count(),
-        3,
-        "the generic candle lane probes tiers only in its three reject arms"
+        4,
+        "the generic candle lane probes tiers only in its capability-floor, Krea-ladder, sequential, \
+         and resident reject arms"
     );
+    let capability_reject = candle_stream
+        .find("DowntierPick::Reject")
+        .expect("capability-floor reject");
     let krea_reject = candle_stream
-        .find("KreaTurboFit::Reject")
+        .find("KreaTurboFit::Reject { phases")
         .expect("Krea ladder reject");
     let sequential_reject = candle_stream
         .find("if let Some(seq_gb) =")
@@ -478,11 +482,13 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         .map(|(offset, _)| offset)
         .collect();
     assert!(
-        krea_reject < probes[0]
-            && probes[0] < sequential_reject
-            && sequential_reject < probes[1]
-            && probes[1] < too_big_reject
-            && too_big_reject < probes[2],
+        capability_reject < probes[0]
+            && probes[0] < krea_reject
+            && krea_reject < probes[1]
+            && probes[1] < sequential_reject
+            && sequential_reject < probes[2]
+            && probes[2] < too_big_reject
+            && too_big_reject < probes[3],
         "installed-tier walks must stay below their reject decisions"
     );
 
