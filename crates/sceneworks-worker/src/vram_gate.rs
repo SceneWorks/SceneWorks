@@ -277,6 +277,171 @@ pub(crate) enum LoadPlan {
     Reject,
 }
 
+/// Krea 2 Turbo's quality-preserving constrained-card ladder. Ordering is load-bearing: the worker
+/// selects the first sufficient rung, preserving the resident path whenever it fits and adding only
+/// the cheapest necessary execution cost after that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KreaTurboRung {
+    ThreeStage,
+    TiledVae,
+    ChunkedAttention,
+    StreamedBlocks,
+}
+
+impl KreaTurboRung {
+    fn manifest_key(self) -> &'static str {
+        match self {
+            Self::ThreeStage => "threeStage",
+            Self::TiledVae => "tiledVae",
+            Self::ChunkedAttention => "chunkedAttention",
+            Self::StreamedBlocks => "streamedBlocks",
+        }
+    }
+}
+
+/// Per-phase prediction for one Krea Turbo rung at the requested geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct KreaTurboPhasePeaks {
+    pub text_gb: f64,
+    pub denoise_gb: f64,
+    pub decode_gb: f64,
+}
+
+impl KreaTurboPhasePeaks {
+    pub(crate) fn peak_gb(self) -> f64 {
+        self.text_gb.max(self.denoise_gb).max(self.decode_gb)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum KreaTurboFit {
+    Fits {
+        rung: KreaTurboRung,
+        phases: KreaTurboPhasePeaks,
+        needed_gb: f64,
+    },
+    Reject {
+        phases: KreaTurboPhasePeaks,
+        needed_gb: f64,
+    },
+}
+
+/// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
+/// allocator residency separately from the geometry-dependent activation slope, fitted from real
+/// renders at multiple resolutions. Invalid or incomplete evidence fails closed to `None`; callers
+/// retain the established sequential gate instead of inventing a fit.
+fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
+    let fixed = phase.get("fixedGb").and_then(json_f64)?;
+    let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
+    if !fixed.is_finite() || !per_mpx.is_finite() || fixed < 0.0 || per_mpx < 0.0 {
+        return None;
+    }
+    Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
+}
+
+fn krea_rung_phase_peaks(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    rung: KreaTurboRung,
+    width: u32,
+    height: u32,
+) -> Option<KreaTurboPhasePeaks> {
+    let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    let max_measured_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
+    if pixels > max_measured_pixels {
+        return None;
+    }
+    let rung = turbo_fit
+        .get("phaseCurvesByTier")?
+        .get(tier)?
+        .get(rung.manifest_key())?
+        .as_object()?;
+    let phase = |name: &str| {
+        rung.get(name)
+            .and_then(Value::as_object)
+            .and_then(|curve| krea_phase_curve(curve, pixels))
+    };
+    Some(KreaTurboPhasePeaks {
+        text_gb: phase("text")?,
+        denoise_gb: phase("denoise")?,
+        decode_gb: phase("decode")?,
+    })
+}
+
+/// Select the least-cost measured Krea Turbo fit rung for this tier, geometry, and live budget.
+/// `allow_streamed_blocks` is false when the job carries load-time adapters: the provider preserves
+/// those jobs on its existing resident/staged paths rather than silently omitting their residuals.
+///
+/// Returns `None` when live budget or complete measured manifest evidence is absent. This is distinct
+/// from `Reject`: unknown evidence must not masquerade as proof that a configuration cannot fit.
+pub(crate) fn krea_turbo_fit(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    allow_streamed_blocks: bool,
+) -> Option<KreaTurboFit> {
+    let budget = budget?;
+    let rungs = [
+        KreaTurboRung::ThreeStage,
+        KreaTurboRung::TiledVae,
+        KreaTurboRung::ChunkedAttention,
+        KreaTurboRung::StreamedBlocks,
+    ];
+    let mut deepest = None;
+    for rung in rungs {
+        if rung == KreaTurboRung::StreamedBlocks && !allow_streamed_blocks {
+            break;
+        }
+        let phases = krea_rung_phase_peaks(manifest_entry, tier, rung, width, height)?;
+        let needed_gb = phases.peak_gb() + HEADROOM_GB;
+        deepest = Some((phases, needed_gb));
+        if needed_gb <= budget.free_gb + f64::EPSILON {
+            return Some(KreaTurboFit::Fits {
+                rung,
+                phases,
+                needed_gb,
+            });
+        }
+    }
+    let (phases, needed_gb) = deepest?;
+    Some(KreaTurboFit::Reject { phases, needed_gb })
+}
+
+/// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
+/// Used only to make rejection copy truthful: if this returns `None`, lowering resolution is not
+/// presented as an escape hatch.
+pub(crate) fn krea_turbo_smaller_fit(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    allow_streamed_blocks: bool,
+) -> Option<(u32, u32)> {
+    let current_pixels = u64::from(width) * u64::from(height);
+    let resolutions = manifest_entry
+        .get("limits")?
+        .get("resolutions")?
+        .as_array()?;
+    let mut candidates = resolutions
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|resolution| resolution.split_once('x'))
+        .filter_map(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .filter(|(w, h)| u64::from(*w) * u64::from(*h) < current_pixels)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(w, h)| std::cmp::Reverse(u64::from(*w) * u64::from(*h)));
+    candidates.into_iter().find(|(w, h)| {
+        matches!(
+            krea_turbo_fit(manifest_entry, tier, *w, *h, budget, allow_streamed_blocks),
+            Some(KreaTurboFit::Fits { .. })
+        )
+    })
+}
+
 /// Resolve the [`LoadPlan`] for `needed` (resident peak) and `sequential_needed` (measured staged peak,
 /// [`predicted_sequential_peak_gb`]) against `budget`. `None` peaks are unmeasured ⇒ never block (admit
 /// resident, or stage best-effort). `sequential_capable` is the provider's staging capability: a lane
@@ -761,6 +926,59 @@ mod tests {
         value.as_object().expect("object literal").clone()
     }
 
+    fn krea_fit_manifest() -> JsonObject {
+        let curve = |fixed: f64, per_mpx: f64| json!({ "fixedGb": fixed, "perMpxGb": per_mpx });
+        obj(json!({
+            "limits": {
+                "resolutions": ["768x768", "1024x1024", "1536x1536", "2048x2048"]
+            },
+            "candle": {
+                "turboFit": {
+                    "maxMeasuredPixels": 1048576,
+                    "phaseCurvesByTier": {
+                        "q4": {
+                            "threeStage": {
+                                "text": curve(7.0, 0.5),
+                                "denoise": curve(14.0, 2.0),
+                                "decode": curve(11.0, 6.0)
+                            },
+                            "tiledVae": {
+                                "text": curve(7.0, 0.5),
+                                "denoise": curve(14.0, 2.0),
+                                "decode": curve(9.0, 2.0)
+                            },
+                            "chunkedAttention": {
+                                "text": curve(7.0, 0.5),
+                                "denoise": curve(12.0, 2.0),
+                                "decode": curve(9.0, 2.0)
+                            },
+                            "streamedBlocks": {
+                                "text": curve(7.0, 0.5),
+                                "denoise": curve(7.0, 1.0),
+                                "decode": curve(9.0, 2.0)
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+    }
+
+    fn builtin_krea_turbo_manifest() -> JsonObject {
+        let jsonc = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+        parsed["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
+            .and_then(Value::as_object)
+            .expect("Krea 2 Turbo manifest entry")
+            .clone()
+    }
+
     #[test]
     fn parse_vram_cap_accepts_positive_numbers_only() {
         assert_eq!(parse_vram_cap(Some("10")), Some(10.0));
@@ -813,6 +1031,300 @@ mod tests {
         );
         // No reading, no cap ⇒ None.
         assert_eq!(apply_vram_cap(None, None), None);
+    }
+
+    #[test]
+    fn krea_turbo_selects_the_least_cost_sufficient_rung() {
+        let manifest = krea_fit_manifest();
+        let fit = |free_gb| {
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+        assert!(matches!(
+            fit(20.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ThreeStage,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(19.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::TiledVae,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(17.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ChunkedAttention,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(13.5),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::StreamedBlocks,
+                ..
+            })
+        ));
+        assert!(matches!(fit(10.0), Some(KreaTurboFit::Reject { .. })));
+    }
+
+    #[test]
+    fn krea_turbo_fit_is_tier_and_resolution_aware_and_never_guesses() {
+        let manifest = krea_fit_manifest();
+        let budget = Some(VramBudget {
+            free_gb: 17.0,
+            total_gb: 17.0,
+        });
+        assert!(matches!(
+            krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ChunkedAttention,
+                ..
+            })
+        ));
+        assert_eq!(
+            krea_turbo_fit(&manifest, "q4", 2048, 2048, budget, true),
+            None,
+            "unmeasured geometries retain the established gate"
+        );
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q4", 2048, 2048, budget, true),
+            Some((1024, 1024))
+        );
+        assert_eq!(
+            krea_turbo_fit(&manifest, "q8", 1024, 1024, budget, true),
+            None,
+            "the synthetic fixture intentionally carries only q4 evidence"
+        );
+        assert_eq!(
+            krea_turbo_fit(&manifest, "q4", 1024, 1024, None, true),
+            None
+        );
+    }
+
+    #[test]
+    fn krea_turbo_block_streaming_is_not_selected_for_adapter_jobs() {
+        let manifest = krea_fit_manifest();
+        let budget = Some(VramBudget {
+            free_gb: 13.5,
+            total_gb: 13.5,
+        });
+        assert!(matches!(
+            krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, false),
+            Some(KreaTurboFit::Reject { .. })
+        ));
+    }
+
+    #[test]
+    fn builtin_krea_q4_curves_select_24_16_and_12_gb_rungs() {
+        let manifest = builtin_krea_turbo_manifest();
+        let fit = |free_gb| {
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+        assert!(matches!(
+            fit(24.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ThreeStage,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(16.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ChunkedAttention,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(12.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::StreamedBlocks,
+                ..
+            })
+        ));
+        assert_eq!(
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                2048,
+                2048,
+                Some(VramBudget {
+                    free_gb: 12.0,
+                    total_gb: 12.0,
+                }),
+                true,
+            ),
+            None,
+            "never extrapolate a measured ladder beyond its validated geometry"
+        );
+        assert_eq!(
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                2048,
+                2048,
+                Some(VramBudget {
+                    free_gb: 17.0,
+                    total_gb: 17.0,
+                }),
+                true,
+            ),
+            None,
+            "2048 attention chunking is not admitted without byte-identity evidence"
+        );
+    }
+
+    #[test]
+    fn builtin_krea_q8_curves_keep_q8_and_select_only_measured_useful_rungs() {
+        let manifest = builtin_krea_turbo_manifest();
+        let fit = |free_gb| {
+            krea_turbo_fit(
+                &manifest,
+                "q8",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+        assert!(matches!(
+            fit(32.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ThreeStage,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(24.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ChunkedAttention,
+                ..
+            })
+        ));
+        for free_gb in [20.0, 12.0] {
+            assert!(matches!(
+                fit(free_gb),
+                Some(KreaTurboFit::Fits {
+                    rung: KreaTurboRung::StreamedBlocks,
+                    ..
+                })
+            ));
+        }
+
+        let three_stage =
+            krea_rung_phase_peaks(&manifest, "q8", KreaTurboRung::ThreeStage, 1024, 1024)
+                .expect("Q8 three-stage evidence");
+        let tiled = krea_rung_phase_peaks(&manifest, "q8", KreaTurboRung::TiledVae, 1024, 1024)
+            .expect("Q8 tiled-VAE evidence");
+        assert!(
+            tiled.peak_gb() >= three_stage.peak_gb(),
+            "the measured Q8 tiled-VAE no-op must never displace the cheaper three-stage rung"
+        );
+
+        assert!(matches!(
+            fit(8.96),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::StreamedBlocks,
+                ..
+            })
+        ));
+        assert!(matches!(fit(8.95), Some(KreaTurboFit::Reject { .. })));
+        let budget = Some(VramBudget {
+            free_gb: 8.95,
+            total_gb: 8.95,
+        });
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, budget, true),
+            Some((1152, 896)),
+            "the immediate-below rejection may suggest only a lower shape the measured Q8 curve fits"
+        );
+        let no_escape_budget = Some(VramBudget {
+            free_gb: 8.5,
+            total_gb: 8.5,
+        });
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, no_escape_budget, true,),
+            None,
+            "do not claim a lower-resolution escape when no shipped measured shape fits"
+        );
+        assert_eq!(
+            krea_turbo_fit(
+                &manifest,
+                "bf16",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: 48.0,
+                    total_gb: 48.0,
+                }),
+                true,
+            ),
+            None,
+            "BF16 retains the established resident/sequential gate until it has its own matrix"
+        );
+    }
+
+    #[test]
+    fn builtin_krea_q8_curves_conservatively_cover_every_measured_phase_sample() {
+        let manifest = builtin_krea_turbo_manifest();
+        let samples = [
+            (KreaTurboRung::ThreeStage, 768, [6.345, 18.357, 16.514]),
+            (KreaTurboRung::ThreeStage, 1024, [6.345, 22.015, 16.514]),
+            (KreaTurboRung::TiledVae, 768, [6.345, 18.357, 16.548]),
+            (KreaTurboRung::TiledVae, 1024, [6.345, 22.015, 16.514]),
+            (
+                KreaTurboRung::ChunkedAttention,
+                768,
+                [6.345, 17.619, 16.514],
+            ),
+            (
+                KreaTurboRung::ChunkedAttention,
+                1024,
+                [6.345, 18.156, 16.512],
+            ),
+            (KreaTurboRung::StreamedBlocks, 768, [6.345, 6.211, 4.837]),
+            (KreaTurboRung::StreamedBlocks, 1024, [6.847, 6.757, 4.132]),
+        ];
+        for (rung, edge, measured) in samples {
+            let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge)
+                .expect("every published Q8 matrix cell has a curve");
+            for (phase, predicted_gb, measured_gb) in [
+                ("text", predicted.text_gb, measured[0]),
+                ("denoise", predicted.denoise_gb, measured[1]),
+                ("decode", predicted.decode_gb, measured[2]),
+            ] {
+                assert!(
+                    predicted_gb >= measured_gb && predicted_gb < measured_gb + 1.0,
+                    "{rung:?} {edge}² {phase}: curve {predicted_gb:.3} must conservatively cover \
+                     measured {measured_gb:.3} without an unrelated tier-derived margin"
+                );
+            }
+        }
     }
 
     /// sc-14625: the complete default tuple passed on a real 32 GB RTX PRO 4500. Admit exactly that

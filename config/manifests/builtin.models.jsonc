@@ -4278,6 +4278,84 @@
         // int8-convrot at 28.6 GB with resident/sequential byte-identical pixels. The int8 and q8 DiTs
         // remain close in size once their text encoders are dropped, so their sequential peaks converge.
         "sequentialPeakGb": { "q4": 21.9, "q8": 29.4, "bf16": 39.4, "int8-convrot": 28.6 },
+        // sc-15117: quality-preserving Q4 constrained-card fit ladder. Each phase is
+        // `fixedGb + perMpxGb * megapixels`; the worker adds its normal 2 GB safety reserve and selects
+        // the first sufficient rung in declaration order. Curves are conservative upper fits (+~0.1 GB
+        // calibration allowance) to rendered-device samples at 768² and 1024², seed 42, on an exclusive
+        // RTX PRO 6000 Blackwell with the public q4 turnkey. Step count does not change the working set.
+        // Raw sample peaks (GB):
+        //   threeStage       768² text/denoise/decode 3.895/11.747/10.843;
+        //                    1024²                         3.895/15.405/15.440
+        //   tiledVae        768²                           3.895/11.747/9.702;
+        //                    1024²                         3.895/15.405/9.736
+        //   chunkedAttention 768²                          3.895/11.076/9.702;
+        //                    1024²                         3.895/11.345/9.702
+        //   streamedBlocks  768²                           3.895/3.761/4.736;
+        //                    1024²                         3.895/4.063/5.676
+        // sc-15205 adds the equivalent Q8 matrix from the same exclusive hardware/methodology; no Q4
+        // curve was scaled or reused. Raw Q8 phase samples (GB):
+        //   threeStage       768² text/denoise/decode 6.345/18.357/16.514;
+        //                    1024²                         6.345/22.015/16.514
+        //   tiledVae         768²                          6.345/18.357/16.548;
+        //                    1024²                         6.345/22.015/16.514
+        //   chunkedAttention 768²                          6.345/17.619/16.514;
+        //                    1024²                         6.345/18.156/16.512
+        //   streamedBlocks   768²                          6.345/6.211/4.837;
+        //                    1024²                         6.847/6.757/4.132
+        // Tiled decode is a measured no-op for Q8's denoise-owned peak, so its curve intentionally
+        // cannot displace the cheaper three-stage rung. BF16 retains the established gate until it has
+        // equivalent tier-specific evidence.
+        "turboFit": {
+          // Do not extrapolate these curves into unvalidated attention shapes. In particular, 2048²
+          // requires per-head query-row fallback whose CUDA byte identity has not been established.
+          "maxMeasuredPixels": 1048576,
+          "phaseCurvesByTier": {
+            "q4": {
+              "threeStage": {
+                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
+                "decode": { "fixedGb": 5.04, "perMpxGb": 10.03 }
+              },
+              "tiledVae": {
+                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
+                "decode": { "fixedGb": 9.76, "perMpxGb": 0.08 }
+              },
+              "chunkedAttention": {
+                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 10.84, "perMpxGb": 0.59 },
+                "decode": { "fixedGb": 9.81, "perMpxGb": 0.00 }
+              },
+              "streamedBlocks": {
+                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 3.48, "perMpxGb": 0.66 },
+                "decode": { "fixedGb": 3.64, "perMpxGb": 2.05 }
+              }
+            },
+            "q8": {
+              "threeStage": {
+                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
+                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+              },
+              "tiledVae": {
+                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
+                "decode": { "fixedGb": 16.65, "perMpxGb": 0.00 }
+              },
+              "chunkedAttention": {
+                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
+                "denoise": { "fixedGb": 17.03, "perMpxGb": 1.18 },
+                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+              },
+              "streamedBlocks": {
+                "text": { "fixedGb": 5.80, "perMpxGb": 1.10 },
+                "denoise": { "fixedGb": 5.61, "perMpxGb": 1.20 },
+                "decode": { "fixedGb": 4.94, "perMpxGb": 0.00 }
+              }
+            }
+          }
+        },
         "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
