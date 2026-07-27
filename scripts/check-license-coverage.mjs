@@ -78,7 +78,7 @@ const UNDETERMINED = new Map([
   ],
   [
     "joycaption_beta_one",
-    "fancyfeast/llama-joycaption-beta-one-hf-llava declares no license; it is a Llama-3.1-8B-Instruct + SigLIP2 derivative, so Meta's Llama 3.1 Community License likely governs — needs confirmation.",
+    "fancyfeast/llama-joycaption-beta-one-hf-llava declares no license; it is a Llama-3.1-8B-Instruct + SigLIP2 derivative, so Meta's Llama 3.1 Community License likely governs — needs confirmation. The same decision covers the JoyCaption PROMPT TAXONOMY reproduced in inference's caption crates (fancyfeast's joy-caption-beta-one Space app.py, CAPTION_TYPE_MAP/NAME_OPTION — see the crateDispositions entry for crates/media/candle-gen/candle-gen-joycaption); that Space likewise declares no license, so no notice text can be shipped honestly yet.",
   ],
   [
     "prompt_refine_anubis_8b",
@@ -113,13 +113,21 @@ const components = new Map(
   (manifest.components ?? []).map((component) => [component.id, component]),
 );
 
-// Dispositions a crate with NO marker-bearing file may carry. Both demand evidence; neither is a
-// catch-all. `first-party-original` asserts there is no upstream source to attribute at all;
+// Dispositions a crate with NO marker-bearing file may carry. All three demand evidence; none is a
+// catch-all. `first-party-original` asserts there is no upstream source to attribute at all — the
+// strictest claim in this file, and the one most likely to be wrong by omission.
 // `architecture-reimplementation-existing-terms` (the same word the ported areas use) asserts the
 // crate IS a port whose files simply never say so, and that its upstream terms are already mapped.
+// `upstream-content-existing-terms` is for the case neither covered: source that REPRODUCES upstream
+// CONTENT — prompt tables, token vocabularies, label lists — rather than reimplementing an
+// algorithm. It exists because `candle-gen-joycaption` was classified `first-party-original` on the
+// strength of "SceneWorks caption product policy" while its prompt map is fancyfeast's JoyCaption
+// demo `CAPTION_TYPE_MAP` reproduced near-verbatim in upstream's order (sc-15191 review). Copied
+// strings are not a reimplementation, and calling them first-party is simply false.
 const CRATE_DISPOSITIONS = new Set([
   "first-party-original",
   "architecture-reimplementation-existing-terms",
+  "upstream-content-existing-terms",
 ]);
 
 /**
@@ -164,9 +172,17 @@ function validateCrateCoverage(audit, componentIndex, crateText, pinnedRev) {
   }
 
   const areas = audit.portedSourceAreas ?? [];
+  // CRATE-level classification is decided by `pathPrefix` ONLY.
+  //
+  // It used to also accept `area.paths`, which meant a single marker-bearing FILE in a brand-new
+  // crate, routed by the scanner's hardcoded SPECIAL_AREAS table into a pre-existing generic area
+  // (`cephes-source`, `comfy-kdiffusion-solvers`, `opencv-source`, …), silently classified the WHOLE
+  // crate — inheriting a decision a human made about some other crate's file rather than making one
+  // about this crate. A `paths` area says "this file transcribes Cephes"; it says nothing about the
+  // thousand other lines around it. Only a `pathPrefix` area (or an explicit crateDispositions
+  // entry) is a statement about the crate.
   const portedCrate = (crate) => areas.some((area) =>
-    (area.pathPrefix && (area.pathPrefix === crate || area.pathPrefix.startsWith(`${crate}/`))) ||
-    (area.paths ?? []).some((candidatePath) => candidatePath.startsWith(`${crate}/`)));
+    area.pathPrefix && (area.pathPrefix === crate || area.pathPrefix.startsWith(`${crate}/`)));
 
   const declared = new Map();
   for (const entry of audit.crateDispositions ?? []) {
@@ -613,6 +629,32 @@ if (process.argv.includes("--self-test")) {
       console.error("self-test: a ported-area-covered crate was still reported unclassified");
       process.exit(1);
     }
+  }
+  // 2b. A new crate whose ONLY coverage is a per-FILE `area.paths` entry is NOT classified.
+  //     This is the inherited-classification path (sc-15191 review): one marker-bearing file routed
+  //     by the scanner's hardcoded SPECIAL_AREAS table into a pre-existing generic area
+  //     (`cephes-source`, `opencv-source`, `comfy-kdiffusion-solvers`, …) used to mark the whole
+  //     crate decided, without anyone deciding anything about the crate. Only `pathPrefix` — or an
+  //     explicit disposition — counts.
+  {
+    const crates = [...committedCrates, "crates/media/mlx-gen/mlx-gen-inherits"].sort();
+    const inherited = withCrateInventory(sourceAudit, crates);
+    inherited.portedSourceAreas = [
+      ...inherited.portedSourceAreas,
+      {
+        id: "cephes-source-selftest",
+        paths: ["crates/media/mlx-gen/mlx-gen-inherits/src/latent.rs"],
+        provenance: "self-test fixture",
+        disposition: "architecture-reimplementation-existing-terms",
+        evidence: "self-test fixture",
+      },
+    ];
+    crateMutations.push([
+      "crate classified only by a per-file area path",
+      inherited,
+      renderCrates(crates),
+      'crate "crates/media/mlx-gen/mlx-gen-inherits" in the pinned inference revision is UNCLASSIFIED',
+    ]);
   }
   // 3. Dropping a decision for a crate that is still there must fail — exemptions cannot rot away.
   {

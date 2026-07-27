@@ -48,8 +48,19 @@ export function pinnedRevision(manifestPath = WORKER_MANIFEST) {
 // sentences like "mirrors the `gen_core` lib-name convention"). Over-matching is not free here: a
 // candidate file forces a ported-source AREA whose disposition asserts an upstream port, so a false
 // positive makes the audit state something untrue.
+//
+// `original` is deliberately NOT here. It reads like a provenance noun but it is an ordinary domain
+// word in this codebase — the *original request*, the *original ordering*, the *original tensor* —
+// so anchoring to it turns first-party prose into a port claim ("The cache mirrors the original
+// request ordering", "Errors are derived from the original request"). The genuine phrasings it was
+// meant to catch ("derived from the original torch implementation") still match, because they carry
+// a real port object (`torch`, `implementation`) alongside it.
+//
+// `reference` carries a negative lookahead for `-` because the compound `reference-image` /
+// `reference-grid` nouns are product vocabulary, not provenance: `\b` fires on the hyphen, so
+// "distinct from the reference-image `strength` lever" matched before sc-15191's follow-up.
 const PORT_OBJECT =
-  "reference|upstream|original|python|pytorch|torch|diffusers|comfy(?:ui)?|transformers|implementation";
+  "reference(?!-)|upstream|python|pytorch|torch|diffusers|comfy(?:ui)?|transformers|implementation";
 
 // 🔴 This regex is a HEURISTIC and is known to have holes — it is NOT the thing that makes the
 // audit complete. `mlx-gen-krea-realtime` was a whole new crate whose headers honestly said
@@ -60,6 +71,15 @@ const PORT_OBJECT =
 // (`scanCrates` + `crateDispositions` in config/inference-third-party-source.json): every
 // production-Rust crate in the pinned revision must be classified explicitly, marker or no marker.
 // Treat this regex as a labour-saver for classification, never as the detector of record.
+//
+// KNOWN MISS, recorded rather than hidden: requiring `original` to be qualified (above) drops
+// `crates/media/candle-gen/candle-gen-sd3/src/clip_tokenizer.rs`, whose only marker is "Mirrors the
+// original CLIP `bpe()` contraction/word/number" — a genuine claim. It is traded deliberately: the
+// unqualified form asserted an upstream port for `gen-core/src/generator.rs` ("the reference-image
+// `strength` lever") and `candle-gen-flux2/src/edit_provider.rs` ("followed by the reference
+// grids"), and a WRONG entry in the audit is worse than a missing one. The crate itself remains
+// classified by `architecture:crates/media/candle-gen/candle-gen-sd3`, so nothing loses coverage —
+// only that file's marker text stops forcing a re-review when it changes.
 export const MARKER = new RegExp(
   "\\b(?:" +
     // Long-standing markers (pre-sc-15191).
@@ -69,9 +89,28 @@ export const MARKER = new RegExp(
     `|mirror(?:s|ed|ing)(?:\\s+\\w+){0,4}\\s+(?:${PORT_OBJECT})` +
     `|derived\\s+from(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
     "|reimplement(?:ed|ation)(?:\\s+\\w+){0,3}\\s+(?:from|of)" +
-    "|translated\\s+from|from\\s+the\\s+reference" +
+    "|trans(?:lated|literated)\\s+from|from\\s+the\\s+reference(?!-)" +
+    // `original` only counts when it is QUALIFIED by an upstream noun. Bare `original` is a domain
+    // word here (original request/ordering/tensor), and even `original source` is — measured at the
+    // pinned rev, it matched both bernini providers' "Original source `(height, width)`", i.e. the
+    // input image's dimensions. `original implementation` / `original repo` are provenance claims
+    // and nothing else.
+    "|original\\s+(?:implementation|repo(?:sitory)?)" +
     `|based\\s+on(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
-    "|follow(?:s|ing|ed)(?:\\s+\\w+){0,2}\\s+(?:reference|upstream)" +
+    // `follow` is anchored to the FULL port-object list, not just reference|upstream: the narrower
+    // anchor was an internal inconsistency that let "based on diffusers" match while "follows
+    // diffusers' scheduler ordering" — the same claim — did not. `followed` is excluded because
+    // "followed by the reference grids" is sequencing prose, not provenance.
+    `|follow(?:s|ing)(?:\\s+\\w+){0,2}\\s+(?:${PORT_OBJECT})` +
+    // sc-15191 follow-up: genuine port phrasings the first broadening still missed. Each is anchored
+    // to a port object so the bare verb ("rewrite of the cache", "modeled after the descriptor")
+    // stays out.
+    `|reimplements(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
+    `|rewrite\\s+of(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
+    `|model(?:l?ed)\\s+after(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
+    "|ported\\s+to(?:\\s+\\w+){0,3}\\s+from" +
+    `|1:1\\s+with(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
+    `|line[-\\s]for[-\\s]line(?:\\s+\\w+){0,3}\\s+(?:${PORT_OBJECT})` +
     ")\\b",
   "giu",
 );
@@ -158,7 +197,19 @@ export function scanCrates(repo, revision = pinnedRevision()) {
   const owning = new Set();
   for (const file of files.filter(productionRustPath)) {
     const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
-    if (owner) owning.add(owner);
+    if (owner !== undefined) owning.add(owner);
+  }
+  // A root-level `Cargo.toml` that directly owns top-level production `.rs` files yields the
+  // EMPTY-STRING prefix. `serializeCrates` would render it as a blank line and `parseCrates` drops
+  // blank lines, so the crate would vanish from the inventory. That fails on count/hash rather than
+  // failing open, but with a message that points nowhere. Reject it here instead, where the cause is
+  // legible: the coverage guard classifies by prefix, and "" is a prefix of everything.
+  if (owning.has("")) {
+    throw new Error(
+      `${revision}: the repository ROOT Cargo.toml directly owns production Rust files, which yields an empty crate prefix. ` +
+        "The crate-coverage guard classifies by prefix and \"\" matches every path, so it cannot be classified. " +
+        "Move the root crate's sources under a named crate directory, or teach scanCrates an explicit label for it.",
+    );
   }
   return [...owning].sort((a, b) => a.localeCompare(b));
 }

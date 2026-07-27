@@ -51,6 +51,53 @@ test("MARKER catches the sc-15138 phrasings that made a whole crate invisible", 
   }
 });
 
+test("MARKER catches the port phrasings the first broadening still missed", () => {
+  // Every one of these was verified NO MATCH against the sc-15191 vocabulary. `follows diffusers`
+  // is the internal inconsistency that motivated the rest: `based on` was anchored to the full
+  // port-object list while `follow` was anchored only to reference|upstream, so the same claim
+  // matched or missed depending on the verb.
+  for (const phrase of [
+    "//! A Rust rewrite of ComfyUI's `k_diffusion` sampler.",
+    "/// Modeled after the diffusers `AutoencoderKL`.",
+    "// Modelled after the diffusers scheduler.",
+    "//! Follows diffusers' scheduler ordering exactly.",
+    "// Ported to Rust from ComfyUI.",
+    "/// Reimplements the diffusers pipeline.",
+    "//! Transliterated from the Python reference kernel.",
+    "// 1:1 with the reference implementation.",
+    "//! Line-for-line with upstream `causal_model.py`.",
+    "// mirrors the original implementation",
+    "/// derived from the original repository",
+  ]) {
+    assert.ok(matches(phrase), `expected a marker match: ${phrase}`);
+  }
+});
+
+test("MARKER does not fire on the verified anchoring false positives", () => {
+  // 🔴 These are not hypotheticals. The first three were SHIPPED in
+  // config/inference-provenance-candidates.tsv and each forced a ported-source area asserting an
+  // upstream port that does not exist. The rest are the same two defects — bare `original` as a
+  // port object, `followed` as a port verb — written as ordinary first-party doc comments.
+  //
+  // This test is the reason the anchoring claim is checkable instead of asserted: loosen
+  // PORT_OBJECT back to bare `original`, drop the `reference(?!-)` lookahead, or re-add `followed`,
+  // and one of these fails.
+  for (const phrase of [
+    // crates/contracts/gen-core/src/generator.rs — `\b` fires on the hyphen of a product noun.
+    "/// it is a stylistic nudge, distinct from the reference-image [`strength`](Self::strength) lever.",
+    // crates/media/candle-gen/candle-gen-flux2/src/edit_provider.rs — sequencing prose.
+    "//! velocity tokens and steps only the target, followed by the reference grids.",
+    // Both bernini providers — the INPUT IMAGE's dimensions, not an upstream project.
+    "/// Original source `(height, width)` (for the conversation's `image` message).",
+    // Constructed first-party sentences with the same shape.
+    "/// The cache mirrors the original request ordering so retries are stable.",
+    "/// Errors are derived from the original request, not the transport.",
+    "/// The chunks are emitted in order, followed by the original tail.",
+  ]) {
+    assert.ok(!matches(phrase), `expected NO marker match: ${phrase}`);
+  }
+});
+
 test("MARKER does NOT fire on ordinary technical English", () => {
   // Every one of these appears in first-party inference crates (catalogs, bundle composition roots,
   // the gen-core testkit). Matching them would force a ported-source area whose disposition claims
@@ -82,4 +129,11 @@ test("crate population hash is order- and content-sensitive", () => {
 
 test("parseCrates rejects a malformed row rather than silently dropping a crate", () => {
   assert.throws(() => parseCrates("crates/a\ncrates/b c\n"), /malformed crate prefix row/);
+});
+
+test("an empty crate prefix cannot survive the serialize/parse round trip", () => {
+  // Why scanCrates rejects "" outright: a root Cargo.toml owning top-level production .rs files
+  // produces it, serializeCrates renders it as a blank line, and parseCrates drops blank lines — so
+  // the crate silently leaves the population it is supposed to be classified in.
+  assert.deepEqual(parseCrates(serializeCrates(["", "crates/a"])), ["crates/a"]);
 });
