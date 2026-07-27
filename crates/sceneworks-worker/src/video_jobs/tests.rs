@@ -3003,9 +3003,9 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
     let (decoded, raw_settings) = decoded;
     assert!(!decoded.frames.is_empty());
     // The fixture is a flat snapshot with no explicit `mlxQuantize`, so the dense-video Q4 default
-    // is what loads — and the arm stamps it on the asset it returns. Read through `as_str` rather
-    // than comparing the `Value` to `"q4"`: a `Value::Object` compares unequal to every `&str`, so a
-    // bare `assert_eq!` would pass on the string and quietly stop discriminating if the shape moved.
+    // is what loads — and the arm now stamps it on the `rawSettings` it returns rather than handing
+    // back a bare tier string. Reading the field through `as_str` targets the stamp itself, which is
+    // what the caller actually records on the asset.
     assert_eq!(
         raw_settings.get("kreaRealtimeTier").and_then(Value::as_str),
         Some("q4"),
@@ -3347,12 +3347,14 @@ fn krea_realtime_stamps_a_partially_applied_lora_and_stays_silent_on_a_clean_one
 #[test]
 fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     let loras = vec!["Squish_I2V.safetensors".to_owned()];
+    // No file was wholly diff-patch, so the format branch stays out of the way in this test.
+    let clean = KreaRealtimeLoraCoverage::default();
     let i2v = gen_core::Error::Msg(
         "krea_realtime_14b adapters: 80 adapter target(s) matched no module (surfaced, not \
          silently dropped): [\"blocks.0.cross_attn.k_img\", \"blocks.0.cross_attn.v_img\"]"
             .to_owned(),
     );
-    let annotated = annotate_krea_realtime_lora_error(i2v, &loras).to_string();
+    let annotated = annotate_krea_realtime_lora_error(i2v, &loras, &clean).to_string();
     assert!(
         annotated.contains("Squish_I2V.safetensors"),
         "the message must name the LoRA the user picked: {annotated}"
@@ -3371,7 +3373,7 @@ fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     let other = gen_core::Error::Msg(
         "krea_realtime_14b adapters: no target modules matched across 1 adapter file(s)".to_owned(),
     );
-    let generic = annotate_krea_realtime_lora_error(other, &loras).to_string();
+    let generic = annotate_krea_realtime_lora_error(other, &loras, &clean).to_string();
     assert!(
         !generic.contains("image-to-video"),
         "a non-I2V failure must not claim an I2V cause: {generic}"
@@ -3384,20 +3386,104 @@ fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     // Not an adapter failure → untouched.
     let unrelated = gen_core::Error::Msg("missing dit.safetensors".to_owned());
     assert_eq!(
-        annotate_krea_realtime_lora_error(unrelated, &loras).to_string(),
+        annotate_krea_realtime_lora_error(unrelated, &loras, &clean).to_string(),
         "missing dit.safetensors"
     );
     // No LoRA selected → untouched even if the text mentions adapters.
     let no_loras = gen_core::Error::Msg("krea_realtime_14b adapters: something".to_owned());
     assert_eq!(
-        annotate_krea_realtime_lora_error(no_loras, &[]).to_string(),
+        annotate_krea_realtime_lora_error(no_loras, &[], &clean).to_string(),
         "krea_realtime_14b adapters: something"
     );
     // 🔴 The typed cancellation must survive: the funnel matches on it to report a clean cancel.
     assert!(matches!(
-        annotate_krea_realtime_lora_error(gen_core::Error::Canceled, &loras),
+        annotate_krea_realtime_lora_error(gen_core::Error::Canceled, &loras, &clean),
         gen_core::Error::Canceled
     ));
+}
+
+/// 🔴 A LoRA whose keys are 100% diff-patch installs NOTHING, so the engine reports "no target
+/// modules matched" — byte-for-byte the same text a genuinely foreign LoRA produces. Without the
+/// coverage-keyed branch the generic arm fires and tells the user their file "was trained for a
+/// different architecture", which is a confident MISDIAGNOSIS: the file may be built for this exact
+/// model and simply be in a format this installer does not read (sc-15326).
+///
+/// Every arm is discriminated here — the same error text produces three different answers depending
+/// only on the evidence available, so none of them can be the one that always renders.
+///
+/// Mutation checks (each verified RED): drop the `wholly_unapplied` branch; change its predicate
+/// from `dropped == total` to `dropped > 0`; move the diff-patch arm ahead of the I2V arm.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_diagnoses_an_all_diff_patch_file_as_format_not_architecture() {
+    // The engine text is IDENTICAL in the first two cases — only the coverage differs.
+    let matched_nothing = || {
+        gen_core::Error::Msg(
+            "krea_realtime_14b adapters: no target modules matched across 1 adapter file(s) — \
+             check the format/prefix"
+                .to_owned(),
+        )
+    };
+    let loras = vec!["wan_lightning_diffpatch.safetensors".to_owned()];
+    let all_diff_patch = KreaRealtimeLoraCoverage {
+        partial: vec![("wan_lightning_diffpatch.safetensors".to_owned(), 647, 647)],
+    };
+
+    let format_hint =
+        annotate_krea_realtime_lora_error(matched_nothing(), &loras, &all_diff_patch).to_string();
+    assert!(
+        format_hint.contains("wan_lightning_diffpatch.safetensors")
+            && format_hint.contains("diff-patch")
+            && format_hint.contains("sc-15326"),
+        "an all-diff-patch file must be diagnosed as a FORMAT problem, by name: {format_hint}"
+    );
+    assert!(
+        format_hint.contains("NOT an architecture mismatch"),
+        "it must actively contradict the architecture reading, not merely omit it: {format_hint}"
+    );
+    assert!(
+        !format_hint.contains("trained for a different architecture"),
+        "the misdiagnosis this branch exists to prevent must not appear: {format_hint}"
+    );
+
+    // Same error, EMPTY coverage → the generic architecture wording. This is the discriminator:
+    // the branch is keyed on the header scan, not on the message.
+    let generic = annotate_krea_realtime_lora_error(matched_nothing(), &loras, &Default::default())
+        .to_string();
+    assert!(
+        generic.contains("trained for a different architecture") && !generic.contains("sc-15326"),
+        "with no coverage evidence the generic arm is the honest answer: {generic}"
+    );
+
+    // A file that is only PARTLY diff-patch installs its low-rank half, so a "matched nothing"
+    // failure cannot be blamed on the format — it stays generic.
+    let partly = KreaRealtimeLoraCoverage {
+        partial: vec![("wan_lightning_diffpatch.safetensors".to_owned(), 647, 1053)],
+    };
+    let partial_case =
+        annotate_krea_realtime_lora_error(matched_nothing(), &loras, &partly).to_string();
+    assert!(
+        !partial_case.contains("sc-15326") && partial_case.contains("Wan-family"),
+        "a partially-applying file is not a wholly-unreadable one: {partial_case}"
+    );
+
+    // 🔴 Precedence: when a job mixes an I2V file with an all-diff-patch one, the engine names the
+    // unmatched `k_img` modules — direct evidence beats the header inference, so I2V wins.
+    let mixed = gen_core::Error::Msg(
+        "krea_realtime_14b adapters: 80 adapter target(s) matched no module (surfaced, not \
+         silently dropped): [\"blocks.0.cross_attn.k_img\"]"
+            .to_owned(),
+    );
+    let mixed_hint = annotate_krea_realtime_lora_error(
+        mixed,
+        &["squish_i2v.safetensors".to_owned(), loras[0].clone()],
+        &all_diff_patch,
+    )
+    .to_string();
+    assert!(
+        mixed_hint.contains("image-to-video") && !mixed_hint.contains("sc-15326"),
+        "the engine's own unmatched-target list is the more actionable finding: {mixed_hint}"
+    );
 }
 
 // ---------------------------------------------------------------------------

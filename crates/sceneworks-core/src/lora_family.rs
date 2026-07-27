@@ -2179,6 +2179,23 @@ fn is_wan_14b_class_id(id: &str) -> bool {
     normalize_model_family(id).ends_with("-14b")
 }
 
+/// Whether a model id names an **image-to-video** Wan entry (`wan_2_2_i2v_14b`), by the same id
+/// convention — an `i2v` path SEGMENT, not a substring, so a hypothetical `…si2vx…` id cannot match
+/// by accident.
+///
+/// This is a size-class peer of the 14B T2V entries, so [`is_wan_14b_class_id`] alone admits it.
+/// It must not ride the extra-compatible arm: an I2V LoRA targets `cross_attn.k_img`/`v_img`, which
+/// a text-to-video backbone does not have at any surface width, and the product ALREADY treats the
+/// two as non-interchangeable — `wan_2_2_i2v_14b` is refused on `wan_2_2_t2v_14b` by exact equality.
+/// Admitting it on Krea Realtime (also a T2V backbone) would be the one place that inconsistency
+/// existed, and it would surface as a hard engine error only AFTER a multi-GB tier fetch instead of
+/// a 400 at submit.
+fn is_wan_i2v_id(id: &str) -> bool {
+    normalize_model_family(id)
+        .split('-')
+        .any(|segment| segment == "i2v")
+}
+
 /// Whether a LoRA recording trained base model `base` may load on `model_id`, for a model whose own
 /// declared family is `model_family`. This is the base-model half of the compatibility gate; the
 /// family half is [`accepted_lora_families`].
@@ -2193,8 +2210,14 @@ fn is_wan_14b_class_id(id: &str) -> bool {
 /// `krea_realtime_14b`. Under exact equality alone, every base-model-stamped Wan LoRA would be
 /// refused on Krea and the relation would be dead on arrival for exactly the LoRAs the app itself
 /// stamps at import. So for a model that accepts `wan-video` through the registry, the gate is
-/// preserved rather than dropped: it still enforces the 5B-vs-14B split the gate exists for, by
-/// requiring the LoRA's base and the accepting model to be the same size class.
+/// preserved rather than dropped, on TWO axes:
+///
+/// * the **size class** (`is_wan_14b_class_id`) — the 5B-vs-14B split the gate was written for;
+/// * the **conditioning class** (`is_wan_i2v_id`) — an I2V base is refused, because Krea Realtime is
+///   a text-to-video backbone and `wan_2_2_i2v_14b` is already refused on the sibling
+///   `wan_2_2_t2v_14b` by exact equality. Without this the arm would be the one place in the product
+///   where an I2V stamp is admitted onto a T2V model, and the mismatch would surface as a hard
+///   engine error after a multi-GB tier fetch rather than a 400 at submit.
 ///
 /// A LoRA that records NO base model is not this function's concern — the callers fall back to
 /// family gating for those, exactly as before.
@@ -2206,6 +2229,7 @@ pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str)
     extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
         && is_wan_14b_class_id(model_id)
         && is_wan_14b_class_id(base)
+        && !is_wan_i2v_id(base)
 }
 
 /// A LoRA id for error messages: `id` / `loraId` / `lora_<n>`.
@@ -4837,6 +4861,35 @@ mod tests {
             "scail2",
             "scail2_14b",
             "wan_2_2_t2v_14b"
+        ));
+        // 🔴 …and REFUSES an I2V base, even though it is the same 14B size class. Krea Realtime is a
+        // TEXT-to-video backbone: an I2V LoRA targets `cross_attn.k_img`/`v_img`, which it does not
+        // have. The product already refuses this stamp on the sibling T2V model by exact equality
+        // (asserted right below), so admitting it here would be the one place that inconsistency
+        // existed — and it would surface as a hard engine error AFTER a multi-GB tier fetch instead
+        // of a 400 at submit.
+        assert!(!base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_i2v_14b"
+        ));
+        assert!(
+            !base_model_satisfies_gate("wan-video", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"),
+            "the sibling T2V model this mirrors must genuinely refuse the same stamp"
+        );
+        // The exclusion is a path SEGMENT, not a substring: an id that merely CONTAINS the letters
+        // must still pass, or a future entry could be refused for its spelling.
+        assert!(base_model_satisfies_gate(
+            "krea-realtime",
+            "krea_realtime_14b",
+            "wan_2_2_si2vx_14b"
+        ));
+        // And an I2V base still loads on its OWN model — the exclusion is scoped to the
+        // extra-compatible arm; it does not tighten exact equality.
+        assert!(base_model_satisfies_gate(
+            "wan-video",
+            "wan_2_2_i2v_14b",
+            "wan_2_2_i2v_14b"
         ));
 
         // End to end through the pre-flight the worker runs.

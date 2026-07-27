@@ -2085,6 +2085,41 @@ mod base_model_gating_tests {
             format!("{err:?}").contains("not interchangeable"),
             "got: {err:?}"
         );
+
+        // 🔴 An I2V-stamped base is the same 14B SIZE class but the wrong CONDITIONING class:
+        // Krea Realtime is text-to-video, and an I2V LoRA targets `cross_attn.k_img`/`v_img`, which
+        // it does not have. Refusing it here is a 400 at submit; admitting it would mean a hard
+        // engine error after the tier fetch. The sibling T2V model already refuses this stamp.
+        let i2v_err = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "krea_realtime_14b",
+            &[stamped("wan_2_2_i2v_14b")],
+            true,
+            "LoRA",
+        )
+        .expect_err("an I2V-stamped base must be refused on a T2V backbone");
+        assert!(
+            format!("{i2v_err:?}").contains("not interchangeable"),
+            "got: {i2v_err:?}"
+        );
+        // Control: the same I2V-stamped LoRA is fine on the I2V model itself, so the refusal above
+        // is the T2V/I2V mismatch and not the stamp merely being present.
+        let mut i2v_models = krea_realtime_models();
+        i2v_models.push(json!({
+            "id": "wan_2_2_i2v_14b",
+            "family": "wan-video",
+            "loraCompatibility": { "families": ["wan-video"] }
+        }));
+        validate_lora_specs_for_model(
+            &i2v_models,
+            &[],
+            "wan_2_2_i2v_14b",
+            &[stamped("wan_2_2_i2v_14b")],
+            true,
+            "LoRA",
+        )
+        .expect("an I2V LoRA still runs on the I2V model");
     }
 
     /// Minimal valid safetensors with one krea-identifying tensor key (`text_fusion`), so

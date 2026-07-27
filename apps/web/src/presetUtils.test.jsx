@@ -201,17 +201,30 @@ describe("acceptedLoraFamilies", () => {
       /fn extra_compatible_lora_families\([^)]*\)[^{]*\{\s*match normalized_family \{([\s\S]*?)\n {4}\}/,
     );
     expect(body, "the Rust registry fn must still be findable — update this parser if it moved").toBeTruthy();
+    const arms = body[1];
+    // 🔴 Match across newlines, not line-by-line. `cargo fmt` wraps a long arm, and a line-anchored
+    // regex would SKIP the wrapped arm silently — then, if the JS table happened to be missing the
+    // same entry, the equality below would pass VACUOUSLY on both sides. A non-empty-parse guard
+    // does not cover a per-arm drop, so the parsed-arm count is reconciled against the `=>` count:
+    // any arm shape this parser cannot read fails loudly and names itself as the thing to update.
     const rust = {};
-    for (const line of body[1].split("\n")) {
-      const arm = line.match(/^\s*((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*&\[([^\]]*)\],/);
-      if (!arm) continue;
+    let parsedArms = 0;
+    for (const arm of arms.matchAll(/((?:"[^"]+"\s*\|\s*)*"[^"]+")\s*=>\s*&\[([\s\S]*?)\]\s*,/g)) {
+      parsedArms += 1;
       const extras = [...arm[2].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
       for (const [, key] of arm[1].matchAll(/"([^"]+)"/g)) {
         rust[key] = extras;
       }
     }
-    // Guard the parser itself: a regex that silently matched nothing would make this pass vacuously.
-    expect(Object.keys(rust).length).toBeGreaterThan(0);
+    // The `_ => &[],` catch-all carries no families and is deliberately not a table entry, but it
+    // still consumes one `=>`, so it is counted here or the reconciliation is off by one.
+    const catchAll = /(^|\n)\s*_\s*=>\s*&\[\s*\]\s*,/.test(arms) ? 1 : 0;
+    const totalArrows = (arms.match(/=>/g) ?? []).length;
+    expect(
+      parsedArms + catchAll,
+      `parsed ${parsedArms} literal arm(s) + ${catchAll} catch-all, but the registry body has ${totalArrows} \`=>\`. An arm shape this parser cannot read (a wrapped/reformatted arm?) would be dropped silently — update the parser in this test.`,
+    ).toBe(totalArrows);
+    expect(parsedArms).toBeGreaterThan(0);
     expect(rust["krea-realtime"]).toEqual(["wan-video"]);
     expect(rust).toEqual(EXTRA_COMPATIBLE_LORA_FAMILIES);
   });

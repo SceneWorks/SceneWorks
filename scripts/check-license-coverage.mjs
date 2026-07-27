@@ -119,6 +119,18 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
       `inference source audit is for ${audit.inferenceRevision}, but Cargo pins ${[...inferencePins][0]}. Re-audit inference NOTICE, LICENSE-*, and production include_str!/include_bytes! sites, then update config/inference-third-party-source.json.`,
     );
   }
+  // 🔴 The ported-source inventory has its OWN revision label, and until sc-15017 nothing compared
+  // it to the pin. That is how the inventory went stale: a bump updated `inferenceRevision` (checked
+  // above) and the scanner was re-run against a revision literal it kept internally, so the label
+  // said one thing, the scan was of another, and the audit stayed self-consistent and GREEN while
+  // missing an entire crate. The scanner now derives its revision from the pin — but CI has no
+  // inference clone, so it never re-scans, and a bump where nobody runs the scanner at all would
+  // still pass every check below. This is the assertion that makes that impossible.
+  if (inferencePins.size === 1 && audit.provenanceScan?.revision !== [...inferencePins][0]) {
+    auditErrors.push(
+      `ported-source inventory was scanned at ${audit.provenanceScan?.revision ?? "(unset)"}, but Cargo pins ${[...inferencePins][0]}. Re-run \`node scripts/scan-inference-provenance.mjs --repo <inference> --write config/inference-provenance-candidates.tsv\` (it reads the pin itself), then update provenanceScan + auditDigest.`,
+    );
+  }
 
   const canonical = JSON.stringify({
     artifacts: audit.artifacts,

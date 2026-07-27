@@ -515,6 +515,22 @@ pub(super) struct KreaRealtimeLoraCoverage {
 
 #[cfg(target_os = "macos")]
 impl KreaRealtimeLoraCoverage {
+    /// The files that are **entirely** diff-patch (`dropped == total`), by name.
+    ///
+    /// These do not merely apply partially — they apply NOTHING, so the strict installer resolves
+    /// zero low-rank targets and fails with "no target modules matched across N adapter file(s)".
+    /// That is a right-architecture / wrong-FORMAT file, and without this list
+    /// [`annotate_krea_realtime_lora_error`] would reach for its architecture-mismatch wording and
+    /// tell the user their Wan LoRA is for a different model — a confident misdiagnosis of a file
+    /// that is for exactly the right model in a format this installer does not read.
+    fn wholly_unapplied(&self) -> Vec<&str> {
+        self.partial
+            .iter()
+            .filter(|(_, dropped, total)| dropped == total)
+            .map(|(file, _, _)| file.as_str())
+            .collect()
+    }
+
     /// The `kreaRealtimeLoraPartial` value for the asset stamp, or `None` when every selected LoRA
     /// applies in full (the common case — the key is then absent rather than an empty array, so the
     /// sidecar of an ordinary render is byte-identical to what it was before this existed).
@@ -533,17 +549,26 @@ impl KreaRealtimeLoraCoverage {
     }
 
     /// Emit the `warn` event for each partially-applied file. Called once, before the load.
+    ///
+    /// A file that is ENTIRELY diff-patch gets different wording: nothing of it applies, and the
+    /// load is about to fail — calling that "partial" would overstate what the render contains.
     fn warn(&self) {
         for (file, dropped, total) in &self.partial {
+            let outcome = if dropped == total {
+                "NONE of this LoRA applies, so the load fails rather than rendering without it"
+            } else {
+                "The clip reflects a PARTIAL application of this LoRA"
+            };
             tracing::warn!(
                 event = "krea_realtime_lora_partially_applied",
                 model = KREA_REALTIME_MODEL_ID,
                 lora = %file,
                 unapplied_keys = *dropped,
                 total_keys = *total,
+                wholly_unapplied = dropped == total,
                 "Krea Realtime applies low-rank LoRA factors only: {dropped} of {total} tensors in \
                  {file} are ComfyUI/lightx2v `.diff`/`.diff_b` diff-patch deltas and are NOT applied \
-                 (sc-15326). The clip reflects a PARTIAL application of this LoRA."
+                 (sc-15326). {outcome}."
             );
         }
     }
@@ -589,14 +614,27 @@ fn adapter_file_label(path: &Path) -> String {
 /// The engine is correct to hard-error: `apply_adapters_strict` refuses to install a file whose
 /// targets do not all exist, because the alternative is a render that silently omits part of the
 /// adapter and still reports success. But the raw text is an engine-internal module list behind a
-/// generic "video load failed", which tells a user nothing about what to do. The one class that
-/// reaches real users is an **I2V-family** Wan LoRA (`cross_attn.k_img` / `v_img`): those modules do
-/// not exist on a T2V backbone at any surface width — no widening fixes it, the LoRA is genuinely for
-/// a different model — so the message says exactly that.
+/// generic "video load failed", which tells a user nothing about what to do.
+///
+/// Three classes reach real users, and they need DIFFERENT answers — a single fallback would
+/// misdiagnose two of them:
+///
+/// 1. An **I2V-family** Wan LoRA (`cross_attn.k_img` / `v_img`). Those modules do not exist on a
+///    T2V backbone at any surface width, so no widening fixes it. Detected from the engine's own
+///    unmatched-target list, which is direct evidence rather than inference.
+/// 2. A file that is **entirely diff-patch** (`.diff` / `.diff_b`, no `lora_down`/`lora_up` at
+///    all). It resolves zero targets, so the engine reports "no target modules matched" — the same
+///    text a genuinely foreign LoRA produces. But it is the RIGHT architecture in a FORMAT this
+///    installer does not read (sc-15326), and telling that user their file is "for a different
+///    architecture" would send them to replace a LoRA that is perfectly correct for this model.
+///    [`KreaRealtimeLoraCoverage`] already read the header, so the discrimination is free.
+/// 3. Anything else — a genuinely foreign architecture, which is the only case the generic wording
+///    is true of.
 #[cfg(target_os = "macos")]
 pub(super) fn annotate_krea_realtime_lora_error(
     error: gen_core::Error,
     loras: &[String],
+    coverage: &KreaRealtimeLoraCoverage,
 ) -> gen_core::Error {
     let gen_core::Error::Msg(message) = &error else {
         return error;
@@ -605,14 +643,28 @@ pub(super) fn annotate_krea_realtime_lora_error(
         return error;
     }
     let selected = loras.join(", ");
+    // The I2V arm goes first because it reads the engine's OWN unmatched-target list: when a job
+    // mixes an I2V file with an all-diff-patch one, the named modules are the actionable finding.
+    let wholly_unapplied = coverage.wholly_unapplied();
     let hint = if message.contains("k_img") || message.contains("v_img") {
         "This looks like an image-to-video (I2V) Wan LoRA: it targets the image cross-attention \
          projections (`cross_attn.k_img` / `v_img`), which a text-to-video backbone like Krea \
          Realtime 14B does not have. Pick a Wan T2V style / motion LoRA instead, or deselect it."
+            .to_owned()
+    } else if !wholly_unapplied.is_empty() {
+        format!(
+            "{} carries only ComfyUI/lightx2v `.diff`/`.diff_b` diff-patch tensors — no \
+             `lora_down`/`lora_up` low-rank factors at all. This is NOT an architecture mismatch: \
+             the file may well be built for this exact model, but Krea Realtime installs low-rank \
+             factors only, so there is nothing here for it to apply (sc-15326). Pick a standard \
+             LoRA/LoKr build of the same adapter, or deselect it.",
+            wholly_unapplied.join(", "),
+        )
     } else {
         "Krea Realtime 14B accepts Wan-family (Wan 2.1 T2V 14B) LoRAs — its DiT is that model \
          weight-for-weight. A LoRA trained for a different architecture has targets this model does \
          not have, so it is refused rather than half-applied. Deselect it, or pick a Wan T2V LoRA."
+            .to_owned()
     };
     gen_core::Error::Msg(format!(
         "Krea Realtime 14B could not apply the selected LoRA(s) ({selected}). {hint}\n\nEngine \
@@ -848,9 +900,13 @@ pub(super) async fn generate_krea_realtime_using(
     // Wrap the caller's loader so a strict-adapter refusal reaches the user as guidance instead of an
     // engine-internal module list behind "video load failed". Non-adapter failures — and the typed
     // `Canceled` the funnel matches on — pass through untouched.
+    // `coverage` rides along so the annotation can tell a wrong-FORMAT file (all diff-patch, right
+    // architecture) from a genuinely foreign one — both produce the same "matched nothing" text.
+    let error_coverage = coverage.clone();
     let load_generator = move |engine: &str, spec: &LoadSpec| {
-        load_generator(engine, spec)
-            .map_err(|error| annotate_krea_realtime_lora_error(error, &lora_labels))
+        load_generator(engine, spec).map_err(|error| {
+            annotate_krea_realtime_lora_error(error, &lora_labels, &error_coverage)
+        })
     };
     let input = VideoGenInput {
         sampler: None,
