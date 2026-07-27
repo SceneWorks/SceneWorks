@@ -1300,8 +1300,6 @@ export function ImageStudio() {
     setSelectedLoraIds,
     loraWeights,
     setLoraWeights,
-    showIncompatibleLoras,
-    setShowIncompatibleLoras,
     compatibleLoras,
     selectedLoras,
     userSelectedLoraCount,
@@ -1331,7 +1329,6 @@ export function ImageStudio() {
     setAdvancedOpen,
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
-    initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
 
@@ -1810,7 +1807,6 @@ export function ImageStudio() {
     upscaleSoftness,
     selectedLoraIds,
     loraWeights,
-    showIncompatibleLoras,
     // Krea 2 multi-phase denoise (sc-13885): persist the editor toggle, phase list, and disclosure
     // state alongside the rest of the studio snapshot (LoRA refs are by stable id, so they survive
     // reload regardless of the selected-LoRA list's async hydration).
@@ -3136,6 +3132,18 @@ export function ImageStudio() {
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
             </div>
+            <LoraPickerSection
+              selectedModel={selectedModel}
+              selectedLoras={pickerSelectedLoras}
+              selectedLoraIds={pickerSelectedLoraIds}
+              compatibleLoras={pickerCompatibleLoras}
+              userSelectedLoraCount={userSelectedLoraCount}
+              toggleLora={toggleLora}
+              effectiveLoraWeight={effectiveLoraWeight}
+              setLoraWeight={setLoraWeight}
+              loraEmptyMessage={loraEmptyMessage}
+              onUpdateLora={createLoraDownloadJob}
+            />
             {/* Style axis (sc-13135): the Style Catalog picker sits FIRST in this row, followed by the
                 model's Style presets — both are style controls, so they share one row instead of the
                 catalog picker floating in a standalone row under the composer. The Style Catalog
@@ -3462,20 +3470,6 @@ export function ImageStudio() {
                 Negative prompt
                 <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
               </label>
-              <LoraPickerSection
-                selectedModel={selectedModel}
-                selectedLoras={pickerSelectedLoras}
-                selectedLoraIds={pickerSelectedLoraIds}
-                compatibleLoras={pickerCompatibleLoras}
-                userSelectedLoraCount={userSelectedLoraCount}
-                showIncompatibleLoras={showIncompatibleLoras}
-                setShowIncompatibleLoras={setShowIncompatibleLoras}
-                toggleLora={toggleLora}
-                effectiveLoraWeight={effectiveLoraWeight}
-                setLoraWeight={setLoraWeight}
-                loraEmptyMessage={loraEmptyMessage}
-                onUpdateLora={createLoraDownloadJob}
-              />
               {/* Save-as-preset folds into Advanced with the rest of the power-user
                   knobs (UI-refinement 2b). */}
               <SavePresetPanel

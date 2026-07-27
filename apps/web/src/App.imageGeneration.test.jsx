@@ -696,9 +696,10 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Qwen Only");
     expect(container.textContent).not.toContain("Missing LoRA");
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    const loraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    expect(loraPicker).toBeTruthy();
+    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    expect(loraPicker.textContent).not.toContain("Show incompatible");
 
     // Add-on-demand LoRA picker (UI-refinement 3b): open the "Add LoRA" dropdown and click a
     // compatible row to add each LoRA. built_in (scope "builtin") doesn't count toward the
@@ -730,15 +731,13 @@ describe("SceneWorks app shell", () => {
     );
     expect(fifthRow.disabled).toBe(true);
 
-    // The Show-incompatible toggle reveals incompatible LoRAs in the same dropdown.
-    await act(async () => {
-      document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
-    });
+    // Incompatible and missing LoRAs stay out of the picker; there is no escape-hatch checkbox.
+    expect(document.body.querySelector('.lora-picker .checkline input[type="checkbox"]')).toBeNull();
     expect(
       [...document.body.querySelectorAll(".lora-pick-row")].some((button) =>
         button.textContent.includes("Qwen Only"),
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
@@ -802,7 +801,7 @@ describe("SceneWorks app shell", () => {
     expect(loraNames).not.toContain("Z Style");
   });
 
-  it("blocks image submit when a visible incompatible LoRA is selected", async () => {
+  it("does not expose incompatible image LoRAs or the incompatible visibility control", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -827,39 +826,12 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
-    // Reveal the incompatible LoRA in the dropdown, then add it via its Add row.
-    await act(async () => {
-      document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
-    });
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
-    });
-    await act(async () => {
-      [...document.body.querySelectorAll(".lora-pick-row")]
-        .find((button) => button.textContent.includes("Qwen Only"))
-        .click();
-    });
-
-    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
-    expect(container.textContent).toContain("Generate is blocked");
-    expect(container.textContent).toContain("Qwen Only");
-    expect(generate.disabled).toBe(true);
-
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
-    await settle();
-
-    expect(document.body.querySelector(".advanced-section.open")).toBeTruthy();
-    expect(container.textContent).toContain("Qwen Only");
-
-    await act(async () => {
-      generate.click();
-    });
-
+    const loraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    expect(loraPicker).toBeTruthy();
+    expect(loraPicker.textContent).not.toContain("Show incompatible");
+    expect(loraPicker.textContent).not.toContain("Qwen Only");
+    expect(loraPicker.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(loraPicker.querySelector(".lora-add")).toBeNull();
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
@@ -919,11 +891,10 @@ describe("SceneWorks app shell", () => {
     // The preset's installed LoRA is now seeded into the visible picker (not hidden), so the
     // guidance strip no longer claims it's "applied at generation" — it's a normal selection.
     expect(container.textContent).not.toContain("Preset LoRA applied at generation");
-    // Open Advanced (where the LoRA rail lives): the preset's LoRA is a real selection sitting
-    // at the preset's weight (0.4), ready to retune.
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    // The model settings container exposes the preset's LoRA as a real selection sitting at
+    // the preset's weight (0.4), ready to retune without opening Advanced.
+    expect(document.body.querySelector(".settings-bar > .lora-picker")).toBeTruthy();
+    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
     expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.40");
 
     await act(async () => {
@@ -1139,7 +1110,10 @@ describe("SceneWorks app shell", () => {
     await settle();
     expect(field(container, "Variations").value).toBe("2");
     expect(field(container, "GPU")).toBeUndefined();
-    expect(container.textContent).not.toContain("LoRAs");
+    expect(container.textContent).toContain("LoRAs");
+    expect(document.body.querySelector(".settings-bar > .lora-picker")).toBeTruthy();
+    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    expect(container.textContent).not.toContain("Show incompatible");
 
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")]
@@ -2199,13 +2173,13 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
-    await settle();
-
     // Add-on-demand LoRA picker (UI-refinement 3b): open the dropdown. Only the ltx-video LoRA is
-    // compatible; the z-image one is filtered out.
+    // compatible; the z-image one is filtered out. It is part of the model settings rather than
+    // the Advanced disclosure, and the incompatible escape hatch is intentionally absent.
+    const videoLoraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    expect(videoLoraPicker).toBeTruthy();
+    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    expect(videoLoraPicker.textContent).not.toContain("Show incompatible");
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });

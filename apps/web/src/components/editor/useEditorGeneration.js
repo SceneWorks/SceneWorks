@@ -103,7 +103,6 @@ export function useEditorGeneration({ context }) {
     setAdvancedOpen,
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
-    initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
 
@@ -275,7 +274,6 @@ export function useEditorGeneration({ context }) {
       advancedOpen,
       selectedLoraIds: studio.selectedLoraIds,
       loraWeights: studio.loraWeights,
-      showIncompatibleLoras: studio.showIncompatibleLoras,
       selectedPresetId: studio.selectedPresetId,
       generalStackIds: studio.generalStackIds,
     },

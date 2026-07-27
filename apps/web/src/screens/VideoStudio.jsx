@@ -428,8 +428,6 @@ export function VideoStudio() {
     setSelectedLoraIds,
     loraWeights,
     setLoraWeights,
-    showIncompatibleLoras,
-    setShowIncompatibleLoras,
     compatibleLoras,
     selectedLoras,
     userSelectedLoraCount,
@@ -459,7 +457,6 @@ export function VideoStudio() {
     setAdvancedOpen,
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
-    initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
   // Sampler / scheduler menus declared by the model. Video Wan torch
@@ -973,7 +970,6 @@ export function VideoStudio() {
     advancedOpen,
     selectedLoraIds,
     loraWeights,
-    showIncompatibleLoras,
     model,
     duration,
     resolution,
@@ -1698,6 +1694,18 @@ export function VideoStudio() {
                 </div>
               </label>
             </div>
+            <LoraPickerSection
+              selectedModel={selectedModel}
+              selectedLoras={selectedLoras}
+              selectedLoraIds={selectedLoraIds}
+              compatibleLoras={compatibleLoras}
+              userSelectedLoraCount={userSelectedLoraCount}
+              toggleLora={toggleLora}
+              effectiveLoraWeight={effectiveLoraWeight}
+              setLoraWeight={setLoraWeight}
+              loraEmptyMessage={loraEmptyMessage}
+              onUpdateLora={createLoraDownloadJob}
+            />
             {/* Style axis (sc-13135): the Style Catalog picker leads this row (hidden for promptless
                 image-conditioned models and for booru-tag models), followed by the model's Style
                 presets — mirrors the Image Studio. The catalog wraps the outgoing prompt
@@ -2061,20 +2069,6 @@ export function VideoStudio() {
                   <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
                 </label>
               ) : null}
-              <LoraPickerSection
-                selectedModel={selectedModel}
-                selectedLoras={selectedLoras}
-                selectedLoraIds={selectedLoraIds}
-                compatibleLoras={compatibleLoras}
-                userSelectedLoraCount={userSelectedLoraCount}
-                showIncompatibleLoras={showIncompatibleLoras}
-                setShowIncompatibleLoras={setShowIncompatibleLoras}
-                toggleLora={toggleLora}
-                effectiveLoraWeight={effectiveLoraWeight}
-                setLoraWeight={setLoraWeight}
-                loraEmptyMessage={loraEmptyMessage}
-                onUpdateLora={createLoraDownloadJob}
-              />
               {characterId ? (
                 <div className="guidance-strip">
                   <strong>Character reference</strong>
