@@ -446,6 +446,19 @@ fn push_scalar_flags(
         return;
     };
 
+    // Blur is measured on the center-crop→bucket-resize the trainer actually feeds, so a sub-bucket
+    // image reads soft largely *because* it was upscaled to get there — the blur arm ends up
+    // re-detecting the resolution problem. When `Resolution` has already fired on this item it
+    // names the cause correctly ("may look soft at the training size"); adding `Blur` on top only
+    // misattributes it to focus and double-counts the same image in the technical sub-score.
+    //
+    // Calibration over 7 real training sets, 79 images (sc-8563): 38 were blur-flagged, and 33 of
+    // those (87%) were already resolution-flagged. The 5 that were not are all >= 790px short edge
+    // and genuinely soft — exactly the cases that should survive this guard.
+    let resolution_flagged = flags
+        .iter()
+        .any(|flag| flag.check == QualityCheck::Resolution);
+
     // Soft if below the absolute floor OR a clear outlier below the dataset median (the spike's
     // "floor AND relative" rule — relative alone would pass a uniformly-soft set). The relative arm
     // also requires the image be below `blur_relative_ceiling`: on the peak-tile scale a high-median
@@ -455,7 +468,7 @@ fn push_scalar_flags(
     let below_relative = scalars.blur_variance < thresholds.blur_relative_ceiling
         && blur_median
             .is_some_and(|median| scalars.blur_variance < thresholds.blur_relative_factor * median);
-    if below_floor || below_relative {
+    if !resolution_flagged && (below_floor || below_relative) {
         flags.push(QualityFlag {
             check: QualityCheck::Blur,
             severity: Severity::Warn,
@@ -2125,6 +2138,51 @@ mod tests {
         soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8]));
         let eval = evaluate_tier0(std::slice::from_ref(&soft), 512, 1, &thresholds());
         assert!(has(&eval, "soft", QualityCheck::Blur));
+        // The companion to the suppression test below: this item is bucket-sized, so `Resolution`
+        // never fires and `Blur` is the only finding — softness with no resolution explanation.
+        assert!(!has(&eval, "soft", QualityCheck::Resolution));
+    }
+
+    #[test]
+    fn blur_is_suppressed_when_resolution_already_explains_the_softness() {
+        // sc-8563: blur is measured after the crop→bucket resize, so a sub-bucket image reads soft
+        // because it was upscaled to get there. `Resolution` already names that cause; `Blur` on
+        // top would misattribute it to focus and penalize the item twice in the technical share.
+        let mut small_and_soft = item("small_and_soft");
+        small_and_soft.width = Some(200);
+        small_and_soft.height = Some(200); // short edge 200 < 0.75 × 512 ⇒ Resolution fires
+        small_and_soft.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8])); // would trip the floor
+
+        let eval = evaluate_tier0(std::slice::from_ref(&small_and_soft), 512, 1, &thresholds());
+
+        assert!(
+            has(&eval, "small_and_soft", QualityCheck::Resolution),
+            "the real cause is still reported"
+        );
+        assert!(
+            !has(&eval, "small_and_soft", QualityCheck::Blur),
+            "blur must not double-report the same softness the resolution finding explains"
+        );
+    }
+
+    #[test]
+    fn blur_suppression_does_not_leak_across_items() {
+        // One item's Resolution finding must not silence a *different* item's genuine blur — the
+        // guard reads only the flags already on the item being evaluated.
+        let mut small = item("small");
+        small.width = Some(200);
+        small.height = Some(200);
+        small.scalars = Some(scalars(10.0, 0.0, 0.0, vec![0; 8]));
+        let mut big_and_soft = item("big_and_soft"); // 512×512 ⇒ resolution-clear
+        big_and_soft.scalars = Some(scalars(12.0, 0.0, 0.0, vec![1; 8]));
+
+        let eval = evaluate_tier0(&[small, big_and_soft], 512, 1, &thresholds());
+
+        assert!(!has(&eval, "small", QualityCheck::Blur));
+        assert!(
+            has(&eval, "big_and_soft", QualityCheck::Blur),
+            "an adequately-sized soft image is still flagged"
+        );
     }
 
     #[test]
