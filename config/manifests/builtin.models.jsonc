@@ -9556,20 +9556,34 @@
         // override (SCENEWORKS_MLX_KREA_REALTIME_DIR) -> app-managed <data>/models/mlx/
         // krea_realtime -> this download-on-first-use snapshot, mirroring bernini/scail2.
         //
-        // minMemoryGb 64 is DERIVED, not measured (sc-8446 / S13 measures it on-device):
-        //   Q4 DiT ~7.8 GiB + the bounded AR KV cache + the z16 VAE ~0.5 GiB, at the default
-        //   832x480 bucket. The KV cache is the term that makes this engine different from a
-        //   block-diffusion Wan: a rolling `kv_cache_num_frames + num_frames_per_block` = 6
-        //   latent-frame window at 1560 tokens/frame over 40 layers x 40 heads x 128 dims x
-        //   {k,v} in bf16 is ~7.7 GB (~7.1 GiB) — bounded, but resident for the whole clip.
-        //   That is ~15.5 GiB steady plus VAE-decode scratch, and MLX's wired-memory ceiling is
-        //   roughly 63% of physical, so a 32 GB Mac (~20 GB wired) cannot hold it and a 48 GB
-        //   Mac (~30 GB) has no headroom. 64 is the first tier that does.
-        //   The ladder above the floor, same derivation: Q8 ~+6.5 GiB of weights, bf16 ~+19 GiB,
-        //   and the 720p buckets ~+9.4 GiB of KV — a bf16 720p clip wants a 128 GB machine. The
-        //   UMT5 text encoder (11.4 GB bf16) is NOT additive: it is loaded, used, and freed
-        //   before the DiT stages, and the engine floors it to Q8 (~5.7 GB) whenever the DiT
-        //   tier is quantized, so it never sets the peak on the q4/q8 tiers.
+        // ⚠️ minMemoryGb 64 is a CONSERVATIVE PLACEHOLDER, not a closed derivation. sc-8446 (S13)
+        // measures the real figure on-device; replace this with it.
+        //
+        // What IS accounted for, at the default 832x480 bucket on the default Q4 tier:
+        //   * Q4 DiT ~7.8 GiB.
+        //   * The AR KV cache ~7.1 GiB — the term that makes this engine unlike a block-diffusion
+        //     Wan. A rolling `kv_cache_num_frames + num_frames_per_block` = 6 latent-frame window
+        //     at 1560 tokens/frame over 40 layers x 40 heads x 128 dims x {k,v} in bf16. Bounded,
+        //     but resident for the whole clip.
+        //   * The z16 VAE ~0.5 GiB.
+        // That is ~15.4 GiB of steady residency, which on its own would fit a 32 GB Mac (MLX's
+        // wired ceiling is roughly 63% of physical, so ~20 GB there). The component sum does NOT
+        // by itself justify 64 — saying otherwise would be arithmetic that does not close.
+        //
+        // What is NOT quantified is the transient peak on top of it: the VAE decode of a 93-frame
+        // clip, whose Metal conv scratch has historically run ~2x the active allocation on this
+        // family (the MEASURED scail2 case: a 33 GB MLX-active decode inside a ~76 GB process
+        // footprint), plus the per-step AR activations. That term is what actually decides whether
+        // a 32 or 48 GB machine survives, and it has never been measured for THIS engine. 64 is
+        // chosen to sit safely above any plausible value of it — presenting a guess as a
+        // derivation is how a model ships that OOMs on a machine we told the user was enough.
+        //
+        // The relative ladder is on firmer ground, because those deltas are pure weight/cache
+        // arithmetic: Q8 ~+6.5 GiB of weights over Q4, bf16 ~+19 GiB, and the 720p buckets
+        // ~+9.4 GiB of KV (3600 vs 1560 tokens/frame) — so a bf16 720p clip wants a 128 GB
+        // machine. The UMT5 text encoder (11.4 GB bf16) is NOT additive: it is loaded, used, and
+        // freed before the DiT stages, and the engine floors it to Q8 (~5.7 GB) whenever the DiT
+        // tier is quantized, so it never sets the peak on the q4/q8 tiers.
         "minMemoryGb": 64,
         "repo": "SceneWorks/krea-realtime-14b-mlx",
         // Declares Q4 as this model's default tier, matching the `default: true` q4 download.

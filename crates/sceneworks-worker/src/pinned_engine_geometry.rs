@@ -106,21 +106,24 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
 /// sc-12587) and remains covered only by `ENGINE_GEOMETRY`.
 ///
 /// The wan 14B grid-16 family renders on the `SIZE_MULTIPLE_14B = 16` lattice: the three A14B ids
-/// through their own engine, `bernini` through a Wan2.2-T2V-A14B snapshot (patch 2 × vae 8), and
-/// `krea_realtime_14b` (epic 8431) on the same grid for the same reason — its checkpoint is Wan 2.1
-/// T2V 14B weight-for-weight, so `mlx-gen-krea-realtime` reuses `mlx-gen-wan`'s z16 VAE (8px spatial
-/// stride) under patch 2, and its descriptor's `min_size: 16` agrees. Tying it to the pinned const
-/// rather than to a literal is what stops a manifest edit or a `runtime-*` bump moving one without
-/// the other; the const is available on both backends even though this engine is mac-only.
+/// through their own engine, and `bernini` through a Wan2.2-T2V-A14B snapshot (patch 2 × vae 8).
 /// `scail2_14b` and the 5B declare no stride (their `None` means "engine stride == core's default
 /// floor"), and ltx / svd / mochi live in other engine crates — all deferred to sc-12587.
+///
+/// **`krea_realtime_14b` (epic 8431 / sc-8444) is deliberately NOT tied here**, even though it
+/// renders on the same ÷16 lattice and its manifest declares 16. The tie would be a FICTION: the
+/// value coincides with `SIZE_MULTIPLE_14B`, but it is not sourced from it. `mlx-gen-krea-realtime`
+/// imports no `SIZE_MULTIPLE_*` — it hardcodes its own `const SPATIAL_STRIDE: usize = 8` (`t2v.rs`)
+/// and takes the patch from `cfg.wan.patch_size`. So a change to *krea's* stride would NOT go red
+/// here (the guard would still be reading wan's const), while a change to *wan's* const WOULD go red
+/// spuriously on a model that never consulted it — a guard wrong in both directions is worse than
+/// none. It therefore joins the ltx / svd / mochi "engine lives in another crate" group and stays
+/// covered by `ENGINE_GEOMETRY`'s literal until sc-12587 extends the pinned tie to those crates.
 fn pinned_stride(id: &str) -> Option<u64> {
     match id {
-        "wan_2_2_t2v_14b"
-        | "wan_2_2_i2v_14b"
-        | "wan_2_2_vace_fun_14b"
-        | "bernini"
-        | "krea_realtime_14b" => Some(SIZE_MULTIPLE_14B as u64),
+        "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "wan_2_2_vace_fun_14b" | "bernini" => {
+            Some(SIZE_MULTIPLE_14B as u64)
+        }
         _ => None,
     }
 }
