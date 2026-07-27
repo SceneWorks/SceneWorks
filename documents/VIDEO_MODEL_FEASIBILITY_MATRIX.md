@@ -126,10 +126,17 @@ reference — see the write-bound note):
 | decode | latent tile / overlap | mean \|Δ\| vs single-pass | highlight clipping mean / worst | MLX active peak |
 |---|---|---|---|---|
 | single-pass (reference) | — | 0 | **0.08% / 0.25%** | 85.1 GiB |
-| **shipped (tile 8 / overlap 2)** | 2 / **0** | **18.5 /255** | **9.7% / 26.6%** | 19.8 GiB |
-| overlap floored to 8 (the sc-8446 fix) | 2 / 2 | 17.1 | 5.2% / 14.7% | 19.8 GiB |
+| **tile 8 / overlap 2 — the ORIGINAL shipped value** | 2 / **0** | **18.5 /255** | **9.7% / 26.6%** | 19.8 GiB |
+| **tile 8 / overlap 4 — what sc-8446 ships** | 2 / **1** | 17.1 | 5.2% / 14.7% | 19.8 GiB |
+| tile 16 / overlap 4 | 4 / 1 | 7.5 | 1.8% / 12.9% | 38.5 GiB |
 | tile 16 / overlap 8 | 4 / 2 | 6.4 | 1.4% / 7.0% | 38.5 GiB |
-| tile 32 / overlap 16 | 8 / 4 | 2.0 | 0.1% / 1.1% | 75.8 GiB |
+| tile 32 / overlap 8 | 8 / 2 | 2.5 | 0.08% / 0.25% | 75.8 GiB |
+| tile 32 / overlap 16 | 8 / 4 | 2.0 | 0.14% / 1.1% | 75.8 GiB |
+
+⚠️ Overlap is expressed in **output** frames but applied in **latent** space (÷4), and `split_spatial`
+then clamps it to `tile − 1`. At the shipped latent tile of **2 the overlap cannot exceed 1**, so the
+sc-8446 fix already takes it to the maximum available there and the tile-2 rows say nothing about how
+much blending is worth.
 
 At the shipped setting roughly **one frame in eight blows a quarter of its pixels to near-white**, with
 violet/green chroma separation and rainbow fringing along moving edges. The same latents decode to a
@@ -137,10 +144,25 @@ clean photographic image single-pass. The artifact period is **8 output frames =
 stride**, which is what identifies the cause: it does **not** align with the 12-output-frame AR chunk,
 so this is not the `sink_size = 0` bounded-window drift of sc-15127.
 
-**Mechanism: a starved temporal receptive field, not a blending seam.** Widening the overlap plateaus
-almost immediately (latent overlap 0 → 1 → 2 gives 18.5 → 17.1 → 17.1); growing the *tile* keeps paying
-(latent 2 → 4 → 8 gives 18.5 → 6.4 → 2.0). Two latent frames is less context than the z16 decoder's
-temporal convolutions need, and blending two starved windows cannot reconstruct what neither saw.
+**Mechanism — read the pairs at a FIXED tile, where overlap has room to move:**
+
+| comparison | mean \|Δ\| | worst-frame clipping | MLX active peak |
+|---|---|---|---|
+| overlap ×2 at latent tile 4 (1→2) | 7.5 → 6.4 (**−15%**) | 12.9% → 7.0% (**−46%**) | 38.5 → 38.5 GiB |
+| overlap ×2 at latent tile 8 (2→4) | 2.5 → 2.0 (**−22%**) | already at the single-pass floor | 75.8 → 75.8 GiB |
+| tile ×2 at matched overlap (4/1 → 8/2) | 7.5 → 2.5 (**−67%**) | 12.9% → 0.25% | 38.5 → **75.8 GiB** |
+| tile ×2 at matched overlap (4/2 → 8/4) | 6.4 → 2.0 (**−70%**) | 7.0% → 1.1% | 38.5 → **75.8 GiB** |
+
+**Tile size dominates** — roughly −67…−70% per doubling — because two latent frames is less temporal
+context than the z16 decoder's convolutions need. But **overlap is a real secondary term**, not a
+negligible one: −15…−22% on mean error and −46% on worst-frame clipping where it has room. An earlier
+cut of these notes called blending a minor contributor on the strength of the tile-2 rows; that was a
+degenerate comparison (the clamp had already capped it) and the claim is withdrawn.
+
+Practical consequence for sc-15325: **raise the tile *and* scale the overlap with it.** Overlap is free
+in *peak* (identical GiB across each pair — it changes the stride and so the number of passes, i.e.
+wall time, not the resident window), so there is no reason to buy a bigger tile and leave the overlap
+at one latent frame.
 
 **Status.** sc-8446 shipped the free half — the overlap now survives the ÷4 to latent space (it was
 literally 0), which halves the clipping at identical memory. The tile size is *not* raised here because
@@ -148,10 +170,17 @@ tile size **is** the memory bound (19.8 → 38.5 → 75.8 GiB), and raising it r
 for this engine **and** for `mlx-gen-scail2`, which computes the identical budget. Tracked as
 **sc-15325**.
 
-**Blast radius:** the exposure is the two engines with hand-rolled pxframe budgets — `krea_realtime_14b`
-and `scail2_14b` (identical `overlap = tile_frames/4` formula). The families that route through
-gen-core's `budgeted_plan` (Wan z16/z48, LTX) pick from candidate tables of 24–96-frame tiles with
-8–24-frame overlaps and are **not** in this regime.
+**Blast radius.** The zero-overlap collapse needs `tile_frames ∈ {8, 12}`, i.e. `budget_frames < 16`,
+i.e. **≥ ~233k px/frame**: 640×384, 512×512, 768×512, 832×480 and 1280×720 all collapse — but
+512×384 does **not** (budget 17 → tile 16 → latent overlap 1). Both engines with hand-rolled pxframe
+budgets are exposed: `krea_realtime_14b` and **`scail2_14b`**, which computes the identical
+`overlap = tile_frames/4` and is shipping it unmeasured.
+
+Once the root cause is tile size, the right metric is **latent** frames, not output frames. On that
+metric: Wan z16/z48 route through `budgeted_plan` and bottom out at latent tile 8 / overlap 2 —
+**clear**, by the table above. **LTX is not cleared**: its `temporal_scale` is 8, so its smallest
+candidate bottoms out at latent tile **3** / overlap 1 — below the latent-4 tile that still measured
+6.4/255 here. Unmeasured; on sc-15325's step 1 alongside scail2.
 
 ⚠️ **Write-bound note.** A single-pass z16 decode is only valid below `96 · frames · h · w ≤ i32::MAX`
 — at 832×480 that is **56 output frames**. An 84-frame single-pass decode is 1.5× over it and MLX
@@ -174,7 +203,7 @@ and single-pass decoding of the same latents yields a clean photographic clip. T
 and much milder progressive stylization consistent with the sc-15127 bounded-window drift, but it is
 **not** what a viewer notices and it was wrongly blamed for this in the first cut of these notes.
 
-## Capability & spec matrix 🌐## Capability & spec matrix 🌐
+## Capability & spec matrix 🌐
 
 | Dimension | **LTX-2.3 (22B)** | **Wan2.2 A14B (27B MoE/14B active)** | **Wan2.2 TI2V-5B (dense)** | **Krea Realtime 14B (dense AR)** ⚙️ |
 |---|---|---|---|---|
@@ -183,7 +212,7 @@ and much milder progressive stylization consistent with the sc-15127 bounded-win
 | First-frame cond. | Yes (native) | Yes (I2V) | Yes | Yes (that IS the i2v path) |
 | Last-frame / first+last bridge | **Yes, native** (keyframe interp) | **Not in core Wan2.2** — via node / Fun-InP (FLF was Wan2.1) | via node, same caveat |
 | Video extend / region-regen | **Yes** (retake/region) | No native continue-clip | No native | v2v restyle only (strength-controlled AR init); no extend/region |
-| LoRA (infer / train) | Yes / Yes (`ltx-trainer`) | Yes / Yes (high+low-noise pair) | Yes / Yes | **Infer: yes — any Wan-2.1-14B-T2V LoRA** ⚙️ / no trainer |
+| LoRA (infer / train) | Yes / Yes (`ltx-trainer`) | Yes / Yes (high+low-noise pair) | Yes / Yes | **Infer: the low-rank half of any Wan-2.1-14B-T2V LoRA** ⚙️ (a step-distill file's 647 `.diff`/`.diff_b` keys are silently dropped — sc-15326) / no trainer |
 | **Native FPS** | 24/25/48/50; **24–25 rec.** | **16 fps** | **24 fps** | **24 fps** |
 | Practical duration | **~20 s max; ~12–15 s sweet-spot** | **~5 s** (81f@16) | **~5 s** (121f@24) | AR loop is unbounded in principle; visible stylization drift accumulates past ~3 s (sc-15127) |
 | **Audio** | **Yes — native synced A/V (24 kHz)** | No native audio | No | No |
@@ -250,7 +279,7 @@ The repo **already implements** this contract; below are validated deltas, not g
 - **Asset outputs:** `AssetFile` already video-capable (`path, mime_type, width, height, duration,
   fps`) — no new fields needed except optional audio-track metadata.
 
-## Caveats / could-not-verify 🌐
+## Caveats / could-not-verify 🌐 (research limits, not story gaps)
 
 **Krea Realtime (sc-8446):** the headline clip was initially characterized as "coherent with
 progressive stylization" and the degradation attributed to sc-15127 bounded-window drift. Both were
@@ -258,7 +287,7 @@ wrong — the dominant artifact is the tiled VAE decode (**sc-15325**), identifi
 period matching the decode tile stride rather than the 12-frame AR chunk. The bf16/Q8 memory ladder is
 **derived** from measured Q4 figures by weight-size substitution, not separately measured. The
 `~47 GiB` bf16 peak and the shipped-default timing projection are likewise derived, not run.
- (research limits, not story gaps)
+
 "Wan ~7 s loop" unsupported by any source; "LTX ≤15 s" true as sweet-spot only; Wan A14B fp8 on
 exactly 24 GB @720p unverified (480p is the safe claim); no measured 14B/22B Mac generation times;
 **"LTX-2.3 is Apache-2.0" is a widespread but incorrect claim** (authoritative LICENSE is the custom

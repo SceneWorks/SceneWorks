@@ -1438,6 +1438,7 @@ mod tests {
         );
 
         let mut prev_peak: Option<u64> = None;
+        let mut q4_baseline: Option<(u64, u64, u64)> = None;
         for tier in &tiers {
             let (variant, is_default, expected_files) =
                 (tier.variant, tier.is_default, &tier.files);
@@ -1555,6 +1556,32 @@ mod tests {
                 );
             }
             prev_peak = Some(peak);
+
+            // THE DERIVATION ITSELF. Only Q4 was run on-device; Q8/bf16 are that measurement plus the
+            // exact DiT byte difference, because the DiT is the only term that changes between tiers
+            // (the KV cache holds bf16 activations and the companions are byte-identical). Monotonicity
+            // alone does not pin that — any increasing triple passes it — so assert the actual
+            // relationship: every tier's delta from Q4 must equal its DiT delta from Q4. A 64 MiB
+            // tolerance absorbs the rounding in the committed values without admitting a guess.
+            match q4_baseline {
+                None => q4_baseline = Some((resident, peak, dit_bytes)),
+                Some((q4_resident, q4_peak, q4_dit)) => {
+                    let want = dit_bytes as i128 - q4_dit as i128;
+                    const TOL: i128 = 64 * 1024 * 1024;
+                    for (label, got) in [
+                        ("resident", resident as i128 - q4_resident as i128),
+                        ("peak", peak as i128 - q4_peak as i128),
+                    ] {
+                        assert!(
+                            (got - want).abs() <= TOL,
+                            "{variant}: {label} is {got} B above Q4 but its DiT is only {want} B \
+                             bigger — the documented derivation is measured-Q4 + the exact DiT delta, \
+                             so this value is not that derivation (drift {} B, tolerance {TOL} B)",
+                            (got - want).abs()
+                        );
+                    }
+                }
+            }
         }
 
         // The three tiers own DISJOINT file sets, so a per-tier delete reclaims that tier's bytes.

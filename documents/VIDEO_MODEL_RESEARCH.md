@@ -55,7 +55,10 @@ with the unrelated `krea_2_*` **image** lane.
   decode tile stride (8 output frames), not the AR chunk (12), which is how it was distinguished from
   bounded-window drift. sc-8446 shipped the free half of the fix (the tile overlap was literally 0
   latent frames and now is not, halving the clipping at identical memory); the remaining fix is a
-  larger decode tile, which costs real memory and re-opens `mlx.minMemoryGb`.
+  larger decode tile, which costs real memory and re-opens `mlx.minMemoryGb`. **`scail2_14b` computes
+  the identical budget and ships the same defect unmeasured, and LTX is *not* cleared either** (its
+  ×8 temporal scale bottoms out at a 3-latent-frame tile, below the 4-frame tile that still measured
+  badly here) — both are step 1 on sc-15325. Wan z16/z48 bottom out at 8 latent frames and are clear.
 - **Performance, harness configuration** (832×480, 81 frames, 5 steps/chunk, Q4): 256 s wall
   (31 s/AR chunk, ≈5.3 s/denoise step, 38 s VAE decode), 27.9 GiB MLX-active peak. ⚠️ **Not a shipped
   configuration** — `defaults.steps` is 6 and the duration lattice snaps to 45/69/93/117 frames, so 81
@@ -66,7 +69,7 @@ with the unrelated `krea_2_*` **image** lane.
   (`hardMaxDuration: 5`, lattice `[2,3,4,5]`), and short shots remain the right posture.
 - **CFG is off.** The distillation baked guidance out: no negative prompt, no guidance scale. Video
   Studio hides both (`video.supportsGuidance/supportsNegativePrompt: false`).
-- **LoRA: any Wan-2.1-14B **T2V** LoRA works.** Verified on real published files — a plain style LoRA
+- **LoRA: the low-rank half of any Wan-2.1-14B **T2V** LoRA installs.** Verified on real published files — a plain style LoRA
   (`shauray/Origami_WanLora`) resolves exactly 400 per-block targets and moves the render; a
   step-distill LoRA (lightx2v Wan2.1-T2V-14B cfg-step-distill v2) resolves **406** of the 407-wide
   surface. ⚠️ Two qualifications: `patch_embedding` ships a bias-only delta so it is exposed but
