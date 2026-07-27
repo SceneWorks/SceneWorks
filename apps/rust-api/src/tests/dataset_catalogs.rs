@@ -149,6 +149,10 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         initial_status["processing"]["state"], "completed",
         "empty fixture scan completes"
     );
+    assert!(
+        initial_status["storage"].is_null(),
+        "hot status responses must not recursively account artifact files"
+    );
 
     let registry = CatalogRegistry::new(&config_dir);
     let mut catalog = registry.open_attached(&catalog_id).unwrap();
@@ -434,6 +438,83 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
             "invalid query contract must be rejected, got {status}"
         );
     }
+}
+
+#[tokio::test]
+async fn catalog_status_omits_unbounded_storage_walk_while_detail_remains_exact() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let catalog_root = temporary.path().join("storage-scale-catalog");
+    let (app, _) = create_app_with_state(settings).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Storage scale catalog",
+            "path": catalog_root.clone()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let catalog_id = created["id"].as_str().unwrap().to_owned();
+
+    let registry = CatalogRegistry::new(config_dir);
+    let mut catalog = registry.open_attached(&catalog_id).unwrap();
+    catalog
+        .append_records(&[
+            catalog_record("scale-one", "photo", 1),
+            catalog_record("scale-two", "photo", 1),
+            catalog_record("scale-three", "illustration", 0),
+        ])
+        .unwrap();
+    catalog.close();
+
+    const DIRECTORY_COUNT: usize = 16;
+    const FILES_PER_DIRECTORY: usize = 32;
+    const ARTIFACT: &[u8] = b"artifact-bytes";
+    for directory_index in 0..DIRECTORY_COUNT {
+        let directory = catalog_root
+            .join("artifacts")
+            .join(format!("scale-{directory_index:02}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for file_index in 0..FILES_PER_DIRECTORY {
+            std::fs::write(
+                directory.join(format!("artifact-{file_index:02}.bin")),
+                ARTIFACT,
+            )
+            .unwrap();
+        }
+    }
+
+    let (status, hot_status) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hot_status}");
+    assert_eq!(hot_status["counts"]["recordCount"], 3);
+    assert!(
+        hot_status["storage"].is_null(),
+        "the polling contract structurally excludes the recursive storage walk"
+    );
+
+    let (status, detail) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["storage"]["artifactBytes"],
+        (DIRECTORY_COUNT * FILES_PER_DIRECTORY * ARTIFACT.len()) as u64
+    );
+    assert_eq!(detail["counts"]["recordCount"], 3);
 }
 
 #[tokio::test]

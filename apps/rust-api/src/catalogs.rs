@@ -294,14 +294,21 @@ pub(crate) async fn get_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    Ok(Json(load_catalog_response(state, catalog_id).await?))
+    Ok(Json(
+        load_catalog_response(state, catalog_id, CatalogStorageMode::Exact).await?,
+    ))
 }
 
 pub(crate) async fn get_catalog_status(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    Ok(Json(load_catalog_response(state, catalog_id).await?))
+    // Artifact bytes remain exact on detail/list responses. This polling route
+    // omits storage instead of recursively walking a potentially huge catalog
+    // or returning a stale cached total.
+    Ok(Json(
+        load_catalog_response(state, catalog_id, CatalogStorageMode::Omit).await?,
+    ))
 }
 
 pub(crate) async fn query_catalog(
@@ -792,6 +799,7 @@ async fn request_processing_state(
 async fn load_catalog_response(
     state: AppState,
     catalog_id: String,
+    storage_mode: CatalogStorageMode,
 ) -> Result<CatalogResponse, ApiError> {
     let config_dir = state.settings.config_dir.clone();
     let mut invalid_reported = state.catalog_scan_invalid_recovery_reported.lock().await;
@@ -807,7 +815,7 @@ async fn load_catalog_response(
             PersistedScanRecovery::None
         };
         Ok((
-            catalog_response_unreconciled(&attached, &catalog)?,
+            catalog_response_unreconciled(&attached, &catalog, storage_mode)?,
             recovery,
         ))
     })
@@ -827,6 +835,12 @@ async fn load_catalog_response(
     Ok(response)
 }
 
+#[derive(Clone, Copy)]
+enum CatalogStorageMode {
+    Exact,
+    Omit,
+}
+
 fn catalog_response(
     attached: &AttachedCatalog,
     catalog: &Catalog,
@@ -838,15 +852,23 @@ fn catalog_response(
         Err(CatalogError::Conflict(_)) => {}
         Err(error) => return Err(error),
     }
-    catalog_response_unreconciled(attached, catalog)
+    catalog_response_unreconciled(attached, catalog, CatalogStorageMode::Exact)
 }
 
 fn catalog_response_unreconciled(
     attached: &AttachedCatalog,
     catalog: &Catalog,
+    storage_mode: CatalogStorageMode,
 ) -> Result<CatalogResponse, CatalogError> {
     let contract_state = catalog.contract_state()?;
-    let storage = catalog.storage_accounting()?;
+    let storage = match storage_mode {
+        CatalogStorageMode::Exact => Some(catalog.storage_accounting()?),
+        CatalogStorageMode::Omit => None,
+    };
+    let record_count = match storage {
+        Some(storage) => storage.record_count,
+        None => catalog.record_count()?,
+    };
     Ok(CatalogResponse {
         contract_version: CATALOG_API_CONTRACT_VERSION,
         id: attached.id.clone(),
@@ -859,11 +881,8 @@ fn catalog_response_unreconciled(
         source_config: contract_state.source_config,
         analyzer_versions: contract_state.analyzer_versions,
         checkpoints: contract_state.checkpoints,
-        counts: Some(counts_response(
-            storage.record_count,
-            &contract_state.processing,
-        )),
-        storage: Some(storage_response(storage)),
+        counts: Some(counts_response(record_count, &contract_state.processing)),
+        storage: storage.map(storage_response),
         processing: contract_state.processing,
         processing_control: catalog.processing_control()?,
         analyzer_config: catalog.analyzer_config()?,

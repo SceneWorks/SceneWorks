@@ -623,7 +623,11 @@ export function DatasetCatalogsScreen() {
           { signal: controller.signal },
         );
         if (stopped || controller.signal.aborted || generation !== generationRef.current) return;
-        setCatalogs((current) => current.map((catalog) => (catalog.id === updated.id ? updated : catalog)));
+        setCatalogs((current) => current.map((catalog) => (
+          catalog.id === updated.id
+            ? { ...catalog, ...updated, storage: updated.storage ?? catalog.storage }
+            : catalog
+        )));
         setError("");
       } catch (err) {
         if (isAbortError(err) || stopped || generation !== generationRef.current) return;

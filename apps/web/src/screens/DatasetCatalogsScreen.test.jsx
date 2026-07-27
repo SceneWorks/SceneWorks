@@ -297,6 +297,47 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.querySelector("[role='progressbar']").getAttribute("aria-valuenow")).toBe("54");
   });
 
+  it("preserves exact storage across null status polls and refreshes it from an exact list response", async () => {
+    await remountWithFakeTimers();
+    const original = fetch.getMockImplementation();
+    let statusPolls = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/status")) {
+        statusPolls += 1;
+        return response(catalog({
+          storage: null,
+          processing: {
+            ...catalog().processing,
+            message: `Status poll ${statusPolls}`,
+          },
+        }));
+      }
+      return original(url, options);
+    });
+
+    await act(async () => vi.advanceTimersByTime(3000));
+    await flush();
+    await act(async () => vi.advanceTimersByTime(3000));
+    await flush();
+    expect(statusPolls).toBe(2);
+    expect(container.textContent).toContain("Status poll 2");
+    expect(container.textContent).toContain("6.5 KiB");
+
+    catalogs[0] = catalog({
+      storage: {
+        databaseBytes: 2048,
+        manifestBytes: 512,
+        artifactBytes: 5632,
+        totalBytes: 8192,
+      },
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
+    expect(container.textContent).toContain("8.0 KiB");
+  });
+
   it("curates a reproducible primary sample with server paging, facets, saved views, and review overrides", async () => {
     const browse = [...container.querySelectorAll("button")]
       .find((button) => button.textContent.includes("Browse catalog"));

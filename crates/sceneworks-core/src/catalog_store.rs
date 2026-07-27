@@ -1956,7 +1956,7 @@ impl Catalog {
         let manifest_bytes = fs::metadata(self.root.join(CATALOG_MANIFEST_FILE))?.len();
         let total_bytes = directory_file_bytes(&self.root)?;
         let artifact_bytes = total_bytes.saturating_sub(database_bytes + manifest_bytes);
-        let record_count = catalog_record_count(&self.connection, &self.database_path())?;
+        let record_count = self.record_count()?;
         Ok(CatalogStorageAccounting {
             database_bytes,
             manifest_bytes,
@@ -1964,6 +1964,10 @@ impl Catalog {
             total_bytes,
             record_count,
         })
+    }
+
+    pub fn record_count(&self) -> CatalogResult<u64> {
+        catalog_record_count(&self.connection, &self.database_path())
     }
 
     pub fn sqlite_setting(&self, pragma: &str) -> CatalogResult<String> {
