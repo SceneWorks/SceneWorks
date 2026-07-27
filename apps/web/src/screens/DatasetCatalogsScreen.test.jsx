@@ -170,15 +170,40 @@ describe("DatasetCatalogsScreen", () => {
       }
       if (path.endsWith("/curation/query")) {
         return response({
-          items: [{
-            id: "record-1",
-            thumbnailPath: "thumbnails/record-1.jpg",
-            metadata: {
-              caption: "A full-body photograph outdoors",
-              analysis: { medium: "photograph", fullBody: true, personCount: 1 },
+          items: [
+            {
+              id: "record-1",
+              thumbnailPath: "thumbnails/record-1.jpg",
+              metadata: {
+                caption: "A full-body photograph outdoors",
+                analysis: {
+                  medium: "photograph",
+                  fullBody: true,
+                  qualifiedSingleFullBody: true,
+                  personCount: 1,
+                },
+              },
             },
+            {
+              id: "record-2",
+              thumbnailPath: "thumbnails/record-2.jpg",
+              metadata: {
+                caption: "A second full-body photograph",
+                analysis: {
+                  medium: "photograph",
+                  fullBody: true,
+                  qualifiedSingleFullBody: true,
+                  personCount: 1,
+                },
+              },
+            },
+          ],
+          reviews: [{
+            recordId: "record-1",
+            decision: "exclude",
+            rejectionReason: "Persisted crop problem",
+            updatedAt: "2026-07-26T12:00:00Z",
           }],
-          reviews: [],
           nextCursor: "opaque-next",
           totalCount: 28,
         });
@@ -285,13 +310,24 @@ describe("DatasetCatalogsScreen", () => {
     expect(queryRequest.body.filters).toEqual(expect.arrayContaining([
       { field: "medium", values: ["photograph"] },
       { field: "personCount", values: ["1"] },
-      { field: "fullBody", values: ["true"] },
+      { field: "qualifiedSingleFullBody", values: ["true"] },
     ]));
     expect(queryRequest.body.sampleSeed).toBe(14959);
     expect(queryRequest.body.deduplicate).toBe(true);
 
-    const thumbnail = container.querySelector(".catalog-thumbnail-card");
-    await act(async () => thumbnail.click());
+    const thumbnails = container.querySelectorAll(".catalog-thumbnail-card");
+    await act(async () => thumbnails[0].click());
+    const rejectionReason = container.querySelector("input[aria-label='Rejection reason']");
+    expect(rejectionReason.value).toBe("Persisted crop problem");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(rejectionReason, "Unsaved reason for first");
+      rejectionReason.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => thumbnails[1].click());
+    expect(rejectionReason.value).toBe("");
+    await act(async () => thumbnails[0].click());
+    expect(rejectionReason.value).toBe("Persisted crop problem");
     await act(async () => [...container.querySelectorAll("button")]
       .find((button) => button.textContent === "Include").click());
     await flush();

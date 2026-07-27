@@ -41,7 +41,10 @@ fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord
         metadata: json!({
             "medium": medium,
             "personCount": person_count,
-            "analysis": { "fullBody": person_count == 1 }
+            "analysis": {
+                "fullBody": person_count == 1,
+                "qualifiedSingleFullBody": person_count == 1
+            }
         }),
     }
 }
@@ -258,7 +261,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         "filters": [
             { "field": "medium", "values": ["photo"] },
             { "field": "personCount", "values": ["1"] },
-            { "field": "fullBody", "values": ["true"] }
+            { "field": "qualifiedSingleFullBody", "values": ["true"] }
         ],
         "sampleSeed": 14959,
         "deduplicate": true,
@@ -312,7 +315,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         &format!("/api/v1/catalogs/{catalog_id}/curation/facets"),
         json!({
             "query": primary_query,
-            "fields": ["medium", "personCount", "fullBody"],
+            "fields": ["medium", "personCount", "qualifiedSingleFullBody"],
             "limitPerFacet": 10
         }),
     )
@@ -358,7 +361,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
             "filters": [
                 { "field": "medium", "values": ["photo"] },
                 { "field": "personCount", "values": ["1"] },
-                { "field": "fullBody", "values": ["true"] }
+                { "field": "qualifiedSingleFullBody", "values": ["true"] }
             ],
             "sampleSeed": 14959
         }}),
@@ -366,6 +369,17 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     .await;
     assert_eq!(status, StatusCode::CREATED, "{saved}");
     assert_eq!(saved["revision"], 0);
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &views_uri,
+        json!({
+            "name": "full BODY photos",
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     let saved_id = saved["id"].as_str().unwrap();
     let saved_item_uri = format!("{views_uri}/{saved_id}");
     let (status, updated) = request(

@@ -167,7 +167,8 @@ const PRIMARY_CURATION = {
   medium: "photograph",
   personCount: "1",
   faceCount: "",
-  fullBody: true,
+  fullBody: false,
+  qualifiedSingleFullBody: true,
   cropState: "",
   poseCoverage: "",
   subjectSize: "",
@@ -195,6 +196,9 @@ function curationBody(query, cursor = null) {
     if (String(value).trim()) filters.push({ field, values: [String(value).trim()] });
   }
   if (query.fullBody) filters.push({ field: "fullBody", values: ["true"] });
+  if (query.qualifiedSingleFullBody) {
+    filters.push({ field: "qualifiedSingleFullBody", values: ["true"] });
+  }
   const numeric = (value) => String(value).trim() ? Number(value) : null;
   return {
     cursor,
@@ -223,6 +227,7 @@ function curationFromSaved(saved) {
     personCount: filters.personCount ?? "",
     faceCount: filters.faceCount ?? "",
     fullBody: filters.fullBody === "true",
+    qualifiedSingleFullBody: filters.qualifiedSingleFullBody === "true",
     cropState: filters.cropState ?? "",
     poseCoverage: filters.poseCoverage ?? "",
     subjectSize: filters.subjectSize ?? "",
@@ -254,6 +259,13 @@ function CatalogCuration({ catalogId, token }) {
   const abortRef = useRef(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+  const selectedRecordId = selectedRecord?.id;
+  useEffect(() => {
+    const review = selectedRecordId ? reviews[selectedRecordId] : null;
+    setRejectionReason(
+      review?.decision === "exclude" ? (review.rejectionReason ?? "") : "",
+    );
+  }, [selectedRecordId, reviews]);
   useEffect(() => {
     abortRef.current?.abort();
     setOpen(false);
@@ -283,7 +295,15 @@ function CatalogCuration({ catalogId, token }) {
             method: "POST",
             body: JSON.stringify({
               query: { ...body, includeTotal: false },
-              fields: ["medium", "personCount", "faceCount", "fullBody", "cropState", "availability"],
+              fields: [
+                "medium",
+                "personCount",
+                "faceCount",
+                "fullBody",
+                "qualifiedSingleFullBody",
+                "cropState",
+                "availability",
+              ],
               limitPerFacet: 12,
             }),
             signal: controller.signal,
@@ -441,11 +461,12 @@ function CatalogCuration({ catalogId, token }) {
             />
           </label>
         ))}
-        <label className="catalog-curation-check"><input checked={query.fullBody} onChange={(event) => setQuery((current) => ({ ...current, fullBody: event.target.checked }))} type="checkbox" /> Full body</label>
+        <label className="catalog-curation-check"><input checked={query.fullBody} onChange={(event) => setQuery((current) => ({ ...current, fullBody: event.target.checked }))} type="checkbox" /> Full body visible</label>
+        <label className="catalog-curation-check"><input checked={query.qualifiedSingleFullBody} onChange={(event) => setQuery((current) => ({ ...current, qualifiedSingleFullBody: event.target.checked }))} type="checkbox" /> Qualified single full body</label>
         <label className="catalog-curation-check"><input checked={query.deduplicate} onChange={(event) => setQuery((current) => ({ ...current, deduplicate: event.target.checked }))} type="checkbox" /> Deduplicate content and perceptual matches</label>
         <div className="catalog-curation-filter-actions">
           <button className="primary-action" disabled={busy} type="submit">Apply filters</button>
-          <button className="secondary-action" onClick={() => { setQuery(PRIMARY_CURATION); run(PRIMARY_CURATION); }} type="button">Photo + one person + full body</button>
+          <button className="secondary-action" onClick={() => { setQuery(PRIMARY_CURATION); run(PRIMARY_CURATION); }} type="button">Photo + one qualified full body</button>
         </div>
       </form>
       {error ? <p className="notice error" role="alert">{error}</p> : null}
