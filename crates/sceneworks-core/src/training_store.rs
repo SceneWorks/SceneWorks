@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     caption_hash, CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck,
     QualityCheck,
@@ -108,6 +109,20 @@ pub struct TrainingDatasetItemInput {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+}
+
+/// A trusted server-side source used to materialize bytes that do not yet live
+/// inside the target project (for example, a verified Dataset Catalog cache
+/// entry). This is deliberately not an HTTP request contract: callers must
+/// resolve and validate the source before crossing this store boundary.
+#[derive(Debug, Clone)]
+pub struct ExternalTrainingDatasetItemInput {
+    pub item: TrainingDatasetItemInput,
+    pub source_path: PathBuf,
+    pub expected_content_hash: String,
+    pub expected_width: u32,
+    pub expected_height: u32,
+    pub extra: ExtraFields,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -231,6 +246,87 @@ impl TrainingDatasetStore {
             return Err(error);
         }
         Ok(dataset)
+    }
+
+    pub fn create_dataset_from_external(
+        &self,
+        project_id: &str,
+        input: TrainingDatasetCreateInput,
+        external_items: Vec<ExternalTrainingDatasetItemInput>,
+        extra: ExtraFields,
+        idempotency_key: &str,
+    ) -> ProjectStoreResult<(TrainingDataset, bool)> {
+        if let Some(existing) = self.get_catalog_materialization(project_id, idempotency_key)? {
+            return Ok((existing, true));
+        }
+        if input.items.len() != external_items.len()
+            || input
+                .items
+                .iter()
+                .zip(&external_items)
+                .any(|(left, right)| left.id != right.item.id)
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "External dataset item contract did not match its verified sources".to_owned(),
+            ));
+        }
+        let name = validated_dataset_name(&input.name)?;
+        let modality = input.modality.unwrap_or(TrainingModality::Image);
+        validate_supported_modality(&modality)?;
+        let dataset_id = format!("ds_{}", random_hex(16)?);
+        let dataset_root = dataset_root(&self.project_path, &dataset_id);
+        let media_dir = dataset_root.join("images");
+        fs::create_dir_all(&media_dir)?;
+        let now = utc_now();
+        let items = match materialize_external_items(&media_dir, &modality, external_items, &now) {
+            Ok(items) => items,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&dataset_root);
+                return Err(error);
+            }
+        };
+        let dataset = TrainingDataset {
+            schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
+            id: dataset_id,
+            version: 1,
+            project_id: Some(project_id.to_owned()),
+            character_id: input.character_id,
+            name,
+            modality,
+            status: input.status.unwrap_or(TrainingDatasetStatus::Draft),
+            created_at: now.clone(),
+            updated_at: now,
+            items,
+            extra,
+        };
+        if let Err(error) = self.save_dataset(&dataset) {
+            let _ = fs::remove_dir_all(&dataset_root);
+            return Err(error);
+        }
+        Ok((dataset, false))
+    }
+
+    pub fn get_catalog_materialization(
+        &self,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> ProjectStoreResult<Option<TrainingDataset>> {
+        if idempotency_key.is_empty() {
+            return Ok(None);
+        }
+        for summary in list_dataset_summaries_from_index(&self.project_path, project_id)? {
+            let dataset = self.read_dataset_by_id(&summary.id)?;
+            if dataset
+                .extra
+                .get("catalogMaterialization")
+                .and_then(|value| value.get("idempotencyKey"))
+                .and_then(Value::as_str)
+                == Some(idempotency_key)
+            {
+                return Ok(Some(dataset));
+            }
+        }
+        Ok(None)
     }
 
     pub fn get_dataset(
@@ -1051,6 +1147,105 @@ fn materialize_items(
         items.push(item);
     }
     Ok(items)
+}
+
+fn materialize_external_items(
+    media_dir: &Path,
+    modality: &TrainingModality,
+    inputs: Vec<ExternalTrainingDatasetItemInput>,
+    now: &str,
+) -> ProjectStoreResult<Vec<TrainingDatasetItem>> {
+    let mut item_ids = Vec::new();
+    let mut items = Vec::with_capacity(inputs.len());
+    for (index, input) in inputs.into_iter().enumerate() {
+        let item_id = item_id_for_input(&input.item, index)?;
+        if item_ids.iter().any(|existing| existing == &item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item IDs must be unique".to_owned(),
+            ));
+        }
+        item_ids.push(item_id.clone());
+        items.push(materialize_external_item(
+            media_dir, modality, input, item_id, now,
+        )?);
+    }
+    Ok(items)
+}
+
+fn materialize_external_item(
+    media_dir: &Path,
+    modality: &TrainingModality,
+    input: ExternalTrainingDatasetItemInput,
+    item_id: String,
+    now: &str,
+) -> ProjectStoreResult<TrainingDatasetItem> {
+    validate_supported_modality(modality)?;
+    let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
+        } else {
+            ProjectStoreError::Io(error)
+        }
+    })?;
+    if !source_path.is_file() {
+        return Err(ProjectStoreError::BadRequest(
+            "Verified dataset source must be a regular file".to_owned(),
+        ));
+    }
+    ensure_supported_item_mime(&source_path, modality)?;
+    let item = input.item;
+    let source_kind = crate::media_convert::sniff_image_kind_at(&source_path).ok_or_else(|| {
+        ProjectStoreError::BadRequest("Verified dataset source was not an image".to_owned())
+    })?;
+    if !source_kind.is_natively_supported() {
+        return Err(ProjectStoreError::BadRequest(
+            "Verified dataset source must use PNG, JPEG, or WebP".to_owned(),
+        ));
+    }
+    let extension = format!(".{}", source_kind.canonical().0);
+    let relative_path = format!("images/{item_id}{extension}");
+    let target_path = media_dir.join(format!("{item_id}{extension}"));
+    fs::copy(&source_path, &target_path)?;
+    let caption = item.caption.unwrap_or_default();
+    let dimensions = crate::media_convert::image_dimensions(&target_path).ok_or_else(|| {
+        ProjectStoreError::BadRequest(
+            "Persisted dataset image dimensions could not be verified".to_owned(),
+        )
+    })?;
+    if dimensions != (input.expected_width, input.expected_height) {
+        return Err(ProjectStoreError::BadRequest(
+            "Persisted dataset image dimensions changed during materialization".to_owned(),
+        ));
+    }
+    let content_hash = crate::media_convert::file_content_hash(&target_path)?;
+    if content_hash != input.expected_content_hash {
+        return Err(ProjectStoreError::BadRequest(
+            "Persisted dataset image failed content verification".to_owned(),
+        ));
+    }
+    Ok(TrainingDatasetItem {
+        id: item_id,
+        asset_id: None,
+        path: relative_path,
+        control_image_path: None,
+        display_name: item
+            .display_name
+            .unwrap_or_else(|| input_display_name(&source_path)),
+        caption: Caption {
+            text: caption.text,
+            source: caption.source.unwrap_or(CaptionSource::Imported),
+            trigger_words: caption.trigger_words,
+            updated_at: Some(now.to_owned()),
+            extra: Default::default(),
+        },
+        width: Some(dimensions.0),
+        height: Some(dimensions.1),
+        content_hash: Some(content_hash),
+        tier0_scalars: None,
+        quality_ack: None,
+        added_at: now.to_owned(),
+        extra: input.extra,
+    })
 }
 
 fn item_id_for_input(input: &TrainingDatasetItemInput, index: usize) -> ProjectStoreResult<String> {

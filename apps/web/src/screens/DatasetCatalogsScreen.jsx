@@ -181,6 +181,11 @@ const PRIMARY_CURATION = {
   seed: "14959",
   deduplicate: true,
 };
+const MAX_SAFE_INTEGER_SEED = 9_007_199_254_740_991;
+
+function materializationKey(catalogId) {
+  return globalThis.crypto?.randomUUID?.() ?? `catalog-${catalogId}-${Date.now()}`;
+}
 
 function curationBody(query, cursor = null) {
   const filters = [];
@@ -249,16 +254,35 @@ function CatalogCuration({ catalogId, token }) {
   const [reviews, setReviews] = useState({});
   const [facets, setFacets] = useState([]);
   const [savedViews, setSavedViews] = useState([]);
+  const [projects, setProjects] = useState([]);
   const [savedName, setSavedName] = useState("");
   const [cursor, setCursor] = useState(null);
   const [total, setTotal] = useState(null);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [materializing, setMaterializing] = useState(false);
+  const [materialization, setMaterialization] = useState(null);
+  const [materializeDraft, setMaterializeDraft] = useState({
+    projectId: "",
+    name: "",
+    requestedCount: "20",
+    seed: String(PRIMARY_CURATION.seed),
+    deduplicationPolicy: "content_and_perceptual",
+    includeGeneratedCaption: false,
+    includeGeneratedTags: false,
+    idempotencyKey: materializationKey(catalogId),
+  });
   const [error, setError] = useState("");
   const abortRef = useRef(null);
+  const materializeAbortRef = useRef(null);
+  const materializeGenerationRef = useRef(0);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    materializeAbortRef.current?.abort();
+    materializeGenerationRef.current += 1;
+  }, []);
   const selectedRecordId = selectedRecord?.id;
   useEffect(() => {
     const review = selectedRecordId ? reviews[selectedRecordId] : null;
@@ -268,9 +292,17 @@ function CatalogCuration({ catalogId, token }) {
   }, [selectedRecordId, reviews]);
   useEffect(() => {
     abortRef.current?.abort();
+    materializeAbortRef.current?.abort();
+    materializeGenerationRef.current += 1;
     setOpen(false);
     setItems([]);
     setSelectedRecord(null);
+    setMaterialization(null);
+    setMaterializing(false);
+    setMaterializeDraft((current) => ({
+      ...current,
+      idempotencyKey: materializationKey(catalogId),
+    }));
   }, [catalogId]);
 
   async function run(nextQuery = query, nextCursor = null, append = false) {
@@ -329,13 +361,22 @@ function CatalogCuration({ catalogId, token }) {
   async function openCuration() {
     setOpen(true);
     try {
-      const views = await apiFetch(
-        `/api/v1/catalogs/${encodeURIComponent(catalogId)}/saved-views`,
-        token,
-      );
+      const [views, projectList] = await Promise.all([
+        apiFetch(
+          `/api/v1/catalogs/${encodeURIComponent(catalogId)}/saved-views`,
+          token,
+        ),
+        apiFetch("/api/v1/projects", token),
+      ]);
       setSavedViews(views ?? []);
+      setProjects(projectList ?? []);
+      setMaterializeDraft((current) => ({
+        ...current,
+        projectId: current.projectId || projectList?.[0]?.id || "",
+      }));
     } catch {
       setSavedViews([]);
+      setProjects([]);
     }
     await run(PRIMARY_CURATION);
   }
@@ -381,6 +422,58 @@ function CatalogCuration({ catalogId, token }) {
       setRejectionReason("");
     } catch (err) {
       setError(safeCatalogError(err, "save the record review"));
+    }
+  }
+
+  async function materializeResults(event) {
+    event.preventDefault();
+    const seed = Number(materializeDraft.seed);
+    if (!Number.isSafeInteger(seed) || seed < 0 || seed > MAX_SAFE_INTEGER_SEED) {
+      setError(`Sampling seed must be a whole number between 0 and ${MAX_SAFE_INTEGER_SEED}.`);
+      return;
+    }
+    materializeAbortRef.current?.abort();
+    const controller = new AbortController();
+    materializeAbortRef.current = controller;
+    const generation = materializeGenerationRef.current + 1;
+    materializeGenerationRef.current = generation;
+    setMaterializing(true);
+    setMaterialization(null);
+    setError("");
+    try {
+      const result = await apiFetch(
+        `/api/v1/catalogs/${encodeURIComponent(catalogId)}/materialize`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...materializeDraft,
+            requestedCount: Number(materializeDraft.requestedCount),
+            seed,
+            query: curationBody(query),
+            idempotencyKey: materializeDraft.idempotencyKey,
+          }),
+          signal: controller.signal,
+        },
+      );
+      if (controller.signal.aborted || materializeGenerationRef.current !== generation) return;
+      setMaterialization(result);
+      setMaterializeDraft((current) => ({
+        ...current,
+        idempotencyKey: materializationKey(catalogId),
+      }));
+    } catch (err) {
+      if (
+        !controller.signal.aborted
+        && materializeGenerationRef.current === generation
+        && !isAbortError(err)
+      ) {
+        setError(err?.message || safeCatalogError(err, "create the training dataset"));
+      }
+    } finally {
+      if (!controller.signal.aborted && materializeGenerationRef.current === generation) {
+        setMaterializing(false);
+      }
     }
   }
 
@@ -493,6 +586,102 @@ function CatalogCuration({ catalogId, token }) {
           <option value="">Saved views ({savedViews.length})</option>
           {savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
         </select>
+      </form>
+      <form className="catalog-materialize-form" noValidate onSubmit={materializeResults}>
+        <div className="catalog-section-heading">
+          <div>
+            <h4>Create training dataset from results</h4>
+            <p className="muted">SceneWorks copies verified image bytes and provenance into the project. The dataset will not depend on this catalog afterward.</p>
+          </div>
+        </div>
+        <label className="settings-field">
+          <span>Project</span>
+          <select
+            aria-label="Training dataset project"
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, projectId: event.target.value }))}
+            required
+            value={materializeDraft.projectId}
+          >
+            {!projects.length ? <option value="">No projects available</option> : null}
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </label>
+        <label className="settings-field">
+          <span>Dataset name</span>
+          <input
+            aria-label="Training dataset name"
+            maxLength="120"
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, name: event.target.value }))}
+            placeholder="Curated full-body photos"
+            required
+            value={materializeDraft.name}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Result count</span>
+          <input
+            aria-label="Training dataset result count"
+            max="500"
+            min="1"
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, requestedCount: event.target.value }))}
+            required
+            type="number"
+            value={materializeDraft.requestedCount}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Sampling seed</span>
+          <input
+            aria-label="Training dataset sampling seed"
+            max={MAX_SAFE_INTEGER_SEED}
+            min="0"
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, seed: event.target.value }))}
+            required
+            type="number"
+            value={materializeDraft.seed}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Deduplication policy</span>
+          <select
+            aria-label="Training dataset deduplication policy"
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, deduplicationPolicy: event.target.value }))}
+            value={materializeDraft.deduplicationPolicy}
+          >
+            <option value="content_and_perceptual">Content + perceptual matches</option>
+            <option value="none">No deduplication</option>
+          </select>
+        </label>
+        <label className="catalog-curation-check">
+          <input
+            checked={materializeDraft.includeGeneratedCaption}
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, includeGeneratedCaption: event.target.checked }))}
+            type="checkbox"
+          />
+          Append generated captions when available
+        </label>
+        <label className="catalog-curation-check">
+          <input
+            checked={materializeDraft.includeGeneratedTags}
+            onChange={(event) => setMaterializeDraft((current) => ({ ...current, includeGeneratedTags: event.target.checked }))}
+            type="checkbox"
+          />
+          Append generated tags when available
+        </label>
+        <button
+          className="primary-action"
+          disabled={materializing || !materializeDraft.projectId || !materializeDraft.name.trim()}
+          type="submit"
+        >
+          {materializing ? "Verifying and copying results…" : "Create training dataset"}
+        </button>
+        {materializing ? <p className="muted" role="status">Selecting deterministic replacements and copying verified images into project storage…</p> : null}
+        {materialization ? (
+          <p className="notice success" role="status">
+            Created {materialization.dataset?.name} with {count(materialization.materializedCount)} images.
+            {materialization.skipped?.length ? ` ${count(materialization.skipped.length)} unavailable or duplicate candidates were replaced.` : ""}
+          </p>
+        ) : null}
       </form>
       <div className="catalog-thumbnail-grid" aria-label="Catalog thumbnails">
         {items.map((record) => {
