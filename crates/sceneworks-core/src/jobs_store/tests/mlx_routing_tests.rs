@@ -802,7 +802,8 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
 fn krea_realtime_is_mlx_routed_and_serves_exactly_its_advertised_modes() {
     assert!(
         VIDEO_MLX_ROUTED_MODELS.contains(&"krea_realtime_14b"),
-        "krea_realtime_14b must be MLX-routed — sc-8443 wired the real engine, so a missing row          makes the app claim it has none"
+        "krea_realtime_14b must be MLX-routed — sc-8443 wired the real engine, so a missing row \
+         makes the app claim it has none"
     );
 
     // The three the catalog + descriptor + worker all agree on.
