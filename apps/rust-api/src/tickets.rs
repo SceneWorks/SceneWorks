@@ -4,7 +4,8 @@ use super::*;
 // auth header (epic 4484). Two flavors share this store:
 //  - SSE (`/api/v1/jobs/events`): `EventSource` can't set headers → single-use
 //    `issue()` + `consume()` tickets (sc-4484 story: events ticket).
-//  - Media (`GET /api/v1/projects/:id/files/*`, `GET /api/v1/poses/preview/*`):
+//  - Media (`GET /api/v1/projects/:id/files/*`, `GET /api/v1/poses/preview/*`,
+//    `GET /api/v1/catalogs/:id/records/:id/thumbnail`):
 //    `<img src>`/`<video src>`/`<a download>` requests can't set headers either →
 //    reusable `issue_sliding()` + `validate()` tickets (sc-8810). A page renders
 //    dozens of media URLs (and <video> issues multiple Range requests), so these
