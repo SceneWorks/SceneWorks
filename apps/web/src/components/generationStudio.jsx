@@ -769,7 +769,7 @@ export function useSavePreset({
 }
 
 // The LoRA picker shared by both studios (sc-4196): the compatible-LoRA checklist
-// with per-LoRA weight sliders, the "Show incompatible" toggle, and the empty state.
+// with per-LoRA weight sliders and the empty state.
 // All state lives in useGenerationStudio; this is a pure presentation of its bundle.
 export function LoraPickerSection({
   selectedModel,
@@ -784,13 +784,12 @@ export function LoraPickerSection({
   setLoraWeight,
   loraEmptyMessage,
   onUpdateLora,
-  showIncompatibleControl = true,
+  showIncompatibleControl = false,
 }) {
   // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
   // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
-  // checkbox-per-LoRA wall so a large library no longer floods the panel. "Show
-  // incompatible" now filters the dropdown (through compatibleLoras) instead of an
-  // always-visible list. Slot styles (.lora-stack/.lora-slot/.lora-add/
+  // checkbox-per-LoRA wall so a large library no longer floods the panel. Slot styles
+  // (.lora-stack/.lora-slot/.lora-add/
   // .lora-picker-panel/.lora-pick-row) already live in styles.css.
   const [pickerOpen, setPickerOpen] = useState(false);
   const availableLoras = compatibleLoras.filter((lora) => !selectedLoraIds.includes(lora.id));

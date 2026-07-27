@@ -2706,9 +2706,9 @@ label {
   color: var(--text-muted);
 }
 
-/* Settings bar (UI-refinement 2b): the everyday knobs (Model / Aspect / Variations, then a
-   Style-preset row) in a bordered strip directly under the composer. Advanced holds the
-   power-user knobs. */
+/* Settings bar (UI-refinement 2b): the everyday knobs (Model / LoRAs / Aspect / Variations,
+   then a Style-preset row) in a bordered strip directly under the composer. Advanced holds
+   the power-user knobs. */
 .settings-bar {
   display: grid;
   gap: 12px;
@@ -2738,6 +2738,13 @@ label {
 .settings-field-model {
   flex: 2 1 200px;
   min-width: 160px;
+}
+
+/* LoRAs are part of model configuration, so the shared picker lives inside the settings
+   container instead of the Advanced disclosure. Keep it visually grouped with the model row. */
+.settings-bar > .lora-picker {
+  border-color: var(--border);
+  background: var(--surface);
 }
 
 .settings-field-aspect {
