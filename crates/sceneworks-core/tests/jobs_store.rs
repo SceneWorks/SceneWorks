@@ -2783,6 +2783,50 @@ fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
+/// sc-15328 (epic 14034 F6) — a Mage-Flow render carrying a trained `mage-flow` LoRA must be
+/// CLAIMED, end to end through the real store, by the mlx worker.
+///
+/// This is the defect's own reproduction, at the layer the user feels it. Before the fix,
+/// `mage_flow_mlx_eligible` refused any payload with a non-empty `loras`, and every Mage
+/// `ModelCaps` row is `candle_lora: false` — so BOTH claims below returned `None` and the job
+/// stayed `queued` / "Waiting for an available worker." forever, with no error and an idle worker.
+/// The `None` from the generic torch worker is asserted first precisely so that a green here means
+/// "mlx claimed it", never "everyone claims everything".
+#[test]
+fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
+    let store = store("mlx-routing-mage-lora");
+    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+
+    let job = store
+        .create_job(image_job_with(
+            json!({
+                "model": "mage_flow_base",
+                "prompt": "a photograph of a golden retriever sitting on grass",
+                "loras": [{ "id": "lora_tqrstmark", "weight": 0.8 }]
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+
+    assert!(
+        store
+            .claim_next_job("worker-torch")
+            .expect("torch claim ok")
+            .is_none(),
+        "Mage-Flow is MLX-only; the generic torch descriptor must not claim it"
+    );
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .expect(
+            "the mlx worker must claim a Mage render carrying a LoRA — otherwise NO backend does \
+             and the job queues forever (sc-15328)",
+        );
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
+}
+
 #[test]
 fn qwen_edit_image_job_defers_to_mlx_worker() {
     let store = store("mlx-routing-qwen-edit");

@@ -2031,4 +2031,141 @@ mod tests {
             assert_eq!(eligible(&conditioned), (false, false));
         }
     }
+
+    /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds, and
+    /// the exact bytes the web LoRA picker reads `loraCompatibility` out of.
+    fn builtin_image_models() -> Vec<serde_json::Value> {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw)).expect("parses as JSON");
+        manifest
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .expect("models array")
+            .iter()
+            .filter(|m| m.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+            .cloned()
+            .collect()
+    }
+
+    /// **THE CLASS GUARD (sc-15328).** If a model advertises LoRA compatibility, then some backend
+    /// must actually be able to CLAIM a render that carries one.
+    ///
+    /// This is the sixth "shipped but unreachable" defect in epic 14034, and every one of them
+    /// passed its own tests, because each layer was correct in isolation. sc-15328 itself: the
+    /// manifest advertised `loraCompatibility.families = ["mage-flow"]` on the three Mage generation
+    /// variants, the picker therefore offered a trained Mage adapter as "installed and compatible",
+    /// `mage_flow_mlx_eligible` refused any payload with a non-empty `loras`, and every Mage
+    /// `ModelCaps` row is `candle_lora: false`. No lane claimed the job. It did not fail — it sat
+    /// `queued` / "Waiting for an available worker." **forever**, next to an idle mlx worker, with
+    /// no error and no terminal state. That is strictly worse than a rejection.
+    ///
+    /// **Derived from the real tables on both sides**, never a restated list:
+    ///
+    ///   * the ADVERTISEMENT is read out of the shipped `builtin.models.jsonc` bytes — the same
+    ///     `loraCompatibility.families` key `presetUtils.js`'s `modelLoraFamilies` reads to decide
+    ///     what the picker offers;
+    ///   * the CLAIM is the real routing predicates, `image_request_mlx_eligible` and
+    ///     `image_request_candle_eligible`, which are what `worker_supports_job` consults.
+    ///
+    /// So a NEW model advertising adapters is covered the moment its manifest row lands — nobody has
+    /// to remember to extend a list here. This is the LoRA-carrying sibling of
+    /// `every_mlx_routed_model_has_a_dispatch_arm` (sc-10523's stranded-Anima guard), and it probes
+    /// the same three conditioning shapes so that an edit-only or reference-only model is judged on
+    /// a shape it actually serves.
+    ///
+    /// The second assertion is what keeps the first honest: every advertised model must be claimable
+    /// on some probe WITHOUT a LoRA too. Without it, a model that no lane could claim under any
+    /// shape would make its half of the first assertion vacuous — the probes would be wrong rather
+    /// than the routing, and the test would be measuring nothing.
+    #[test]
+    fn every_lora_advertising_image_model_is_claimable_with_a_lora() {
+        // The three conditioning shapes, each in a with-LoRA and a without-LoRA form. Anything a
+        // model gates on beyond these is out of scope for what this guard can decide.
+        let probes = |model: &str, with_lora: bool| -> Vec<serde_json::Map<String, serde_json::Value>> {
+            [
+                serde_json::json!({ "model": model, "mode": "text_to_image" }),
+                serde_json::json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset-1" }),
+                serde_json::json!({ "model": model, "mode": "character_image", "referenceAssetId": "asset-1" }),
+            ]
+            .into_iter()
+            .map(|shape| {
+                let mut payload = shape.as_object().expect("probe is an object").clone();
+                if with_lora {
+                    payload.insert(
+                        "loras".to_owned(),
+                        serde_json::json!([{ "id": "adapter-1", "weight": 0.8 }]),
+                    );
+                }
+                payload
+            })
+            .collect()
+        };
+        let claimable = |model: &str, payload: &serde_json::Map<String, serde_json::Value>| {
+            super::super::mlx::image_request_mlx_eligible(model, payload)
+                || super::super::candle::image_request_candle_eligible(model, payload)
+        };
+
+        // Every image model whose SHIPPED manifest row offers adapters to the picker.
+        let advertised: Vec<String> = builtin_image_models()
+            .iter()
+            .filter(|model| {
+                model
+                    .get("loraCompatibility")
+                    .and_then(|lora| lora.get("families"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|families| !families.is_empty())
+            })
+            .filter_map(|model| {
+                model
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert!(
+            !advertised.is_empty(),
+            "no image model advertises `loraCompatibility` — the manifest key was renamed or the \
+             filter is wrong, and this guard is asserting nothing"
+        );
+
+        // Anti-vacuity: the probe shapes must be right for every advertised model, so that a
+        // failure below is about the LoRA and not about the probe.
+        let unroutable: Vec<&String> = advertised
+            .iter()
+            .filter(|model| {
+                !probes(model, false)
+                    .iter()
+                    .any(|payload| claimable(model, payload))
+            })
+            .collect();
+        assert!(
+            unroutable.is_empty(),
+            "these models are unclaimable by every backend even WITHOUT a LoRA, so the with-LoRA \
+             assertion below would be vacuous for them — fix the probe shapes or the routing: \
+             {unroutable:?}"
+        );
+
+        let stranded: Vec<&String> = advertised
+            .iter()
+            .filter(|model| {
+                !probes(model, true)
+                    .iter()
+                    .any(|payload| claimable(model, payload))
+            })
+            .collect();
+        assert!(
+            stranded.is_empty(),
+            "these image models advertise `loraCompatibility` in builtin.models.jsonc — so the \
+             picker offers adapters for them as \"installed and compatible\" — but NO backend will \
+             claim a render carrying one (neither `image_request_mlx_eligible` nor \
+             `image_request_candle_eligible`). A user who attaches an adapter gets a job that \
+             queues FOREVER with no error and an idle worker (sc-15328). Either make a lane claim \
+             it, or stop advertising `loraCompatibility` on the model: {stranded:?}"
+        );
+    }
 }
