@@ -1405,8 +1405,10 @@ pub(crate) async fn run_catalog_analysis_job(
         ),
     )
     .await?;
-    let mut fetch_options = crate::catalog_image_fetch::CatalogImageFetchOptions::default();
-    fetch_options.accepted_target = record_count;
+    let fetch_options = crate::catalog_image_fetch::CatalogImageFetchOptions {
+        accepted_target: record_count,
+        ..crate::catalog_image_fetch::CatalogImageFetchOptions::default()
+    };
     let fetch = fetch_catalog_images_with_heartbeat(
         api,
         settings,
