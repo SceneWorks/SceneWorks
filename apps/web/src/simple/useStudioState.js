@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
-// Studio state that survives navigation.
+// Studio state that survives navigation AND a relaunch.
 //
 // The Simple shell renders exactly one screen at a time (`{screen === "image" ? … : null}`),
 // so every studio UNMOUNTS when you leave it and its `useState` values are gone — walk to
@@ -9,16 +9,55 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 // catalog defaults. `dismissedJobIds` already lives on the shell for precisely this reason;
 // this is the same trick generalised, so a studio's own knobs get the same treatment.
 //
-// The store is a plain Map on a shell-owned ref, NOT React state: writing to it must not
-// re-render the shell (and therefore every screen) on each keystroke. The mounted studio
-// already holds the live value in its own `useState` — the store is only the carbon copy
-// that outlives it.
+// Two layers, because they solve two different problems:
+//   values  — a plain Map on a shell-owned ref, NOT React state: it is written on every
+//             keystroke and must not re-render the shell (and therefore every screen). This
+//             is what survives NAVIGATION.
+//   persist — the shell's debounced write-through to `simpleStudioStore`, which is what
+//             survives a RELAUNCH (localStorage cache + the durable ui-preferences copy).
 //
-// Session-scoped on purpose. This restores where you were while the app is open; it is not
-// a preferences store, so a relaunch still starts from the catalog defaults.
+// The mounted studio still holds the live value in its own `useState`; both layers are only
+// carbon copies that outlive it.
 
 export function createStudioStateStore() {
-  return new Map();
+  return {
+    values: new Map(),
+    // Replaced by the shell once it can persist. A no-op until then, so a studio that renders
+    // before the shell has wired durability simply doesn't write — it never throws and never
+    // pushes a half-seeded snapshot at the store.
+    persist: () => {},
+  };
+}
+
+/** The `{ [scope]: { [key]: value } }` snapshot for a store's Map — the shape the store persists. */
+export function snapshotFromStore(store) {
+  const snapshot = {};
+  for (const [id, value] of store.values) {
+    const separator = id.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+    const scope = id.slice(0, separator);
+    const key = id.slice(separator + 1);
+    snapshot[scope] = { ...(snapshot[scope] ?? {}), [key]: value };
+  }
+  return snapshot;
+}
+
+/** Load a persisted `{ [scope]: { [key]: value } }` snapshot into a store's Map, replacing it. */
+export function loadSnapshotIntoStore(store, snapshot) {
+  store.values.clear();
+  if (!snapshot || typeof snapshot !== "object") {
+    return;
+  }
+  for (const [scope, fields] of Object.entries(snapshot)) {
+    if (!fields || typeof fields !== "object") {
+      continue;
+    }
+    for (const [key, value] of Object.entries(fields)) {
+      store.values.set(`${scope}:${key}`, value);
+    }
+  }
 }
 
 /**
@@ -28,13 +67,17 @@ export function createStudioStateStore() {
  * @param {string} scope - the owning studio ("image" | "video" | "audio"), so two studios
  *   can each keep their own `model` without colliding.
  * @param {string} key - the field name.
- * @param {*} initial - the value used the FIRST time this scope+key is seen in a session.
+ * @param {*} initial - the value used when this scope+key has no stored value.
  */
 export function useStudioState(scope, key, initial) {
   const { studioState } = useSimpleUi();
   const id = `${scope}:${key}`;
-  // Read once, at mount. Re-reading on every render would fight the local state below.
-  const [value, setValue] = useState(() => (studioState.has(id) ? studioState.get(id) : initial));
+  // Read once, at mount. Re-reading on every render would fight the local state below — which
+  // is also why the shell REMOUNTS the studios (via a key) when a restored snapshot lands,
+  // rather than trying to push new values into already-mounted state.
+  const [value, setValue] = useState(() =>
+    studioState.values.has(id) ? studioState.values.get(id) : initial,
+  );
 
   // Write-through in an effect rather than inside the setter: a state updater may be invoked
   // more than once for a single update (StrictMode, concurrent re-render), and a Map write is
@@ -42,7 +85,8 @@ export function useStudioState(scope, key, initial) {
   const idRef = useRef(id);
   idRef.current = id;
   useEffect(() => {
-    studioState.set(idRef.current, value);
+    studioState.values.set(idRef.current, value);
+    studioState.persist();
   }, [studioState, value]);
 
   // `setValue` is React's own `useState` setter, so it is referentially stable and safe to

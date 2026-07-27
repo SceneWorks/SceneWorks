@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
@@ -122,6 +122,24 @@ export function SimpleImageStudio() {
     () => assets.find((asset) => asset.id === referenceAssetId) ?? null,
     [assets, referenceAssetId],
   );
+
+  // A RESTORED reference can name an asset the user has since deleted — the id outlives the
+  // library now that the studio's settings are durable. Drop it once, when the catalog has
+  // actually loaded: `assets` is empty both before the fetch lands and when the library is
+  // genuinely empty, and pruning during that window would strip a perfectly good reference
+  // (the sc-11962 guard, in the shape VideoStudio's `restoredAssetsValidatedRef` uses).
+  // Without this the tile reads "attach an image" while `needsSource` still sees an id, so
+  // edit mode stays submittable and sends a dangling reference the job then fails on.
+  const restoredReferenceValidated = useRef(false);
+  useEffect(() => {
+    if (restoredReferenceValidated.current || !assets.length) {
+      return;
+    }
+    restoredReferenceValidated.current = true;
+    setReferenceAssetId((current) =>
+      current && !assets.some((asset) => asset.id === current) ? null : current,
+    );
+  }, [assets, setReferenceAssetId]);
 
   // "Use as reference" from an asset preview lands here. Keyed on the request token so a
   // repeat pick of the SAME asset still re-arms after the user cleared it.

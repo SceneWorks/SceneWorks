@@ -38,6 +38,7 @@ import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
+import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -1353,6 +1354,14 @@ export function App() {
         // even after the desktop origin — and its localStorage — changed on relaunch.
         if (prefs?.perModelTier) {
           seedLastTiersFromServer(prefs.perModelTier);
+        }
+        // Re-prime the Simple studios' settings cache from the durable server copy, for exactly
+        // the same reason as the tier sticky above: the desktop shell's per-launch origin wipes
+        // localStorage, so the model/prompt/resolution a user left in a Simple studio would be
+        // gone every relaunch. SimpleShell waits for `navigationHydrated` before reading this,
+        // so it can't race the seed and restore an empty snapshot.
+        if (prefs?.simpleStudio) {
+          seedSimpleStudiosFromServer(prefs.simpleStudio);
         }
         const persistedView = prefs?.activeView;
         if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
@@ -3138,6 +3147,10 @@ export function App() {
             onModeChange={setUiModeOverride}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
+            /* The same flag that gates the durable `activeView` write: until the
+               ui-preferences GET has landed, the Simple studios must neither restore from
+               a possibly-empty cache nor write their catalog defaults over the stored copy. */
+            preferencesHydrated={navigationHydrated}
             simpleDefault={simpleUiDefault}
           />
         </AppLiveContext.Provider>

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { videoModelServesMode } from "../modelEligibility.js";
@@ -115,10 +115,28 @@ export function SimpleVideoStudio() {
     }
   }, [durations, duration, selectedModel, setDuration]);
 
+  // Resolved against the FULL catalog rather than the picker's recent-20 list. That list is
+  // what the PICKER offers; a source restored from a previous session can have aged out of it
+  // while the asset is still perfectly valid, and resolving against it would blank the tile
+  // (and, below, wrongly prune the id).
   const sourceAsset = useMemo(
-    () => recentImageAssets.find((asset) => asset.id === sourceAssetId) ?? null,
-    [recentImageAssets, sourceAssetId],
+    () => assets.find((asset) => asset.id === sourceAssetId) ?? null,
+    [assets, sourceAssetId],
   );
+
+  // Same one-shot validation as the Image studio: a restored source can name an asset the
+  // user has since deleted, and `needsSource` reads the id — so without this, Image→Video
+  // stays submittable with a reference that no longer exists. Guarded on a LOADED catalog.
+  const restoredSourceValidated = useRef(false);
+  useEffect(() => {
+    if (restoredSourceValidated.current || !assets.length) {
+      return;
+    }
+    restoredSourceValidated.current = true;
+    setSourceAssetId((current) =>
+      current && !assets.some((asset) => asset.id === current) ? null : current,
+    );
+  }, [assets, setSourceAssetId]);
 
   // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
   // the video lane just has no auto-applied managed LoRA to exclude.

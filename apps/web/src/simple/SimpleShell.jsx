@@ -9,7 +9,15 @@ import { breakpointFor, contentMaxWidth } from "./breakpoint.js";
 import { ADVANCED_MODE } from "./uiMode.js";
 import { useContainerWidth } from "./useContainerWidth.js";
 import { SimpleUiContext } from "./SimpleUiContext.js";
-import { createStudioStateStore } from "./useStudioState.js";
+import {
+  createStudioStateStore,
+  loadSnapshotIntoStore,
+  snapshotFromStore,
+} from "./useStudioState.js";
+import {
+  readSimpleStudioSnapshot,
+  writeSimpleStudioSnapshot,
+} from "../simpleStudioStore.js";
 import { SimpleSheet, SimpleSheetOptions } from "./SimpleSheet.jsx";
 import { PromptGuideSheet } from "./PromptGuideSheet.jsx";
 import { SimplePreview } from "./SimplePreview.jsx";
@@ -59,6 +67,10 @@ export const SIMPLE_SCREENS = [
 const SCREEN_BY_ID = new Map(SIMPLE_SCREENS.flatMap((group) => group.items).map((item) => [item.id, item]));
 
 const TOAST_MS = 1900;
+// How long the studios go quiet before their settings are written through to the durable
+// store. Long enough that typing a prompt is one write, short enough that a hard quit a
+// moment after the last keystroke still keeps it.
+const PERSIST_DEBOUNCE_MS = 400;
 
 export function SimpleShell({
   accent,
@@ -68,6 +80,7 @@ export function SimpleShell({
   onModeChange,
   onScreenChange,
   lockedToSimple,
+  preferencesHydrated = true,
 }) {
   const {
     jobs = [],
@@ -77,6 +90,7 @@ export function SimpleShell({
     setSelectedAssetId,
     setActiveView,
     sendAssetToVideo,
+    activeProject,
   } = useAppContext();
 
   const [rootRef, width] = useContainerWidth();
@@ -114,6 +128,45 @@ export function SimpleShell({
   if (studioStateRef.current === null) {
     studioStateRef.current = createStudioStateStore();
   }
+  const workspaceId = activeProject?.id ?? null;
+  // Bumped whenever a restored snapshot is loaded into the store; used as the studios' React
+  // key so they REMOUNT and re-read it. `useStudioState` reads the store once at mount (any
+  // other rule would fight the studio's own live state), so a remount is how a restore lands.
+  const [studioEpoch, setStudioEpoch] = useState(0);
+  const persistTimer = useRef(null);
+
+  // Load this workspace's persisted studio settings, then let the studios write through.
+  //
+  // Gated on `preferencesHydrated` for the sc-11962 reason: until the ui-preferences GET has
+  // landed, the localStorage cache may be empty (a relaunched desktop app has a NEW origin and
+  // so an empty cache), the studios would seed themselves from catalog defaults, and writing
+  // those through would overwrite the durable copy before it was ever read. So no restore and
+  // no persistence happen until the durable copy has had its chance to arrive.
+  useEffect(() => {
+    if (!preferencesHydrated) {
+      return undefined;
+    }
+    const store = studioStateRef.current;
+    loadSnapshotIntoStore(store, readSimpleStudioSnapshot(workspaceId));
+    setStudioEpoch((epoch) => epoch + 1);
+
+    // Debounced: a prompt is typed, and one durable write per keystroke would hammer both
+    // localStorage and the disk-writing PUT. The store's coalescing queue keeps the requests
+    // ordered; this keeps them rare.
+    store.persist = () => {
+      clearTimeout(persistTimer.current);
+      persistTimer.current = setTimeout(() => {
+        writeSimpleStudioSnapshot(workspaceId, snapshotFromStore(store));
+      }, PERSIST_DEBOUNCE_MS);
+    };
+    return () => {
+      clearTimeout(persistTimer.current);
+      store.persist = () => {};
+      // Flush on the way out (workspace switch, or the shell unmounting on a switch to
+      // Advanced) so the last few keystrokes aren't the ones that get dropped.
+      writeSimpleStudioSnapshot(workspaceId, snapshotFromStore(store));
+    };
+  }, [preferencesHydrated, workspaceId]);
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
   useEffect(() => {
@@ -288,9 +341,13 @@ export function SimpleShell({
 
           <div className="su-body su-scroll">
             <div className="su-content">
-              {screen === "image" ? <SimpleImageStudio /> : null}
-              {screen === "video" ? <SimpleVideoStudio /> : null}
-              {screen === "audio" ? <SimpleAudioStudio /> : null}
+              {/* Keyed on `studioEpoch` so a restored snapshot — which lands asynchronously,
+                  after the ui-preferences GET — remounts the studio and is read by its state
+                  initialisers, rather than having to be pushed into already-mounted state.
+                  The advanced studios key on the workspace id for the same reason. */}
+              {screen === "image" ? <SimpleImageStudio key={studioEpoch} /> : null}
+              {screen === "video" ? <SimpleVideoStudio key={studioEpoch} /> : null}
+              {screen === "audio" ? <SimpleAudioStudio key={studioEpoch} /> : null}
               {screen === "assets" ? <SimpleAssets /> : null}
               {screen === "models" ? <SimpleModelManager /> : null}
               {screen === "queue" ? <SimpleQueue /> : null}

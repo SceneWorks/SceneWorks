@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { readSimpleStudioSnapshot, seedSimpleStudiosFromServer } from "../simpleStudioStore.js";
 
 // A studio UNMOUNTS when you navigate away (the shell renders exactly one screen), so
 // without the shell-held store every knob would be re-seeded from the catalog on the way
@@ -63,7 +64,7 @@ function baseContext(overrides = {}) {
   };
 }
 
-function renderShell(root, context) {
+function renderShell(root, context, props = {}) {
   return act(async () => {
     root.render(
       <AppContext.Provider value={context}>
@@ -74,6 +75,7 @@ function renderShell(root, context) {
           onModeChange={() => {}}
           onSimpleDefaultChange={() => {}}
           simpleDefault
+          {...props}
         />
       </AppContext.Provider>,
     );
@@ -126,6 +128,10 @@ describe("Simple studio state across navigation", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    // The Simple studios now persist their settings (localStorage cache + the durable
+    // ui-preferences copy), so without this a snapshot flushed by one case restores into
+    // the next and the catalog-default assertions read the previous test's picks.
+    window.localStorage.clear();
     ({ container, root } = mountRoot());
   });
 
@@ -168,6 +174,118 @@ describe("Simple studio state across navigation", () => {
 
     await click(navButton(container, "Image"));
     expect(container.querySelector("#su-image-prompt").value).toBe("image prompt");
+  });
+
+  // The relaunch half. A desktop relaunch gives the app a NEW `127.0.0.1:<port>` origin and
+  // therefore an EMPTY localStorage, so these simulate the real thing: unmount, clear the
+  // cache, seed only from the durable server copy, mount again.
+  it("restores the studio from the durable server copy after a relaunch", async () => {
+    await renderShell(root, baseContext(), { preferencesHydrated: true });
+    await typePrompt(container, "a lighthouse at dusk");
+    await openField(container, "Model");
+    await chooseOption(container, "Z-Image");
+
+    // Unmounting flushes the pending debounce, which is what a switch to Advanced (or a quit)
+    // does. Capture what would have reached the server.
+    await unmountRoot(root, container);
+    const persisted = JSON.parse(window.localStorage.getItem("sceneworks-simple-studio"));
+    expect(persisted["project-1"].image.prompt).toBe("a lighthouse at dusk");
+    expect(persisted["project-1"].image.model).toBe("z_image");
+
+    // Relaunch: the cache is gone with the old origin; only the server copy survives.
+    window.localStorage.clear();
+    seedSimpleStudiosFromServer(persisted);
+
+    ({ container, root } = mountRoot());
+    await renderShell(root, baseContext(), { preferencesHydrated: true });
+    expect(container.querySelector("#su-image-prompt").value).toBe("a lighthouse at dusk");
+    expect(fieldValue(container, "Model")).toBe("Z-Image");
+  });
+
+  it("keeps each workspace's settings separate", async () => {
+    const one = { id: "project-1", name: "One" };
+    const two = { id: "project-2", name: "Two" };
+    await renderShell(root, baseContext({ activeProject: one }), { preferencesHydrated: true });
+    await typePrompt(container, "prompt for project one");
+    await unmountRoot(root, container);
+
+    // A different workspace starts clean rather than inheriting project-1's prompt.
+    ({ container, root } = mountRoot());
+    await renderShell(root, baseContext({ activeProject: two }), { preferencesHydrated: true });
+    expect(container.querySelector("#su-image-prompt").value).toBe("");
+    await typePrompt(container, "prompt for project two");
+    await unmountRoot(root, container);
+
+    // …and returning to project-1 brings ITS prompt back, not project-2's.
+    ({ container, root } = mountRoot());
+    await renderShell(root, baseContext({ activeProject: one }), { preferencesHydrated: true });
+    expect(container.querySelector("#su-image-prompt").value).toBe("prompt for project one");
+  });
+
+  // sc-11962's failure mode, in the durable lane: on a relaunch the cache is empty and the
+  // GET is still in flight, so a studio that seeded and persisted during that window would
+  // overwrite the stored snapshot with catalog defaults before anyone had read it.
+  it("does not write catalog defaults over the stored copy before preferences hydrate", async () => {
+    await renderShell(root, baseContext(), { preferencesHydrated: false });
+    // The studio is live and has seeded itself from the catalog...
+    expect(fieldValue(container, "Model")).toBe("Anima 2B");
+    await typePrompt(container, "typed before hydration");
+    await unmountRoot(root, container);
+    // ...but nothing reached the durable store, so the copy on disk is still the user's.
+    expect(window.localStorage.getItem("sceneworks-simple-studio")).toBeNull();
+    // Leave afterEach a live root to tear down.
+    ({ container, root } = mountRoot());
+  });
+
+  it("restores once preferences hydrate, without the studio having to be revisited", async () => {
+    // A snapshot already on disk, as if written in a previous session.
+    seedSimpleStudiosFromServer({
+      "project-1": { image: { model: "z_image", prompt: "from a previous session" } },
+    });
+
+    // Mount pre-hydration: the studio shows catalog defaults, because the cache must not be
+    // trusted yet (on a real relaunch it would be empty at this point).
+    await renderShell(root, baseContext(), { preferencesHydrated: false });
+    expect(fieldValue(container, "Model")).toBe("Anima 2B");
+
+    // The GET lands. The shell remounts the studio so the restored values are read by its
+    // state initialisers — no revisit, no navigation required.
+    await renderShell(root, baseContext(), { preferencesHydrated: true });
+    expect(fieldValue(container, "Model")).toBe("Z-Image");
+    expect(container.querySelector("#su-image-prompt").value).toBe("from a previous session");
+  });
+
+  // sc-15412's open question: the reference id now outlives the library, so a restored one can
+  // name an asset the user deleted in between.
+  it("drops a restored reference whose asset no longer exists, but only once the catalog loads", async () => {
+    const REFERENCE = { id: "asset-9", type: "image", projectId: "project-1", url: "/m/a.png" };
+    seedSimpleStudiosFromServer({
+      "project-1": { image: { model: "z_image", referenceAssetId: "asset-9" } },
+    });
+
+    // Each phase reads the snapshot AFTER an unmount, because the write-through is debounced
+    // and the unmount flush is what makes the stored value observable.
+    const runWith = async (assets) => {
+      ({ container, root } = mountRoot());
+      await renderShell(root, baseContext({ assets }), { preferencesHydrated: true });
+      await unmountRoot(root, container);
+      return readSimpleStudioSnapshot("project-1").image.referenceAssetId;
+    };
+
+    // Catalog still loading (`assets` empty): the id must SURVIVE. Pruning here would strip a
+    // perfectly good reference on every cold start — that is the sc-11962 trap.
+    expect(await runWith([])).toBe("asset-9");
+
+    // Catalog loaded and the asset is still there: kept.
+    expect(await runWith([REFERENCE])).toBe("asset-9");
+
+    // Catalog loaded and the asset is gone: dropped, so the Generate gate and the tile agree
+    // instead of submitting a reference the job would fail on.
+    const other = { id: "asset-1", type: "image", projectId: "project-1", url: "/m/b.png" };
+    expect(await runWith([other])).toBeNull();
+
+    // Leave afterEach a live root to tear down.
+    ({ container, root } = mountRoot());
   });
 
   it("still re-seeds a studio the user never touched", async () => {
