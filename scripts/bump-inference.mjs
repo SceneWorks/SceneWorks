@@ -174,13 +174,21 @@ function selfTest() {
   }
   check("throws when no inference pin is present", threw);
 
+  // The fixture deliberately carries a DECOY 40-hex constant: the real file declares
+  // CLIP_MODEL_REVISION (an upstream HF model revision) two lines above the stamp, and nothing else
+  // guards it -- it is only ever compared against itself. A loosened SEMANTIC_PROVENANCE_RE would
+  // silently overwrite it on every bump, so the fixture must prove the rewrite is anchored to the
+  // stamp's own name, not merely that the stamp moved.
+  const CLIP_DECOY = `const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";`;
+  const stampBefore =
+    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${"b".repeat(40)}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
+  const stampAfter =
+    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${SHA}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
+  const stampBumped = repinSemanticProvenance(stampBefore, SHA);
+  check("semantic provenance stamp bumps with the pin", stampBumped === stampAfter);
   check(
-    "semantic provenance stamp bumps with the pin",
-    repinSemanticProvenance(
-      `const CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${"b".repeat(40)}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`,
-      SHA,
-    ) ===
-      `const CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${SHA}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`,
+    "neighbouring 40-hex CLIP_MODEL_REVISION is left byte-identical",
+    stampBumped.includes(CLIP_DECOY) && !stampBumped.includes(`CLIP_MODEL_REVISION: &str = "${SHA}"`),
   );
   let stampThrew = false;
   try {
@@ -208,8 +216,15 @@ function main() {
     process.exit(2);
   }
 
-  // Three files carry the revision: the worker's direct deps, the root's candle-kernels [patch],
-  // and the worker's semantic-provenance stamp. They must land on the same rev, so bump as one unit.
+  // Three files the tool can safely rewrite: the worker's direct deps, the root's candle-kernels
+  // [patch], and the worker's semantic-provenance stamp. They must land on the same rev, so bump
+  // them as one unit. `cargo update` below refreshes a fourth, Cargo.lock.
+  //
+  // Two further files also carry the revision and are DELIBERATELY left manual, not overlooked:
+  // config/inference-third-party-source.json and scripts/scan-inference-provenance.mjs. Those are
+  // audit sites -- their revision is a label on a scan result (candidate inventory, population
+  // hash, audit digest). Substituting the string without re-running the scan would fake an audit,
+  // so a bump must re-run scan-inference-provenance.mjs and recompute the digest by hand.
   const manifests = [
     { path: MANIFEST, rewrite: (text) => repin(text, sha, MANIFEST) },
     { path: ROOT_MANIFEST, rewrite: (text) => repin(text, sha, ROOT_MANIFEST) },
