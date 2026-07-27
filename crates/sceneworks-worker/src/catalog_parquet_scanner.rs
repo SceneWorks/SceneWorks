@@ -192,6 +192,8 @@ pub struct CatalogParquetScanReport {
 /// from observing a lease-free gap while durable progress still says running.
 #[cfg(test)]
 type TestPathHook = Box<dyn FnOnce(&Path) + Send>;
+#[cfg(test)]
+type TestBatchHook = Box<dyn FnOnce() + Send>;
 
 pub struct AttachedCatalogParquetScanDriver {
     catalog: Catalog,
@@ -205,6 +207,8 @@ pub struct AttachedCatalogParquetScanDriver {
     before_shard_open: Option<TestPathHook>,
     #[cfg(test)]
     fail_before_durable_flush_after_rows: Option<u64>,
+    #[cfg(test)]
+    before_durable_flush: Option<TestBatchHook>,
 }
 
 impl AttachedCatalogParquetScanDriver {
@@ -232,6 +236,8 @@ impl AttachedCatalogParquetScanDriver {
             before_shard_open: None,
             #[cfg(test)]
             fail_before_durable_flush_after_rows: None,
+            #[cfg(test)]
+            before_durable_flush: None,
         })
     }
 
@@ -282,6 +288,8 @@ impl AttachedCatalogParquetScanDriver {
                 &should_cancel,
                 #[cfg(test)]
                 self.fail_before_durable_flush_after_rows.take(),
+                #[cfg(test)]
+                &mut self.before_durable_flush,
             )
         })();
         if let Err(error) = &result {
@@ -316,6 +324,11 @@ impl AttachedCatalogParquetScanDriver {
     #[cfg(test)]
     fn fail_before_durable_flush_after_rows(&mut self, rows: u64) {
         self.fail_before_durable_flush_after_rows = Some(rows);
+    }
+
+    #[cfg(test)]
+    fn before_durable_flush_once(&mut self, hook: impl FnOnce() + Send + 'static) {
+        self.before_durable_flush = Some(Box::new(hook));
     }
 
     /// Publishes terminal state after the scheduler exhausts bounded retries
@@ -718,7 +731,15 @@ fn scan_parquet_catalog_under_lease(
         #[cfg(test)]
         None,
     )?;
-    scan_prepared_parquet_catalog_under_lease(catalog, &mut prepared, options, should_cancel, None)
+    let mut before_durable_flush = None;
+    scan_prepared_parquet_catalog_under_lease(
+        catalog,
+        &mut prepared,
+        options,
+        should_cancel,
+        None,
+        &mut before_durable_flush,
+    )
 }
 
 fn scan_prepared_parquet_catalog_under_lease(
@@ -727,6 +748,7 @@ fn scan_prepared_parquet_catalog_under_lease(
     options: &CatalogParquetScanOptions,
     should_cancel: &dyn Fn() -> bool,
     #[cfg(test)] fail_before_durable_flush_after_rows: Option<u64>,
+    #[cfg(test)] before_durable_flush: &mut Option<TestBatchHook>,
 ) -> CatalogParquetScanResult<CatalogParquetScanReport> {
     let mut checkpoint = load_checkpoint(
         catalog,
@@ -815,6 +837,8 @@ fn scan_prepared_parquet_catalog_under_lease(
                         } else {
                             FlushDisposition::Yield
                         },
+                        #[cfg(test)]
+                        before_durable_flush,
                     )?;
                     if should_cancel() && !paused {
                         return Err(CatalogParquetScanError::Interrupted(
@@ -879,6 +903,8 @@ fn scan_prepared_parquet_catalog_under_lease(
                             &mut checkpoint,
                             candidate_count_floor,
                             FlushDisposition::Pause,
+                            #[cfg(test)]
+                            before_durable_flush,
                         )?;
                         return Ok(CatalogParquetScanReport {
                             checkpoint,
@@ -893,6 +919,8 @@ fn scan_prepared_parquet_catalog_under_lease(
                             &mut checkpoint,
                             candidate_count_floor,
                             FlushDisposition::Continue,
+                            #[cfg(test)]
+                            before_durable_flush,
                         )?;
                         return Err(CatalogParquetScanError::Interrupted(
                             "Catalog scan interrupted by server shutdown; restart it to continue."
@@ -909,6 +937,8 @@ fn scan_prepared_parquet_catalog_under_lease(
                         &mut checkpoint,
                         candidate_count_floor,
                         FlushDisposition::Continue,
+                        #[cfg(test)]
+                        before_durable_flush,
                     )?;
                     pending_ids.clear();
                 }
@@ -927,6 +957,8 @@ fn scan_prepared_parquet_catalog_under_lease(
                 } else {
                     FlushDisposition::Continue
                 },
+                #[cfg(test)]
+                before_durable_flush,
             )? {
                 return Ok(CatalogParquetScanReport {
                     checkpoint,
@@ -957,6 +989,8 @@ fn scan_prepared_parquet_catalog_under_lease(
             } else {
                 FlushDisposition::Continue
             },
+            #[cfg(test)]
+            before_durable_flush,
         )? {
             return Ok(CatalogParquetScanReport {
                 checkpoint,
@@ -979,6 +1013,8 @@ fn scan_prepared_parquet_catalog_under_lease(
         &mut checkpoint,
         candidate_count_floor,
         FlushDisposition::Complete,
+        #[cfg(test)]
+        before_durable_flush,
     )?;
     Ok(CatalogParquetScanReport {
         checkpoint,
@@ -1248,6 +1284,7 @@ fn flush_batch(
     checkpoint: &mut CatalogParquetCheckpoint,
     candidate_count_floor: u64,
     disposition: FlushDisposition,
+    #[cfg(test)] before_durable_flush: &mut Option<TestBatchHook>,
 ) -> CatalogParquetScanResult<bool> {
     let paused = matches!(disposition, FlushDisposition::Pause);
     let (state, message) = if matches!(disposition, FlushDisposition::Complete) {
@@ -1262,6 +1299,12 @@ fn flush_batch(
     } else {
         (CatalogProcessingState::Running, "Scanning Parquet metadata")
     };
+    #[cfg(test)]
+    if !pending.is_empty() {
+        if let Some(hook) = before_durable_flush.take() {
+            hook();
+        }
+    }
     let base_checkpoint = checkpoint.clone();
     let (_, committed_checkpoint) = catalog.append_scanner_batch(pending, |existing| {
         let mut committed_checkpoint = base_checkpoint;
@@ -2640,6 +2683,102 @@ mod tests {
             "preexisting",
             "scanner duplicates must not overwrite an existing record"
         );
+    }
+
+    #[test]
+    fn racing_direct_insert_is_reconciled_by_the_real_flush_builder() {
+        let temporary = tempfile::tempdir().expect("temp directory");
+        let source = temporary.path().join("race.parquet");
+        let source_url = "https://example.com/racing.jpg";
+        write_rows(&source, &[vec![row(source_url, "loser caption")]]);
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let catalog = registry
+            .create_catalog(temporary.path().join("catalog"), "Flush race")
+            .unwrap();
+        let catalog_id = catalog.descriptor().id.clone();
+        let catalog_root = catalog.root().to_path_buf();
+        catalog.close();
+        let record_id = format!(
+            "pq_{}",
+            hex_prefix(&Sha256::digest(source_url.as_bytes()), 32)
+        );
+        let winner_id = record_id.clone();
+        let mut driver =
+            AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id).unwrap();
+        driver.before_durable_flush_once(move || {
+            let mut winner_catalog = Catalog::open(&catalog_root).unwrap();
+            winner_catalog
+                .append_records(&[NewCatalogRecord {
+                    id: winner_id,
+                    image_path: "images/winner.jpg".to_owned(),
+                    thumbnail_path: None,
+                    embedding_path: None,
+                    artifact_path: None,
+                    metadata: json!({
+                        "caption": "winner caption",
+                        "width": 2048,
+                    }),
+                }])
+                .unwrap();
+        });
+
+        let report = driver
+            .scan_pass(
+                &source,
+                &CatalogParquetScanOptions {
+                    batch_size: 25,
+                    ..CatalogParquetScanOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(report.checkpoint.complete);
+        assert_eq!(report.checkpoint.counts.scanned, 1);
+        assert_eq!(report.checkpoint.counts.accepted, 0);
+        assert_eq!(report.checkpoint.counts.duplicate, 1);
+        assert_eq!(
+            report.checkpoint.counts.reasons["duplicate_url"], 1,
+            "the real worker commit builder reconciles the racing duplicate reason"
+        );
+        drop(driver);
+
+        let catalog = registry.open_attached(&catalog_id).unwrap();
+        assert_eq!(catalog.record_count().unwrap(), 1);
+        let durable_checkpoint: CatalogParquetCheckpoint = serde_json::from_str(
+            &catalog
+                .metadata(CHECKPOINT_KEY)
+                .unwrap()
+                .expect("checkpoint persists"),
+        )
+        .unwrap();
+        assert_eq!(durable_checkpoint.counts.accepted, 0);
+        assert_eq!(durable_checkpoint.counts.duplicate, 1);
+        assert_eq!(durable_checkpoint.counts.reasons["duplicate_url"], 1);
+        let winner = catalog.record_by_id(&record_id).unwrap();
+        assert_eq!(winner.image_path, "images/winner.jpg");
+        assert_eq!(winner.metadata["caption"], "winner caption");
+        assert_eq!(winner.metadata["width"], 2048);
+        let progress = catalog.contract_state().unwrap().processing;
+        assert_eq!(progress.state, CatalogProcessingState::Completed);
+        assert_eq!(progress.processed_count, 1);
+        assert_eq!(progress.accepted_count, 0);
+        assert_eq!(progress.rejected_count, 1);
+        let winner_search = catalog
+            .search_records(&sceneworks_core::catalog_store::CatalogSearchRequest {
+                limit: 10,
+                text: "winner".to_owned(),
+                min_width: Some(1_024),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(winner_search.records.len(), 1);
+        let loser_search = catalog
+            .search_records(&sceneworks_core::catalog_store::CatalogSearchRequest {
+                limit: 10,
+                text: "loser".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(loser_search.records.is_empty());
     }
 
     #[test]
