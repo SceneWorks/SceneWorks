@@ -189,6 +189,8 @@ thread_local! {
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     static CURATION_BACKFILL_AFTER_SOURCE_READ_HOOK:
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    static SCANNER_BATCH_BEFORE_WRITE_TX_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -227,6 +229,25 @@ fn run_curation_backfill_after_source_read_hook() {
 
 #[cfg(not(test))]
 fn run_curation_backfill_after_source_read_hook() {}
+
+#[cfg(test)]
+fn set_scanner_batch_before_write_tx_hook(hook: impl FnOnce() + 'static) {
+    SCANNER_BATCH_BEFORE_WRITE_TX_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_scanner_batch_before_write_tx_hook() {
+    SCANNER_BATCH_BEFORE_WRITE_TX_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_scanner_batch_before_write_tx_hook() {}
 
 #[derive(Debug)]
 pub enum CatalogError {
@@ -535,6 +556,17 @@ pub struct CatalogProcessingProgress {
     pub updated_at: String,
 }
 
+/// Scanner-owned durable state built after existing record IDs are classified
+/// under the same SQLite writer transaction that commits the batch.
+///
+/// `state` is returned to the scanner only after the transaction commits, so a
+/// validation or SQLite failure cannot advance its in-memory checkpoint.
+pub struct CatalogScannerBatchCommit<T> {
+    pub metadata: Vec<(String, String)>,
+    pub progress: CatalogProcessingProgress,
+    pub state: T,
+}
+
 impl Default for CatalogProcessingProgress {
     fn default() -> Self {
         Self {
@@ -760,51 +792,15 @@ impl Catalog {
         records: &[NewCatalogRecord],
         metadata: &[(&str, &str)],
     ) -> CatalogResult<usize> {
-        self.append_records_metadata_and_progress(records, metadata, None)
-    }
-
-    /// Atomically appends a bounded scanner batch, advances its caller-owned
-    /// checkpoint metadata, and publishes typed processing progress.
-    ///
-    /// Reserved catalog metadata remains inaccessible through `metadata`;
-    /// processor progress can only be written through its validated type.
-    pub fn append_records_and_metadata_with_progress(
-        &mut self,
-        records: &[NewCatalogRecord],
-        metadata: &[(&str, &str)],
-        progress: &CatalogProcessingProgress,
-    ) -> CatalogResult<usize> {
-        self.append_records_metadata_and_progress(records, metadata, Some(progress))
-    }
-
-    fn append_records_metadata_and_progress(
-        &mut self,
-        records: &[NewCatalogRecord],
-        metadata: &[(&str, &str)],
-        progress: Option<&CatalogProcessingProgress>,
-    ) -> CatalogResult<usize> {
         for record in records {
             validate_record(record)?;
         }
         for (key, value) in metadata {
             validate_metadata_entry(key, value)?;
         }
-        if let Some(progress) = progress {
-            validate_processing_progress(progress)?;
-        }
-        let progress_payload = progress.map(serde_json::to_string).transpose()?;
-        let mut transaction_metadata =
-            Vec::with_capacity(metadata.len() + usize::from(progress_payload.is_some()));
-        transaction_metadata.extend_from_slice(metadata);
-        if let Some(progress_payload) = progress_payload.as_deref() {
-            transaction_metadata.push((PROGRESS_METADATA_KEY, progress_payload));
-        }
         let database_path = self.database_path();
         let transaction = self
             .connection
-            // Acquire the WAL writer slot before the existing-id read. A
-            // deferred read transaction can otherwise lose a snapshot upgrade
-            // race and fail immediately with SQLITE_BUSY_SNAPSHOT.
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let existing_record_ids = query_existing_record_ids(
@@ -827,6 +823,74 @@ impl Catalog {
             records.iter(),
             Some(&existing_record_ids),
         )?;
+        upsert_catalog_metadata(&transaction, &database_path, metadata, added_record_count)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        Ok(records.len())
+    }
+
+    /// Classifies and appends a bounded scanner batch under one immediate
+    /// SQLite writer transaction.
+    ///
+    /// `build_commit` observes IDs that already exist only after the writer
+    /// slot is held. It can therefore reconcile exact scanner counts before
+    /// returning checkpoint metadata and typed progress. Existing candidates
+    /// are skipped rather than updated; ordinary append methods retain their
+    /// existing last-write-wins behavior.
+    pub fn append_scanner_batch<T, F>(
+        &mut self,
+        records: &[NewCatalogRecord],
+        build_commit: F,
+    ) -> CatalogResult<(usize, T)>
+    where
+        F: FnOnce(&HashSet<String>) -> CatalogResult<CatalogScannerBatchCommit<T>>,
+    {
+        let mut unique_record_ids = HashSet::with_capacity(records.len());
+        for record in records {
+            validate_record(record)?;
+            if !unique_record_ids.insert(record.id.as_str()) {
+                return Err(CatalogError::InvalidCatalog(
+                    "Catalog scanner batches require unique record ids".to_owned(),
+                ));
+            }
+        }
+        let database_path = self.database_path();
+        run_scanner_batch_before_write_tx_hook();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let existing_record_ids = query_existing_record_ids(
+            &transaction,
+            &database_path,
+            records.iter().map(|record| record.id.as_str()),
+        )?;
+        let commit = build_commit(&existing_record_ids)?;
+        for (key, value) in &commit.metadata {
+            validate_metadata_entry(key, value)?;
+        }
+        validate_processing_progress(&commit.progress)?;
+        let progress_payload = serde_json::to_string(&commit.progress)?;
+        let mut transaction_metadata = commit
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        transaction_metadata.push((PROGRESS_METADATA_KEY, progress_payload.as_str()));
+        let new_records = records
+            .iter()
+            .filter(|record| !existing_record_ids.contains(record.id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_record_count = new_records.len() as u64;
+        upsert_catalog_records(&transaction, &database_path, &new_records)?;
+        upsert_search_projection(
+            &transaction,
+            &database_path,
+            new_records.iter(),
+            Some(&existing_record_ids),
+        )?;
         upsert_catalog_metadata(
             &transaction,
             &database_path,
@@ -836,7 +900,7 @@ impl Catalog {
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&database_path, error))?;
-        Ok(records.len())
+        Ok((new_records.len(), commit.state))
     }
 
     pub fn metadata(&self, key: &str) -> CatalogResult<Option<String>> {
@@ -860,17 +924,6 @@ impl Catalog {
                 |row| row.get(0),
             )
             .map_err(|error| map_sqlite_error(&self.database_path(), error))
-    }
-
-    pub fn existing_record_ids(&self, record_ids: &[String]) -> CatalogResult<HashSet<String>> {
-        for record_id in record_ids {
-            validate_record_id(record_id)?;
-        }
-        query_existing_record_ids(
-            &self.connection,
-            &self.database_path(),
-            record_ids.iter().map(String::as_str),
-        )
     }
 
     pub fn record_by_id(&self, record_id: &str) -> CatalogResult<CatalogRecord> {
@@ -5941,14 +5994,17 @@ mod tests {
             ..CatalogProcessingProgress::default()
         };
 
-        assert!(matches!(
-            catalog.append_records_and_metadata_with_progress(
-                &[record("atomic-scanner-record")],
-                &[("scanner.test.checkpoint", r#"{"row":1}"#)],
-                &progress,
-            ),
-            Err(CatalogError::Sqlite(_))
-        ));
+        let result = catalog.append_scanner_batch(&[record("atomic-scanner-record")], |_| {
+            Ok(CatalogScannerBatchCommit {
+                metadata: vec![(
+                    "scanner.test.checkpoint".to_owned(),
+                    r#"{"row":1}"#.to_owned(),
+                )],
+                progress,
+                state: (),
+            })
+        });
+        assert!(matches!(result, Err(CatalogError::Sqlite(_))));
         assert!(!catalog.contains_record_id("atomic-scanner-record").unwrap());
         assert_eq!(catalog.metadata("scanner.test.checkpoint").unwrap(), None);
         assert_eq!(
@@ -5956,6 +6012,110 @@ mod tests {
             original_progress
         );
         assert_eq!(catalog.record_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn scanner_classifies_racing_insert_inside_its_write_transaction() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Scanner race").unwrap();
+        let winner_root = root.clone();
+        set_scanner_batch_before_write_tx_hook(move || {
+            let mut winner_catalog = Catalog::open(&winner_root).unwrap();
+            let mut winner = record("racing-record");
+            winner.image_path = "images/winner.jpg".to_owned();
+            winner.metadata = serde_json::json!({
+                "caption": "winner caption",
+                "width": 2048,
+            });
+            winner_catalog.append_records(&[winner]).unwrap();
+        });
+        let mut loser = record("racing-record");
+        loser.image_path = "images/loser.jpg".to_owned();
+        loser.metadata = serde_json::json!({
+            "caption": "loser caption",
+            "width": 64,
+        });
+        let (added, (accepted, duplicate)) = catalog
+            .append_scanner_batch(&[loser], |existing| {
+                assert_eq!(
+                    existing,
+                    &HashSet::from(["racing-record".to_owned()]),
+                    "classification happens after the racing writer commits"
+                );
+                let accepted = 1_u64.saturating_sub(existing.len() as u64);
+                let duplicate = existing.len() as u64;
+                let checkpoint = serde_json::json!({
+                    "counts": {
+                        "scanned": 1,
+                        "accepted": accepted,
+                        "duplicate": duplicate,
+                    }
+                });
+                Ok(CatalogScannerBatchCommit {
+                    metadata: vec![(
+                        "scanner.test.race-checkpoint".to_owned(),
+                        serde_json::to_string(&checkpoint).unwrap(),
+                    )],
+                    progress: CatalogProcessingProgress {
+                        state: CatalogProcessingState::Running,
+                        candidate_count: 1,
+                        processed_count: 1,
+                        accepted_count: accepted,
+                        rejected_count: duplicate,
+                        message: Some("scanner race reconciled".to_owned()),
+                        updated_at: catalog_timestamp_now(),
+                        ..CatalogProcessingProgress::default()
+                    },
+                    state: (accepted, duplicate),
+                })
+            })
+            .unwrap();
+
+        assert_eq!(added, 0);
+        assert_eq!((accepted, duplicate), (0, 1));
+        assert_eq!(catalog.record_count().unwrap(), 1);
+        let preserved = catalog.record_by_id("racing-record").unwrap();
+        assert_eq!(preserved.image_path, "images/winner.jpg");
+        assert_eq!(preserved.metadata["caption"], "winner caption");
+        assert_eq!(preserved.metadata["width"], 2048);
+        let winner_search = catalog
+            .search_records(&CatalogSearchRequest {
+                limit: 10,
+                text: "winner".to_owned(),
+                min_width: Some(1_024),
+                ..CatalogSearchRequest::default()
+            })
+            .unwrap();
+        assert_eq!(
+            winner_search.records.len(),
+            1,
+            "winner search projection remains intact"
+        );
+        let loser_search = catalog
+            .search_records(&CatalogSearchRequest {
+                limit: 10,
+                text: "loser".to_owned(),
+                ..CatalogSearchRequest::default()
+            })
+            .unwrap();
+        assert!(
+            loser_search.records.is_empty(),
+            "scanner duplicate must not replace the winner's FTS projection"
+        );
+        let checkpoint: Value = serde_json::from_str(
+            &catalog
+                .metadata("scanner.test.race-checkpoint")
+                .unwrap()
+                .expect("checkpoint commits"),
+        )
+        .unwrap();
+        assert_eq!(checkpoint["counts"]["accepted"], 0);
+        assert_eq!(checkpoint["counts"]["duplicate"], 1);
+        let progress = catalog.contract_state().unwrap().processing;
+        assert_eq!(progress.processed_count, 1);
+        assert_eq!(progress.accepted_count, 0);
+        assert_eq!(progress.rejected_count, 1);
     }
 
     #[test]

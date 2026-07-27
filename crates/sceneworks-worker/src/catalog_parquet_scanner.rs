@@ -9,7 +9,7 @@ use parquet::record::{Field, Row};
 use sceneworks_core::catalog_store::{
     catalog_timestamp_now, Catalog, CatalogError, CatalogProcessingDesiredState,
     CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRegistry,
-    NewCatalogRecord,
+    CatalogScannerBatchCommit, NewCatalogRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1249,23 +1249,6 @@ fn flush_batch(
     candidate_count_floor: u64,
     disposition: FlushDisposition,
 ) -> CatalogParquetScanResult<bool> {
-    let candidate_ids = pending
-        .iter()
-        .map(|record| record.id.clone())
-        .collect::<Vec<_>>();
-    let existing = catalog.existing_record_ids(&candidate_ids)?;
-    if !existing.is_empty() {
-        let duplicate_count = existing.len() as u64;
-        checkpoint.counts.accepted = checkpoint.counts.accepted.saturating_sub(duplicate_count);
-        checkpoint.counts.duplicate = checkpoint.counts.duplicate.saturating_add(duplicate_count);
-        let duplicate_reason = checkpoint
-            .counts
-            .reasons
-            .entry("duplicate_url".to_owned())
-            .or_default();
-        *duplicate_reason = duplicate_reason.saturating_add(duplicate_count);
-        pending.retain(|record| !existing.contains(&record.id));
-    }
     let paused = matches!(disposition, FlushDisposition::Pause);
     let (state, message) = if matches!(disposition, FlushDisposition::Complete) {
         (CatalogProcessingState::Completed, "Parquet scan complete")
@@ -1279,13 +1262,40 @@ fn flush_batch(
     } else {
         (CatalogProcessingState::Running, "Scanning Parquet metadata")
     };
-    let progress = progress_for_checkpoint(checkpoint, candidate_count_floor, state, Some(message));
-    let payload = serde_json::to_string(checkpoint)?;
-    catalog.append_records_and_metadata_with_progress(
-        pending,
-        &[(CHECKPOINT_KEY, payload.as_str())],
-        &progress,
-    )?;
+    let base_checkpoint = checkpoint.clone();
+    let (_, committed_checkpoint) = catalog.append_scanner_batch(pending, |existing| {
+        let mut committed_checkpoint = base_checkpoint;
+        if !existing.is_empty() {
+            let duplicate_count = existing.len() as u64;
+            committed_checkpoint.counts.accepted = committed_checkpoint
+                .counts
+                .accepted
+                .saturating_sub(duplicate_count);
+            committed_checkpoint.counts.duplicate = committed_checkpoint
+                .counts
+                .duplicate
+                .saturating_add(duplicate_count);
+            let duplicate_reason = committed_checkpoint
+                .counts
+                .reasons
+                .entry("duplicate_url".to_owned())
+                .or_default();
+            *duplicate_reason = duplicate_reason.saturating_add(duplicate_count);
+        }
+        let progress = progress_for_checkpoint(
+            &committed_checkpoint,
+            candidate_count_floor,
+            state,
+            Some(message),
+        );
+        let payload = serde_json::to_string(&committed_checkpoint).map_err(CatalogError::Json)?;
+        Ok(CatalogScannerBatchCommit {
+            metadata: vec![(CHECKPOINT_KEY.to_owned(), payload)],
+            progress,
+            state: committed_checkpoint,
+        })
+    })?;
+    *checkpoint = committed_checkpoint;
     pending.clear();
     Ok(paused)
 }
