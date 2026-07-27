@@ -149,6 +149,7 @@ export function VideoStudio() {
     videoModels,
     models = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    preferencesHydrated,
   } = useAppContext();
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
@@ -1022,7 +1023,8 @@ export function VideoStudio() {
   // Suppress the live writer until the video catalog has loaded (sc-11962), so a transient
   // defaults-reset during the restart-restore/settle window can't overwrite the restored
   // snapshot before the async catalogs settle.
-  videoModels.length > 0);
+  // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
+  preferencesHydrated && videoModels.length > 0);
 
   useEffect(() => {
     if (mode !== "replace_person") {

@@ -47,6 +47,7 @@ export function useEditorGeneration({ context }) {
     createPreset,
     createModelDownloadJob,
     createLoraDownloadJob,
+    preferencesHydrated,
   } = context;
 
   const projectId = activeProject?.id ?? null;
@@ -277,7 +278,8 @@ export function useEditorGeneration({ context }) {
       selectedPresetId: studio.selectedPresetId,
       generalStackIds: studio.generalStackIds,
     },
-    videoModels.length > 0,
+    // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
+    preferencesHydrated && videoModels.length > 0,
   );
 
   // The generation fields common to every editor action. The screen merges this with the

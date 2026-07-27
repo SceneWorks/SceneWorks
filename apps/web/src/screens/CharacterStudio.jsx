@@ -170,6 +170,7 @@ export function CharacterStudio() {
     createTrainingDataset,
     openDatasetInLibrary,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    preferencesHydrated,
   } = useAppContext();
   const latestAssets = latestImageAssets;
   // Mac UI gating (sc-3486): hide torch-only models from the angle/pose/test pickers.
@@ -237,7 +238,10 @@ export function CharacterStudio() {
   const [activeTab, setActiveTab] = useState(() =>
     CHARACTER_TAB_IDS.includes(savedSettings.activeTab) ? savedSettings.activeTab : DEFAULT_CHARACTER_TAB,
   );
-  useStudioSettingsWriter("character", activeProject?.id ?? null, { activeTab });
+  // Gated on ui-preferences hydration (sc-15425): this writer had no gate because the tab is
+  // not catalog-derived, but it still must not persist the DEFAULT tab over a stored one during
+  // the window before the durable copy has arrived.
+  useStudioSettingsWriter("character", activeProject?.id ?? null, { activeTab }, preferencesHydrated);
   const tabRefs = useRef({});
   const activeTabIndex = CHARACTER_TABS.findIndex(([id]) => id === activeTab);
   // Roving-tabindex keyboard nav, matching the TrainingStudio tablist: arrows wrap,
