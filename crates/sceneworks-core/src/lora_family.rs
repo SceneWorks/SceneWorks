@@ -378,8 +378,9 @@ pub fn apply_model_manifest_defaults(
 /// fine-tuned checkpoint is DENSE bf16 and the builtin q4/q8 tiers are pre-quantized artifacts with
 /// an 8-bit floor on `norm_out.linear` and the text-encoder decoder layers (sc-15071) that a naive
 /// load-time quantize does not reproduce — so packing one at load would render a tiled texture
-/// rather than the prompt. No `ui.img2img` and no `ui.editReferences`: the non-edit Mage variants
-/// advertise no conditioning at all.
+/// rather than the prompt. It DOES declare `mlx.minMemoryGb`, which the builtin does not, precisely
+/// because loading dense is what makes the sc-13959 >1536² gate matter here. No `ui.img2img` and no
+/// `ui.editReferences`: the non-edit Mage variants advertise no conditioning at all.
 fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: &str) {
     match family {
         "krea-2" => apply_krea_2_studio_surface_defaults(entry),
@@ -441,6 +442,36 @@ fn apply_mage_flow_studio_surface_defaults(entry: &mut Map<String, Value>) {
         defaults
             .entry("count".to_owned())
             .or_insert_with(|| json!(1));
+    }
+    if let Some(mlx) = entry
+        .entry("mlx".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        // The >1536² memory-gate anchor (sc-13959). Load-bearing for a fine-tune in a way it is not
+        // for the builtin: `mage_flow_base` declares no `mlx.minMemoryGb` but defaults to the
+        // pre-quantized `q4` tier (7.87 GB measured peak), whereas a fine-tuned checkpoint is DENSE
+        // bf16 by construction — ~2.4x the resident weights — and this entry deliberately declares
+        // no `mlx.quantize` (the pre-quantized tiers carry an 8-bit floor a load-time quantize does
+        // not reproduce, sc-15071). With no floor, `resolutionMemory.js` has no basis to predict a
+        // peak and offers 2048² unconditionally on ANY Mac — and an MLX overcommit is an
+        // uncatchable SIGKILL, not a recoverable error.
+        //
+        // 20 GB, derived from the builtin manifest's own numbers rather than guessed:
+        //   install totals  q4 7.002 · q8 9.450 · bf16 17.464 GB
+        //   measured MLX unified peaks (sc-15071 note)  q4 7.87 · q8 10.11 GB
+        //   peak/install    1.124 · 1.070  =>  mean 1.097
+        //   bf16 predicted  17.464 x 1.097 ~= 19.2 GB
+        // cross-checked against the manifest's MEASURED `candle.vramGbByTier.bf16` of 20.41 GB.
+        // Rounded UP to 20: over-estimating hides a borderline bucket (safe), under-estimating
+        // offers one that SIGKILLs. This is an extrapolation, not an on-device measurement — the
+        // sc-15038 precedent (calibrate via `mlx::get_peak_memory`) applies to it too.
+        //
+        // Effect: everything at/below the 2.36 MP baseline stays unconditionally offered (including
+        // 2048x1024, which at 2.10 MP is below it); only true 2048² is gated, needing a ~49 GB host
+        // to clear the 0.9 headroom fraction.
+        mlx.entry("minMemoryGb".to_owned())
+            .or_insert_with(|| json!(20));
     }
 }
 
@@ -4408,11 +4439,21 @@ mod tests {
         // carry an 8-bit floor (sc-15071) that a load-time quantize does not reproduce, so packing
         // one at load would render a tiled texture rather than the prompt.
         assert!(
-            entry
-                .get("mlx")
-                .and_then(Value::as_object)
-                .is_none_or(|mlx| !mlx.contains_key("quantize")),
+            !entry["mlx"]
+                .as_object()
+                .expect("mlx block")
+                .contains_key("quantize"),
             "a fine-tuned Mage checkpoint must not be load-time quantized by default"
+        );
+        // ...but it DOES declare a memory floor, and that pairing is the whole point: loading dense
+        // is exactly what makes the sc-13959 >1536² gate matter. With no floor, `resolutionMemory`
+        // has no basis to predict a peak and offers 2048² on ANY Mac — and an MLX overcommit is an
+        // uncatchable SIGKILL. Derived from the builtin manifest's measured q4/q8 unified peaks and
+        // cross-checked against its measured candle bf16 VRAM; see the arm for the arithmetic.
+        assert_eq!(
+            entry["mlx"]["minMemoryGb"],
+            json!(20),
+            "a dense fine-tune must anchor the >1536² memory gate"
         );
         // No conditioning surface is invented for it either.
         let ui = entry["ui"].as_object().expect("ui object");

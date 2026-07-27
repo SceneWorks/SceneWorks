@@ -135,3 +135,40 @@ describe("fitsResolutionOptions", () => {
     expect(fitsResolutionOptions(kreaModel(), undefined, 48, { backend: "mlx" })).toEqual([]);
   });
 });
+
+// sc-15036: a fine-tuned Mage-Flow base is the case the "no declared floor ⇒ unchanged" escape
+// hatch (SCOPE note 3) was NOT written for. The builtin `mage_flow_base` declares no
+// `mlx.minMemoryGb` but defaults to its pre-quantized q4 tier; a fine-tune is DENSE bf16 and
+// deliberately declares no `mlx.quantize`, so it carries ~2.4x the resident weights while
+// advertising the same 2048² ladder. Without a floor it would offer 2048² on any Mac — and an MLX
+// overcommit is an uncatchable SIGKILL, not a recoverable error.
+//
+// Discriminating: the SAME entry and the SAME host, with and without the floor.
+describe("a dense fine-tuned Mage base anchors the >1536 gate", () => {
+  const ladder = ["1024x1024", "1536x1536", "2048x1024", "2048x2048"];
+  const withFloor = { mlx: { minMemoryGb: 20 } };
+  const noFloor = { mlx: {} };
+
+  it("withholds 2048x2048 on a host that cannot hold it, and only that bucket", () => {
+    // 20 + 13 x ((2048^2 - 1536^2) / 1e6) = 43.9 GB, needing ~48.7 GB at the 0.9 headroom fraction.
+    expect(fitsResolutionOptions(withFloor, ladder, 32, { backend: "mlx" })).toEqual([
+      "1024x1024",
+      "1536x1536",
+      "2048x1024",
+    ]);
+    // 2048x1024 is 2.10 MP — BELOW the 2.36 MP baseline — so it is always offered, not gated.
+    expect(fitsResolutionOptions(withFloor, ladder, 8, { backend: "mlx" })).toEqual([
+      "1024x1024",
+      "1536x1536",
+      "2048x1024",
+    ]);
+    // A 64 GB Mac clears it.
+    expect(fitsResolutionOptions(withFloor, ladder, 64, { backend: "mlx" })).toEqual(ladder);
+  });
+
+  it("would offer 2048x2048 on the same 32 GB host with no floor declared", () => {
+    // The pre-fix behavior, kept here so the assertion above is visibly about the FLOOR and not
+    // about the ladder or the host.
+    expect(fitsResolutionOptions(noFloor, ladder, 32, { backend: "mlx" })).toEqual(ladder);
+  });
+});
