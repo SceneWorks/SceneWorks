@@ -2458,3 +2458,230 @@ describe("ImageStudio multi-phase denoise (epic 13879 S5, sc-13885)", () => {
     expect(payload.advanced).not.toHaveProperty("phases");
   });
 });
+
+// ----------------------------------------------------------------------------------------------
+// sc-15299 — the manifest `image` sub-block gates the Guidance / Negative prompt axes.
+//
+// The image-lane sibling of the `video` block sc-8445 shipped for Krea Realtime, with the SAME
+// absent-means-TRUE polarity. Both directions are pinned here: a declaring model loses the
+// controls and stops sending the values, an undeclared model keeps everything, and the two keys
+// are independent (an embedded-guidance engine keeps Guidance while losing Negative prompt).
+//
+// ⚠️ Payload assertions are NEVER made on a freshly mounted CFG-free model — both fields default
+// to empty, so such an assertion would pass against no implementation at all. Each one runs
+// through the RECIPE REPLAY path instead, which is the real leak: it restores model + guidance +
+// negative together with the advanced-defaults reset deliberately suppressed
+// (`skipAdvancedDefaultsReset`), so a non-empty override genuinely arrives on the CFG-free model.
+// ----------------------------------------------------------------------------------------------
+describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const openAdvanced = async () => click(document.body.querySelector(".advanced-section-toggle"));
+  const generate = async () =>
+    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+  const labelStartingWith = (text) =>
+    [...container.querySelectorAll("label")].find((node) => node.textContent.trim().startsWith(text));
+  const setTextarea = async (element, value) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(element, value);
+      element.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  };
+
+  // Guidance-taking baseline: declares NO `image` block at all, which is the shape of the
+  // overwhelming majority of the catalog. Absent means TRUE, so it must be untouched.
+  const GUIDED = {
+    ...Z_IMAGE,
+    id: "sdxl",
+    name: "Stable Diffusion XL",
+    family: "sdxl",
+    defaults: { resolution: "1024x1024", guidanceScale: 7 },
+  };
+
+  // Guidance-distilled: the descriptor is supports_guidance=false AND
+  // supports_negative_prompt=false, so resolve_guidance / resolve_true_cfg / resolve_negative_prompt
+  // all return None. Matches the shipped z_image_turbo / flux_schnell / krea_2_turbo declarations.
+  const CFG_FREE = {
+    ...Z_IMAGE,
+    id: "flux_schnell",
+    name: "FLUX.1 [schnell]",
+    family: "flux",
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
+  };
+
+  // Embedded-guidance: a REAL guidance scale, no unconditional branch. Declares only the negative
+  // axis absent — the shape of flux_dev / ideogram_4 / flux2_dev / sensenova / sana_sprint.
+  const NO_NEGATIVE = {
+    ...Z_IMAGE,
+    id: "flux_dev",
+    name: "FLUX.1 [dev]",
+    family: "flux",
+    defaults: { resolution: "1024x1024", guidanceScale: 3.5 },
+    image: { supportsNegativePrompt: false },
+  };
+
+  it("keeps both controls, and sends both values, for a model that declares no image block", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({ createImageJob, imageModels: [GUIDED] }));
+    await openAdvanced();
+
+    const guidance = labelStartingWith("Guidance")?.querySelector("input");
+    expect(guidance, "an undeclared model keeps Guidance — absent means TRUE").toBeTruthy();
+    await act(async () => setInput(guidance, "6.5"));
+    const negative = labelStartingWith("Negative prompt")?.querySelector("textarea");
+    expect(negative).toBeTruthy();
+    await setTextarea(negative, "blurry, low quality");
+
+    await generate();
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.negativePrompt).toBe("blurry, low quality");
+    expect(payload.advanced.guidanceScale).toBe(6.5);
+  });
+
+  it("hides both controls for a CFG-free engine and sends neither, even from a replayed recipe", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [GUIDED, CFG_FREE],
+        // The leak path: a recipe carries a real guidance scale AND a real negative onto the
+        // CFG-free model, with the model-switch reset suppressed. Without the gate both reach
+        // the worker (which discards them) and get recorded on this job's own recipe.
+        studioLaunch: {
+          id: "launch-1",
+          view: "Image",
+          assetId: "asset-1",
+          recipe: {
+            model: "flux_schnell",
+            mode: "text_to_image",
+            prompt: "a fox",
+            negativePrompt: "blurry, low quality",
+            rawAdapterSettings: { guidanceScale: 6.5 },
+          },
+        },
+      }),
+    );
+    await openAdvanced();
+
+    expect(labelStartingWith("Guidance")).toBeFalsy();
+    expect(labelStartingWith("Negative prompt")).toBeFalsy();
+
+    await generate();
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe("flux_schnell");
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+
+  it("keeps Guidance but drops Negative prompt for an embedded-guidance engine", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [GUIDED, NO_NEGATIVE],
+        // Same replay path, so the restored negative is genuinely non-empty when the gate runs.
+        studioLaunch: {
+          id: "launch-2",
+          view: "Image",
+          assetId: "asset-2",
+          recipe: {
+            model: "flux_dev",
+            mode: "text_to_image",
+            prompt: "a fox",
+            negativePrompt: "blurry, low quality",
+            rawAdapterSettings: { guidanceScale: 4.5 },
+          },
+        },
+      }),
+    );
+    await openAdvanced();
+
+    // The two keys are independent: guidance survives, the negative box is gone.
+    expect(labelStartingWith("Guidance")?.querySelector("input")).toBeTruthy();
+    expect(labelStartingWith("Negative prompt")).toBeFalsy();
+
+    await generate();
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe("flux_dev");
+    expect(payload.advanced.guidanceScale).toBe(4.5);
+    expect(payload.negativePrompt).toBe("");
+  });
+
+  // The seed effect (`ui.defaultNegativePrompt` → an empty negative box) must not fire for an
+  // engine with no negative axis. Asserting the SUBMITTED negative here would be a false green:
+  // the payload gate blanks it either way. The ghost is only observable once the user moves to a
+  // model that CAN take a negative — the seeded text is still in studio state and reappears in
+  // the box they can now see. That is the assertion, and it is the one that dies without the guard.
+  it("never seeds a hidden default negative that resurfaces on the next model", async () => {
+    const seeded = {
+      ...CFG_FREE,
+      id: "anima_turbo",
+      ui: { defaultNegativePrompt: "worst quality, low quality" },
+    };
+    await render(baseContext({ imageModels: [seeded, GUIDED] }));
+    await openAdvanced();
+    expect(labelStartingWith("Negative prompt")).toBeFalsy();
+
+    await act(async () => setSelect(field(container, "Model"), "sdxl"));
+    await act(async () => {});
+    const negative = labelStartingWith("Negative prompt")?.querySelector("textarea");
+    expect(negative, "the guidance-taking model shows the box again").toBeTruthy();
+    expect(negative.value).toBe("");
+  });
+
+  // A saved preset is a persisted recipe, so the same axis gate applies: banking a dead negative
+  // or guidance on a CFG-free model would resurrect it when the preset is applied elsewhere.
+  it("keeps the dead axes out of a preset saved on a CFG-free model", async () => {
+    const createPreset = vi.fn(async (payload) => ({ id: payload.id }));
+    await render(
+      baseContext({
+        createPreset,
+        imageModels: [GUIDED, CFG_FREE],
+        studioLaunch: {
+          id: "launch-3",
+          view: "Image",
+          assetId: "asset-3",
+          recipe: {
+            model: "flux_schnell",
+            mode: "text_to_image",
+            prompt: "a fox",
+            negativePrompt: "blurry, low quality",
+            rawAdapterSettings: { guidanceScale: 6.5 },
+          },
+        },
+      }),
+    );
+
+    await act(async () => setInput(nameInput(container), "My preset"));
+    await saveWithScope(container, "This project");
+    const defaults = createPreset.mock.calls[0][0].defaults;
+    // The preset builder prunes empty values, so an absent key IS the blanked negative. Without
+    // the gate this is the recipe's "blurry, low quality".
+    expect(defaults.negativePrompt ?? "").toBe("");
+    expect(defaults.guidanceScale).toBeUndefined();
+  });
+});

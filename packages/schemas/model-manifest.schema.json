@@ -542,6 +542,21 @@
               }
             }
           },
+          "image": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Image-generation capability metadata (sc-15299) — the image-lane sibling of the `video` sub-block (sc-8445), declaring which generation AXES an image engine actually has so Image Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Mirrors the engine descriptor's own `Capabilities { supports_guidance, supports_negative_prompt }`, which `resolve_guidance` / `resolve_negative_prompt` in the worker's image_jobs/base.rs already gate on. Every property is OPTIONAL and, exactly like `video` but UNLIKE `audio`, an ABSENT property means TRUE: the image population is overwhelmingly guidance-taking, so absent-means-supported is the correct default and leaves an undeclared entry behaving exactly as it did before this block existed. Only a guidance-distilled engine that genuinely lacks an axis declares it false.",
+            "properties": {
+              "supportsGuidance": {
+                "type": "boolean",
+                "description": "Does the engine have a classifier-free-guidance axis? False for a guidance-distilled engine whose descriptor advertises `supports_guidance: false`, so the worker's `resolve_guidance` returns None and never forwards a scale. ABSENT MEANS TRUE. When false, Image Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
+              },
+              "supportsNegativePrompt": {
+                "type": "boolean",
+                "description": "Does the engine accept a negative prompt? An engine with no steerable unconditional branch has nothing for a negative prompt to do — `resolve_negative_prompt` returns None for any model whose descriptor advertises `supports_negative_prompt: false`. ABSENT MEANS TRUE. When false, Image Studio hides its Negative prompt field, never seeds `ui.defaultNegativePrompt` into it, and sends an empty one."
+              }
+            }
+          },
           "video": {
             "type": "object",
             "additionalProperties": false,
@@ -630,6 +645,14 @@
               "supportsStreaming": {
                 "type": "boolean",
                 "description": "Whether the model streams audio incrementally as it renders (backend Capabilities.supports_streaming, sc-12846). When true the worker drives Generator::generate_streaming so partial PCM chunks arrive before the clip finishes, and the Audio Studio reveals progressive/streaming results in the results zone. Absent/false means one-shot synthesis. The reassembly of every chunk still equals the one-shot track, so it is advisory to the STREAM SHAPE, not to correctness (sc-13675)."
+              },
+              "supportsGuidance": {
+                "type": "boolean",
+                "description": "Whether the model has a classifier-free-guidance axis (backend Capabilities.supports_guidance). Read by Audio Studio's Music tab to decide whether to render its Guidance (CFG) control; a scale sent to a model that does not advertise it is rejected as a typed Unsupported at the gen-core floor. ⚠️ Polarity here is the AUDIO one — ABSENT MEANS FALSE, the opposite of the `image` / `video` blocks — because the audio population is the reverse shape: the only music engine shipped is guidance-distilled. Declared in the schema by sc-15299; the Audio Studio read predates it, so before that fix the key could not be set at all (this object is additionalProperties:false) and the control was permanently hidden by accident rather than by declaration."
+              },
+              "supportsNegativePrompt": {
+                "type": "boolean",
+                "description": "Whether the model accepts a negative prompt (backend Capabilities.supports_negative_prompt). Read by Audio Studio's Music tab for its Negative prompt field. ABSENT MEANS FALSE — same audio polarity and the same sc-15299 history as `supportsGuidance`."
               },
               "conditioning": {
                 "type": "array",

@@ -1113,7 +1113,15 @@ export function ImageStudio() {
     if (!seedsNegativeInMode(mode) || negativePrompt !== "") {
       return;
     }
-    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    const entry = imageModels.find((item) => item.id === model);
+    // An engine with no negative-prompt axis (sc-15299) never gets one seeded: the box is hidden
+    // for it and the value is not sent, so seeding would only plant a ghost the user cannot see.
+    // Read off the entry rather than the `supportsNegativePrompt` const below — that binding is
+    // declared later in this component body, so touching it from a dep array would be a TDZ hit.
+    if (entry?.image?.supportsNegativePrompt === false) {
+      return;
+    }
+    const ui = entry?.ui ?? {};
     if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
       setNegativePrompt(ui.defaultNegativePrompt);
     }
@@ -1196,6 +1204,25 @@ export function ImageStudio() {
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
   const showGuidanceMethodPicker = guidanceMethodOptions.length > 1;
+  // Which generation axes the selected engine actually has, declared in the manifest `image`
+  // sub-block (sc-15299) — the image-lane sibling of the `video` block sc-8445 added for Krea
+  // Realtime, and of `audio.supportsGuidance` / `audio.supportsNegativePrompt`. Neither an id check
+  // nor an engine link: the catalog says it, mirroring the engine descriptor's own
+  // `Capabilities { supports_guidance, supports_negative_prompt }` that the worker's
+  // `resolve_guidance` / `resolve_negative_prompt` already gate on (image_jobs/base.rs) — a
+  // guidance-distilled engine drops both on the floor, so offering them is a knob that does nothing.
+  //
+  // ⚠️ ABSENT MEANS TRUE, the same polarity as `video` and the OPPOSITE of `audio`. Most image
+  // engines take both a CFG scale and a negative prompt and declare nothing, so `!== false` is what
+  // keeps them byte-identical to their pre-sc-15299 behaviour; only an engine that genuinely lacks
+  // the axis declares it false.
+  //
+  // HIDDEN, not disabled: the Wan Lightning precedent in Video Studio DISABLES Steps/Guidance
+  // because that inertness is TRANSIENT (turn Lightning off and the control works again). A missing
+  // axis is permanent for the model, so a forever-dead input is just clutter — Audio Studio hides
+  // these two for the same reason (`showGuidance` / `showNegative`).
+  const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
   const advancedDefaultsModel = useRef(model);
   const skipAdvancedDefaultsReset = useRef(false);
   useEffect(() => {
@@ -1760,11 +1787,15 @@ export function ImageStudio() {
     },
     buildDefaults: () => ({
       prompt,
-      negativePrompt,
+      // Same axis gate as the job payload (sc-15299): a preset saved on an engine with no
+      // negative-prompt / guidance axis must not bank a value the studio never showed and the
+      // worker never reads — applying that preset later on a guidance-taking model would
+      // resurrect a "negative prompt" the user never typed there.
+      negativePrompt: supportsNegativePrompt ? negativePrompt : "",
       resolution,
       count,
       mode,
-      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      guidanceScale: supportsGuidance ? finiteNumberOrUndefined(guidanceOverride) : undefined,
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
@@ -2007,7 +2038,15 @@ export function ImageStudio() {
       // Shared studio settings (identical for both paths).
       resolution,
       mode,
-      negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
+      // An engine with no negative-prompt axis (sc-15299) gets an empty one rather than whatever a
+      // preset stack composed or a replayed recipe restored — the field is hidden for it, so
+      // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
+      // discards anyway) would be a ghost input recorded on this job's recipe.
+      negativePrompt: supportsNegativePrompt
+        ? stackActive
+          ? composedStack.negativePrompt
+          : negativePrompt
+        : "",
       model,
       count: stackActive && composedStack.count != null ? composedStack.count : count,
       seed,
@@ -2046,7 +2085,12 @@ export function ImageStudio() {
       scheduler,
       schedulerShift,
       stepsOverride,
-      guidanceOverride,
+      // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
+      // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
+      // omitted entirely. The model-switch reset already clears it in the ordinary case, but a
+      // replayed recipe (and a preset launch) restores model + guidance together with that reset
+      // suppressed — which is the path that really leaks a stale scale onto a CFG-free engine.
+      guidanceOverride: supportsGuidance ? guidanceOverride : "",
       guidanceMethod,
       flashAttn,
       promptEnhance,
@@ -3182,10 +3226,14 @@ export function ImageStudio() {
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
+          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-15299), the
+              same way VideoStudio does it: the submit path blanks the composed negative for a
+              CFG-free engine, so previewing "+ negative prompt" would advertise a contribution
+              this job will not make. */}
           <PresetStackPreview
             generalStack={generalStack}
             composed={composedStack}
-            stackAddsNegative={stackAddsNegative}
+            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
 
@@ -3319,21 +3367,23 @@ export function ImageStudio() {
                   value={stepsOverride}
                 />
               </label>
-              <label>
-                Guidance
-                <input
-                  min="0"
-                  max="30"
-                  onChange={(event) => setGuidanceOverride(event.target.value)}
-                  placeholder={(() => {
-                    const value = guidanceDefaultFromModel(selectedModel);
-                    return value == null ? "" : String(value);
-                  })()}
-                  step="0.1"
-                  type="number"
-                  value={guidanceOverride}
-                />
-              </label>
+              {supportsGuidance ? (
+                <label>
+                  Guidance
+                  <input
+                    min="0"
+                    max="30"
+                    onChange={(event) => setGuidanceOverride(event.target.value)}
+                    placeholder={(() => {
+                      const value = guidanceDefaultFromModel(selectedModel);
+                      return value == null ? "" : String(value);
+                    })()}
+                    step="0.1"
+                    type="number"
+                    value={guidanceOverride}
+                  />
+                </label>
+              ) : null}
               {supportsTextStyle ? (
                 <label className="text-style-gain">
                   {textStyleGainConfig?.label ?? "Text style"}
@@ -3490,10 +3540,12 @@ export function ImageStudio() {
                   <span>{upscaleSoftness.toFixed(2)}</span>
                 </label>
               ) : null}
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-              </label>
+              {supportsNegativePrompt ? (
+                <label className="prompt-field">
+                  Negative prompt
+                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                </label>
+              ) : null}
             </div>
           </AdvancedSection>
 

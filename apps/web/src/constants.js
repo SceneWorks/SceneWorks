@@ -104,6 +104,10 @@ After the think block, always provide a concise, user-facing final answer. The a
 export const fallbackModels = [
   {
     id: "z_image_turbo",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "Z-Image-Turbo",
     type: "image",
     // No `character_image`: the worker adapter has no IP-Adapter wiring (sc-2005).
@@ -172,6 +176,10 @@ export const fallbackModels = [
   },
   {
     id: "z_image_edit",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "Z-Image-Edit",
     type: "image",
     capabilities: ["edit_image"],
@@ -259,6 +267,10 @@ export const fallbackModels = [
   },
   {
     id: "sensenova_u1_8b",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsNegativePrompt: false },
     name: "SenseNova-U1 8B",
     type: "image",
     // character_image (sc-2016): SenseNova's it2i edit path doubles as a
@@ -279,6 +291,10 @@ export const fallbackModels = [
   },
   {
     id: "sensenova_u1_8b_fast",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsNegativePrompt: false },
     name: "SenseNova-U1 8B Fast",
     type: "image",
     // character_image (sc-2016): same wardrobe-preserving reference flow as the
@@ -308,6 +324,10 @@ export const fallbackModels = [
   },
   {
     id: "flux_schnell",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "FLUX.1 [schnell]",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
@@ -318,6 +338,10 @@ export const fallbackModels = [
   },
   {
     id: "flux_dev",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsNegativePrompt: false },
     name: "FLUX.1 [dev]",
     type: "image",
     // character_image: XLabs FLUX IP-Adapter (sc-2011 resemblance tier).
@@ -507,6 +531,10 @@ export const fallbackModels = [
   },
   {
     id: "pulid_flux_dev",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsNegativePrompt: false },
     name: "PuLID-FLUX (FLUX.1 [dev])",
     type: "image",
     // Reference-driven only — appears solely in the "With character" picker.
@@ -570,6 +598,10 @@ export const fallbackModels = [
     // manifest/macSupport; this fallback entry only seeds the picker + per-variant
     // defaults until the live catalog loads. Recommended (the fast SD3.5 default).
     id: "sd3_5_large_turbo",
+    // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
+    // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
+    // ⚠️ ABSENT MEANS TRUE, so every other seed entry keeps both controls.
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "Stable Diffusion 3.5 Large Turbo",
     type: "image",
     capabilities: ["text_to_image", "style_variations"],
