@@ -12669,3 +12669,215 @@ fn krea_imported_mlx_gpu_smoke() {
         png_b.display()
     );
 }
+
+/// Settings + a complete fine-tuned Mage transformer component dir under the app data root
+/// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
+/// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
+#[cfg(target_os = "macos")]
+fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
+    let checkpoint = dir
+        .join("models")
+        .join("finetunes")
+        .join("finetune_9f3c0a11");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    std::fs::write(
+        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        br#"{"_class_name":"MageFlow"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        b"dit",
+    )
+    .unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.to_path_buf();
+    (settings, checkpoint)
+}
+
+/// sc-15036 — `resolve_mage_finetuned_transformer` claims ONLY a non-builtin `mage-flow`-family
+/// entry whose recorded path is a COMPLETE transformer component dir.
+///
+/// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
+/// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
+/// component file missing) is refused here rather than failing deep inside the load.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let path_str = checkpoint.to_str().unwrap();
+
+    let finetune = request(json!({
+        "projectId": "p", "model": "finetune_9f3c0a11",
+        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
+    }));
+    assert_eq!(
+        resolve_mage_finetuned_transformer(&finetune, &settings)
+            .expect("resolve ok")
+            .expect("a complete fine-tuned checkpoint resolves"),
+        std::fs::canonicalize(&checkpoint).unwrap_or(checkpoint.clone())
+    );
+
+    // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
+    assert!(
+        mlx_model("mage_flow_base").is_some(),
+        "precondition: mage_flow_base is a builtin engine on macOS"
+    );
+    let builtin = request(json!({
+        "projectId": "p", "model": "mage_flow_base",
+        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
+    }));
+    assert_eq!(
+        resolve_mage_finetuned_transformer(&builtin, &settings).expect("resolve ok"),
+        None,
+        "a builtin Mage id must NOT take the fine-tuned path"
+    );
+
+    // Wrong family → not this lane.
+    let wrong_family = request(json!({
+        "projectId": "p", "model": "some_import",
+        "modelManifestEntry": { "family": "krea_2", "paths": { "model": path_str } }
+    }));
+    assert_eq!(
+        resolve_mage_finetuned_transformer(&wrong_family, &settings).expect("resolve ok"),
+        None
+    );
+
+    // A TORN checkpoint — weights present, architecture config missing — is refused here.
+    let torn = dir.path().join("models").join("finetunes").join("torn");
+    std::fs::create_dir_all(&torn).unwrap();
+    std::fs::write(
+        torn.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        b"dit",
+    )
+    .unwrap();
+    let torn_job = request(json!({
+        "projectId": "p", "model": "finetune_torn",
+        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": torn.to_str().unwrap() } }
+    }));
+    assert_eq!(
+        resolve_mage_finetuned_transformer(&torn_job, &settings).expect("resolve ok"),
+        None,
+        "a torn checkpoint must not be claimed — it cannot load"
+    );
+}
+
+/// sc-15036 — the claim gate and the route. `mage_finetuned_available` must admit plain txt2img and
+/// refuse every shape the fine-tuned lane cannot serve, mirroring the scheduler's `mage-flow` arm
+/// so the two agree; and `resolve_image_route` must actually reach `ImageRoute::MageFinetuned`
+/// rather than falling through to the stub (the fine-tune's id is in no `MODEL_TABLE`, so nothing
+/// else claims it).
+///
+/// Discriminating: one entry, one flip of one field per case.
+#[cfg(target_os = "macos")]
+#[test]
+fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+    let path_str = checkpoint.to_str().unwrap().to_owned();
+    let job = |extra: serde_json::Value| {
+        let mut value = json!({
+            "projectId": "p", "model": "finetune_9f3c0a11",
+            "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        request(value)
+    };
+
+    let t2i = job(json!({ "mode": "text_to_image" }));
+    assert!(
+        mage_finetuned_available(&t2i, &settings),
+        "plain txt2img is the shape this lane serves"
+    );
+    assert_eq!(
+        resolve_image_route(&t2i, &settings),
+        Some(ImageRoute::MageFinetuned),
+        "the router must reach the fine-tuned lane — the id is in no MODEL_TABLE, so otherwise the \
+         job stubs"
+    );
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "s" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "a" })),
+        ("source", json!({ "sourceAssetId": "a" })),
+        (
+            "lora",
+            json!({ "loras": [{ "id": "l", "path": "/l.safetensors" }] }),
+        ),
+        (
+            "pose",
+            json!({ "advanced": { "poses": [{ "assetId": "a" }] } }),
+        ),
+        ("phases", json!({ "advanced": { "phases": [{}] } })),
+        ("mask", json!({ "maskAssetId": "m" })),
+        ("character", json!({ "characterId": "c" })),
+        ("look", json!({ "characterLookId": "l" })),
+    ] {
+        let shaped = job(extra);
+        assert!(
+            !mage_finetuned_available(&shaped, &settings),
+            "{label} must not be claimed by the fine-tuned lane — it would be silently dropped"
+        );
+        assert_ne!(
+            resolve_image_route(&shaped, &settings),
+            Some(ImageRoute::MageFinetuned),
+            "{label} must not route to the fine-tuned lane"
+        );
+    }
+}
+
+/// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
+/// must be the identity-guard-free one.
+///
+/// Compiling is not proof of either. This calls the real
+/// `runtime_macos::providers::mage::load_finetuned` at the pin, with a weights dir that is NOT a
+/// published snapshot root, and asserts the typed refusal is the FINE-TUNED entrypoint's own
+/// component-staging contract.
+///
+/// What it actually guards, stated precisely rather than overclaimed: the failure mode is a FUTURE
+/// PIN that re-points `load_finetuned` at the guarded path (an alias, or a "just add the
+/// fingerprint check back" edit) or drops the staging requirement for a flat-layout fallback.
+/// Either shows up here — the first as a fingerprint / "cannot open transformer checkpoint
+/// `<root>/transformer/...`" complaint (`load` reads `<weights>/transformer`, which this fixture
+/// deliberately does not have), the second as a missing-FILE error instead of a missing-COMPONENT
+/// one. I could not mutation-check it by swapping the call to `load`, because `load` is not
+/// re-exported from the crate root — only `load_finetuned` is — so that swap does not compile.
+///
+/// The evidence that the bypass is genuinely live at this pin is the real-weights run recorded on
+/// sc-15036: trained a full fine-tune, loaded it through this entrypoint at the merged inference
+/// revision, and rendered. This test is the permanent linkage guard for that fact.
+///
+/// Weights-free and device-free: the refusal happens before any Metal work, so this runs in the
+/// normal suite rather than behind `#[ignore]`.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+
+    let error = runtime_macos::providers::mage::load_finetuned(
+        runtime_macos::providers::mage::MageVariant::Base,
+        &LoadSpec::new(WeightsSource::Dir(checkpoint.clone())),
+    )
+    .err()
+    .map(|error| error.to_string())
+    .expect("no components are staged, so this must refuse");
+
+    assert!(
+        error.contains(runtime_macos::providers::mage::COMPONENT_TEXT_ENCODER),
+        "the refusal must name the component the caller has to stage, which is the fine-tuned \
+         entrypoint's own contract; got: {error}"
+    );
+    assert!(
+        !error.contains("fingerprint") && !error.contains("cannot open transformer checkpoint"),
+        "this must NOT be the published-checkpoint `load` path — a full fine-tune retrains the \
+         identity tensor, so that path can never serve one; got: {error}"
+    );
+}

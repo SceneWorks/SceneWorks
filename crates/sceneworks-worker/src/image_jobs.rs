@@ -492,6 +492,21 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::MageFinetuned => {
+                // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
+                // with the installed Mage-Flow base's shared text encoder + VAE and render through
+                // `load_finetuned`. txt2img, `count` renders each its own seed.
+                generate_mage_finetuned_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::SdxlImported => {
                 generate_sdxl_imported_stream(
                     api,
@@ -1875,6 +1890,13 @@ include!("image_jobs/krea_imported.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/sdxl_imported.rs");
+#[cfg(target_os = "macos")]
+// Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
+// artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
+// encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
+// checkpoint identity guard a fine-tune necessarily fails. macOS/MLX only — the Mage generator is
+// `mac_only` and there is no candle Mage engine.
+include!("image_jobs/mage_finetuned.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");

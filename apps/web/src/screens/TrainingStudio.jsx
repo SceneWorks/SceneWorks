@@ -39,6 +39,7 @@ import {
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
+  isFullFinetuneNetworkType,
   lrSchedulerOptions,
   mergeCustomizedConfigDraft,
   presetForQualityTier,
@@ -616,7 +617,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // (activation) checkpointing has no full-tune implementation yet (sc-14989) and the engine hard-
   // errors rather than ignoring the flag, so the worker clears it for a full run. Hide the checkbox
   // here and say why, so the override is visible rather than a silent drop of a checked box.
-  const isFullFinetune = asText(configDraft.networkType).trim().toLowerCase() === "full";
+  // sc-15036: one shared predicate with `outputKindLabel`, so what the panel LABELS the run and
+  // what it hides for the run can never disagree about which runs are full fine-tunes.
+  const isFullFinetune = isFullFinetuneNetworkType(configDraft.networkType);
   // Mac UI gating (sc-3486): the mlx Wan trainer can't merge a Kronecker (LoKr) adapter, so
   // disable the LoKr network type for Wan targets on a gated Mac (LoKr on Z-Image/SDXL/LTX is fine).
   const macLokrOnWanBlocked =

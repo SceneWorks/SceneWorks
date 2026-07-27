@@ -10,6 +10,7 @@ import {
   isImageGenerationJob,
   isInterleaveJob,
   isPlaceholderOnlyGpuWorker,
+  trainingRegistrationFailure,
   isSelectableGpuWorker,
   isVideoGenerationJob,
   jobFreshnessMs,
@@ -243,5 +244,45 @@ describe("stored theme + accent readers", () => {
   it("reads a valid stored accent and defaults otherwise", () => {
     store.set("sceneworks-accent", "not-an-accent");
     expect(readStoredAccent()).toBe(DEFAULT_ACCENT);
+  });
+});
+
+describe("trainingRegistrationFailure", () => {
+  // sc-15036: a `lora_train` job now produces EITHER an adapter or a FULL base checkpoint, and each
+  // registrar reports under its own result key — only one of which is present on any given run.
+  //
+  // The bug this pins: the notice branch checked only `loraRegistered === false`, so a failed
+  // BASE-CHECKPOINT registration (where `loraRegistered` is `undefined`) fell into the success
+  // path. The user was told the run succeeded while the job's own result carried
+  // `baseCheckpointRegistrationError` saying the ~8 GB checkpoint had not been registered — and the
+  // catalog was refreshed as if something had landed.
+  //
+  // Discriminating: the adapter-failure and base-checkpoint-failure shapes differ ONLY in which key
+  // carries the `false`, and both must surface; the two success shapes must both stay silent.
+  it("surfaces a failed base-checkpoint registration, not just a failed LoRA one", () => {
+    expect(trainingRegistrationFailure({ loraRegistered: false, loraRegistrationError: "no adapter found" })).toBe(
+      "no adapter found",
+    );
+    expect(
+      trainingRegistrationFailure({
+        baseCheckpointRegistered: false,
+        baseCheckpointRegistrationError: "no complete fine-tuned base checkpoint found",
+      }),
+    ).toBe("no complete fine-tuned base checkpoint found");
+  });
+
+  it("stays silent when the run's own registrar succeeded", () => {
+    // An ABSENT key means "that registrar did not claim this job" — the normal case for the other
+    // kind. It must never read as a failure, or every successful adapter run would show an error.
+    expect(trainingRegistrationFailure({ loraRegistered: true, loraId: "lora_1" })).toBeNull();
+    expect(trainingRegistrationFailure({ baseCheckpointRegistered: true, baseCheckpointModelId: "finetune_1" })).toBeNull();
+    expect(trainingRegistrationFailure({})).toBeNull();
+    expect(trainingRegistrationFailure(undefined)).toBeNull();
+  });
+
+  it("falls back to a generic message when the registrar reported failure without a reason", () => {
+    expect(trainingRegistrationFailure({ baseCheckpointRegistered: false })).toBe(
+      "Completed training but could not register the result.",
+    );
   });
 });

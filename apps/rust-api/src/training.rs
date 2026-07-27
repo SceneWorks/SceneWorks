@@ -1346,6 +1346,16 @@ pub(crate) async fn create_training_job(
         target.output_kind,
         sceneworks_core::training::TrainingOutputKind::ControlBranch
     );
+    // sc-15036 (epic 14034 F6): the SAME target produces an adapter or a full base checkpoint
+    // depending on `advanced.networkType`, so this is a per-JOB property. Derived through the one
+    // shared discriminator in `sceneworks_core::training` that also stamps the plan's `outputKind`
+    // and drives the worker's `full_finetune` engine flag, so the three cannot disagree.
+    let output_kind =
+        sceneworks_core::training::training_output_kind(&target.output_kind, &payload.config);
+    let is_base_checkpoint = matches!(
+        output_kind,
+        sceneworks_core::training::TrainingOutputKind::BaseCheckpoint
+    );
     if is_control && payload.dry_run {
         return Err(ApiError::bad_request(
             "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
@@ -1444,7 +1454,14 @@ pub(crate) async fn create_training_job(
     // is pre-allocated so the plan can embed its own `jobId`/`sourceJobId`.
     let data_dir = state.settings.data_dir.clone();
     let base_model_path = resolve_base_model_path(target, &data_dir);
-    let lora_id = format!("lora_{}", Uuid::new_v4().simple());
+    // The output id is also the on-disk directory name AND — for a full fine-tune — the catalog
+    // model id the user sees in the Studio picker, so it carries what the artifact IS rather than
+    // labelling an 8 GB base checkpoint `lora_…`.
+    let lora_id = if is_base_checkpoint {
+        format!("finetune_{}", Uuid::new_v4().simple())
+    } else {
+        format!("lora_{}", Uuid::new_v4().simple())
+    };
     let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
     let job_id = format!("job_{}", Uuid::new_v4().simple());
     let requested_gpu = training_requested_gpu(&payload.config.advanced);
@@ -1472,13 +1489,21 @@ pub(crate) async fn create_training_job(
     // A control overlay is a distinct artifact class (registered into its own store + manifest, applied at
     // inference on a frozen base via a strict-control lane, not a mergeable adapter), so its output +
     // source path go to `control-overlays/`, never the LoRA tree (sc-10165, epic 10159 B4).
-    let (output_dir, _manifest_path) = if is_control {
+    // A full base fine-tune is a MODEL, not an adapter (sc-15036): it registers into the model
+    // catalog and its ~8 GB transformer component dir lands under `<data>/models/finetunes/`, so
+    // the LoRA scope knob does not apply to it (the model catalog is global-only — see
+    // `resolve_finetune_output_location`).
+    let (output_dir, _manifest_path) = if is_base_checkpoint {
+        resolve_finetune_output_location(&state, &lora_id)
+    } else if is_control {
         resolve_control_overlay_output_location(&state, &output_scope, Some(&project_id), &lora_id)
             .await?
     } else {
         resolve_training_output_location(&state, &output_scope, Some(&project_id), &lora_id).await?
     };
-    let source_relpath = if is_control {
+    let source_relpath = if is_base_checkpoint {
+        format!("models/finetunes/{lora_id}")
+    } else if is_control {
         format!("control-overlays/{lora_id}")
     } else {
         format!("loras/{lora_id}")
@@ -1623,6 +1648,36 @@ pub(crate) async fn create_training_job(
     // generation (krea_2 trains against krea_2_raw but applies on krea_2_turbo). `register_completed_\
     // control_overlay` writes this into the control-overlay manifest; the security-sensitive id/scope/
     // source are recomputed from trusted inputs there, so this stays purely descriptive.
+    // A full base fine-tune registers as a MODEL, not an adapter (sc-15036, epic 14034 F6). Swap
+    // the LoRA-shaped descriptive fields for a model-catalog entry: `type`/`family` drive the
+    // Studio's per-family surface (`apply_model_manifest_defaults` fills `adapter`, `capabilities`,
+    // resolutions and defaults at registration time, exactly as the model-import job does), and
+    // `paths.model` is what `install_state_for` and the worker's render lane both resolve the
+    // checkpoint through. `networkType` is deliberately kept — it is the field that says this entry
+    // came from a `"full"` run, and the completion registrar keys the third arm off the plan's
+    // `outputKind` rather than off it. The security-sensitive id/source are recomputed from trusted
+    // inputs in `register_trained_base_checkpoint`, so this stays purely descriptive.
+    if is_base_checkpoint {
+        if let Some(entry) = manifest_entry.as_object_mut() {
+            entry.remove("triggerWords");
+            entry.insert("type".to_owned(), Value::String("image".to_owned()));
+            entry.insert(
+                "paths".to_owned(),
+                json!({ "model": output_dir.display().to_string() }),
+            );
+            // The catalog has one global user manifest; record the effective scope honestly rather
+            // than echoing a "project" the model store cannot honour.
+            entry.insert("scope".to_owned(), Value::String("global".to_owned()));
+            entry.insert(
+                "files".to_owned(),
+                json!([
+                    sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
+                    sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
+                ]),
+            );
+        }
+    }
+
     if is_control {
         let (control_engine, inference_base) = control_overlay_inference_identity(&target.family)
             .ok_or_else(|| {
@@ -2158,6 +2213,59 @@ pub(crate) async fn resolve_control_overlay_output_location(
             "Unsupported training outputScope: {other}. Use project or global."
         ))),
     }
+}
+
+/// The full-base-fine-tune analog of [`resolve_training_output_location`] (sc-15036, epic 14034 F6).
+///
+/// A full fine-tune produces a **base model**, not an adapter, so it is registered into the MODEL
+/// catalog (`user.models.jsonc`) and its weights land under `<data>/models/finetunes/<id>` — never
+/// the LoRA tree, whose entries the Studio offers as adapters to stack onto a base.
+///
+/// Deliberately takes no `scope`: the model catalog has exactly one user manifest and it is
+/// **global** (the worker's `model_manifest_target` allow-list hard-restricts a model write to
+/// `<config>/manifests/user.models.jsonc`, and the catalog build reads only that file). There is no
+/// project-scoped model store to honour a `"project"` scope with, so rather than silently writing a
+/// project-scoped request to the global manifest, the caller records the effective scope on the
+/// entry. `<data>/models` is already an allowed training output root worker-side.
+pub(crate) fn resolve_finetune_output_location(
+    state: &AppState,
+    finetune_id: &str,
+) -> (PathBuf, PathBuf) {
+    (
+        state
+            .settings
+            .data_dir
+            .join("models")
+            .join("finetunes")
+            .join(finetune_id),
+        state
+            .settings
+            .config_dir
+            .join("manifests")
+            .join("user.models.jsonc"),
+    )
+}
+
+/// The directory-shaped sibling of [`trusted_adapter_files`] (sc-15036).
+///
+/// A full base fine-tune does not produce an adapter FILE; it produces a diffusers **transformer
+/// component directory** — `config.json` plus the diffusers weight file — which is what the model
+/// catalog entry's `paths.model` points at and what `mlx_gen_mage::load_finetuned` reads. So
+/// `trusted_adapter_files`, whose whole contract is `output_dir.join(name).is_file()` on a declared
+/// adapter name, can only ever return `None` here.
+///
+/// Same security posture as its sibling: nothing is read out of the mutable job payload. The
+/// component file names are recomputed from the shared
+/// [`sceneworks_core::base_weights`] constants — the same pair the worker's render lane and the
+/// import gate probe — so "registered" and "loadable" cannot drift, and a torn run (weights written,
+/// config missing, or vice versa) is refused rather than registered as a model that fails at load.
+pub(crate) fn trusted_base_checkpoint_files(output_dir: &FsPath) -> Option<Vec<String>> {
+    sceneworks_core::base_weights::is_mage_flow_transformer_dir(output_dir).then(|| {
+        vec![
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE.to_owned(),
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE.to_owned(),
+        ]
+    })
 }
 
 /// Maps a control training target's family to its inference-side control identity (sc-10165, B4): the

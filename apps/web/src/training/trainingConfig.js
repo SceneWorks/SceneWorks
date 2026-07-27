@@ -124,8 +124,19 @@ export function defaultPresetForTarget(presets, targetId) {
   return targetPresets.find((preset) => preset.ui?.default) ?? targetPresets[0] ?? null;
 }
 
-export function outputKindLabel(target) {
-  const kind = String(target?.outputKind ?? "output").toLowerCase();
+// sc-15036: the output kind is a per-RUN property, not a per-target one. The Mage target offers
+// `networkType: "full"`, and a full run produces a base checkpoint (a model) rather than an adapter
+// — the same `training_output_kind` derivation the Rust plan builder applies. Mirrored here so the
+// Studio names what THIS run will produce instead of what the target usually produces.
+const FULL_FINETUNE_NETWORK_TYPE = "full";
+
+export function isFullFinetuneNetworkType(networkType) {
+  return String(networkType ?? "").trim().toLowerCase() === FULL_FINETUNE_NETWORK_TYPE;
+}
+
+export function outputKindLabel(target, networkType) {
+  const targetKind = String(target?.outputKind ?? "output").toLowerCase();
+  const kind = targetKind === "lora" && isFullFinetuneNetworkType(networkType) ? "base_checkpoint" : targetKind;
   if (kind === "lora") {
     return "LoRA";
   }
@@ -137,7 +148,7 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   const advanced = defaults.advanced ?? {};
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
-  const outputLabel = outputKindLabel(target);
+  const outputLabel = outputKindLabel(target, advanced.networkType);
   return {
     outputName: previousDraft.outputName ?? (dataset?.name ? `${dataset.name} ${outputLabel}` : ""),
     triggerWord: triggerPhrase || asText(defaults.triggerWord),
@@ -242,7 +253,7 @@ export function configValidation(configDraft, { activeDataset, selectedTarget, d
     issues.push(issue.requirement("dataset", "Select a saved dataset"));
   }
   if (!configDraft.outputName?.trim()) {
-    issues.push(issue.requirement("outputName", `Name the ${outputKindLabel(selectedTarget)} output`));
+    issues.push(issue.requirement("outputName", `Name the ${outputKindLabel(selectedTarget, configDraft.networkType)} output`));
   }
   if (!configDraft.triggerWord?.trim()) {
     issues.push(issue.requirement("triggerWord", "Add a trigger phrase"));

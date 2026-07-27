@@ -4195,3 +4195,260 @@ fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
         "with no converted dir, fall back to the HF snapshot"
     );
 }
+
+/// sc-15036 (epic 14034 F6) — the whole point of the story, end to end through the real API.
+///
+/// A completed FULL base fine-tune must register its checkpoint as a **model**, not a LoRA, and
+/// that model must be selectable at generation. Before this, the same run registered nothing: the
+/// plan declared `outputKind: "lora"`, the LoRA registrar claimed it, and `trusted_adapter_files`
+/// (which requires `is_file()` on a declared adapter name) found no adapter — so an ~8 GB trained
+/// checkpoint sat on disk with no home.
+///
+/// Discriminating on four independent axes, each of which fails under a different regression:
+///   1. the output dir is in the MODEL tree, not the LoRA tree (submit-side fork);
+///   2. the result carries `baseCheckpointRegistered` and NOT `loraRegistered` (the LoRA registrar
+///      must defer, and the base registrar must claim);
+///   3. `/api/v1/models` — the exact payload the Image Studio picker filters — offers the entry
+///      with the family surface that makes it selectable, and `/api/v1/loras` does NOT;
+///   4. a second completion of the same job does not duplicate the catalog entry.
+#[tokio::test]
+async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (job_id, output_dir) =
+        submit_full_finetune_job(app.clone(), &project_id, &settings.data_dir).await;
+
+    // (1) A full fine-tune produces a MODEL, so its weights land in the model tree — never
+    // `loras/`, whose entries the Studio offers as adapters to stack onto a base.
+    assert!(
+        output_dir.starts_with(settings.data_dir.join("models").join("finetunes")),
+        "a full fine-tune must not write into the LoRA tree: {}",
+        output_dir.display()
+    );
+
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    stage_trained_base_checkpoint(&output_dir);
+
+    let progress_path = format!("/api/v1/jobs/{job_id}/progress");
+    let complete = || {
+        request(
+            app.clone(),
+            "POST",
+            &progress_path,
+            json!({
+                "status": "completed",
+                "stage": "completed",
+                "progress": 1,
+                "message": "Fine-tuned base saved.",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": {}
+            }),
+        )
+    };
+    let (status, completed) = complete().await;
+    assert_eq!(status, StatusCode::OK);
+
+    // (2) Exactly one registrar claims the job, and it is the base-checkpoint one.
+    assert_eq!(
+        completed["result"]["baseCheckpointRegistered"], true,
+        "registration outcome: {}",
+        completed["result"]
+    );
+    assert!(
+        completed["result"].get("loraRegistered").is_none(),
+        "the LoRA registrar must DEFER on a base checkpoint, not claim or fail it: {}",
+        completed["result"]
+    );
+    let model_id = completed["result"]["baseCheckpointModelId"]
+        .as_str()
+        .expect("model id")
+        .to_owned();
+    assert!(
+        model_id.starts_with("finetune_"),
+        "an 8 GB base checkpoint must not be labelled lora_…: {model_id}"
+    );
+    assert!(completed["result"]["baseCheckpointManifestPath"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("user.models.jsonc")));
+
+    // (3) The trained base is a normal, installed, selectable image model. This is the exact
+    // payload `generationModelsForType` / `imageModelServesMode` filter in the Image Studio, so
+    // asserting it here IS the selectability contract.
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == json!(model_id.as_str()))
+        .unwrap_or_else(|| panic!("the fine-tuned base must appear in the model catalog"))
+        .clone();
+    assert_eq!(entry["type"], "image");
+    assert_eq!(entry["family"], "mage-flow");
+    assert_eq!(entry["catalogScope"], "user");
+    // The three fields the picker gates on: install state, `usable`, and a `text_to_image` capability.
+    assert_eq!(entry["installState"], "installed");
+    assert_ne!(
+        entry["usable"],
+        json!(false),
+        "an explicitly unusable entry is dropped from every picker"
+    );
+    assert!(entry["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .contains(&json!("text_to_image")));
+    // The family surface it inherits from its base, without which the Studio falls back to a bare
+    // 4-option resolution list.
+    assert_eq!(entry["adapter"], "mlx_mage");
+    assert_eq!(entry["defaults"]["resolution"], "1024x1024");
+    assert_eq!(entry["limits"]["requiresDimensionsMultipleOf"], json!(16));
+    // ...and `paths.model` is the recomputed output dir the worker's render lane resolves.
+    assert_eq!(
+        entry["paths"]["model"],
+        json!(output_dir.display().to_string())
+    );
+    assert_eq!(entry["provenance"]["kind"], "training");
+    assert_eq!(entry["provenance"]["trainingJobId"], json!(job_id.as_str()));
+
+    // It is NOT a LoRA — registering it as one would offer it as an adapter the engine cannot load.
+    let (status, loras) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|lora| lora["id"] == json!(model_id.as_str())),
+        "a full fine-tune must never appear in the LoRA library"
+    );
+
+    // (4) A repeated terminal report refreshes rather than duplicates.
+    let created_at = entry["createdAt"].clone();
+    let (status, _) = complete().await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    let matches: Vec<Value> = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|model| model["id"] == json!(model_id.as_str()))
+        .cloned()
+        .collect();
+    assert_eq!(matches.len(), 1, "a re-run must not duplicate the entry");
+    assert_eq!(
+        matches[0]["createdAt"], created_at,
+        "the original createdAt is preserved across a re-registration"
+    );
+
+    // (5) …and it is REMOVABLE. An ~8 GB base checkpoint that the catalog offers but the Models
+    // page cannot delete would be a one-way disk leak, so the lifecycle is closed here rather than
+    // assumed: `<data>/models/finetunes/<id>` sits under the `<data>/models` root
+    // `remove_owned_artifacts` allows, and `paths.model` is what `model_artifact_paths` resolves.
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/models/{model_id}?permanent=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {deleted}");
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(
+        !output_dir.exists(),
+        "the checkpoint directory must be removed from disk: {}",
+        output_dir.display()
+    );
+    let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert!(
+        !models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|model| model["id"] == json!(model_id.as_str())),
+        "the deleted fine-tune must leave the catalog without a restart"
+    );
+}
+
+/// sc-15036 — a TORN checkpoint (weights written, architecture config missing, or vice versa) must
+/// be refused rather than registered as a model that then fails at load. Surfaced on the job result
+/// so the outcome is observable, never silently dropped.
+///
+/// Discriminating: the same job, same everything, differing only in which of the two component
+/// files exists.
+#[tokio::test]
+async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (job_id, output_dir) =
+        submit_full_finetune_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+
+    // Weights, but no architecture config — `MageTransformer::load` cannot read it.
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(
+        &output_dir.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+    );
+
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Fine-tuned base saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["result"]["baseCheckpointRegistered"], false);
+    let reason = completed["result"]["baseCheckpointRegistrationError"]
+        .as_str()
+        .expect("a refusal reason");
+    assert!(
+        reason.contains("config.json"),
+        "the refusal must name what was missing: {reason}"
+    );
+
+    // Nothing was written to the catalog.
+    let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert!(
+        !models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|model| model["catalogScope"] == json!("user")),
+        "a torn checkpoint must not register a user model"
+    );
+}
