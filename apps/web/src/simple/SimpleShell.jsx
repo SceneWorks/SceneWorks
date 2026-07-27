@@ -147,8 +147,17 @@ export function SimpleShell({
       return undefined;
     }
     const store = studioStateRef.current;
-    loadSnapshotIntoStore(store, readSimpleStudioSnapshot(workspaceId));
-    setStudioEpoch((epoch) => epoch + 1);
+    const restored = readSimpleStudioSnapshot(workspaceId);
+    // Only replace the store — and only remount the studios — when there is something to
+    // restore. The remount is what discards whatever the mounted studio currently holds, so
+    // doing it unconditionally would throw away anything the user typed while the GET was in
+    // flight. That window is a loopback round trip on the desktop but a real network hop on a
+    // LAN deployment. With something stored, the stored value SHOULD win: it is the user's
+    // earlier deliberate choice, and the alternative is a studio half on defaults.
+    if (Object.keys(restored).length) {
+      loadSnapshotIntoStore(store, restored);
+      setStudioEpoch((epoch) => epoch + 1);
+    }
 
     // Debounced: a prompt is typed, and one durable write per keystroke would hammer both
     // localStorage and the disk-writing PUT. The store's coalescing queue keeps the requests

@@ -288,6 +288,17 @@ describe("Simple studio state across navigation", () => {
     ({ container, root } = mountRoot());
   });
 
+  // With nothing stored there is nothing to restore, so the hydration remount must not fire —
+  // on a LAN deployment the ui-preferences GET is a real network hop, and remounting
+  // unconditionally would discard whatever the user typed while it was in flight.
+  it("keeps what the user typed while preferences were still loading, when nothing is stored", async () => {
+    await renderShell(root, baseContext(), { preferencesHydrated: false });
+    await typePrompt(container, "typed during the GET");
+
+    await renderShell(root, baseContext(), { preferencesHydrated: true });
+    expect(container.querySelector("#su-image-prompt").value).toBe("typed during the GET");
+  });
+
   it("still re-seeds a studio the user never touched", async () => {
     await renderShell(root, baseContext());
     await click(navButton(container, "Queue"));
