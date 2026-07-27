@@ -3413,10 +3413,11 @@ fn mage_flow_foundation_targets_resolve_the_installed_flat_mirrors() {
     // sc-14054: Mage's q4/q8/bf16 catalog variants all materialize the same flat dense snapshot on
     // every platform. The training targets must therefore resolve their live SceneWorks mirrors
     // directly and report them ready without inventing a physical `bf16/` subdirectory.
-    for (base_model, expected_repo) in [
-        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
-        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
-    ] {
+    // Base only since sc-15277: `mage_flow_edit_base` is still a catalog GENERATION model, but it
+    // is no longer a training target (no `mlx-gen-mage` edit trainer exists — sc-15320), so there is
+    // no training pre-flight to resolve for it.
+    {
+        let (base_model, expected_repo) = ("mage_flow_base", "SceneWorks/Mage-Flow-Base");
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().expect("tempdir");
         let data_dir = temp.path().join("data");
@@ -3463,7 +3464,9 @@ fn mage_flow_foundation_targets_are_missing_when_not_installed() {
     // live case rather than a hypothetical: sc-14980 re-hosts Mage to PHYSICAL per-tier artifacts
     // with shared TE/VAE co-requisites, so `TrainingTierMissing` is genuinely REACHABLE for Mage —
     // a q4/q8-only install must produce it rather than a false `Ready`.
-    for base_model in ["mage_flow_base", "mage_flow_edit_base"] {
+    // Base only since sc-15277 (see `mage_flow_foundation_targets_resolve_the_installed_flat_mirrors`).
+    {
+        let base_model = "mage_flow_base";
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().expect("tempdir");
         let data_dir = temp.path().join("data");
@@ -3505,10 +3508,9 @@ fn mage_flow_foundation_targets_are_missing_when_not_installed() {
 /// flips to `Ready`; break the flat path and the first flips.
 #[test]
 fn mage_flow_training_base_status_discriminates_flat_from_tiered_layouts() {
-    for (base_model, repo) in [
-        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
-        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
-    ] {
+    // Base only since sc-15277 (see `mage_flow_foundation_targets_resolve_the_installed_flat_mirrors`).
+    {
+        let (base_model, repo) = ("mage_flow_base", "SceneWorks/Mage-Flow-Base");
         let target = crate::builtin_training_targets()
             .targets
             .into_iter()
@@ -3655,7 +3657,6 @@ fn training_base_model_label_strips_the_output_kind_suffix() {
         label, "Mage-Flow Base",
         "the rejection must name the base model, not the LoRA target"
     );
-    assert_eq!(label_of("mage_flow_edit_base").1, "Mage-Flow Edit-Base");
 
     // The rule is the trailing output-kind word ONLY — never more. Across the whole built-in
     // registry, every label must be its target name minus exactly that suffix.
