@@ -313,6 +313,7 @@ export function ImageStudio() {
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     visibleWorkers = [],
+    preferencesHydrated,
   } = useAppContext();
   // Krea 2 INT8-ConvRot eligibility (sc-9300, epic 9083): the candle-only tier is offered ONLY when a
   // live worker advertises the `int8_convrot` capability — which the worker emits solely on the candle
@@ -1838,7 +1839,10 @@ export function ImageStudio() {
   // transient defaults-reset during the restart-restore/settle window can't be
   // persisted over the restored snapshot. When there are no models the studio shows
   // the availability gate (no editable form), so nothing meaningful is lost by waiting.
-  imageModels.length > 0);
+  // ALSO gated on ui-preferences hydration (sc-15425): before the GET lands the localStorage
+  // cache may be empty (a relaunched desktop app has a new origin), and persisting through it
+  // would overwrite the durable copy with catalog defaults before anything read it.
+  preferencesHydrated && imageModels.length > 0);
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to

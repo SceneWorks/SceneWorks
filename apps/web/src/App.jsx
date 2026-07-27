@@ -39,6 +39,7 @@ import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
+import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -523,6 +524,10 @@ export function App() {
   const [activeProject, setActiveProject] = useState(null);
   const [activeView, setActiveView] = useState("Library");
   const [navigationHydrated, setNavigationHydrated] = useState(false);
+  // Bumped when the durable studio snapshot is seeded into the localStorage cache (sc-15425).
+  // Part of the kept-alive studios' React key, so a studio that mounted before the seed landed
+  // remounts and re-reads it. See the seed call in the ui-preferences effect.
+  const [studioRestoreEpoch, setStudioRestoreEpoch] = useState(0);
   const [simpleActiveScreen, setSimpleActiveScreen] = useState("image");
   // Selective lazy keep-alive (sc-11959): the set of keep-alive views the user has
   // visited at least once. A view mounts on first visit (activeView === view) and,
@@ -1362,6 +1367,17 @@ export function App() {
         // so it can't race the seed and restore an empty snapshot.
         if (prefs?.simpleStudio) {
           seedSimpleStudiosFromServer(prefs.simpleStudio);
+        }
+        // The advanced studios' equivalent (sc-15425). Seeded BEFORE `setActiveView` below, on
+        // purpose: restoring the view can mount a keep-alive studio in the same commit, and that
+        // studio reads `loadStudioSettings` synchronously at mount — so the cache has to already
+        // hold the durable copy or it would come up on defaults and never re-read.
+        if (prefs?.advancedStudio && seedStudioSettingsFromServer(prefs.advancedStudio) > 0) {
+          // Remount the kept-alive studios so a studio the user opened BEFORE this landed
+          // re-reads the now-seeded cache — being keep-alive, it never would on its own. Only
+          // when something was actually restored, so the common case (nothing stored yet)
+          // doesn't throw away what they typed while the GET was in flight.
+          setStudioRestoreEpoch((epoch) => epoch + 1);
         }
         const persistedView = prefs?.activeView;
         if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
@@ -3081,7 +3097,13 @@ export function App() {
     // drives the app-wide data-theme rather than a screen-local override.
     theme,
     changeTheme,
+    // Whether the durable ui-preferences GET has landed (sc-15425). The studios gate their
+    // settings WRITER on it: until it resolves the localStorage cache may be empty (a relaunched
+    // desktop app has a new origin), and persisting catalog defaults during that window would
+    // overwrite the stored snapshot before anything read it.
+    preferencesHydrated: navigationHydrated,
   }), [
+    navigationHydrated,
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
@@ -3326,25 +3348,25 @@ export function App() {
             "Use in Studio" injection still fires on an already-mounted studio. */}
         {keepAliveMounted("Image") ? (
           <KeepAlivePane active={activeView === "Image"}>
-            <ImageStudio key={activeProject?.id ?? "default"} />
+            <ImageStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
           </KeepAlivePane>
         ) : null}
 
         {keepAliveMounted("Video") ? (
           <KeepAlivePane active={activeView === "Video"}>
-            <VideoStudio key={activeProject?.id ?? "default"} />
+            <VideoStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
           </KeepAlivePane>
         ) : null}
 
         {keepAliveMounted("Audio") ? (
           <KeepAlivePane active={activeView === "Audio"}>
-            <AudioStudio key={activeProject?.id ?? "default"} />
+            <AudioStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
           </KeepAlivePane>
         ) : null}
 
         {keepAliveMounted("Characters") ? (
           <KeepAlivePane active={activeView === "Characters"}>
-            <CharacterStudio key={activeProject?.id ?? "default"} />
+            <CharacterStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
           </KeepAlivePane>
         ) : null}
 
@@ -3394,6 +3416,12 @@ export function App() {
 
         {keepAliveMounted("Editor") ? (
           <KeepAlivePane active={activeView === "Editor"}>
+            {/* Deliberately NOT keyed on the studio restore epoch (sc-15425), unlike the four
+                studios. The Editor holds timeline edit state and live scratch-op claims
+                (registerEditorScratchClaim), so remounting it to recover its `editor-video`
+                generation settings would risk discarding real editing work and leaking a claim —
+                a far worse trade than the settings it would recover. It picks up a restored
+                snapshot on its next mount instead. */}
             <EditorScreen />
           </KeepAlivePane>
         ) : null}

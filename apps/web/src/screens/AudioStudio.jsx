@@ -222,6 +222,7 @@ export function AudioStudio() {
     savedVoices = [],
     createSavedVoice,
     deleteSavedVoice,
+    preferencesHydrated,
   } = useAppContext();
 
   // Last-used settings for this workspace, restored on mount. The component is keyed by workspace in
@@ -615,7 +616,8 @@ export function AudioStudio() {
       matchStrength,
       advancedOpen,
     },
-    audioModels.length > 0,
+    // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
+    preferencesHydrated && audioModels.length > 0,
   );
 
   // A human-readable capability summary so the capability-driven nature of the settings is visible
