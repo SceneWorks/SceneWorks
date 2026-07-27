@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, Transaction};
+use rusqlite::{
+    params, params_from_iter, Connection, ErrorCode, OptionalExtension, Transaction,
+    TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
@@ -72,6 +75,51 @@ const RESERVED_CATALOG_METADATA_KEYS: &[&str] = &[
 ];
 
 pub type CatalogResult<T> = Result<T, CatalogError>;
+
+#[cfg(test)]
+thread_local! {
+    static CURATION_BACKFILL_BEFORE_WRITE_TX_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    static CURATION_BACKFILL_AFTER_SOURCE_READ_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_curation_backfill_test_hooks(
+    before_write_tx: impl FnOnce() + 'static,
+    after_source_read: impl FnOnce() + 'static,
+) {
+    CURATION_BACKFILL_BEFORE_WRITE_TX_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(before_write_tx));
+    });
+    CURATION_BACKFILL_AFTER_SOURCE_READ_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(after_source_read));
+    });
+}
+
+#[cfg(test)]
+fn run_curation_backfill_before_write_tx_hook() {
+    CURATION_BACKFILL_BEFORE_WRITE_TX_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_curation_backfill_before_write_tx_hook() {}
+
+#[cfg(test)]
+fn run_curation_backfill_after_source_read_hook() {
+    CURATION_BACKFILL_AFTER_SOURCE_READ_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_curation_backfill_after_source_read_hook() {}
 
 #[derive(Debug)]
 pub enum CatalogError {
@@ -3261,19 +3309,40 @@ fn backfill_curation_projection(
     if complete.as_deref() == Some("true") {
         return Ok(());
     }
-    let mut checkpoint = connection
-        .query_row(
-            "select value from catalog_metadata where key = ?1",
-            [CURATION_PROJECTION_CHECKPOINT_METADATA_KEY],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(database_path, error))?
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or_default();
     loop {
+        // Serialize incomplete migrations before taking the record snapshot.
+        // This prevents another opener from advancing the checkpoint while
+        // this batch is being projected and prevents record upserts from
+        // committing between the source read and projection write.
+        run_curation_backfill_before_write_tx_hook();
+        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        let complete: Option<String> = transaction
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [CURATION_PROJECTION_COMPLETE_METADATA_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        if complete.as_deref() == Some("true") {
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(database_path, error))?;
+            return Ok(());
+        }
+        let checkpoint = transaction
+            .query_row(
+                "select value from catalog_metadata where key = ?1",
+                [CURATION_PROJECTION_CHECKPOINT_METADATA_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(database_path, error))?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or_default();
         let batch = {
-            let mut statement = connection
+            let mut statement = transaction
                 .prepare(
                     "select rowid, id, image_path, thumbnail_path, embedding_path,
                             artifact_path, metadata_json
@@ -3308,9 +3377,7 @@ fn backfill_curation_projection(
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
                 .map_err(|error| map_sqlite_error(database_path, error))?
         };
-        let transaction = connection
-            .unchecked_transaction()
-            .map_err(|error| map_sqlite_error(database_path, error))?;
+        run_curation_backfill_after_source_read_hook();
         if batch.is_empty() {
             transaction
                 .execute(
@@ -3335,7 +3402,7 @@ fn backfill_curation_projection(
             database_path,
             batch.iter().map(|(rowid, record)| (*rowid, record)),
         )?;
-        checkpoint = batch.last().map(|(rowid, _)| *rowid).unwrap_or(checkpoint);
+        let checkpoint = batch.last().map(|(rowid, _)| *rowid).unwrap_or(checkpoint);
         transaction
             .execute(
                 "insert into catalog_metadata(key, value) values (?1, ?2)
@@ -4589,6 +4656,191 @@ mod tests {
         let reopened = Catalog::open(&root).expect("completed migration is read-compatible");
         reopened.close();
         writer.execute_batch("rollback;").unwrap();
+    }
+
+    #[test]
+    fn concurrent_curation_migrations_serialize_checkpointed_batches() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Concurrent migration").unwrap();
+        let records = (0..1_005)
+            .map(|index| {
+                curation_record(
+                    &format!("record-{index:04}"),
+                    &format!("Concurrent record {index}"),
+                    &format!("sha256:{index}"),
+                    &format!("dhash64:{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        catalog.append_records(&records).unwrap();
+        catalog.close();
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let raw = Connection::open(&database_path).unwrap();
+        raw.execute(
+            "delete from catalog_metadata where key in (?1, ?2)",
+            params![
+                CURATION_PROJECTION_CHECKPOINT_METADATA_KEY,
+                CURATION_PROJECTION_COMPLETE_METADATA_KEY
+            ],
+        )
+        .unwrap();
+        raw.execute_batch(
+            "delete from catalog_record_search;
+             delete from catalog_record_fts;",
+        )
+        .unwrap();
+        drop(raw);
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles = (0..3)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Catalog::open(root).expect("concurrent migration opens")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap().close();
+        }
+
+        let raw = Connection::open(&database_path).unwrap();
+        let projected: u64 = raw
+            .query_row("select count(*) from catalog_record_search", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let searchable: u64 = raw
+            .query_row("select count(*) from catalog_record_fts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(projected, records.len() as u64);
+        assert_eq!(searchable, records.len() as u64);
+        assert_eq!(
+            raw.query_row(
+                "select value from catalog_metadata where key = ?1",
+                [CURATION_PROJECTION_COMPLETE_METADATA_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "true"
+        );
+        assert!(
+            raw.query_row(
+                "select value from catalog_metadata where key = ?1",
+                [CURATION_PROJECTION_CHECKPOINT_METADATA_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+            .is_none(),
+            "completed migration removes its checkpoint"
+        );
+    }
+
+    #[test]
+    fn curation_migration_cannot_overwrite_a_racing_record_update_with_stale_projection() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        let mut catalog = Catalog::create(&root, "Racing update").unwrap();
+        let original = curation_record(
+            "racing-record",
+            "old_race_caption",
+            "sha256:racing",
+            "dhash64:racing",
+        );
+        catalog.append_records(&[original]).unwrap();
+        catalog.close();
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let writer = Connection::open(&database_path).unwrap();
+        writer
+            .execute(
+                "delete from catalog_metadata where key in (?1, ?2)",
+                params![
+                    CURATION_PROJECTION_CHECKPOINT_METADATA_KEY,
+                    CURATION_PROJECTION_COMPLETE_METADATA_KEY
+                ],
+            )
+            .unwrap();
+        writer
+            .execute_batch(
+                "delete from catalog_record_search;
+                 delete from catalog_record_fts;
+                 begin immediate;",
+            )
+            .unwrap();
+        let mut updated = curation_record(
+            "racing-record",
+            "fresh_race_suffix",
+            "sha256:racing",
+            "dhash64:racing",
+        );
+        updated.metadata["analysis"]["tagMembership"] = serde_json::json!({"fresh_race_tag": true});
+        writer
+            .execute(
+                "update catalog_records
+                 set metadata_json = ?1, updated_at = ?2
+                 where id = 'racing-record'",
+                params![serde_json::to_string(&updated.metadata).unwrap(), utc_now()],
+            )
+            .unwrap();
+
+        let (before_tx, before_rx) = std::sync::mpsc::channel();
+        let (allow_tx, allow_rx) = std::sync::mpsc::channel();
+        let (source_read_tx, source_read_rx) = std::sync::mpsc::channel();
+        let opener_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            set_curation_backfill_test_hooks(
+                move || {
+                    before_tx.send(()).unwrap();
+                    allow_rx.recv().unwrap();
+                },
+                move || source_read_tx.send(()).unwrap(),
+            );
+            Catalog::open(opener_root).expect("migration waits for racing update")
+        });
+        before_rx.recv().unwrap();
+        allow_tx.send(()).unwrap();
+        assert!(
+            matches!(
+                source_read_rx.recv_timeout(Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the source snapshot must wait until the active writer commits"
+        );
+        writer.execute_batch("commit;").unwrap();
+        source_read_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("source snapshot proceeds after the writer commits");
+        handle.join().unwrap().close();
+
+        let reopened = Catalog::open(&root).unwrap();
+        assert_eq!(
+            reopened
+                .search_records(&CatalogSearchRequest {
+                    limit: 10,
+                    text: "fresh_race_suffix fresh_race_tag".to_owned(),
+                    ..CatalogSearchRequest::default()
+                })
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        assert!(reopened
+            .search_records(&CatalogSearchRequest {
+                limit: 10,
+                text: "old_race_caption".to_owned(),
+                ..CatalogSearchRequest::default()
+            })
+            .unwrap()
+            .records
+            .is_empty());
     }
 
     #[test]
