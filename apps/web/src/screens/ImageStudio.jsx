@@ -4,6 +4,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import {
   buildTurboFinishPhases,
@@ -284,6 +285,7 @@ export function ImageStudio() {
     imageDescribe,
     createModelDownloadJob,
     createLoraDownloadJob,
+    createLoraImportJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -3104,6 +3106,13 @@ export function ImageStudio() {
               setLoraWeight={setLoraWeight}
               loraEmptyMessage={loraEmptyMessage}
               onUpdateLora={createLoraDownloadJob}
+              importPanel={(
+                <StudioLoraImportPanel
+                  activeProject={activeProject}
+                  createLoraImportJob={createLoraImportJob}
+                  models={models}
+                />
+              )}
             />
             {/* Style axis (sc-13135): the Style Catalog picker sits FIRST in this row, followed by the
                 model's Style presets — both are style controls, so they share one row instead of the

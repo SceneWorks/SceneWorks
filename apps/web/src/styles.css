@@ -7095,6 +7095,14 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: pointer;
 }
 
+/* The same import band embedded in a studio's Add-LoRA picker (studio-cleanup sc-15373). It sits
+   inside an already-padded panel, so it runs a notch tighter than the Model Manager copy. */
+.studio-lora-import {
+  gap: 11px;
+  padding: 13px;
+  border-radius: var(--r-md);
+}
+
 /* Full-width trigger-keyword + notes fields below the import grid (epic 10328). */
 .lora-import-metadata {
   display: grid;

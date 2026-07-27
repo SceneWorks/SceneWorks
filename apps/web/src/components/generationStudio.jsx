@@ -807,6 +807,10 @@ export function LoraPickerSection({
   loraEmptyMessage,
   onUpdateLora,
   showIncompatibleControl = false,
+  // Optional node appended to the open picker — the studios pass the in-place Import LoRA form
+  // (studio-cleanup sc-15373) so "no compatible LoRAs" has a fix right where it is reported. The
+  // editor rails omit it and keep a list-only picker.
+  importPanel = null,
 }) {
   // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
   // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
@@ -847,94 +851,95 @@ export function LoraPickerSection({
         </label>
       ) : null}
 
-      {!selectedLoras.length && !availableLoras.length ? (
-        <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-      ) : (
-        <>
-          {selectedLoras.length ? (
-            <div className="lora-stack">
-              {selectedLoras.map((lora) => {
-                const weight = effectiveLoraWeight(lora);
+      {selectedLoras.length ? (
+        <div className="lora-stack">
+          {selectedLoras.map((lora) => {
+            const weight = effectiveLoraWeight(lora);
+            return (
+              <div className="lora-slot" key={lora.id}>
+                <div className="lora-slot-head">
+                  <span className="lora-slot-meta">
+                    <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
+                    <small>{loraMeta(lora)}</small>
+                  </span>
+                  <button
+                    aria-label={`Remove ${lora.name ?? lora.id}`}
+                    className="lora-slot-remove"
+                    onClick={() => toggleLora(lora)}
+                    title="Remove"
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+                <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
+                <LoraKeywordSummary lora={lora} />
+                <div className="lora-slot-weight">
+                  <label>
+                    <span>Weight</span>
+                    <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
+                  </label>
+                  <input
+                    aria-label={`${lora.name ?? lora.id} weight`}
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
+                    onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                    step={LORA_WEIGHT_STEP}
+                    type="range"
+                    value={weight}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* Always enabled (studio-cleanup sc-15373): with nothing available the picker is exactly
+          where the user needs to be — it explains WHY the list is empty and (in the studios)
+          carries the import form that fixes it. Disabling it left a dead end. */}
+      <button
+        className="lora-add"
+        data-count={`· ${availableLoras.length} available`}
+        onClick={() => setPickerOpen((open) => !open)}
+        type="button"
+      >
+        <Icon.Plus size={15} />
+        <span>Add LoRA</span>
+      </button>
+
+      {pickerOpen ? (
+        <div className="lora-picker-panel">
+          {availableLoras.length ? (
+            <div className="lora-picker-list">
+              {availableLoras.map((lora) => {
+                const disabled = lora.scope !== "builtin" && atUserLimit;
                 return (
-                  <div className="lora-slot" key={lora.id}>
-                    <div className="lora-slot-head">
-                      <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
-                        <small>{loraMeta(lora)}</small>
-                      </span>
-                      <button
-                        aria-label={`Remove ${lora.name ?? lora.id}`}
-                        className="lora-slot-remove"
-                        onClick={() => toggleLora(lora)}
-                        title="Remove"
-                        type="button"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
-                    <LoraKeywordSummary lora={lora} />
-                    <div className="lora-slot-weight">
-                      <label>
-                        <span>Weight</span>
-                        <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
-                      </label>
-                      <input
-                        aria-label={`${lora.name ?? lora.id} weight`}
-                        max={LORA_WEIGHT_MAX}
-                        min={LORA_WEIGHT_MIN}
-                        onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                        step={LORA_WEIGHT_STEP}
-                        type="range"
-                        value={weight}
-                      />
-                    </div>
-                  </div>
+                  <button
+                    className="lora-pick-row"
+                    disabled={disabled}
+                    key={lora.id}
+                    onClick={() => {
+                      toggleLora(lora);
+                      setPickerOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <span className="lora-slot-meta">
+                      <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
+                      <small>{loraMeta(lora)}</small>
+                    </span>
+                    <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
+                  </button>
                 );
               })}
             </div>
-          ) : null}
-
-          <button
-            className="lora-add"
-            data-count={`· ${availableLoras.length} available`}
-            disabled={!availableLoras.length}
-            onClick={() => setPickerOpen((open) => !open)}
-            type="button"
-          >
-            <Icon.Plus size={15} />
-            <span>Add LoRA</span>
-          </button>
-
-          {pickerOpen && availableLoras.length ? (
-            <div className="lora-picker-panel">
-              <div className="lora-picker-list">
-                {availableLoras.map((lora) => {
-                  const disabled = lora.scope !== "builtin" && atUserLimit;
-                  return (
-                    <button
-                      className="lora-pick-row"
-                      disabled={disabled}
-                      key={lora.id}
-                      onClick={() => {
-                        toggleLora(lora);
-                        setPickerOpen(false);
-                      }}
-                      type="button"
-                    >
-                      <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
-                        <small>{loraMeta(lora)}</small>
-                      </span>
-                      <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
-        </>
-      )}
+          ) : (
+            <p className="lora-pick-empty">{loraEmptyMessage}</p>
+          )}
+          {importPanel}
+        </div>
+      ) : null}
     </section>
   );
 }

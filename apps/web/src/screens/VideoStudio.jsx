@@ -6,6 +6,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -122,6 +123,7 @@ export function VideoStudio() {
     refinePrompt,
     createModelDownloadJob,
     createLoraDownloadJob,
+    createLoraImportJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -1704,6 +1706,13 @@ export function VideoStudio() {
               setLoraWeight={setLoraWeight}
               loraEmptyMessage={loraEmptyMessage}
               onUpdateLora={createLoraDownloadJob}
+              importPanel={(
+                <StudioLoraImportPanel
+                  activeProject={activeProject}
+                  createLoraImportJob={createLoraImportJob}
+                  models={models}
+                />
+              )}
             />
             {/* Style axis (sc-13135): the Style Catalog picker leads this row (hidden for promptless
                 image-conditioned models and for booru-tag models), followed by the model's Style

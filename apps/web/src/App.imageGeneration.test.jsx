@@ -831,7 +831,16 @@ describe("SceneWorks app shell", () => {
     expect(loraPicker.textContent).not.toContain("Show incompatible");
     expect(loraPicker.textContent).not.toContain("Qwen Only");
     expect(loraPicker.querySelector('input[type="checkbox"]')).toBeNull();
-    expect(loraPicker.querySelector(".lora-add")).toBeNull();
+    // Add LoRA stays available with nothing compatible (sc-15373) — it opens the picker, which
+    // says WHY the list is empty and carries the in-place import form.
+    const addButton = loraPicker.querySelector(".lora-add");
+    expect(addButton).toBeTruthy();
+    expect(addButton.disabled).toBe(false);
+    expect(addButton.dataset.count).toBe("· 0 available");
+    await act(async () => addButton.click());
+    expect(loraPicker.querySelector(".lora-pick-row")).toBeNull();
+    expect(loraPicker.textContent).toContain("No installed LoRAs match");
+    expect(loraPicker.querySelector(".studio-lora-import")).toBeTruthy();
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
