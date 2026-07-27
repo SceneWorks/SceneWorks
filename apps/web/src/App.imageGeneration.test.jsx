@@ -1124,7 +1124,7 @@ describe("SceneWorks app shell", () => {
 
     // With no preset selected the guidance strip renders nothing (the visible controls
     // already describe the run); it only appears once a preset is active.
-    expect(document.body.querySelector(".guidance-strip")).toBeNull();
+    expect(document.body.querySelector(".style-axis-guidance")).toBeNull();
     expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {

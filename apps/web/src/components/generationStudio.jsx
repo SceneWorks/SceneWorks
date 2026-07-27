@@ -127,19 +127,27 @@ export function StyleAxisRow({
   generalStackIds,
   onToggleGeneral,
   noPresetValue,
+  // The "what this preset adds" line, rendered as the last row of this grid rather than a
+  // standalone card below the settings bar (studio-cleanup sc-15371).
+  presetPromptParts = [],
+  presetLoraDetails = [],
 }) {
   return (
     <>
-      <div className="settings-bar-styles settings-bar-style-axis">
+      <div
+        className={`settings-bar-styles settings-bar-style-axis${available ? "" : " settings-bar-style-axis-single"}`}
+      >
         {available ? (
           <div className="style-axis-field style-axis-catalog">
             <span className="settings-bar-label">Style</span>
-            <StylePicker groups={groups} selectedId={styleId} onSelect={onStyleChange} label="Style" />
+            <div className="style-axis-control">
+              <StylePicker groups={groups} selectedId={styleId} onSelect={onStyleChange} label="Style" />
+            </div>
           </div>
         ) : null}
         <div className="style-axis-field style-axis-presets">
           <span className="settings-bar-label">Style preset</span>
-          <div className="preset-chips">
+          <div className="style-axis-control preset-chips">
             <button className={!selectedPreset ? "preset-chip active" : "preset-chip"} onClick={() => onPresetChange(noPresetValue)} type="button">None</button>
             {presets.map((preset) => (
               <button className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"} key={preset.id} onClick={() => onPresetChange(preset.id)} type="button">
@@ -148,6 +156,11 @@ export function StyleAxisRow({
             ))}
           </div>
         </div>
+        <PresetGuidanceStrip
+          presetLoraDetails={presetLoraDetails}
+          presetPromptParts={presetPromptParts}
+          selectedPreset={selectedPreset}
+        />
       </div>
       {generalPresets.length ? (
         <div className="settings-bar-styles">
@@ -1040,7 +1053,9 @@ export function PresetStackPreview({ generalStack, composed, stackAddsNegative, 
   );
 }
 
-// The "what this preset adds" strip shown under the preset picker in both studios.
+// The "what this preset adds" strip shown under the preset picker in both studios. It is the last
+// row of the style-axis grid (studio-cleanup sc-15371), not a card of its own — hence
+// `.style-axis-guidance` rather than the bordered `.guidance-strip`.
 export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails }) {
   // Nothing to say when no preset is active — the visible controls already describe the run.
   if (!selectedPreset) {
@@ -1051,7 +1066,7 @@ export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetL
   // they aren't installed, so the user knows to import them before the preset fully applies.
   const missingLoras = presetLoraDetails.filter((lora) => lora.missing);
   return (
-    <div className="guidance-strip">
+    <div className="style-axis-guidance">
       <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
       <span>
         {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}

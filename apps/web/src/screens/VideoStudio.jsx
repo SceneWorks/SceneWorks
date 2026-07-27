@@ -47,7 +47,6 @@ import {
 import {
   LoraPickerSection,
   onPromptKeyDown,
-  PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
   ModeTabs,
@@ -1722,6 +1721,8 @@ export function VideoStudio() {
               generalStackIds={generalStackIds}
               onToggleGeneral={toggleGeneralPreset}
               noPresetValue={noPresetId}
+              presetPromptParts={presetPromptParts}
+              presetLoraDetails={presetLoraDetails}
             />
           </div>
 
@@ -1729,12 +1730,6 @@ export function VideoStudio() {
               from the same base the submit uses so it can never drift. Sits under the Style axis row.
               Hidden when no style applies. */}
           <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
-
-          <PresetGuidanceStrip
-            selectedPreset={selectedPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-          />
 
           {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
               panel is captioned "Prompt sent" and exists so the user sees exactly what will be

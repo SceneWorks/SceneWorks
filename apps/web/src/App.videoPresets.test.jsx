@@ -517,7 +517,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // No preset selected → no guidance strip (it only appears when a preset is active).
-    expect(document.body.querySelector(".guidance-strip")).toBeNull();
+    expect(document.body.querySelector(".style-axis-guidance")).toBeNull();
     expect(container.textContent).not.toContain("LTX Story");
   });
 

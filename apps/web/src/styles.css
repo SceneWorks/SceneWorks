@@ -2801,27 +2801,60 @@ label {
 }
 
 /* Style axis row (sc-13135): the Style Catalog picker and the model's Style presets share one row —
-   catalog first, presets filling the remaining width and wrapping under it on narrow viewports. */
+   catalog first, presets filling the remaining width. A GRID rather than a flex row
+   (studio-cleanup sc-15371) so the two columns' eyebrows and controls line up instead of sitting
+   at whatever offset their differing control heights produce. The preset-description row spans
+   both columns at the bottom. */
 .settings-bar-style-axis {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(240px, auto) minmax(0, 1fr);
   gap: 16px 20px;
-  align-items: flex-start;
+  align-items: start;
+}
+
+/* No Style Catalog for this model — the presets column takes the whole width. */
+.settings-bar-style-axis-single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .style-axis-field {
   display: grid;
   gap: 7px;
   align-content: start;
-}
-
-.style-axis-catalog {
-  flex: 0 0 auto;
-}
-
-.style-axis-presets {
-  flex: 1 1 240px;
   min-width: 0;
+}
+
+/* One shared control-row height so the pill and the chip row bottom out together. */
+.style-axis-control {
+  min-height: 44px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* The preset description: the grid's last row, a hairline under the two columns rather than a
+   floating bordered card between the settings bar and Advanced. */
+.style-axis-guidance {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.style-axis-guidance strong {
+  font-weight: 600;
+}
+
+.style-axis-guidance span {
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .settings-bar-style-axis {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .refine-control {

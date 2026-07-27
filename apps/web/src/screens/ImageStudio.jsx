@@ -112,7 +112,6 @@ import {
 import {
   LoraPickerSection,
   onPromptKeyDown,
-  PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
   ModeTabs,
@@ -3124,6 +3123,8 @@ export function ImageStudio() {
               generalStackIds={generalStackIds}
               onToggleGeneral={toggleGeneralPreset}
               noPresetValue={noPresetId}
+              presetPromptParts={presetPromptParts}
+              presetLoraDetails={presetLoraDetails}
             />
           </div>
 
@@ -3134,12 +3135,6 @@ export function ImageStudio() {
           <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
-
-          <PresetGuidanceStrip
-            selectedPreset={selectedPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-          />
 
           <PresetStackPreview
             generalStack={generalStack}
