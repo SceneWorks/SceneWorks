@@ -4080,8 +4080,11 @@ mod model_size_concurrency_tests {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
             .expect("builtin manifest parses");
+        // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
+        // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
+        // from 81 to 82.
         for (os, expected_distinct_contexts) in
-            [("macos", 81_usize), ("windows", 80), ("linux", 80)]
+            [("macos", 82_usize), ("windows", 80), ("linux", 80)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

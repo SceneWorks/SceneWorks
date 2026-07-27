@@ -2079,11 +2079,23 @@ pub const MAX_JOB_LORAS: usize = 5;
 /// as `flux2`, so a klein model must accept `flux2` LoRAs. FLUX.2-dev's family is
 /// `flux2-dev` (a separate model — Mistral3 TE + 48/48 DiT) but it shares the FLUX.2
 /// transformer layout, so dev LoRAs are likewise detected/declared as `flux2` (epic 5914;
-/// dev LoRA application is validated in sc-5920).
+/// dev LoRA application is validated in sc-5920). Krea Realtime 14B's model family is
+/// `krea-realtime`, but its checkpoint IS Wan 2.1 T2V 14B weight-for-weight — same 40 blocks, same
+/// `blocks.{i}.self_attn.{q,k,v,o}` / `ffn` target names — so Wan-family LoRAs install on it
+/// (sc-15015 wired the dense forward-time residual path in `mlx-gen-krea-realtime`, and it is
+/// tier-agnostic over the packed Q4/Q8 bases). Declaring it HERE rather than putting `wan-video` in
+/// the model's own `loraCompatibility.families` is deliberate: family membership is read by every
+/// other family-keyed gate too (training bases, repo/tier resolution), and Krea Realtime is not a
+/// Wan model for any of those. The relation is one-directional in the usual way — a Wan LoRA loads
+/// on Krea Realtime, and a Krea-Realtime checkpoint detected by tensor keys reports the base
+/// `wan-video` (there is no krea-specific signature), which is exactly what
+/// [`detected_base_architecture_satisfies_declared`] needs; a Krea-Realtime LoRA is not thereby
+/// declared loadable on a Wan model.
 fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static str] {
     match normalized_family {
         "chroma" => &["flux"],
         "flux2-klein" | "flux2-dev" => &["flux2"],
+        "krea-realtime" => &["wan-video"],
         _ => &[],
     }
 }
@@ -4693,6 +4705,44 @@ mod tests {
             vec!["flux2-klein".to_owned(), "flux2".to_owned()]
         );
         assert!(accepted_lora_families("").is_empty());
+    }
+
+    /// sc-8444 (epic 8431): Krea Realtime 14B declares its OWN `krea-realtime` family in the
+    /// catalog, and picks up Wan-family LoRAs through the extra-compatible registry rather than by
+    /// joining the Wan family. Both halves are asserted, and both DISCRIMINATE:
+    /// * the accepted set must be exactly `[krea-realtime, wan-video]` — dropping the registry
+    ///   entry leaves `[krea-realtime]` (a real Wan LoRA then gets pre-flight rejected), and
+    ///   declaring `wan-video` as the model's own family instead would make the FIRST element
+    ///   `wan-video`, which this pins against;
+    /// * the relation stays one-directional — a Wan model must NOT thereby accept a
+    ///   `krea-realtime` LoRA, which is what a symmetric edit to the registry would produce.
+    #[test]
+    fn krea_realtime_accepts_wan_loras_one_directionally() {
+        assert_eq!(
+            accepted_lora_families("krea-realtime"),
+            vec!["krea-realtime".to_owned(), "wan-video".to_owned()]
+        );
+        // The manifest spells the family with a hyphen; the underscore spelling normalizes to the
+        // same token, so the registry hit does not depend on which spelling reaches it.
+        assert_eq!(
+            accepted_lora_families("krea_realtime"),
+            accepted_lora_families("krea-realtime")
+        );
+        // Not symmetric: a Wan model accepts only Wan LoRAs.
+        assert_eq!(
+            accepted_lora_families("wan-video"),
+            vec!["wan-video".to_owned()]
+        );
+        // Distinct from the Krea 2 IMAGE family — same vendor, unrelated architecture.
+        assert_eq!(accepted_lora_families("krea_2"), vec!["krea-2".to_owned()]);
+        // And a real Wan LoRA passes the pre-flight on a Krea Realtime job.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "a", "family": "wan-video" })],
+            Some("krea-realtime"),
+            "krea_realtime",
+            Some("krea_realtime_14b"),
+        )
+        .is_ok());
     }
 
     #[test]

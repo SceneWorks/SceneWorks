@@ -1319,4 +1319,218 @@ mod tests {
             );
         }
     }
+
+    /// sc-8444 (epic 8431) — Krea Realtime 14B's three download tiers must describe the REAL
+    /// `SceneWorks/krea-realtime-14b-mlx` layout, file for file and byte for byte.
+    ///
+    /// The expectation below is the remote tree as published (read off the HF tree API at authoring
+    /// time), transcribed here rather than derived from the manifest — that independence is what
+    /// makes this a check instead of a tautology.
+    ///
+    /// Two failures it exists to catch, both of which produce a SILENT bad install rather than an
+    /// error:
+    ///
+    /// 1. **The bf16 DiT is one level deeper** (`bf16/transformer/dit-0000N-of-00007`) while q4/q8
+    ///    keep a flat `dit.safetensors`. A `files: ["bf16/*"]` glob would still DOWNLOAD those
+    ///    shards — the worker's `pattern_matches` uses the Rust `glob` crate with default
+    ///    `MatchOptions`, where `*` crosses `/` (`scripts/check-download-patterns.mjs` documents the
+    ///    same semantics) — but rust-api's cache health (`snapshot_contains_pattern`) treats a glob
+    ///    as satisfied by ANY single matching file, and this repo ships no `model_index.json`, so
+    ///    the per-component augmentation is a no-op for it. A tier that lost six of its seven shards
+    ///    would read `installed` and then die at load. Explicit paths make each file its own
+    ///    presence check, so this pins that they stay explicit AND complete.
+    /// 2. **`estimatedSizeBytes` must be the tier's real total.** It drives the pre-download size
+    ///    the user is shown and the free-space check, and nothing else verifies it.
+    #[test]
+    fn krea_realtime_tiers_match_the_published_rehost_layout() {
+        // The dense companions repeat per tier by design (each tier dir is a self-contained
+        // `from_snapshot` tree) and are byte-identical across all three.
+        const T5: (&str, u64) = ("t5_encoder.safetensors", 11_361_845_504);
+        const VAE: (&str, u64) = ("vae.safetensors", 507_591_212);
+        const TOKENIZER: (&str, u64) = ("tokenizer.json", 16_837_417);
+        // The 7 sharded bf16 DiT parts, in order.
+        const BF16_DIT_SHARDS: [u64; 7] = [
+            4_269_218_524,
+            4_269_187_488,
+            4_269_187_543,
+            4_269_204_920,
+            4_216_748_302,
+            4_216_748_199,
+            3_066_800_251,
+        ];
+
+        let packed_tier = |dit_bytes: u64| {
+            vec![
+                ("config.json".to_owned(), 1_557_u64),
+                ("dit.safetensors".to_owned(), dit_bytes),
+                (T5.0.to_owned(), T5.1),
+                (TOKENIZER.0.to_owned(), TOKENIZER.1),
+                (VAE.0.to_owned(), VAE.1),
+            ]
+        };
+        let bf16_tier = {
+            let mut files = vec![
+                ("config.json".to_owned(), 1_496_u64),
+                (T5.0.to_owned(), T5.1),
+                (TOKENIZER.0.to_owned(), TOKENIZER.1),
+                (VAE.0.to_owned(), VAE.1),
+            ];
+            for (index, bytes) in BF16_DIT_SHARDS.into_iter().enumerate() {
+                files.push((
+                    format!("transformer/dit-0000{}-of-00007.safetensors", index + 1),
+                    bytes,
+                ));
+            }
+            files
+        };
+        /// One published tier: its variant key, whether it is the default install tier, and its
+        /// `(path-within-tier, bytes)` contents.
+        struct Tier {
+            variant: &'static str,
+            is_default: bool,
+            files: Vec<(String, u64)>,
+        }
+        let tiers = [
+            Tier {
+                variant: "q4",
+                is_default: true,
+                files: packed_tier(8_378_982_809),
+            },
+            Tier {
+                variant: "q8",
+                is_default: false,
+                files: packed_tier(15_404_443_762),
+            },
+            Tier {
+                variant: "bf16",
+                is_default: false,
+                files: bf16_tier,
+            },
+        ];
+
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_realtime_14b"))
+            .expect("krea_realtime_14b present in the builtin models catalog");
+
+        assert_eq!(model["type"].as_str(), Some("video"));
+        assert_eq!(
+            model["family"].as_str(),
+            Some("krea-realtime"),
+            "its OWN family — not wan-video; the Wan-LoRA relation lives in \
+             extra_compatible_lora_families instead (sc-8444)"
+        );
+        assert_eq!(
+            model["loraCompatibility"]["families"],
+            serde_json::json!(["krea-realtime"])
+        );
+
+        let downloads = model["downloads"].as_array().expect("downloads array");
+        assert_eq!(
+            downloads.len(),
+            3,
+            "exactly the three shipped tiers — no co-requisites, every tier is self-contained"
+        );
+
+        for tier in &tiers {
+            let (variant, is_default, expected_files) =
+                (tier.variant, tier.is_default, &tier.files);
+            let entry = downloads
+                .iter()
+                .find(|d| d["variant"].as_str() == Some(variant))
+                .unwrap_or_else(|| panic!("krea_realtime_14b declares a {variant} tier"));
+
+            assert_eq!(entry["provider"].as_str(), Some("huggingface"));
+            assert_eq!(
+                entry["repo"].as_str(),
+                Some("SceneWorks/krea-realtime-14b-mlx"),
+                "{variant}: all tiers come from the one turnkey repo"
+            );
+            assert_eq!(
+                entry["revision"].as_str(),
+                Some("e68e9a3d98187fdf6936838ffcf6df5aa48d6626"),
+                "{variant}: pinned to the published immutable commit"
+            );
+            assert_eq!(
+                entry["platforms"],
+                serde_json::json!(["macos"]),
+                "{variant}: macOS-only — there is no candle Krea Realtime engine"
+            );
+            assert_eq!(
+                entry["default"].as_bool() == Some(true),
+                is_default,
+                "{variant}: exactly q4 is the default install tier"
+            );
+
+            let mut declared: Vec<&str> = entry["files"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{variant} declares a files list"))
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            // Explicit paths, never a glob: a glob is satisfied by one surviving file in the
+            // cache-health check, which is how a torn no-`model_index` tier reads `installed`.
+            for pattern in &declared {
+                assert!(
+                    !pattern.contains(['*', '?', '[', ']']),
+                    "{variant}: `{pattern}` is a glob — declare explicit paths so every file is \
+                     its own presence check and its own download-time claim (sc-12283)"
+                );
+            }
+            let mut want: Vec<String> = expected_files
+                .iter()
+                .map(|(name, _)| format!("{variant}/{name}"))
+                .collect();
+            declared.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(
+                declared,
+                want.iter().map(String::as_str).collect::<Vec<_>>(),
+                "{variant}: declared files must be exactly the published tier contents — in \
+                 particular every one of bf16's seven `transformer/` DiT shards"
+            );
+
+            let total: u64 = expected_files.iter().map(|(_, bytes)| bytes).sum();
+            assert_eq!(
+                entry["estimatedSizeBytes"].as_u64(),
+                Some(total),
+                "{variant}: estimatedSizeBytes must be the tier's real byte total"
+            );
+            assert_eq!(
+                entry["footprint"]["diskSizeBytes"].as_u64(),
+                Some(total),
+                "{variant}: footprint.diskSizeBytes must agree with estimatedSizeBytes"
+            );
+            // Memory footprints are MEASURED (sc-8516 / sc-8446); a derived guess must not be
+            // parked here, where the RAM-suggestion surface would read it as a measurement.
+            assert!(
+                entry["footprint"]["residentMemoryBytes"].is_null()
+                    && entry["footprint"]["peakMemoryBytes"].is_null(),
+                "{variant}: memory footprints stay null until measured on-device (sc-8446)"
+            );
+        }
+
+        // The three tiers own DISJOINT file sets, so a per-tier delete reclaims that tier's bytes.
+        assert_ne!(downloads[0]["files"], downloads[1]["files"]);
+        assert_ne!(downloads[0]["files"], downloads[2]["files"]);
+        assert_ne!(downloads[1]["files"], downloads[2]["files"]);
+
+        // The turnkey repo is named consistently across the surfaces the worker resolves.
+        assert_eq!(
+            model["mlx"]["repo"].as_str(),
+            Some("SceneWorks/krea-realtime-14b-mlx")
+        );
+        assert_eq!(
+            model["paths"]["model"].as_str(),
+            Some("${HF_CACHE}/SceneWorks/krea-realtime-14b-mlx")
+        );
+        // Q4 is the declared default tier for this dense 14B video engine (sc-10750), matching the
+        // `default: true` download above. (The video lane does not READ this key yet — sc-15258.)
+        assert_eq!(model["mlx"]["quantize"].as_u64(), Some(4));
+    }
 }

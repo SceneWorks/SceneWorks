@@ -60,6 +60,7 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
     "wan_2_2_vace_fun_14b",
     "bernini",
     "scail2_14b",
+    "krea_realtime_14b",
 ];
 
 /// The pinned engine area cap a video model's `limits.maxPixels` must equal. Derived from the
@@ -73,6 +74,12 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
 ///   genuinely lower budget than the 14B family's).
 /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` have no `maxPixels`-expressible area cap in
 ///   either backend, so the manifest must NOT invent one — expected `None` (key absent).
+/// * `krea_realtime_14b` is a Wan-2.1-14B derivative but is deliberately NOT in the
+///   [`MAX_AREA_14B`] group: `mlx-gen-krea-realtime` imports no `MAX_AREA_*` and has no
+///   `reject_over_area`, and gen-core's `validate_request` carries no area term — only the
+///   descriptor's per-EDGE `max_size: 1280`. Sharing the backbone is not sharing the check, so it
+///   is `None` (key absent) like ltx/svd. This is the axis where "inherit the family's cap"
+///   would have been wrong.
 ///
 /// An unmapped id panics: adding a video model is a deliberate act that must derive its own cap
 /// from its engine, never inherit one by default.
@@ -84,7 +91,7 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
         | "bernini"
         | "scail2_14b" => Some(MAX_AREA_14B as u64),
         "wan_2_2" => Some(MAX_AREA_5B as u64),
-        "ltx_2_3" | "ltx_2_3_eros" | "svd" => None,
+        "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => None,
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
              MAX_AREA_* from that model's engine `config.rs` and add it to \
@@ -102,6 +109,16 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
 /// through their own engine, and `bernini` through a Wan2.2-T2V-A14B snapshot (patch 2 × vae 8).
 /// `scail2_14b` and the 5B declare no stride (their `None` means "engine stride == core's default
 /// floor"), and ltx / svd / mochi live in other engine crates — all deferred to sc-12587.
+///
+/// **`krea_realtime_14b` (epic 8431 / sc-8444) is deliberately NOT tied here**, even though it
+/// renders on the same ÷16 lattice and its manifest declares 16. The tie would be a FICTION: the
+/// value coincides with `SIZE_MULTIPLE_14B`, but it is not sourced from it. `mlx-gen-krea-realtime`
+/// imports no `SIZE_MULTIPLE_*` — it hardcodes its own `const SPATIAL_STRIDE: usize = 8` (`t2v.rs`)
+/// and takes the patch from `cfg.wan.patch_size`. So a change to *krea's* stride would NOT go red
+/// here (the guard would still be reading wan's const), while a change to *wan's* const WOULD go red
+/// spuriously on a model that never consulted it — a guard wrong in both directions is worse than
+/// none. It therefore joins the ltx / svd / mochi "engine lives in another crate" group and stays
+/// covered by `ENGINE_GEOMETRY`'s literal until sc-12587 extends the pinned tie to those crates.
 fn pinned_stride(id: &str) -> Option<u64> {
     match id {
         "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "wan_2_2_vace_fun_14b" | "bernini" => {
