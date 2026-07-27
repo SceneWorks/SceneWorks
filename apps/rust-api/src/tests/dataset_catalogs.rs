@@ -539,6 +539,21 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_response}");
     assert_eq!(invalid_response["code"], "catalog_invalid");
 
+    let mut missing_structured_gate = settings.clone();
+    missing_structured_gate["structuredAnalysisEnabled"] = json!(false);
+    let (status, invalid_response) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({
+            "expectedRevision": 1,
+            "settings": missing_structured_gate
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_response}");
+    assert_eq!(invalid_response["code"], "catalog_invalid");
+
     let (_, persisted) = request(
         app,
         "GET",
@@ -548,6 +563,74 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
     .await;
     assert_eq!(persisted["analyzerConfig"]["revision"], 1);
     assert_eq!(persisted["analyzerConfig"]["settings"], settings);
+}
+
+#[tokio::test]
+async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_paths() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Semantic catalog",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({
+            "expectedAnalyzerConfigRevision": 0,
+            "requestedGpu": "gpu-1",
+            "batchSize": 8
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "catalog_analysis");
+    assert_eq!(job["requestedGpu"], "gpu-1");
+    assert_eq!(job["payload"]["catalogId"], id);
+    assert_eq!(job["payload"]["analyzerConfigRevision"], 0);
+    assert_eq!(job["payload"]["batchSize"], 8);
+    assert!(
+        job["payload"].get("catalogRoot").is_none() && job["payload"].get("path").is_none(),
+        "the worker must resolve catalog identity only through the attached registry"
+    );
+
+    let (status, stale) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({
+            "expectedAnalyzerConfigRevision": 99,
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+    let (status, raw) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "catalog_analysis",
+            "payload": {
+                "catalogId": id,
+                "catalogRoot": temporary.path().join("attacker-controlled")
+            },
+            "requestedGpu": "gpu-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
 }
 
 #[tokio::test]

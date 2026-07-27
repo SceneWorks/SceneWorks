@@ -1049,6 +1049,12 @@ fn registry_capabilities_from(
     if native_prompt_refine {
         push(Cap::PromptRefine, &mut caps);
     }
+    // Catalog analysis needs both production inference seams: the constrained
+    // Qwen JSON lane and the CLIP image embedder. Never advertise a partial
+    // pipeline that would claim the job and fail after structured filtering.
+    if native_prompt_refine && has_clip_image {
+        push(Cap::CatalogAnalysis, &mut caps);
+    }
     caps
 }
 

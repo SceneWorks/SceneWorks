@@ -424,7 +424,7 @@ pub struct CatalogAnalysisReport {
 }
 
 struct CatalogAnalysisLease {
-    _processing: CatalogProcessingLease,
+    _processing: Option<CatalogProcessingLease>,
     _files: Vec<File>,
 }
 
@@ -438,6 +438,21 @@ impl CatalogAnalysisLease {
                 )),
                 error => CatalogAnalysisError::Catalog(error),
             })?;
+        Self::acquire_with_processing(catalog, Some(processing))
+    }
+
+    #[allow(dead_code)]
+    fn acquire_under_processing_lease(
+        catalog: &Catalog,
+        _processing: &CatalogProcessingLease,
+    ) -> CatalogAnalysisResult<Self> {
+        Self::acquire_with_processing(catalog, None)
+    }
+
+    fn acquire_with_processing(
+        catalog: &Catalog,
+        processing: Option<CatalogProcessingLease>,
+    ) -> CatalogAnalysisResult<Self> {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
@@ -482,9 +497,37 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
     config: &CatalogAnalysisConfig,
     analyzers: &mut A,
 ) -> CatalogAnalysisResult<CatalogAnalysisReport> {
+    analyze_attached_catalog_with_lease(registry, catalog_id, config, analyzers, None)
+}
+
+/// Pipeline-only sibling that keeps the caller's shared processing lease alive
+/// across fetch, structured analysis, and survivor-only semantic analysis.
+#[allow(dead_code)]
+pub(crate) fn analyze_attached_catalog_under_processing_lease<A: CatalogAnalyzers>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    config: &CatalogAnalysisConfig,
+    analyzers: &mut A,
+    processing: &CatalogProcessingLease,
+) -> CatalogAnalysisResult<CatalogAnalysisReport> {
+    analyze_attached_catalog_with_lease(registry, catalog_id, config, analyzers, Some(processing))
+}
+
+fn analyze_attached_catalog_with_lease<A: CatalogAnalyzers>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    config: &CatalogAnalysisConfig,
+    analyzers: &mut A,
+    processing: Option<&CatalogProcessingLease>,
+) -> CatalogAnalysisResult<CatalogAnalysisReport> {
     validate_config(config)?;
     let mut catalog = registry.open_attached(catalog_id)?;
-    let _lease = CatalogAnalysisLease::acquire(&catalog)?;
+    let _lease = match processing {
+        Some(processing) => {
+            CatalogAnalysisLease::acquire_under_processing_lease(&catalog, processing)?
+        }
+        None => CatalogAnalysisLease::acquire(&catalog)?,
+    };
     let mut report = CatalogAnalysisReport::default();
     let mut cursor = None;
 

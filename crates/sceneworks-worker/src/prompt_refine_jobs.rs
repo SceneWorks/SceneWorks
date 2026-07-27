@@ -731,7 +731,7 @@ fn downscale_to_pixel_budget(image: image::DynamicImage, max_pixels: u64) -> ima
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
+pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
     let decoded = crate::image_decode::decode_image_any(path).map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "image-caption reference image {}: {error}",
