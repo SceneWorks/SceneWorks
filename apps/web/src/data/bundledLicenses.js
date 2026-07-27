@@ -98,6 +98,10 @@ import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/A
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
 import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?raw";
+// Upstream CONTENT (not an algorithm port) reproduced in the native captioners: the JoyCaption
+// prompt taxonomy. This is fpgaminer/joycaption's own LICENSE file, kept verbatim because it
+// carries the upstream copyright line the generic Apache template does not (sc-15191 review).
+import joycaptionApache20 from "../../../desktop/licenses/joycaption-source/Apache-2.0.txt?raw";
 
 // Maps a manifest document `key` to its imported text. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
@@ -164,6 +168,7 @@ const DOCUMENT_TEXT = {
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
+  "joycaption-source-apache": joycaptionApache20,
 };
 
 // Resolve each component's document keys to its actual text once, at module load.

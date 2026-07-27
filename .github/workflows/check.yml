@@ -108,6 +108,12 @@ jobs:
         # revision-locks the audited inventory of ported/embedded inference source
         # (Cephes, CMUDICT), forcing every inference pin bump to re-audit upstream
         # NOTICE/LICENSE-* and production include_str!/include_bytes! sites.
+        # It additionally fails CLOSED on any production-Rust crate in the pinned
+        # inference revision that is neither covered by a ported-source area nor given
+        # an explicit crateDispositions decision. The marker regex that finds ported
+        # FILES is only a heuristic, and a whole crate already slipped it once —
+        # mlx-gen-krea-realtime described its port in words the regex did not know and
+        # shipped unclassified on a false green (sc-15138 → sc-15191).
         run: |
           node scripts/check-license-coverage.mjs --self-test
           npm run check:license-coverage

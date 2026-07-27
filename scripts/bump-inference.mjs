@@ -224,7 +224,17 @@ function main() {
   // config/inference-third-party-source.json and scripts/scan-inference-provenance.mjs. Those are
   // audit sites -- their revision is a label on a scan result (candidate inventory, population
   // hash, audit digest). Substituting the string without re-running the scan would fake an audit,
-  // so a bump must re-run scan-inference-provenance.mjs and recompute the digest by hand.
+  // so a bump must re-run scan-inference-provenance.mjs and recompute the digest by hand:
+  //
+  //   node scripts/scan-inference-provenance.mjs --repo <inference> \
+  //     --write config/inference-provenance-candidates.tsv \
+  //     --write-crates config/inference-crate-prefixes.txt
+  //
+  // Both inventories matter. The candidate TSV is heuristic (a marker regex over doc comments); the
+  // crate-prefix list is not, and every production-Rust crate it lists must be classified — ported
+  // area or explicit `crateDispositions` decision — or check-license-coverage.mjs FAILS. That guard
+  // exists because a whole new crate once slipped the marker vocabulary and shipped unclassified
+  // (sc-15138 -> sc-15191).
   const manifests = [
     { path: MANIFEST, rewrite: (text) => repin(text, sha, MANIFEST) },
     { path: ROOT_MANIFEST, rewrite: (text) => repin(text, sha, ROOT_MANIFEST) },
