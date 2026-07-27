@@ -888,6 +888,18 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // carries the matching t2v-only arm. Absent from `CANDLE_VIDEO_LORA_MODELS` because both
     // descriptors set `supports_lora`/`supports_lokr` = false, so a LoRA-carrying job is refused.
     VideoModelCaps::new("mochi_1", true, true, false, false),
+    // Krea Realtime 14B (epic 8431 / sc-8444): the autoregressive Self-Forcing Wan-2.1-14B video
+    // engine. `video_mlx_routed = true` — S10 (sc-8443) wired the real MLX route
+    // (`video_jobs/krea_realtime.rs` + the `resolve_video_route` arm), so without this row
+    // `video_job_is_mlx_eligible` refuses the job AND `video_model_mac_support` reports the
+    // `classify_video_gap` "no MLX engine" reason, which is simply untrue for this model.
+    //
+    // Every CANDLE column is false, and that is load-bearing rather than a default: there is no
+    // `candle-gen-krea-realtime` at all (parity is a deliberately separate follow-up epic), the MLX
+    // descriptor is `mac_only: true`, and `run_video_generate_job` already fails a non-mac krea job
+    // loudly rather than routing it elsewhere. So it is neither candle-routed nor a candle i2v/VACE
+    // model — the same all-false candle shape `scail2_14b` carries, and for the same reason.
+    VideoModelCaps::new("krea_realtime_14b", true, false, false, false),
 ];
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
@@ -1513,6 +1525,7 @@ mod tests {
         "bernini",
         "scail2_14b",
         "mochi_1",
+        "krea_realtime_14b",
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[

@@ -288,6 +288,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // native-flow gap — so it's `Ok` here. Its real capability is gated by the worker's
         // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
         | JobType::DatasetAnalysis
+        | JobType::CatalogAnalysis
         // sc-6539: dataset_upscale runs the Real-ESRGAN ONNX engine natively in the Rust worker
         // (the same engine as image_upscale) — not a native-flow gap. Its real availability is the
         // worker's capability advertisement, so it queues rather than enforce-fails here.
@@ -558,6 +559,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // dataset_analysis routes by capability (no candle worker advertises it) rather than
         // enforce-failing — the same "parity landing later" treatment as the surfaces above.
         | JobType::DatasetAnalysis
+        | JobType::CatalogAnalysis
         // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.
         | JobType::DatasetUpscale
         // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.

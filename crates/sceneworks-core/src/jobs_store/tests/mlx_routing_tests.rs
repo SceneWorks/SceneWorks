@@ -661,14 +661,23 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
             "bernini should not serve {mode}"
         );
     }
-    // The editing/reference + multi-source modes are Bernini-only — every other routed
-    // model rejects them.
+    // The reference + multi-source modes are Bernini-only — every other routed model rejects
+    // them. `video_to_video` is deliberately NOT in this list: it is Bernini-plus-one since
+    // sc-8444, because Krea Realtime's descriptor takes a `VideoClip` source to drive its
+    // strength-controlled AR init, so it genuinely serves v2v too (see
+    // `krea_realtime_is_mlx_routed_and_serves_exactly_its_advertised_modes`, which pins the
+    // whole per-model v2v column so this relaxation cannot widen into the generic arm).
     for model in VIDEO_MLX_ROUTED_MODELS {
         if *model == "bernini" {
             continue;
         }
+        if *model != "krea_realtime_14b" {
+            assert!(
+                !video_mode_is_mlx_eligible(model, "video_to_video"),
+                "video_to_video should be Bernini/Krea-Realtime-only, not eligible on {model}"
+            );
+        }
         for mode in [
-            "video_to_video",
             "reference_to_video",
             "reference_video_to_video",
             "multi_video_to_video",
@@ -767,4 +776,98 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     assert!(video_mode_is_mlx_eligible("wan_2_2", "replace_person"));
     // Unknown modes are never eligible.
     assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
+}
+
+/// sc-8444 (epic 8431) — Krea Realtime 14B is MLX-ROUTED and serves exactly the three modes its
+/// catalog entry advertises.
+///
+/// Both halves are regressions this test exists to prevent, and both are silent:
+///
+/// 1. **Absent from `VIDEO_MODEL_CAPS`** ⇒ `video_job_is_mlx_eligible` refuses the job (it never
+///    reaches a worker) AND `video_model_mac_support` answers `supported: false` carrying
+///    `classify_video_gap`'s "this video model has no MLX engine" — which is FALSE: sc-8443 wired
+///    `mlx-gen-krea-realtime` in `video_jobs/krea_realtime.rs`. The Video Studio picker then hides
+///    the model (`macAvailableModels`) and the Model Manager shows the untrue reason, so a shipped
+///    20–40 GB catalog entry becomes unselectable and misdescribed at once.
+/// 2. **No arm in `video_mode_is_mlx_eligible`** ⇒ the generic arm grants only
+///    `text_to_video | image_to_video` and `video_to_video` falls to `_ => false` — an advertised
+///    capability (manifest `capabilities` AND `ui.recommendedFor`) that the engine implements
+///    (`conditioning: [Reference, VideoClip]`) and the worker maps (`krea_realtime_video_task`
+///    → `"v2v"`) would be refused by the router alone.
+///
+/// Discriminating in both directions: it pins the modes krea does NOT serve too, so a future edit
+/// that "fixes" v2v by widening the generic arm — which would hand `video_to_video` to every routed
+/// model — fails on the models that must keep rejecting it.
+#[test]
+fn krea_realtime_is_mlx_routed_and_serves_exactly_its_advertised_modes() {
+    assert!(
+        VIDEO_MLX_ROUTED_MODELS.contains(&"krea_realtime_14b"),
+        "krea_realtime_14b must be MLX-routed — sc-8443 wired the real engine, so a missing row \
+         makes the app claim it has none"
+    );
+
+    // The three the catalog + descriptor + worker all agree on.
+    for mode in ["text_to_video", "image_to_video", "video_to_video"] {
+        assert!(
+            video_mode_is_mlx_eligible("krea_realtime_14b", mode),
+            "krea_realtime_14b advertises {mode} and must serve it"
+        );
+    }
+    // ...and nothing else. The descriptor exposes no keyframe / clip-extend / bridge /
+    // person-replace / character-animation surface.
+    for mode in [
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "replace_person",
+        "animate_character",
+        "reference_to_video",
+        "reference_video_to_video",
+        "multi_video_to_video",
+        "ads2v",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible("krea_realtime_14b", mode),
+            "krea_realtime_14b does not implement {mode} and must not claim it"
+        );
+    }
+
+    // `video_to_video` stays a per-model capability, NOT something the generic arm hands out: only
+    // bernini (the planner editing modes) and krea serve it. Without this, "make krea's v2v work"
+    // by relaxing the shared arm would pass every assertion above while silently enabling v2v on
+    // LTX / Wan / SVD / Mochi, none of which implement it.
+    for model in VIDEO_MLX_ROUTED_MODELS {
+        let expected = matches!(*model, "bernini" | "krea_realtime_14b");
+        assert_eq!(
+            video_mode_is_mlx_eligible(model, "video_to_video"),
+            expected,
+            "video_to_video eligibility for {model}"
+        );
+    }
+
+    // The UI gating oracle — the surface the user actually meets. `supported: false` here is what
+    // hides the entry from the picker and prints the false "no MLX engine" reason.
+    let support = model_mac_support("krea_realtime_14b", "video", None);
+    assert!(
+        support.supported,
+        "krea_realtime_14b must be Mac-supported: {:?}",
+        support.reason
+    );
+    assert!(support.reason.is_none());
+    let modes = &support.features.video_modes;
+    for mode in ["text_to_video", "image_to_video", "video_to_video"] {
+        assert_eq!(
+            modes.get(mode),
+            Some(&true),
+            "Video Studio must enable {mode} for krea_realtime_14b"
+        );
+    }
+    for mode in ["replace_person", "animate_character", "extend_clip"] {
+        assert_eq!(
+            modes.get(mode),
+            Some(&false),
+            "Video Studio must disable {mode} for krea_realtime_14b"
+        );
+    }
 }

@@ -677,6 +677,20 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "mochi_1" {
         return mode == "text_to_video";
     }
+    // Krea Realtime 14B (epic 8431 / sc-8444) needs its own arm because the generic arm below grants
+    // exactly `text_to_video | image_to_video`, so its `video_to_video` would fall to `_ => false` and
+    // be silently DROPPED — a capability the manifest advertises (in both `capabilities` and
+    // `ui.recommendedFor`), the engine implements (`conditioning: [Reference, VideoClip]`; a
+    // `VideoClip` source drives the strength-controlled AR init), and the worker already maps
+    // (`krea_realtime_video_task` → `"v2v"`, via `krea_realtime_conditioning`'s clip branch). Serving
+    // fewer modes than the catalog advertises is exactly the failure this arm exists to prevent.
+    //
+    // These three and NO more: the descriptor exposes no first/last-frame, clip-extend, bridge,
+    // person-replace or character-animation surface, so those correctly stay false (the generic arm's
+    // `first_last_frame` / `extend_clip` / `replace_person` lists never name it either).
+    if model == "krea_realtime_14b" {
+        return matches!(mode, "text_to_video" | "image_to_video" | "video_to_video");
+    }
     match mode {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),

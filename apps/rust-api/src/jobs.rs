@@ -78,6 +78,11 @@ pub(crate) async fn create_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<JobCreateRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if matches!(payload.job_type, JobType::CatalogAnalysis) {
+        return Err(ApiError::bad_request(
+            "catalog_analysis jobs must be created through POST /api/v1/catalogs/:catalog_id/analyze",
+        ));
+    }
     // A generation job type must be created through its typed route, which resolves the
     // model's merged manifest entry into the payload (and validates the request). This
     // route is the raw queue primitive: it enqueues `job_type` + payload verbatim, so a

@@ -104,6 +104,7 @@ conditional/partial.
 | `training_caption` | ⚠️ MLX / candle JoyCaption only | `run_utility_job` → `run_training_caption_job`; `caption_job_is_mlx_eligible` |
 | `dataset_parquet_import` | ✅ CPU utility (Parquet scan + public image fetch) | `run_utility_job` → `run_dataset_parquet_import_job`; `NON_GPU_JOB_TYPES`; `mac_rust_supported`; `candle_supported` |
 | `dataset_analysis` | ⚠️ MLX CLIP lane when linked; no candle CLIP lane yet | `run_utility_job` → `run_dataset_analysis_job`; `mlx_gpu`; `mac_rust_supported` |
+| `catalog_analysis` | ⚠️ MLX / candle when constrained vision and CLIP image lanes are linked | `run_utility_job` → `run_catalog_analysis_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `face_likeness_compare` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_face_likeness_compare_job`; `mlx_gpu`; `with_candle_capabilities` |

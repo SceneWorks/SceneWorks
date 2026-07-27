@@ -14,6 +14,7 @@ use sceneworks_core::catalog_store::{
     CatalogProcessingState, CatalogRegistry, CatalogSourceConfig, NewCatalogRecord,
 };
 use sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS;
+use tower::ServiceExt as _;
 
 use super::support::*;
 
@@ -40,7 +41,10 @@ fn catalog_record(id: &str, medium: &str, person_count: u64) -> NewCatalogRecord
         metadata: json!({
             "medium": medium,
             "personCount": person_count,
-            "analysis": { "fullBody": person_count == 1 }
+            "analysis": {
+                "fullBody": person_count == 1,
+                "qualifiedSingleFullBody": person_count == 1
+            }
         }),
     }
 }
@@ -145,6 +149,10 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
         initial_status["processing"]["state"], "completed",
         "empty fixture scan completes"
     );
+    assert!(
+        initial_status["storage"].is_null(),
+        "hot status responses must not recursively account artifact files"
+    );
 
     let registry = CatalogRegistry::new(&config_dir);
     let mut catalog = registry.open_attached(&catalog_id).unwrap();
@@ -156,6 +164,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
             catalog_record("four", "illustration", 1),
         ])
         .unwrap();
+    std::fs::write(catalog_root.join("thumbnails/one.jpg"), b"thumbnail-bytes").unwrap();
     let mut contract = catalog.contract_state().unwrap();
     contract.analyzer_versions =
         BTreeMap::from([("person_detector".to_owned(), "model@sha256:abc".to_owned())]);
@@ -250,6 +259,169 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     assert_eq!(facets["facets"][0]["values"][0]["value"], "photo");
     assert_eq!(facets["facets"][0]["values"][0]["count"], 3);
 
+    let curation_uri = format!("/api/v1/catalogs/{catalog_id}/curation/query");
+    let primary_query = json!({
+        "limit": 2,
+        "filters": [
+            { "field": "medium", "values": ["photo"] },
+            { "field": "personCount", "values": ["1"] },
+            { "field": "qualifiedSingleFullBody", "values": ["true"] }
+        ],
+        "sampleSeed": 14959,
+        "deduplicate": true,
+        "includeTotal": true
+    });
+    let (status, curated) =
+        request(app.clone(), "POST", &curation_uri, primary_query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{curated}");
+    assert!(
+        !curated["items"].as_array().unwrap().is_empty(),
+        "the seeded keyset may wrap onto a second page"
+    );
+    assert_eq!(curated["totalCount"], 2);
+    assert!(curated["nextCursor"].is_string());
+    let (status, replay) = request(app.clone(), "POST", &curation_uri, primary_query.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["items"], curated["items"]);
+    let thumbnail_response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/api/v1/catalogs/{catalog_id}/records/one/thumbnail"
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(thumbnail_response.status(), StatusCode::OK);
+    assert_eq!(thumbnail_response.headers()["content-type"], "image/jpeg");
+    assert_eq!(
+        axum::body::to_bytes(thumbnail_response.into_body(), 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"thumbnail-bytes"
+    );
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/records/not-in-catalog/thumbnail"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, indexed_facets) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/curation/facets"),
+        json!({
+            "query": primary_query,
+            "fields": ["medium", "personCount", "qualifiedSingleFullBody"],
+            "limitPerFacet": 10
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{indexed_facets}");
+    assert_eq!(indexed_facets["facets"][0]["values"][0]["value"], "photo");
+
+    let review_uri = format!("/api/v1/catalogs/{catalog_id}/records/one/review");
+    let (status, missing_reason) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "exclude" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_reason}");
+    let (status, review) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "exclude", "rejectionReason": "cropped feet" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["rejectionReason"], "cropped feet");
+    let (status, included) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "include", "rejectionReason": "must be cleared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(included["rejectionReason"].is_null());
+
+    let views_uri = format!("/api/v1/catalogs/{catalog_id}/saved-views");
+    let (status, saved) = request(
+        app.clone(),
+        "POST",
+        &views_uri,
+        json!({ "name": "Full body photos", "query": {
+            "limit": 48,
+            "filters": [
+                { "field": "medium", "values": ["photo"] },
+                { "field": "personCount", "values": ["1"] },
+                { "field": "qualifiedSingleFullBody", "values": ["true"] }
+            ],
+            "sampleSeed": 14959
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["revision"], 0);
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &views_uri,
+        json!({
+            "name": "full BODY photos",
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    let saved_id = saved["id"].as_str().unwrap();
+    let saved_item_uri = format!("{views_uri}/{saved_id}");
+    let (status, updated) = request(
+        app.clone(),
+        "PUT",
+        &saved_item_uri,
+        json!({
+            "name": "Reviewed photos",
+            "expectedRevision": 0,
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["revision"], 1);
+    let (status, stale) = request(
+        app.clone(),
+        "PUT",
+        &saved_item_uri,
+        json!({
+            "name": "Stale edit",
+            "expectedRevision": 0,
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+    for invalid_body in [
+        json!({"limit": 10, "text": "!!!"}),
+        json!({"limit": 10, "filters": [{
+            "field": "analysis.notIndexed", "values": ["anything"]
+        }]}),
+    ] {
+        let (status, _) = request(app.clone(), "POST", &curation_uri, invalid_body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     for invalid_body in [
         json!({"limit": 0}),
         json!({"limit": 201}),
@@ -266,6 +438,83 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
             "invalid query contract must be rejected, got {status}"
         );
     }
+}
+
+#[tokio::test]
+async fn catalog_status_omits_unbounded_storage_walk_while_detail_remains_exact() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let config_dir = settings.config_dir.clone();
+    let catalog_root = temporary.path().join("storage-scale-catalog");
+    let (app, _) = create_app_with_state(settings).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Storage scale catalog",
+            "path": catalog_root.clone()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let catalog_id = created["id"].as_str().unwrap().to_owned();
+
+    let registry = CatalogRegistry::new(config_dir);
+    let mut catalog = registry.open_attached(&catalog_id).unwrap();
+    catalog
+        .append_records(&[
+            catalog_record("scale-one", "photo", 1),
+            catalog_record("scale-two", "photo", 1),
+            catalog_record("scale-three", "illustration", 0),
+        ])
+        .unwrap();
+    catalog.close();
+
+    const DIRECTORY_COUNT: usize = 16;
+    const FILES_PER_DIRECTORY: usize = 32;
+    const ARTIFACT: &[u8] = b"artifact-bytes";
+    for directory_index in 0..DIRECTORY_COUNT {
+        let directory = catalog_root
+            .join("artifacts")
+            .join(format!("scale-{directory_index:02}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for file_index in 0..FILES_PER_DIRECTORY {
+            std::fs::write(
+                directory.join(format!("artifact-{file_index:02}.bin")),
+                ARTIFACT,
+            )
+            .unwrap();
+        }
+    }
+
+    let (status, hot_status) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hot_status}");
+    assert_eq!(hot_status["counts"]["recordCount"], 3);
+    assert!(
+        hot_status["storage"].is_null(),
+        "the polling contract structurally excludes the recursive storage walk"
+    );
+
+    let (status, detail) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["storage"]["artifactBytes"],
+        (DIRECTORY_COUNT * FILES_PER_DIRECTORY * ARTIFACT.len()) as u64
+    );
+    assert_eq!(detail["counts"]["recordCount"], 3);
 }
 
 #[tokio::test]
@@ -539,6 +788,21 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_response}");
     assert_eq!(invalid_response["code"], "catalog_invalid");
 
+    let mut missing_structured_gate = settings.clone();
+    missing_structured_gate["structuredAnalysisEnabled"] = json!(false);
+    let (status, invalid_response) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({
+            "expectedRevision": 1,
+            "settings": missing_structured_gate
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid_response}");
+    assert_eq!(invalid_response["code"], "catalog_invalid");
+
     let (_, persisted) = request(
         app,
         "GET",
@@ -548,6 +812,74 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
     .await;
     assert_eq!(persisted["analyzerConfig"]["revision"], 1);
     assert_eq!(persisted["analyzerConfig"]["settings"], settings);
+}
+
+#[tokio::test]
+async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_paths() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Semantic catalog",
+            "path": temporary.path().join("catalog")
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({
+            "expectedAnalyzerConfigRevision": 0,
+            "requestedGpu": "gpu-1",
+            "batchSize": 8
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "catalog_analysis");
+    assert_eq!(job["requestedGpu"], "gpu-1");
+    assert_eq!(job["payload"]["catalogId"], id);
+    assert_eq!(job["payload"]["analyzerConfigRevision"], 0);
+    assert_eq!(job["payload"]["batchSize"], 8);
+    assert!(
+        job["payload"].get("catalogRoot").is_none() && job["payload"].get("path").is_none(),
+        "the worker must resolve catalog identity only through the attached registry"
+    );
+
+    let (status, stale) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({
+            "expectedAnalyzerConfigRevision": 99,
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+    let (status, raw) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "catalog_analysis",
+            "payload": {
+                "catalogId": id,
+                "catalogRoot": temporary.path().join("attacker-controlled")
+            },
+            "requestedGpu": "gpu-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
 }
 
 #[tokio::test]
@@ -950,13 +1282,12 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     assert_eq!(shutdown.joined, 1);
     let registry = CatalogRegistry::new(temporary.path().join("config"));
     let stranded = registry.open_attached(&id).expect("catalog opens");
+    let stranded_contract = stranded.contract_state().expect("contract reads");
     assert_eq!(
-        stranded
-            .contract_state()
-            .expect("contract reads")
-            .processing
-            .state,
-        CatalogProcessingState::Paused
+        stranded_contract.processing.state,
+        CatalogProcessingState::Paused,
+        "{:?}",
+        stranded_contract.processing
     );
     assert_eq!(
         stranded
@@ -992,6 +1323,190 @@ async fn successor_queued_after_closure_is_recovered_by_new_appstate() {
     .await;
     assert_eq!(completed["processing"]["state"], "completed", "{completed}");
     assert_eq!(completed["counts"]["recordCount"], 100_000);
+}
+
+#[tokio::test]
+async fn transient_sqlite_contention_retries_and_completes_exactly() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 1_000);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state
+        .catalog_scan_injected_sqlite_busy_failures
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Contention retry",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, completed) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(completed["processing"]["state"], "completed", "{completed}");
+    assert_eq!(completed["counts"]["recordCount"], 1_000);
+    assert_eq!(
+        state
+            .catalog_scan_injected_sqlite_busy_failures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn exhausted_sqlite_contention_is_visible_and_actionable() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 10);
+    let (app, state) =
+        create_app_with_state(test_settings(&temporary)).expect("app and state create");
+    state.catalog_scan_injected_sqlite_busy_failures.store(
+        u64::from(crate::catalogs::CATALOG_SCAN_MAX_CONTENTION_RETRIES) + 1,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Contention exhaustion",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, failed) = request(
+        app,
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(failed["processing"]["state"], "failed", "{failed}");
+    assert!(
+        failed["processing"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("database contention")),
+        "{failed}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_during_contention_backoff_preserves_paused_resume_boundary() {
+    let _hook_guard = catalog_scan_hook_test_lock().lock().await;
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let source = temporary.path().join("source.parquet");
+    write_catalog_parquet(&source, 100_000);
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({
+            "name": "Backoff shutdown",
+            "path": temporary.path().join("catalog"),
+            "sourceConfig": {
+                "kind": "parquet",
+                "paths": [source],
+                "options": { "batchSize": 25 }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id").to_owned();
+    let mut running = None;
+    for _ in 0..1_000 {
+        let (_, current) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/catalogs/{id}/status"),
+            Value::Null,
+        )
+        .await;
+        if current["processing"]["state"] == "running" {
+            running = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let running = running.expect("scan starts");
+    let (pause_status, paused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{id}/pause"),
+        json!({"expectedRevision": running["processingControl"]["revision"]}),
+    )
+    .await;
+    assert_eq!(pause_status, StatusCode::OK, "{paused}");
+    wait_for_catalog_scan_idle(&state.catalog_scan_supervisor).await;
+    let (_, durable_pause) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{id}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(durable_pause["processing"]["state"], "paused");
+
+    state
+        .catalog_scan_injected_sqlite_busy_failures
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let backoff_started = state.catalog_scan_contention_backoff_started.notified();
+    tokio::pin!(backoff_started);
+    backoff_started.as_mut().enable();
+    let (resume_status, resumed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/resume"),
+        json!({"expectedRevision": durable_pause["processingControl"]["revision"]}),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resumed}");
+    tokio::time::timeout(Duration::from_secs(60), backoff_started)
+        .await
+        .expect("injected contention enters backoff");
+    let shutdown = state.catalog_scan_supervisor.shutdown().await;
+    assert_eq!(shutdown.requested, 1);
+    assert_eq!(shutdown.joined, 1);
+
+    let registry = CatalogRegistry::new(temporary.path().join("config"));
+    let catalog = registry.open_attached(&id).expect("catalog opens");
+    let contract = catalog.contract_state().expect("contract reads");
+    assert_eq!(contract.processing.state, CatalogProcessingState::Paused);
+    assert_eq!(
+        catalog.processing_control().unwrap().desired_state,
+        sceneworks_core::catalog_store::CatalogProcessingDesiredState::Running
+    );
 }
 
 #[tokio::test]

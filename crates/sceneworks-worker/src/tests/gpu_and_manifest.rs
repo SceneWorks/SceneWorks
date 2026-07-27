@@ -309,6 +309,9 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6535: runtime-macos includes the CLIP `clip_vit_l14` ImageEmbedder, so the registry
         // derives DatasetAnalysis from its descriptor.
         WorkerCapability::DatasetAnalysis,
+        // sc-14958: catalog analysis reuses the linked CLIP and vision providers and is routed to
+        // the same MLX GPU worker.
+        WorkerCapability::CatalogAnalysis,
         // carve-outs
         WorkerCapability::ImageEdit,
         WorkerCapability::ImageDetail,
@@ -594,6 +597,67 @@ fn every_image_model_with_a_candle_vram_block_declares_mlx_quantize() {
             "{id} must declare mlx.quantize: 4 (sc-12155 — q4 default, matching `qwen_image`)"
         );
     }
+}
+
+/// sc-15258 — the VIDEO-lane twin of the lint above, and it enforces the opposite thing: on a video
+/// entry `mlx.quantize` is **documentation, not a control**, so it may only ever restate the default
+/// the video resolver already produces.
+///
+/// The video lane never reads `manifest.mlx.quantize`. `resolve_quant` (`image_jobs/base.rs`) is the
+/// image lane; the video lane resolves through `video_jobs::resolve_mlx_dense_quant` (shared by
+/// bernini / scail2 / krea_realtime) and the per-family tier orders, all of which key on
+/// `advanced.mlxQuantize` alone and default to **Q4**. That is not an oversight to be fixed by wiring
+/// the manifest in: sc-10859 made the video lane's q4-first default an OWNED carve-out from epic
+/// 10721's app-wide Q8 default (there is no MLX video Q8 lever, so a silent Q8 only risks a
+/// video-runtime OOM at heavy res/frame counts), and letting a manifest key flip it would quietly undo
+/// that decision for all three families at once.
+///
+/// So the invariant a video entry must satisfy is agreement: declare `4`, or declare nothing. Anything
+/// else is a manifest that documents a default the product does not honour — a lie that reads as
+/// authoritative to the next engineer and to anyone inspecting the catalog. Today all three video
+/// entries that declare the key declare `4`.
+///
+/// Mutation check: set any video entry's `mlx.quantize` to `8` (or `0`) → RED naming it.
+#[test]
+fn video_models_may_only_declare_the_mlx_quantize_the_video_lane_actually_defaults_to() {
+    /// The tier `video_jobs::resolve_mlx_dense_quant` returns for a request with no explicit
+    /// `advanced.mlxQuantize` — the only value a video entry may restate.
+    const VIDEO_LANE_DEFAULT_BITS: u64 = 4;
+
+    let mut offenders = Vec::new();
+    let mut declaring = Vec::new();
+    for model in builtin_models_manifest() {
+        if model.get("type").and_then(Value::as_str) != Some("video") {
+            continue;
+        }
+        let Some(quantize) = model.get("mlx").and_then(|mlx| mlx.get("quantize")) else {
+            continue;
+        };
+        let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        declaring.push(id.to_owned());
+        if quantize.as_u64() != Some(VIDEO_LANE_DEFAULT_BITS) {
+            offenders.push(format!("{id} (declares {quantize})"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these `type: video` models declare an `mlx.quantize` other than {VIDEO_LANE_DEFAULT_BITS}: \
+         {offenders:?}. The video lane does NOT read `manifest.mlx.quantize` — it resolves through \
+         `resolve_mlx_dense_quant` / the per-family tier orders, which key on `advanced.mlxQuantize` \
+         and default to Q4 (sc-10750), a carve-out from epic 10721's app-wide Q8 that sc-10859 made \
+         deliberately (no MLX video Q8 lever ⇒ a silent Q8 only risks a video-runtime OOM). So a \
+         video entry may only RESTATE the Q4 default or say nothing; declaring anything else \
+         documents a default the product will not honour. If the video lane should start honouring \
+         the manifest, change the resolver and this guard together — do not change the manifest alone."
+    );
+
+    // Non-vacuity: the guard must actually be looking at entries. If a refactor moved the key or the
+    // `type` label, `declaring` would silently empty out and the assertion above would pass on air.
+    assert!(
+        declaring.contains(&"krea_realtime_14b".to_owned()),
+        "krea_realtime_14b declares mlx.quantize, so this guard must see it — an empty sweep would \
+         make the check vacuous; saw {declaring:?}"
+    );
 }
 
 /// sc-13533 — the sc-12155 lint above, strengthened from PRESENCE to COVERAGE: declaring
@@ -1072,6 +1136,66 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
     assert_eq!(
         sequential_overflow_gb(Some(q4_sequential), card12),
         Some(23.9)
+    );
+}
+
+/// sc-15256: the shipped Z-Image Turbo rows and provider capability move in lockstep. Pins the real
+/// Q4/Q8/BF16 resident + sequential measurements and proves the fixed 2 GB operational reserve still
+/// admits Q4 on an emulated 8 GB card while rejecting the heavier hosted tiers.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
+    use crate::vram_gate::{
+        apply_vram_cap, fit_decision, predicted_peak_gb, predicted_sequential_peak_gb,
+        resolve_offload, sequential_overflow_gb, FitDecision,
+    };
+
+    let z_image = builtin_model_entry("z_image_turbo");
+    let entry = z_image.as_object().expect("z_image_turbo entry object");
+    assert_eq!(
+        entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .and_then(|candle| candle.get("measured"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        crate::mlx_fit_gate::engine_supports_sequential("z_image_turbo"),
+        "the generic Candle route must derive Sequential support from the provider descriptor"
+    );
+
+    let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak + reserve");
+    let q8_resident = predicted_peak_gb(entry, "q8").expect("real hosted q8 resident peak + reserve");
+    let bf16_resident = predicted_peak_gb(entry, "bf16").expect("bf16 resident peak + reserve");
+    assert!((q4_resident - 20.4).abs() < 1e-6);
+    assert!((q8_resident - 26.2).abs() < 1e-6);
+    assert!((bf16_resident - 34.2).abs() < 1e-6);
+
+    let q4_sequential =
+        predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak + reserve");
+    let q8_sequential =
+        predicted_sequential_peak_gb(entry, "q8").expect("q8 sequential peak + reserve");
+    let bf16_sequential =
+        predicted_sequential_peak_gb(entry, "bf16").expect("bf16 sequential peak + reserve");
+    assert!((q4_sequential - 7.7).abs() < 1e-6);
+    assert!((q8_sequential - 11.8).abs() < 1e-6);
+    assert!((bf16_sequential - 15.9).abs() < 1e-6);
+
+    let card8 = apply_vram_cap(None, Some(8.0));
+    assert!(matches!(
+        resolve_offload(fit_decision(Some(q4_resident), card8), true),
+        FitDecision::Offload { .. }
+    ));
+    assert_eq!(sequential_overflow_gb(Some(q4_sequential), card8), None);
+    assert_eq!(
+        sequential_overflow_gb(Some(q8_sequential), card8),
+        Some(11.8),
+        "the real Q8 row must not inherit q4 or a legacy estimate"
+    );
+    assert_eq!(
+        sequential_overflow_gb(Some(bf16_sequential), card8),
+        Some(15.9)
     );
 }
 

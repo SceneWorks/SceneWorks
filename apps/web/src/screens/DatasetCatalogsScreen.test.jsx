@@ -147,6 +147,84 @@ describe("DatasetCatalogsScreen", () => {
         });
         return response(catalogs[0]);
       }
+      if (path.endsWith("/analyze") && options.method === "POST") {
+        return response({
+          id: "job-catalog-analysis",
+          type: "catalog_analysis",
+          status: "queued",
+          payload: JSON.parse(options.body),
+        }, 201);
+      }
+      if (path.endsWith("/saved-views") && (!options.method || options.method === "GET")) {
+        return response([]);
+      }
+      if (path.endsWith("/saved-views") && options.method === "POST") {
+        return response({
+          id: "view-1",
+          name: JSON.parse(options.body).name,
+          query: JSON.parse(options.body).query,
+          revision: 0,
+          createdAt: "2026-07-26T12:00:00Z",
+          updatedAt: "2026-07-26T12:00:00Z",
+        }, 201);
+      }
+      if (path.endsWith("/curation/query")) {
+        return response({
+          items: [
+            {
+              id: "record-1",
+              thumbnailPath: "thumbnails/record-1.jpg",
+              metadata: {
+                caption: "A full-body photograph outdoors",
+                analysis: {
+                  medium: "photograph",
+                  fullBody: true,
+                  qualifiedSingleFullBody: true,
+                  personCount: 1,
+                },
+              },
+            },
+            {
+              id: "record-2",
+              thumbnailPath: "thumbnails/record-2.jpg",
+              metadata: {
+                caption: "A second full-body photograph",
+                analysis: {
+                  medium: "photograph",
+                  fullBody: true,
+                  qualifiedSingleFullBody: true,
+                  personCount: 1,
+                },
+              },
+            },
+          ],
+          reviews: [{
+            recordId: "record-1",
+            decision: "exclude",
+            rejectionReason: "Persisted crop problem",
+            updatedAt: "2026-07-26T12:00:00Z",
+          }],
+          nextCursor: "opaque-next",
+          totalCount: 28,
+        });
+      }
+      if (path.endsWith("/curation/facets")) {
+        return response({
+          facets: [{
+            field: "medium",
+            values: [{ value: "photograph", count: 28 }],
+          }],
+        });
+      }
+      if (path.endsWith("/review") && options.method === "PUT") {
+        const body = JSON.parse(options.body);
+        return response(body.decision === "default" ? null : {
+          recordId: "record-1",
+          decision: body.decision,
+          rejectionReason: body.decision === "exclude" ? body.rejectionReason : null,
+          updatedAt: "2026-07-26T12:00:00Z",
+        });
+      }
       if (path.endsWith("/pause")) {
         catalogs[0] = catalog({
           processingControl: {
@@ -217,6 +295,107 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("Analyzing shard 7");
     expect(container.textContent).toContain("6.5 KiB");
     expect(container.querySelector("[role='progressbar']").getAttribute("aria-valuenow")).toBe("54");
+  });
+
+  it("preserves exact storage across null status polls and refreshes it from an exact list response", async () => {
+    await remountWithFakeTimers();
+    const original = fetch.getMockImplementation();
+    let statusPolls = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/status")) {
+        statusPolls += 1;
+        return response(catalog({
+          storage: null,
+          processing: {
+            ...catalog().processing,
+            message: `Status poll ${statusPolls}`,
+          },
+        }));
+      }
+      return original(url, options);
+    });
+
+    await act(async () => vi.advanceTimersByTime(3000));
+    await flush();
+    await act(async () => vi.advanceTimersByTime(3000));
+    await flush();
+    expect(statusPolls).toBe(2);
+    expect(container.textContent).toContain("Status poll 2");
+    expect(container.textContent).toContain("6.5 KiB");
+
+    catalogs[0] = catalog({
+      storage: {
+        databaseBytes: 2048,
+        manifestBytes: 512,
+        artifactBytes: 5632,
+        totalBytes: 8192,
+      },
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
+    expect(container.textContent).toContain("8.0 KiB");
+  });
+
+  it("curates a reproducible primary sample with server paging, facets, saved views, and review overrides", async () => {
+    const browse = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Browse catalog"));
+    await act(async () => browse.click());
+    await flush();
+
+    expect(container.textContent).toContain("28 matches");
+    expect(container.textContent).toContain("A full-body photograph outdoors");
+    expect(container.textContent).toContain("photograph (28)");
+    const queryRequest = requests.find((item) => item.path.endsWith("/curation/query"));
+    expect(queryRequest.body.filters).toEqual(expect.arrayContaining([
+      { field: "medium", values: ["photograph"] },
+      { field: "personCount", values: ["1"] },
+      { field: "qualifiedSingleFullBody", values: ["true"] },
+    ]));
+    expect(queryRequest.body.sampleSeed).toBe(14959);
+    expect(queryRequest.body.deduplicate).toBe(true);
+
+    const thumbnails = container.querySelectorAll(".catalog-thumbnail-card");
+    await act(async () => thumbnails[0].click());
+    const rejectionReason = container.querySelector("input[aria-label='Rejection reason']");
+    expect(rejectionReason.value).toBe("Persisted crop problem");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(rejectionReason, "Unsaved reason for first");
+      rejectionReason.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => thumbnails[1].click());
+    expect(rejectionReason.value).toBe("");
+    await act(async () => thumbnails[0].click());
+    expect(rejectionReason.value).toBe("Persisted crop problem");
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Include").click());
+    await flush();
+    expect(requests.find((item) => item.path.endsWith("/review"))?.body).toEqual({
+      decision: "include",
+      rejectionReason: null,
+    });
+
+    const name = container.querySelector("input[placeholder='Full-body photos']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(name, "My seeded sample");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Save view").click());
+    await flush();
+    expect(requests.find((item) => item.path.endsWith("/saved-views")
+      && item.options.method === "POST")?.body.name).toBe("My seeded sample");
+    expect(container.textContent).toContain("Saved views (1)");
+
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Load next page")).click());
+    await flush();
+    const pages = requests.filter((item) => item.path.endsWith("/curation/query"));
+    expect(pages.at(-1).body.cursor).toBe("opaque-next");
+    expect(pages.at(-1).body.includeTotal).toBe(false);
   });
 
   it("renders running progress as indeterminate when the scanner has no total", async () => {
@@ -390,6 +569,36 @@ describe("DatasetCatalogsScreen", () => {
     await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Delete files permanently").click());
     await flush();
     expect(requests.some((item) => item.path === "/api/v1/catalogs/cat-1/on-disk" && item.options.method === "DELETE")).toBe(true);
+  });
+
+  it("starts the typed survivor-only analysis job with revision and GPU selection", async () => {
+    catalogs[0] = catalog({
+      processing: { ...catalog().processing, state: "completed" },
+      analyzerConfig: {
+        ...catalog().analyzerConfig,
+        revision: 7,
+        settings: {
+          ...catalog().analyzerConfig.settings,
+          visionAnalysisEnabled: true,
+          semanticEmbeddingsEnabled: true,
+        },
+      },
+    });
+    await remountWithFakeTimers();
+    const gpu = container.querySelector("input[aria-label='Analysis GPU']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(gpu, "gpu-1");
+      gpu.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Run analysis")).click());
+    await flush();
+    expect(requests.find((item) => item.path === "/api/v1/catalogs/cat-1/analyze")?.body).toEqual({
+      expectedAnalyzerConfigRevision: 7,
+      requestedGpu: "gpu-1",
+      batchSize: 16,
+    });
   });
 
   it("shows actionable sanitized errors without echoing a private server path", async () => {

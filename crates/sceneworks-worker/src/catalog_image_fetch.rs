@@ -260,7 +260,7 @@ enum DiscardFaultPoint {
 
 #[derive(Debug)]
 struct CatalogFetchLease {
-    _processing: CatalogProcessingLease,
+    _processing: Option<CatalogProcessingLease>,
     _file: File,
 }
 
@@ -534,6 +534,21 @@ impl CatalogFetchLease {
                 )),
                 error => CatalogImageFetchError::Catalog(error),
             })?;
+        Self::acquire_with_processing(catalog, Some(processing))
+    }
+
+    #[allow(dead_code)]
+    fn acquire_under_processing_lease(
+        catalog: &Catalog,
+        _processing: &CatalogProcessingLease,
+    ) -> CatalogImageFetchResult<Self> {
+        Self::acquire_with_processing(catalog, None)
+    }
+
+    fn acquire_with_processing(
+        catalog: &Catalog,
+        processing: Option<CatalogProcessingLease>,
+    ) -> CatalogImageFetchResult<Self> {
         let path = catalog.root().join(FETCH_LOCK_FILE);
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -588,6 +603,28 @@ pub async fn fetch_attached_catalog_images(
     .await
 }
 
+/// Pipeline-only sibling that proves the caller already owns the shared
+/// catalog-processing lease. The fetch-specific compatibility lock remains
+/// held for the complete pass, while the shared lease can span later stages.
+#[allow(dead_code)]
+pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    options: &CatalogImageFetchOptions,
+    processing: &CatalogProcessingLease,
+) -> CatalogImageFetchResult<CatalogImageFetchReport> {
+    fetch_attached_catalog_images_with_lease(
+        registry,
+        catalog_id,
+        options,
+        Some(processing),
+        |url, fetch_options| async move {
+            fetch_public_source_url_bytes_with_options(&url, &fetch_options).await
+        },
+    )
+    .await
+}
+
 async fn fetch_attached_catalog_images_with<F, Fut>(
     registry: &CatalogRegistry,
     catalog_id: &str,
@@ -598,9 +635,28 @@ where
     F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
     Fut: Future<Output = WorkerResult<Vec<u8>>>,
 {
+    fetch_attached_catalog_images_with_lease(registry, catalog_id, options, None, fetcher).await
+}
+
+async fn fetch_attached_catalog_images_with_lease<F, Fut>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    options: &CatalogImageFetchOptions,
+    processing: Option<&CatalogProcessingLease>,
+    fetcher: F,
+) -> CatalogImageFetchResult<CatalogImageFetchReport>
+where
+    F: Fn(String, PublicSourceUrlFetchOptions) -> Fut + Clone,
+    Fut: Future<Output = WorkerResult<Vec<u8>>>,
+{
     validate_options(options)?;
     let mut catalog = registry.open_attached(catalog_id)?;
-    let _lease = CatalogFetchLease::acquire(&catalog)?;
+    let _lease = match processing {
+        Some(processing) => {
+            CatalogFetchLease::acquire_under_processing_lease(&catalog, processing)?
+        }
+        None => CatalogFetchLease::acquire(&catalog)?,
+    };
     prepare_cache_directories(&catalog)?;
     cleanup_stale_temps(&catalog)?;
     let mut artifact_budget = ArtifactBudget::initialize(&catalog, options.max_cache_bytes)?;

@@ -359,6 +359,10 @@ pub struct AppState {
     pub(crate) catalog_scan_preflight_execution_timeout_ms: Arc<AtomicU64>,
     #[cfg(test)]
     pub(crate) catalog_scan_preflight_test_ticks: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_injected_sqlite_busy_failures: Arc<AtomicU64>,
+    #[cfg(test)]
+    pub(crate) catalog_scan_contention_backoff_started: Arc<tokio::sync::Notify>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]
