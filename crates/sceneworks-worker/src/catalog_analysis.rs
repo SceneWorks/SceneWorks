@@ -596,27 +596,50 @@ fn analyze_attached_catalog_with_lease<A: CatalogAnalyzers>(
         for mut record in page.records {
             check_analysis_cancel(cancel)?;
             report.records_examined = report.records_examined.saturating_add(1);
-            let structured = match resolve_catalog_image(&catalog, &record)
-                .and_then(|path| image_fingerprint(&path).map(|fingerprint| (path, fingerprint)))
-            {
-                Ok((image_path, input_fingerprint)) => analyze_record(
-                    &record,
-                    &image_path,
-                    &input_fingerprint,
-                    config,
-                    analyzers,
-                    &mut report,
-                ),
+            let previous = previous_structured_analysis(&record);
+            let previous_perceptual_hash = record
+                .metadata
+                .pointer("/analysis/perceptualHash")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let (structured, perceptual_hash) = match resolve_catalog_image(&catalog, &record)
+                .and_then(|path| {
+                    let fingerprint = image_fingerprint(&path)?;
+                    let perceptual_hash = image_perceptual_hash(&path)?;
+                    Ok((path, fingerprint, perceptual_hash))
+                }) {
+                Ok((image_path, input_fingerprint, perceptual_hash)) => {
+                    let analyzed = analyze_record(
+                        &record,
+                        &image_path,
+                        &input_fingerprint,
+                        config,
+                        analyzers,
+                        &mut report,
+                    );
+                    let needs_perceptual_upgrade =
+                        previous_perceptual_hash.as_deref() != Some(&perceptual_hash);
+                    (
+                        analyzed.or_else(|| {
+                            needs_perceptual_upgrade.then(|| previous.clone()).flatten()
+                        }),
+                        Some(perceptual_hash),
+                    )
+                }
                 Err(error) => {
                     report.records_skipped_unavailable =
                         report.records_skipped_unavailable.saturating_add(1);
                     let unavailable = unavailable_input_analysis(config, error);
-                    (previous_structured_analysis(&record).as_ref() != Some(&unavailable))
-                        .then_some(unavailable)
+                    (
+                        (previous.as_ref() != Some(&unavailable)
+                            || previous_perceptual_hash.is_some())
+                        .then_some(unavailable),
+                        None,
+                    )
                 }
             };
             if let Some(structured) = structured {
-                persist_structured_analysis(&mut record, &structured)?;
+                persist_structured_analysis(&mut record, &structured, perceptual_hash.as_deref())?;
                 let update = NewCatalogRecord {
                     id: record.id,
                     image_path: record.image_path,
@@ -1192,6 +1215,7 @@ fn previous_structured_analysis(record: &CatalogRecord) -> Option<StructuredCata
 fn persist_structured_analysis(
     record: &mut CatalogRecord,
     structured: &StructuredCatalogAnalysis,
+    perceptual_hash: Option<&str>,
 ) -> CatalogAnalysisResult<()> {
     let metadata = record.metadata.as_object_mut().ok_or_else(|| {
         CatalogAnalysisError::InvalidConfig(format!(
@@ -1213,6 +1237,11 @@ fn persist_structured_analysis(
         STRUCTURED_ANALYSIS_KEY.to_owned(),
         serde_json::to_value(structured).map_err(CatalogError::from)?,
     );
+    if let Some(perceptual_hash) = perceptual_hash {
+        analysis.insert("perceptualHash".to_owned(), json!(perceptual_hash));
+    } else {
+        analysis.remove("perceptualHash");
+    }
     analysis.insert("personCount".to_owned(), json!(structured.person.count));
     analysis.insert("faceCount".to_owned(), json!(structured.face.count));
     analysis.insert(
@@ -1263,6 +1292,29 @@ fn image_fingerprint(path: &Path) -> std::io::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// 64-bit difference hash over a normalized 9x8 luminance image. This is
+/// intentionally cheap enough to run beside the already-bounded structured
+/// analyzer and survives lossless re-encoding and small color changes.
+fn image_perceptual_hash(path: &Path) -> std::io::Result<String> {
+    use image::imageops::FilterType;
+
+    let decoded = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()
+        .map_err(std::io::Error::other)?;
+    let luminance = decoded.resize_exact(9, 8, FilterType::Triangle).to_luma8();
+    let mut hash = 0_u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash <<= 1;
+            if luminance.get_pixel(x, y).0[0] > luminance.get_pixel(x + 1, y).0[0] {
+                hash |= 1;
+            }
+        }
+    }
+    Ok(format!("dhash64:{hash:016x}"))
 }
 
 fn validate_config(config: &CatalogAnalysisConfig) -> CatalogAnalysisResult<()> {
@@ -1829,6 +1881,42 @@ mod tests {
         assert_eq!(unchanged_report.records_updated, 0);
         assert!(unchanged.calls.is_empty());
 
+        let mut catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog");
+        let mut record = catalog.page_records(0, 1).unwrap().remove(0);
+        record.metadata["analysis"]
+            .as_object_mut()
+            .unwrap()
+            .remove("perceptualHash");
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: record.id,
+                image_path: record.image_path,
+                thumbnail_path: record.thumbnail_path,
+                embedding_path: record.embedding_path,
+                artifact_path: record.artifact_path,
+                metadata: record.metadata,
+            }])
+            .unwrap();
+        drop(catalog);
+        let mut upgrade = FakeAnalyzers::default();
+        let upgrade_report =
+            analyze_attached_catalog(&fixture.registry, &fixture.catalog_id, &base, &mut upgrade)
+                .expect("perceptual hash upgrade");
+        assert_eq!(upgrade_report.records_updated, 1);
+        assert!(
+            upgrade.calls.is_empty(),
+            "adding a missing dHash must not rerun model analyzers"
+        );
+        assert!(fixture
+            .record("qualified")
+            .metadata
+            .pointer("/analysis/perceptualHash")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("dhash64:")));
+
         let mut face_changed = base.clone();
         face_changed.thresholds.face_min_confidence = 0.7;
         let mut face = FakeAnalyzers::default();
@@ -1980,6 +2068,43 @@ mod tests {
         assert_eq!(
             record.metadata["analysis"]["qualifiedSingleFullBody"],
             json!(false)
+        );
+        assert!(
+            record
+                .metadata
+                .pointer("/analysis/perceptualHash")
+                .is_none(),
+            "an unavailable image cannot retain a stale perceptual identity"
+        );
+    }
+
+    #[test]
+    fn perceptual_hash_matches_reencoded_pixels_and_separates_different_structure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut forward = RgbImage::new(18, 16);
+        let mut reverse = RgbImage::new(18, 16);
+        for (x, y, pixel) in forward.enumerate_pixels_mut() {
+            let value = ((x * 11 + y * 3) % 255) as u8;
+            *pixel = image::Rgb([value, value, value]);
+        }
+        for (x, y, pixel) in reverse.enumerate_pixels_mut() {
+            let value = (255 - ((x * 11 + y * 3) % 255)) as u8;
+            *pixel = image::Rgb([value, value, value]);
+        }
+        let png = temporary.path().join("same.png");
+        let bmp = temporary.path().join("same.bmp");
+        let different = temporary.path().join("different.png");
+        forward.save(&png).unwrap();
+        forward.save(&bmp).unwrap();
+        reverse.save(&different).unwrap();
+        assert_ne!(std::fs::read(&png).unwrap(), std::fs::read(&bmp).unwrap());
+        assert_eq!(
+            image_perceptual_hash(&png).unwrap(),
+            image_perceptual_hash(&bmp).unwrap()
+        );
+        assert_ne!(
+            image_perceptual_hash(&png).unwrap(),
+            image_perceptual_hash(&different).unwrap()
         );
     }
 

@@ -266,7 +266,8 @@ pub(crate) fn loopback_trusted(trust_loopback: bool, peer: Option<SocketAddr>) -
 /// (`<img src>`, `<video src>`, `<a download>`), so — mirroring the SSE ticket — an
 /// authenticated client mints a short-lived ticket (POST /api/v1/files/ticket) and
 /// appends it as a `?ticket=` query param. The bypass is scoped hard: GET only, and
-/// only the read-only media routes (project files + pose previews); every other
+/// only the read-only media routes (project files, pose previews, and confined
+/// catalog thumbnails); every other
 /// route still requires the real token, and an SSE event ticket is never accepted
 /// here (separate store).
 fn media_ticket_authorized(state: &AppState, request: &Request<axum::body::Body>) -> bool {
@@ -285,6 +286,7 @@ fn media_ticket_authorized(state: &AppState, request: &Request<axum::body::Body>
 /// The exact route families a media ticket unlocks:
 ///   GET /api/v1/projects/:project_id/files/*relative_path
 ///   GET /api/v1/poses/preview/:job_id/:file_name
+///   GET /api/v1/catalogs/:catalog_id/records/:record_id/thumbnail
 /// Matched on the raw request path (same shape the router matches); the handlers
 /// keep their own traversal/validity checks, the ticket only answers "is this
 /// caller allowed", identically to a header-token caller on these routes.
@@ -298,6 +300,14 @@ pub(crate) fn is_ticketed_media_path(path: &str) -> bool {
     }
     if let Some(rest) = path.strip_prefix("/api/v1/poses/preview/") {
         return !rest.is_empty();
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/catalogs/") {
+        let segments = rest.split('/').collect::<Vec<_>>();
+        return segments.len() == 4
+            && !segments[0].is_empty()
+            && segments[1] == "records"
+            && !segments[2].is_empty()
+            && segments[3] == "thumbnail";
     }
     false
 }

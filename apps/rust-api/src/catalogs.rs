@@ -8,14 +8,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, Response, StatusCode};
 use axum::Json;
 use sceneworks_core::catalog_store::{
     AttachedCatalog, Catalog, CatalogAnalyzerConfig, CatalogAnalyzerSettings, CatalogContractState,
     CatalogError, CatalogFacet, CatalogProcessingControl, CatalogProcessingDesiredState,
     CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRecord,
-    CatalogRecordFilter, CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
+    CatalogRecordFilter, CatalogRecordReview, CatalogRegistry, CatalogReviewDecision,
+    CatalogSavedView, CatalogSearchRequest, CatalogSourceConfig, CatalogStorageAccounting,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobType};
 use sceneworks_core::jobs_store::CreateJob;
@@ -76,6 +78,38 @@ pub(crate) struct CatalogFacetsRequest {
     filters: Vec<CatalogRecordFilter>,
     #[serde(default = "default_facet_limit")]
     limit_per_facet: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CatalogCurationFacetsRequest {
+    query: CatalogSearchRequest,
+    fields: Vec<String>,
+    #[serde(default = "default_facet_limit")]
+    limit_per_facet: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CatalogRecordReviewRequest {
+    decision: CatalogReviewDecision,
+    #[serde(default)]
+    rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SaveCatalogViewRequest {
+    name: String,
+    query: CatalogSearchRequest,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeleteCatalogViewRequest {
+    expected_revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +182,16 @@ pub(crate) struct CatalogQueryResponse {
     contract_version: u32,
     items: Vec<CatalogRecord>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogCurationQueryResponse {
+    contract_version: u32,
+    items: Vec<CatalogRecord>,
+    reviews: Vec<CatalogRecordReview>,
+    next_cursor: Option<String>,
+    total_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,6 +330,179 @@ pub(crate) async fn query_catalog(
     Ok(Json(response))
 }
 
+pub(crate) async fn curate_catalog(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogSearchRequest>,
+) -> Result<Json<CatalogCurationQueryResponse>, ApiError> {
+    if request.limit == 0 || request.limit > MAX_QUERY_LIMIT {
+        return Err(ApiError::bad_request(format!(
+            "Catalog query limit must be between 1 and {MAX_QUERY_LIMIT}"
+        )));
+    }
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&catalog_id)?;
+        let page = catalog.search_records(&request)?;
+        let record_ids = page
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        Ok(CatalogCurationQueryResponse {
+            contract_version: CATALOG_API_CONTRACT_VERSION,
+            reviews: catalog.record_reviews(&record_ids)?,
+            items: page.records,
+            next_cursor: page.next_cursor,
+            total_count: page.total_count,
+        })
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn review_catalog_record(
+    State(state): State<AppState>,
+    Path((catalog_id, record_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CatalogRecordReviewRequest>,
+) -> Result<Json<Option<CatalogRecordReview>>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let review = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .set_record_review(&record_id, request.decision, request.rejection_reason)
+    })
+    .await?;
+    Ok(Json(review))
+}
+
+pub(crate) async fn list_catalog_saved_views(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<Vec<CatalogSavedView>>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let views = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .saved_views()
+    })
+    .await?;
+    Ok(Json(views))
+}
+
+pub(crate) async fn create_catalog_saved_view(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<SaveCatalogViewRequest>,
+) -> Result<(StatusCode, Json<CatalogSavedView>), ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let view = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .save_view(None, request.name, request.query, None)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+pub(crate) async fn update_catalog_saved_view(
+    State(state): State<AppState>,
+    Path((catalog_id, view_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<SaveCatalogViewRequest>,
+) -> Result<Json<CatalogSavedView>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let view = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .save_view(
+                Some(&view_id),
+                request.name,
+                request.query,
+                request.expected_revision,
+            )
+    })
+    .await?;
+    Ok(Json(view))
+}
+
+pub(crate) async fn delete_catalog_saved_view(
+    State(state): State<AppState>,
+    Path((catalog_id, view_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<DeleteCatalogViewRequest>,
+) -> Result<StatusCode, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .delete_saved_view(&view_id, request.expected_revision)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn catalog_record_thumbnail(
+    State(state): State<AppState>,
+    Path((catalog_id, record_id)): Path<(String, String)>,
+) -> Result<Response<Body>, ApiError> {
+    const MAX_THUMBNAIL_BYTES: u64 = 32 * 1024 * 1024;
+    let config_dir = state.settings.config_dir.clone();
+    let (bytes, content_type) = catalog_call(move || {
+        let catalog = CatalogRegistry::new(config_dir).open_attached(&catalog_id)?;
+        let record = catalog.record_by_id(&record_id)?;
+        let relative = record
+            .thumbnail_path
+            .as_deref()
+            .or_else(|| {
+                record
+                    .metadata
+                    .pointer("/acquisition/thumbnailPath")
+                    .and_then(Value::as_str)
+            })
+            .ok_or_else(|| CatalogError::NotFound("Catalog thumbnail was not found".to_owned()))?;
+        let root = std::fs::canonicalize(catalog.root())?;
+        let path = std::fs::canonicalize(catalog.root().join(relative)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
+            } else {
+                CatalogError::Io(error)
+            }
+        })?;
+        if !path.starts_with(&root) || !path.is_file() {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog thumbnail escapes its catalog".to_owned(),
+            ));
+        }
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() > MAX_THUMBNAIL_BYTES {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog thumbnail exceeds its size limit".to_owned(),
+            ));
+        }
+        let content_type = match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("png") => "image/png",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            _ => "application/octet-stream",
+        };
+        Ok((std::fs::read(path)?, content_type))
+    })
+    .await?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .map_err(|error| ApiError::internal(format!("Catalog thumbnail response failed: {error}")))
+}
+
 pub(crate) async fn catalog_facets(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
@@ -305,6 +522,32 @@ pub(crate) async fn catalog_facets(
             facets: catalog.facet_counts(
                 &request.fields,
                 &request.filters,
+                request.limit_per_facet,
+            )?,
+        })
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn catalog_curation_facets(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogCurationFacetsRequest>,
+) -> Result<Json<CatalogFacetsResponse>, ApiError> {
+    if request.limit_per_facet == 0 || request.limit_per_facet > MAX_FACET_LIMIT {
+        return Err(ApiError::bad_request(format!(
+            "Catalog facet limit must be between 1 and {MAX_FACET_LIMIT}"
+        )));
+    }
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let catalog = CatalogRegistry::new(config_dir).open_attached(&catalog_id)?;
+        Ok(CatalogFacetsResponse {
+            contract_version: CATALOG_API_CONTRACT_VERSION,
+            facets: catalog.search_facet_counts(
+                &request.query,
+                &request.fields,
                 request.limit_per_facet,
             )?,
         })

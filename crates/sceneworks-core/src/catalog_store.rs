@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,9 @@ const MAX_FILTER_VALUES: usize = 64;
 const MAX_FACET_FIELDS: usize = 16;
 const MAX_FACET_VALUES: u32 = 200;
 const MAX_FACET_VALUE_BYTES: u32 = 512;
+const MAX_SEARCH_TEXT_BYTES: usize = 1024;
+const MAX_SAVED_VIEWS: u64 = 200;
+const MAX_REJECTION_REASON_BYTES: usize = 2_048;
 
 const SOURCE_CONFIG_METADATA_KEY: &str = "source_config";
 const ANALYZER_VERSIONS_METADATA_KEY: &str = "analyzer_versions";
@@ -164,6 +167,70 @@ pub struct CatalogRecord {
 pub struct CatalogRecordPage {
     pub records: Vec<CatalogRecord>,
     pub next_cursor: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSearchRequest {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    pub limit: u32,
+    #[serde(default)]
+    pub filters: Vec<CatalogRecordFilter>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub min_width: Option<u32>,
+    #[serde(default)]
+    pub max_width: Option<u32>,
+    #[serde(default)]
+    pub min_height: Option<u32>,
+    #[serde(default)]
+    pub max_height: Option<u32>,
+    #[serde(default)]
+    pub min_analyzer_confidence: Option<f64>,
+    #[serde(default)]
+    pub sample_seed: Option<u64>,
+    #[serde(default)]
+    pub deduplicate: bool,
+    #[serde(default)]
+    pub include_total: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogSearchPage {
+    pub records: Vec<CatalogRecord>,
+    pub next_cursor: Option<String>,
+    pub total_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogReviewDecision {
+    #[default]
+    Default,
+    Include,
+    Exclude,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRecordReview {
+    pub record_id: String,
+    pub decision: CatalogReviewDecision,
+    pub rejection_reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSavedView {
+    pub id: String,
+    pub name: String,
+    pub query: CatalogSearchRequest,
+    pub revision: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +640,96 @@ impl Catalog {
             }
         }
         {
+            let mut index_statement = transaction
+                .prepare_cached(
+                    "insert into catalog_record_search (
+                        record_id, sample_key, medium, person_count, face_count, full_body,
+                        pose_coverage, crop_state, subject_size, width, height, availability,
+                        analyzer_confidence, content_hash, perceptual_hash
+                     ) values (
+                        ?1, ?2,
+                        coalesce(json_extract(?3, '$.analysis.medium'), json_extract(?3, '$.medium')),
+                        coalesce(json_extract(?3, '$.analysis.personCount'), json_extract(?3, '$.personCount')),
+                        json_extract(?3, '$.analysis.faceCount'),
+                        coalesce(
+                            json_extract(?3, '$.analysis.fullBody'),
+                            json_extract(?3, '$.analysis.qualifiedSingleFullBody')
+                        ),
+                        json_extract(?3, '$.analysis.poseCoverage'),
+                        json_extract(?3, '$.analysis.cropState'),
+                        json_extract(?3, '$.analysis.subjectFrameFraction'),
+                        coalesce(json_extract(?3, '$.acquisition.width'), json_extract(?3, '$.width')),
+                        coalesce(json_extract(?3, '$.acquisition.height'), json_extract(?3, '$.height')),
+                        coalesce(json_extract(?3, '$.acquisition.availability'), json_extract(?3, '$.availability'), 'unknown'),
+                        coalesce(
+                            json_extract(?3, '$.analysis.mediumConfidence'),
+                            json_extract(?3, '$.analysis.visionLanguage.medium.confidence'),
+                            json_extract(?3, '$.analysis.structured.derived.analyzer.confidence'),
+                            json_extract(?3, '$.analysis.structured.person.analyzer.confidence'),
+                            json_extract(?3, '$.analysis.structured.face.analyzer.confidence'),
+                            json_extract(?3, '$.analysis.structured.pose.analyzer.confidence')
+                        ),
+                        coalesce(
+                            json_extract(?3, '$.acquisition.contentHash'),
+                            json_extract(?3, '$.contentHash'),
+                            json_extract(?3, '$.analysis.structured.inputFingerprint')
+                        ),
+                        coalesce(
+                            json_extract(?3, '$.perceptualHash'),
+                            json_extract(?3, '$.analysis.perceptualHash')
+                        )
+                     )
+                     on conflict(record_id) do update set
+                        sample_key = excluded.sample_key,
+                        medium = excluded.medium,
+                        person_count = excluded.person_count,
+                        face_count = excluded.face_count,
+                        full_body = excluded.full_body,
+                        pose_coverage = excluded.pose_coverage,
+                        crop_state = excluded.crop_state,
+                        subject_size = excluded.subject_size,
+                        width = excluded.width,
+                        height = excluded.height,
+                        availability = excluded.availability,
+                        analyzer_confidence = excluded.analyzer_confidence,
+                        content_hash = excluded.content_hash,
+                        perceptual_hash = excluded.perceptual_hash",
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let mut rowid_statement = transaction
+                .prepare_cached("select rowid from catalog_records where id = ?1")
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let mut fts_delete = transaction
+                .prepare_cached("delete from catalog_record_fts where rowid = ?1")
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let mut fts_insert = transaction
+                .prepare_cached(
+                    "insert into catalog_record_fts(rowid, record_id, caption, tags)
+                     values (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            for record in records {
+                let metadata = serde_json::to_string(&record.metadata)?;
+                index_statement
+                    .execute(params![record.id, stable_sample_key(&record.id), metadata,])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+                let rowid: i64 = rowid_statement
+                    .query_row([&record.id], |row| row.get(0))
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+                fts_delete
+                    .execute([rowid])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+                fts_insert
+                    .execute(params![
+                        rowid,
+                        record.id,
+                        searchable_caption(&record.metadata),
+                        searchable_tags(&record.metadata),
+                    ])
+                    .map_err(|error| map_sqlite_error(&database_path, error))?;
+            }
+        }
+        {
             let mut statement = transaction
                 .prepare_cached(
                     "insert into catalog_metadata(key, value) values (?1, ?2)
@@ -616,6 +773,47 @@ impl Catalog {
                 |row| row.get(0),
             )
             .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    pub fn record_by_id(&self, record_id: &str) -> CatalogResult<CatalogRecord> {
+        validate_record_id(record_id)?;
+        let database_path = self.database_path();
+        let row = self
+            .connection
+            .query_row(
+                "select id, image_path, thumbnail_path, embedding_path, artifact_path,
+                        metadata_json, created_at, updated_at
+                 from catalog_records where id = ?1",
+                [record_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&database_path, error))?
+            .ok_or_else(|| CatalogError::NotFound("Catalog record was not found".to_owned()))?;
+        Ok(CatalogRecord {
+            id: row.0.clone(),
+            image_path: row.1,
+            thumbnail_path: row.2,
+            embedding_path: row.3,
+            artifact_path: row.4,
+            metadata: serde_json::from_str(&row.5).map_err(|error| CatalogError::Corrupt {
+                path: database_path,
+                detail: format!("record {} contains invalid metadata JSON: {error}", row.0),
+            })?,
+            created_at: row.6,
+            updated_at: row.7,
+        })
     }
 
     pub fn page_records(&self, offset: u64, limit: u32) -> CatalogResult<Vec<CatalogRecord>> {
@@ -856,6 +1054,496 @@ impl Catalog {
             });
         }
         Ok(facets)
+    }
+
+    /// Runs the curation query exclusively against the compact indexed
+    /// projection. The opaque cursor is bound to the complete query, including
+    /// seed and deduplication, so it cannot be replayed against another view.
+    pub fn search_records(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> CatalogResult<CatalogSearchPage> {
+        validate_search_request(request)?;
+        let fingerprint = search_fingerprint(request)?;
+        let cursor =
+            parse_search_cursor(request.cursor.as_deref(), &fingerprint, request.sample_seed)?;
+        let database_path = self.database_path();
+        let search_text = fts_query(&request.text)?;
+        let mut sql = String::from(
+            "select records.rowid, records.id, records.image_path, records.thumbnail_path,
+                    records.embedding_path, records.artifact_path, records.metadata_json,
+                    records.created_at, records.updated_at, search.sample_key
+             from catalog_records records
+             join catalog_record_search search on search.record_id = records.id
+             left join catalog_record_reviews review on review.record_id = records.id",
+        );
+        if search_text.is_some() {
+            sql.push_str(" join catalog_record_fts fts on fts.rowid = records.rowid");
+        }
+        sql.push_str(" where 1 = 1");
+        let mut bindings = Vec::new();
+        append_search_predicates(&mut sql, &mut bindings, request, search_text.as_deref())?;
+
+        let sample_start = request
+            .sample_seed
+            .map(|seed| stable_sample_key(&format!("seed:{seed}")));
+        let (sample_phase, last_key, last_rowid) = match cursor {
+            Some(SearchCursor::Row { rowid }) => (0_u8, 0_i64, rowid),
+            Some(SearchCursor::Sample {
+                phase,
+                sample_key,
+                rowid,
+                ..
+            }) => (phase, sample_key, rowid),
+            None => (0, sample_start.unwrap_or_default(), 0),
+        };
+        if let Some(start) = sample_start {
+            if sample_phase == 0 {
+                sql.push_str(
+                    " and search.sample_key >= ?
+                      and (search.sample_key > ? or
+                           (search.sample_key = ? and records.rowid > ?))",
+                );
+                bindings.extend([
+                    SqlValue::Integer(start),
+                    SqlValue::Integer(last_key),
+                    SqlValue::Integer(last_key),
+                    SqlValue::Integer(last_rowid),
+                ]);
+            } else {
+                sql.push_str(
+                    " and search.sample_key < ?
+                      and (search.sample_key > ? or
+                           (search.sample_key = ? and records.rowid > ?))",
+                );
+                bindings.extend([
+                    SqlValue::Integer(start),
+                    SqlValue::Integer(last_key),
+                    SqlValue::Integer(last_key),
+                    SqlValue::Integer(last_rowid),
+                ]);
+            }
+            sql.push_str(" order by search.sample_key, records.rowid");
+        } else {
+            sql.push_str(" and records.rowid > ? order by records.rowid");
+            bindings.push(SqlValue::Integer(last_rowid));
+        }
+        sql.push_str(" limit ?");
+        bindings.push(SqlValue::Integer(i64::from(request.limit) + 1));
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let rows = statement
+            .query_map(params_from_iter(bindings), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let mut decoded = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let has_more = decoded.len() > request.limit as usize;
+        if has_more {
+            decoded.pop();
+        }
+        let wrap_cursor = request
+            .sample_seed
+            .filter(|_| sample_phase == 0)
+            .map(|seed| format!("v1:{fingerprint}:s:{seed}:1:-1:0"));
+        let next_cursor = decoded.last().and_then(|row| {
+            if has_more {
+                Some(if let Some(seed) = request.sample_seed {
+                    format!(
+                        "v1:{fingerprint}:s:{seed}:{sample_phase}:{}:{}",
+                        row.9, row.0
+                    )
+                } else {
+                    format!("v1:{fingerprint}:r:{}", row.0)
+                })
+            } else {
+                wrap_cursor.clone()
+            }
+        });
+        // If a seed begins beyond the highest matching sample key, advance to
+        // the wrap phase without asking the client to guess a new query.
+        let next_cursor = if decoded.is_empty() {
+            wrap_cursor
+        } else {
+            next_cursor
+        };
+        let mut records = Vec::with_capacity(decoded.len());
+        for row in decoded {
+            let metadata = serde_json::from_str(&row.6).map_err(|error| CatalogError::Corrupt {
+                path: database_path.clone(),
+                detail: format!("record {} contains invalid metadata JSON: {error}", row.1),
+            })?;
+            records.push(CatalogRecord {
+                id: row.1,
+                image_path: row.2,
+                thumbnail_path: row.3,
+                embedding_path: row.4,
+                artifact_path: row.5,
+                metadata,
+                created_at: row.7,
+                updated_at: row.8,
+            });
+        }
+        let total_count = request
+            .include_total
+            .then(|| self.search_count(request, search_text.as_deref()))
+            .transpose()?;
+        Ok(CatalogSearchPage {
+            records,
+            next_cursor,
+            total_count,
+        })
+    }
+
+    fn search_count(
+        &self,
+        request: &CatalogSearchRequest,
+        search_text: Option<&str>,
+    ) -> CatalogResult<u64> {
+        let mut sql = String::from(
+            "select count(*)
+             from catalog_records records
+             join catalog_record_search search on search.record_id = records.id
+             left join catalog_record_reviews review on review.record_id = records.id",
+        );
+        if search_text.is_some() {
+            sql.push_str(" join catalog_record_fts fts on fts.rowid = records.rowid");
+        }
+        sql.push_str(" where 1 = 1");
+        let mut bindings = Vec::new();
+        append_search_predicates(&mut sql, &mut bindings, request, search_text)?;
+        self.connection
+            .query_row(&sql, params_from_iter(bindings), |row| row.get(0))
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))
+    }
+
+    pub fn search_facet_counts(
+        &self,
+        request: &CatalogSearchRequest,
+        fields: &[String],
+        max_values_per_facet: u32,
+    ) -> CatalogResult<Vec<CatalogFacet>> {
+        validate_search_request(request)?;
+        if fields.is_empty() || fields.len() > MAX_FACET_FIELDS {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog facets require 1 to {MAX_FACET_FIELDS} fields"
+            )));
+        }
+        if max_values_per_facet == 0 || max_values_per_facet > MAX_FACET_VALUES {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog facet size must be between 1 and {MAX_FACET_VALUES}"
+            )));
+        }
+        let search_text = fts_query(&request.text)?;
+        let database_path = self.database_path();
+        let mut facets = Vec::with_capacity(fields.len());
+        for field in fields {
+            let (column, _) = search_column(field)?;
+            let mut sql = String::from("select cast(");
+            sql.push_str(column);
+            sql.push_str(
+                " as text) facet_value, count(*)
+                 from catalog_records records
+                 join catalog_record_search search on search.record_id = records.id
+                 left join catalog_record_reviews review on review.record_id = records.id",
+            );
+            if search_text.is_some() {
+                sql.push_str(" join catalog_record_fts fts on fts.rowid = records.rowid");
+            }
+            sql.push_str(" where ");
+            sql.push_str(column);
+            sql.push_str(" is not null");
+            let mut bindings = Vec::new();
+            append_search_predicates(&mut sql, &mut bindings, request, search_text.as_deref())?;
+            sql.push_str(" group by facet_value order by count(*) desc, facet_value limit ?");
+            bindings.push(SqlValue::Integer(i64::from(max_values_per_facet)));
+            let mut statement = self
+                .connection
+                .prepare(&sql)
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            let values = statement
+                .query_map(params_from_iter(bindings), |row| {
+                    Ok(CatalogFacetCount {
+                        value: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })
+                .map_err(|error| map_sqlite_error(&database_path, error))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| map_sqlite_error(&database_path, error))?;
+            facets.push(CatalogFacet {
+                field: field.clone(),
+                values,
+            });
+        }
+        Ok(facets)
+    }
+
+    pub fn record_reviews(&self, record_ids: &[String]) -> CatalogResult<Vec<CatalogRecordReview>> {
+        if record_ids.len() > MAX_PAGE_SIZE as usize {
+            return Err(CatalogError::InvalidCatalog(
+                "Too many catalog reviews requested".to_owned(),
+            ));
+        }
+        let mut reviews = Vec::new();
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "select decision, rejection_reason, updated_at
+                 from catalog_record_reviews where record_id = ?1",
+            )
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        for record_id in record_ids {
+            validate_record_id(record_id)?;
+            if let Some((decision, rejection_reason, updated_at)) = statement
+                .query_row([record_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| map_sqlite_error(&self.database_path(), error))?
+            {
+                reviews.push(CatalogRecordReview {
+                    record_id: record_id.clone(),
+                    decision: parse_review_decision(&decision)?,
+                    rejection_reason,
+                    updated_at,
+                });
+            }
+        }
+        Ok(reviews)
+    }
+
+    pub fn set_record_review(
+        &self,
+        record_id: &str,
+        decision: CatalogReviewDecision,
+        rejection_reason: Option<String>,
+    ) -> CatalogResult<Option<CatalogRecordReview>> {
+        validate_record_id(record_id)?;
+        if !self.contains_record_id(record_id)? {
+            return Err(CatalogError::NotFound(
+                "Catalog record was not found".to_owned(),
+            ));
+        }
+        let reason = rejection_reason
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if reason
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_REJECTION_REASON_BYTES || value.contains('\0'))
+        {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog rejection reason is invalid".to_owned(),
+            ));
+        }
+        match decision {
+            CatalogReviewDecision::Default => {
+                self.connection
+                    .execute(
+                        "delete from catalog_record_reviews where record_id = ?1",
+                        [record_id],
+                    )
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                Ok(None)
+            }
+            CatalogReviewDecision::Include => {
+                let updated_at = utc_now();
+                self.connection
+                    .execute(
+                        "insert into catalog_record_reviews(
+                            record_id, decision, rejection_reason, updated_at
+                         ) values (?1, 'include', null, ?2)
+                         on conflict(record_id) do update set
+                            decision = 'include', rejection_reason = null,
+                            updated_at = excluded.updated_at",
+                        params![record_id, updated_at],
+                    )
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                Ok(Some(CatalogRecordReview {
+                    record_id: record_id.to_owned(),
+                    decision,
+                    rejection_reason: None,
+                    updated_at,
+                }))
+            }
+            CatalogReviewDecision::Exclude => {
+                let reason = reason.ok_or_else(|| {
+                    CatalogError::InvalidCatalog(
+                        "Excluded catalog records require a rejection reason".to_owned(),
+                    )
+                })?;
+                let updated_at = utc_now();
+                self.connection
+                    .execute(
+                        "insert into catalog_record_reviews(
+                            record_id, decision, rejection_reason, updated_at
+                         ) values (?1, 'exclude', ?2, ?3)
+                         on conflict(record_id) do update set
+                            decision = 'exclude', rejection_reason = excluded.rejection_reason,
+                            updated_at = excluded.updated_at",
+                        params![record_id, reason, updated_at],
+                    )
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                Ok(Some(CatalogRecordReview {
+                    record_id: record_id.to_owned(),
+                    decision,
+                    rejection_reason: Some(reason),
+                    updated_at,
+                }))
+            }
+        }
+    }
+
+    pub fn saved_views(&self) -> CatalogResult<Vec<CatalogSavedView>> {
+        let database_path = self.database_path();
+        let mut statement = self
+            .connection
+            .prepare(
+                "select id, name, query_json, revision, created_at, updated_at
+                 from catalog_saved_views order by name collate nocase, id",
+            )
+            .map_err(|error| map_sqlite_error(&database_path, error))?;
+        let views = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|error| map_sqlite_error(&database_path, error))?
+            .map(|row| {
+                let (id, name, query_json, revision, created_at, updated_at) =
+                    row.map_err(|error| map_sqlite_error(&database_path, error))?;
+                Ok(CatalogSavedView {
+                    id,
+                    name,
+                    query: serde_json::from_str(&query_json)?,
+                    revision,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .collect();
+        views
+    }
+
+    pub fn save_view(
+        &self,
+        id: Option<&str>,
+        name: String,
+        mut query: CatalogSearchRequest,
+        expected_revision: Option<u64>,
+    ) -> CatalogResult<CatalogSavedView> {
+        let name = validated_saved_view_name(name)?;
+        query.cursor = None;
+        query.include_total = false;
+        validate_search_request(&query)?;
+        let query_json = serde_json::to_string(&query)?;
+        let now = utc_now();
+        let id = match id {
+            Some(id) => {
+                validate_saved_view_id(id)?;
+                let expected = expected_revision.ok_or_else(|| {
+                    CatalogError::Conflict(
+                        "Updating a saved view requires its current revision".to_owned(),
+                    )
+                })?;
+                let changed = self
+                    .connection
+                    .execute(
+                        "update catalog_saved_views
+                         set name = ?1, query_json = ?2, revision = revision + 1, updated_at = ?3
+                         where id = ?4 and revision = ?5",
+                        params![name, query_json, now, id, expected],
+                    )
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                if changed == 0 {
+                    return Err(CatalogError::Conflict(
+                        "Saved view changed; refresh and retry".to_owned(),
+                    ));
+                }
+                id.to_owned()
+            }
+            None => {
+                let count: u64 = self
+                    .connection
+                    .query_row("select count(*) from catalog_saved_views", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                if count >= MAX_SAVED_VIEWS {
+                    return Err(CatalogError::InvalidCatalog(format!(
+                        "Catalogs support at most {MAX_SAVED_VIEWS} saved views"
+                    )));
+                }
+                let id = random_hex(16)?;
+                self.connection
+                    .execute(
+                        "insert into catalog_saved_views(
+                            id, name, query_json, revision, created_at, updated_at
+                         ) values (?1, ?2, ?3, 0, ?4, ?4)",
+                        params![id, name, query_json, now],
+                    )
+                    .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+                id
+            }
+        };
+        let (revision, created_at) = self
+            .connection
+            .query_row(
+                "select revision, created_at from catalog_saved_views where id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        Ok(CatalogSavedView {
+            id,
+            name,
+            query,
+            revision,
+            created_at,
+            updated_at: now,
+        })
+    }
+
+    pub fn delete_saved_view(&self, id: &str, expected_revision: u64) -> CatalogResult<()> {
+        validate_saved_view_id(id)?;
+        let changed = self
+            .connection
+            .execute(
+                "delete from catalog_saved_views where id = ?1 and revision = ?2",
+                params![id, expected_revision],
+            )
+            .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
+        if changed == 0 {
+            return Err(CatalogError::Conflict(
+                "Saved view changed; refresh and retry".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn contract_state(&self) -> CatalogResult<CatalogContractState> {
@@ -1703,6 +2391,327 @@ fn append_filter_sql(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SearchCursor {
+    Row {
+        rowid: i64,
+    },
+    Sample {
+        phase: u8,
+        sample_key: i64,
+        rowid: i64,
+    },
+}
+
+fn validate_search_request(request: &CatalogSearchRequest) -> CatalogResult<()> {
+    validate_page_size(request.limit)?;
+    if request.limit > 200 {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog curation pages support at most 200 records".to_owned(),
+        ));
+    }
+    if request.text.len() > MAX_SEARCH_TEXT_BYTES || request.text.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog search text is invalid".to_owned(),
+        ));
+    }
+    if request.filters.len() > MAX_QUERY_FILTERS {
+        return Err(CatalogError::InvalidCatalog(format!(
+            "Catalog queries support at most {MAX_QUERY_FILTERS} filters"
+        )));
+    }
+    for filter in &request.filters {
+        search_column(&filter.field)?;
+        if filter.values.is_empty() || filter.values.len() > MAX_FILTER_VALUES {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Each catalog filter requires 1 to {MAX_FILTER_VALUES} values"
+            )));
+        }
+        if filter
+            .values
+            .iter()
+            .any(|value| value.len() > 128 || value.contains('\0'))
+        {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog curation filter values are invalid".to_owned(),
+            ));
+        }
+    }
+    for (minimum, maximum, label) in [
+        (request.min_width, request.max_width, "width"),
+        (request.min_height, request.max_height, "height"),
+    ] {
+        if minimum
+            .zip(maximum)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(CatalogError::InvalidCatalog(format!(
+                "Catalog {label} minimum cannot exceed its maximum"
+            )));
+        }
+    }
+    if request
+        .min_analyzer_confidence
+        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog analyzer confidence must be between 0 and 1".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn search_column(field: &str) -> CatalogResult<(&'static str, bool)> {
+    match field {
+        "medium" | "analysis.medium" => Ok(("search.medium", false)),
+        "personCount" | "analysis.personCount" => Ok(("search.person_count", true)),
+        "faceCount" | "analysis.faceCount" => Ok(("search.face_count", true)),
+        "fullBody" | "analysis.fullBody" | "analysis.qualifiedSingleFullBody" => {
+            Ok(("search.full_body", true))
+        }
+        "poseCoverage" | "analysis.poseCoverage" => Ok(("search.pose_coverage", true)),
+        "cropState" | "analysis.cropState" => Ok(("search.crop_state", false)),
+        "subjectSize" | "analysis.subjectFrameFraction" => Ok(("search.subject_size", true)),
+        "width" => Ok(("search.width", true)),
+        "height" => Ok(("search.height", true)),
+        "availability" | "acquisition.availability" => Ok(("search.availability", false)),
+        "analyzerConfidence" | "analysis.mediumConfidence" => {
+            Ok(("search.analyzer_confidence", true))
+        }
+        "reviewDecision" => Ok(("coalesce(review.decision, 'default')", false)),
+        _ => Err(CatalogError::InvalidCatalog(format!(
+            "Unsupported indexed catalog filter: {field}"
+        ))),
+    }
+}
+
+fn append_search_predicates(
+    sql: &mut String,
+    bindings: &mut Vec<SqlValue>,
+    request: &CatalogSearchRequest,
+    search_text: Option<&str>,
+) -> CatalogResult<()> {
+    if let Some(search_text) = search_text {
+        sql.push_str(" and catalog_record_fts match ?");
+        bindings.push(SqlValue::Text(search_text.to_owned()));
+    }
+    for filter in &request.filters {
+        let (column, numeric) = search_column(&filter.field)?;
+        sql.push_str(" and ");
+        sql.push_str(column);
+        sql.push_str(" in (");
+        for (index, value) in filter.values.iter().enumerate() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+            if numeric {
+                let normalized = match value.as_str() {
+                    "true" => SqlValue::Integer(1),
+                    "false" => SqlValue::Integer(0),
+                    _ => value.parse::<f64>().map(SqlValue::Real).map_err(|_| {
+                        CatalogError::InvalidCatalog(format!(
+                            "Catalog filter {} requires numeric values",
+                            filter.field
+                        ))
+                    })?,
+                };
+                bindings.push(normalized);
+            } else {
+                bindings.push(SqlValue::Text(value.clone()));
+            }
+        }
+        sql.push(')');
+    }
+    for (column, value, operator) in [
+        ("search.width", request.min_width, ">="),
+        ("search.width", request.max_width, "<="),
+        ("search.height", request.min_height, ">="),
+        ("search.height", request.max_height, "<="),
+    ] {
+        if let Some(value) = value {
+            sql.push_str(" and ");
+            sql.push_str(column);
+            sql.push(' ');
+            sql.push_str(operator);
+            sql.push_str(" ?");
+            bindings.push(SqlValue::Integer(i64::from(value)));
+        }
+    }
+    if let Some(value) = request.min_analyzer_confidence {
+        sql.push_str(" and search.analyzer_confidence >= ?");
+        bindings.push(SqlValue::Real(value));
+    }
+    if request.deduplicate {
+        sql.push_str(
+            " and not exists (
+                select 1 from catalog_record_search duplicate
+                where duplicate.record_id < search.record_id
+                  and (
+                    (search.perceptual_hash is not null
+                     and duplicate.perceptual_hash = search.perceptual_hash)
+                    or
+                    (search.content_hash is not null
+                     and duplicate.content_hash = search.content_hash)
+                  )
+             )",
+        );
+    }
+    Ok(())
+}
+
+fn fts_query(text: &str) -> CatalogResult<Option<String>> {
+    let tokens = text
+        .split_whitespace()
+        .map(|token| token.trim_matches(|character: char| !character.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if !text.trim().is_empty() && tokens.is_empty() {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog search requires letters or numbers".to_owned(),
+        ));
+    }
+    Ok((!tokens.is_empty()).then(|| tokens.join(" AND ")))
+}
+
+fn search_fingerprint(request: &CatalogSearchRequest) -> CatalogResult<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut normalized = request.clone();
+    normalized.cursor = None;
+    normalized.include_total = false;
+    let digest = Sha256::digest(serde_json::to_vec(&normalized)?);
+    Ok(format!("{digest:x}")[..24].to_owned())
+}
+
+fn parse_search_cursor(
+    cursor: Option<&str>,
+    expected_fingerprint: &str,
+    expected_seed: Option<u64>,
+) -> CatalogResult<Option<SearchCursor>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let parts = cursor.split(':').collect::<Vec<_>>();
+    if parts.len() == 4 && parts[0] == "v1" && parts[1] == expected_fingerprint && parts[2] == "r" {
+        let rowid = parts[3].parse::<i64>().ok().filter(|value| *value >= 0);
+        return rowid
+            .map(|rowid| Some(SearchCursor::Row { rowid }))
+            .ok_or_else(|| CatalogError::InvalidCatalog("Catalog cursor is invalid".to_owned()));
+    }
+    if parts.len() == 7 && parts[0] == "v1" && parts[1] == expected_fingerprint && parts[2] == "s" {
+        let seed = parts[3].parse::<u64>().ok();
+        let phase = parts[4].parse::<u8>().ok().filter(|value| *value <= 1);
+        let sample_key = parts[5].parse::<i64>().ok();
+        let rowid = parts[6].parse::<i64>().ok().filter(|value| *value >= 0);
+        if let (Some(seed), Some(phase), Some(sample_key), Some(rowid)) =
+            (seed, phase, sample_key, rowid)
+        {
+            if expected_seed == Some(seed) {
+                return Ok(Some(SearchCursor::Sample {
+                    phase,
+                    sample_key,
+                    rowid,
+                }));
+            }
+        }
+    }
+    Err(CatalogError::InvalidCatalog(
+        "Catalog cursor does not match this query".to_owned(),
+    ))
+}
+
+fn stable_sample_key(value: &str) -> i64 {
+    // FNV-1a gives an architecture-independent stable ordering key. Masking the
+    // sign bit keeps SQLite ordering and cursor serialization straightforward.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash & i64::MAX as u64) as i64
+}
+
+fn searchable_caption(metadata: &Value) -> String {
+    metadata
+        .get("caption")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_SEARCH_TEXT_BYTES)
+        .collect()
+}
+
+fn searchable_tags(metadata: &Value) -> String {
+    let mut tags = HashSet::new();
+    if let Some(membership) = metadata
+        .pointer("/analysis/tagMembership")
+        .and_then(Value::as_object)
+    {
+        tags.extend(
+            membership
+                .iter()
+                .filter(|(_, included)| included.as_bool() == Some(true))
+                .map(|(tag, _)| tag.as_str()),
+        );
+    }
+    if let Some(values) = metadata
+        .pointer("/analysis/visionLanguage/tags")
+        .and_then(Value::as_array)
+    {
+        tags.extend(values.iter().filter_map(|value| {
+            value
+                .get("value")
+                .and_then(Value::as_str)
+                .or_else(|| value.as_str())
+        }));
+    }
+    let mut tags = tags.into_iter().collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.join(" ").chars().take(MAX_SEARCH_TEXT_BYTES).collect()
+}
+
+fn validate_record_id(record_id: &str) -> CatalogResult<()> {
+    if record_id.trim().is_empty() || record_id.len() > 512 || record_id.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog record id must contain 1 to 512 non-NUL bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_review_decision(value: &str) -> CatalogResult<CatalogReviewDecision> {
+    match value {
+        "default" => Ok(CatalogReviewDecision::Default),
+        "include" => Ok(CatalogReviewDecision::Include),
+        "exclude" => Ok(CatalogReviewDecision::Exclude),
+        _ => Err(CatalogError::Corrupt {
+            path: PathBuf::from(CATALOG_DATABASE_FILE),
+            detail: "catalog review has an invalid decision".to_owned(),
+        }),
+    }
+}
+
+fn validated_saved_view_name(name: String) -> CatalogResult<String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 128 || name.contains('\0') {
+        return Err(CatalogError::InvalidCatalog(
+            "Saved view name must contain 1 to 128 non-NUL bytes".to_owned(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn validate_saved_view_id(id: &str) -> CatalogResult<()> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CatalogError::InvalidCatalog(
+            "Saved view id is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_source_config(source: &mut CatalogSourceConfig) -> CatalogResult<()> {
     let kind = source.kind.trim();
     if kind.is_empty()
@@ -1834,6 +2843,19 @@ fn validate_processing_progress(progress: &CatalogProcessingProgress) -> Catalog
 }
 
 fn configure_connection(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    use rusqlite::functions::FunctionFlags;
+
+    connection
+        .create_scalar_function(
+            "sceneworks_sample_key",
+            1,
+            FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_INNOCUOUS,
+            |context| {
+                let record_id = context.get::<String>(0)?;
+                Ok(stable_sample_key(&record_id))
+            },
+        )
+        .map_err(|error| map_sqlite_error(database_path, error))?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|error| map_sqlite_error(database_path, error))?;
@@ -1896,6 +2918,148 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
             )
             .map_err(|error| map_sqlite_error(database_path, error))?;
     }
+    // Additive v1 migration: catalogs remain attachable by older SceneWorks
+    // builds while newer builds gain a compact, indexed curation projection.
+    // The projection is rebuilt incrementally by every record upsert and never
+    // requires loading catalog rows into the API process.
+    connection
+        .execute_batch(
+            "begin immediate;
+             create table if not exists catalog_record_search (
+                record_id text primary key not null
+                    references catalog_records(id) on delete cascade,
+                sample_key integer not null,
+                medium text,
+                person_count integer,
+                face_count integer,
+                full_body integer,
+                pose_coverage real,
+                crop_state text,
+                subject_size real,
+                width integer,
+                height integer,
+                availability text,
+                analyzer_confidence real,
+                content_hash text,
+                perceptual_hash text
+             ) strict;
+             create index if not exists idx_catalog_search_medium
+                on catalog_record_search(medium, record_id);
+             create index if not exists idx_catalog_search_people
+                on catalog_record_search(person_count, record_id);
+             create index if not exists idx_catalog_search_faces
+                on catalog_record_search(face_count, record_id);
+             create index if not exists idx_catalog_search_full_body
+                on catalog_record_search(full_body, record_id);
+             create index if not exists idx_catalog_search_pose
+                on catalog_record_search(pose_coverage, record_id);
+             create index if not exists idx_catalog_search_crop
+                on catalog_record_search(crop_state, record_id);
+             create index if not exists idx_catalog_search_subject_size
+                on catalog_record_search(subject_size, record_id);
+             create index if not exists idx_catalog_search_dimensions
+                on catalog_record_search(width, height, record_id);
+             create index if not exists idx_catalog_search_availability
+                on catalog_record_search(availability, record_id);
+             create index if not exists idx_catalog_search_confidence
+                on catalog_record_search(analyzer_confidence, record_id);
+             create index if not exists idx_catalog_search_sample
+                on catalog_record_search(sample_key, record_id);
+             create index if not exists idx_catalog_search_primary_flow
+                on catalog_record_search(medium, person_count, full_body, sample_key, record_id);
+             create index if not exists idx_catalog_search_content_hash
+                on catalog_record_search(content_hash, record_id);
+             create index if not exists idx_catalog_search_perceptual_hash
+                on catalog_record_search(perceptual_hash, record_id);
+             create virtual table if not exists catalog_record_fts using fts5(
+                record_id unindexed, caption, tags, tokenize = 'unicode61'
+             );
+             create table if not exists catalog_record_reviews (
+                record_id text primary key not null
+                    references catalog_records(id) on delete cascade,
+                decision text not null check(decision in ('default', 'include', 'exclude')),
+                rejection_reason text,
+                updated_at text not null
+             ) strict;
+             create index if not exists idx_catalog_reviews_decision
+                on catalog_record_reviews(decision, record_id);
+             create table if not exists catalog_saved_views (
+                id text primary key not null,
+                name text not null,
+                query_json text not null,
+                created_at text not null,
+                updated_at text not null,
+                revision integer not null default 0
+             ) strict;
+             create unique index if not exists idx_catalog_saved_views_name
+                on catalog_saved_views(name collate nocase);
+             insert or ignore into catalog_record_search (
+                record_id, sample_key, medium, person_count, face_count, full_body,
+                pose_coverage, crop_state, subject_size, width, height, availability,
+                analyzer_confidence, content_hash, perceptual_hash
+             )
+             select id, sceneworks_sample_key(id),
+                coalesce(json_extract(metadata_json, '$.analysis.medium'), json_extract(metadata_json, '$.medium')),
+                coalesce(json_extract(metadata_json, '$.analysis.personCount'), json_extract(metadata_json, '$.personCount')),
+                json_extract(metadata_json, '$.analysis.faceCount'),
+                coalesce(json_extract(metadata_json, '$.analysis.fullBody'), json_extract(metadata_json, '$.analysis.qualifiedSingleFullBody')),
+                json_extract(metadata_json, '$.analysis.poseCoverage'),
+                json_extract(metadata_json, '$.analysis.cropState'),
+                json_extract(metadata_json, '$.analysis.subjectFrameFraction'),
+                coalesce(json_extract(metadata_json, '$.acquisition.width'), json_extract(metadata_json, '$.width')),
+                coalesce(json_extract(metadata_json, '$.acquisition.height'), json_extract(metadata_json, '$.height')),
+                coalesce(json_extract(metadata_json, '$.acquisition.availability'), json_extract(metadata_json, '$.availability'), 'unknown'),
+                coalesce(
+                    json_extract(metadata_json, '$.analysis.mediumConfidence'),
+                    json_extract(metadata_json, '$.analysis.visionLanguage.medium.confidence'),
+                    json_extract(metadata_json, '$.analysis.structured.derived.analyzer.confidence'),
+                    json_extract(metadata_json, '$.analysis.structured.person.analyzer.confidence'),
+                    json_extract(metadata_json, '$.analysis.structured.face.analyzer.confidence'),
+                    json_extract(metadata_json, '$.analysis.structured.pose.analyzer.confidence')
+                ),
+                coalesce(
+                    json_extract(metadata_json, '$.acquisition.contentHash'),
+                    json_extract(metadata_json, '$.contentHash'),
+                    json_extract(metadata_json, '$.analysis.structured.inputFingerprint')
+                ),
+                coalesce(
+                    json_extract(metadata_json, '$.perceptualHash'),
+                    json_extract(metadata_json, '$.analysis.perceptualHash')
+                )
+             from catalog_records;
+             insert into catalog_record_fts(rowid, record_id, caption, tags)
+             select records.rowid, records.id,
+                    coalesce(json_extract(records.metadata_json, '$.caption'), ''),
+                    coalesce((
+                        select group_concat(tags.key, ' ')
+                        from json_each(records.metadata_json, '$.analysis.tagMembership') tags
+                        where tags.value = 1
+                    ), '')
+             from catalog_records records
+             where not exists (
+                select 1 from catalog_record_fts search where search.rowid = records.rowid
+             );
+             commit;",
+        )
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let saved_view_has_revision: bool = connection
+        .prepare("pragma table_info(catalog_saved_views)")
+        .and_then(|mut statement| {
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>("name"))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(columns.iter().any(|column| column == "revision"))
+        })
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if !saved_view_has_revision {
+        connection
+            .execute(
+                "alter table catalog_saved_views
+                 add column revision integer not null default 0",
+                [],
+            )
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
     Ok(())
 }
 
@@ -1919,6 +3083,52 @@ fn validate_schema(connection: &Connection, database_path: &Path) -> CatalogResu
             ("metadata_json", "TEXT", 1, 0),
             ("created_at", "TEXT", 1, 0),
             ("updated_at", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table_columns(
+        connection,
+        database_path,
+        "catalog_record_search",
+        &[
+            ("record_id", "TEXT", 1, 1),
+            ("sample_key", "INTEGER", 1, 0),
+            ("medium", "TEXT", 0, 0),
+            ("person_count", "INTEGER", 0, 0),
+            ("face_count", "INTEGER", 0, 0),
+            ("full_body", "INTEGER", 0, 0),
+            ("pose_coverage", "REAL", 0, 0),
+            ("crop_state", "TEXT", 0, 0),
+            ("subject_size", "REAL", 0, 0),
+            ("width", "INTEGER", 0, 0),
+            ("height", "INTEGER", 0, 0),
+            ("availability", "TEXT", 0, 0),
+            ("analyzer_confidence", "REAL", 0, 0),
+            ("content_hash", "TEXT", 0, 0),
+            ("perceptual_hash", "TEXT", 0, 0),
+        ],
+    )?;
+    validate_table_columns(
+        connection,
+        database_path,
+        "catalog_record_reviews",
+        &[
+            ("record_id", "TEXT", 1, 1),
+            ("decision", "TEXT", 1, 0),
+            ("rejection_reason", "TEXT", 0, 0),
+            ("updated_at", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table_columns(
+        connection,
+        database_path,
+        "catalog_saved_views",
+        &[
+            ("id", "TEXT", 1, 1),
+            ("name", "TEXT", 1, 0),
+            ("query_json", "TEXT", 1, 0),
+            ("created_at", "TEXT", 1, 0),
+            ("updated_at", "TEXT", 1, 0),
+            ("revision", "INTEGER", 1, 0),
         ],
     )?;
 
@@ -2648,6 +3858,290 @@ mod tests {
         assert_eq!(facets[0].values.len(), 1, "facet output honors its cap");
         assert_eq!(facets[0].values[0].value, "photo");
         assert_eq!(facets[0].values[0].count, 2);
+    }
+
+    fn curation_record(id: &str, caption: &str, hash: &str, perceptual: &str) -> NewCatalogRecord {
+        NewCatalogRecord {
+            id: id.to_owned(),
+            image_path: format!("images/{id}.jpg"),
+            thumbnail_path: Some(format!("thumbnails/{id}.jpg")),
+            embedding_path: None,
+            artifact_path: None,
+            metadata: serde_json::json!({
+                "caption": caption,
+                "acquisition": {
+                    "availability": "available",
+                    "contentHash": hash,
+                    "width": 1024,
+                    "height": 1536
+                },
+                "analysis": {
+                    "medium": "photograph",
+                    "personCount": 1,
+                    "faceCount": 1,
+                    "fullBody": true,
+                    "cropState": "uncropped",
+                    "poseCoverage": 0.91,
+                    "subjectFrameFraction": 0.62,
+                    "perceptualHash": perceptual,
+                    "visionLanguage": {
+                        "medium": { "confidence": 0.97 }
+                    },
+                    "tagMembership": { "full_body": true, "outdoors": true }
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn curation_projection_migration_matches_fresh_upserts_and_fts_is_current() {
+        let temporary = tempdir().expect("temp directory");
+        let legacy_root = temporary.path().join("legacy");
+        let fresh_root = temporary.path().join("fresh");
+        let legacy = Catalog::create(&legacy_root, "Legacy").unwrap();
+        let descriptor = legacy.descriptor().clone();
+        legacy.close();
+
+        let legacy_db = legacy_root.join(CATALOG_DATABASE_FILE);
+        let raw = Connection::open(&legacy_db).unwrap();
+        raw.execute_batch(
+            "drop table catalog_record_search;
+             drop table catalog_record_fts;
+             drop table catalog_record_reviews;
+             drop table catalog_saved_views;",
+        )
+        .unwrap();
+        let record = curation_record(
+            "same-id",
+            "A person wearing a crimson coat",
+            "sha256:one",
+            "dhash64:1111",
+        );
+        raw.execute(
+            "insert into catalog_records(
+                id, image_path, thumbnail_path, embedding_path, artifact_path,
+                metadata_json, created_at, updated_at
+             ) values (?1, ?2, ?3, null, null, ?4, ?5, ?5)",
+            params![
+                record.id,
+                record.image_path,
+                record.thumbnail_path,
+                serde_json::to_string(&record.metadata).unwrap(),
+                utc_now(),
+            ],
+        )
+        .unwrap();
+        drop(raw);
+        // The public manifest remains schema-compatible; opening performs the
+        // additive backfill and validates all new tables.
+        let manifest = read_manifest(&legacy_root).unwrap();
+        assert_eq!(manifest.id, descriptor.id);
+        assert_eq!(manifest.schema_version, descriptor.schema_version);
+        let migrated = Catalog::open(&legacy_root).unwrap();
+
+        let mut fresh = Catalog::create(&fresh_root, "Fresh").unwrap();
+        fresh.append_records(std::slice::from_ref(&record)).unwrap();
+        let migrated_key: i64 = migrated
+            .connection
+            .query_row(
+                "select sample_key from catalog_record_search where record_id='same-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fresh_key: i64 = fresh
+            .connection
+            .query_row(
+                "select sample_key from catalog_record_search where record_id='same-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_key, fresh_key);
+
+        let request = CatalogSearchRequest {
+            limit: 10,
+            text: "crimson full_body".to_owned(),
+            ..CatalogSearchRequest::default()
+        };
+        assert_eq!(migrated.search_records(&request).unwrap().records.len(), 1);
+
+        let mut updated = record;
+        updated.metadata["caption"] = serde_json::json!("A blue jacket");
+        updated.metadata["analysis"]["tagMembership"] = serde_json::json!({"studio": true});
+        fresh.append_records(&[updated]).unwrap();
+        assert!(fresh.search_records(&request).unwrap().records.is_empty());
+        assert_eq!(
+            fresh
+                .search_records(&CatalogSearchRequest {
+                    limit: 10,
+                    text: "blue studio".to_owned(),
+                    ..CatalogSearchRequest::default()
+                })
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn curation_sampling_dedup_reviews_and_saved_views_are_reproducible() {
+        let temporary = tempdir().expect("temp directory");
+        let mut catalog =
+            Catalog::create(temporary.path().join("catalog"), "Curation").expect("catalog");
+        let records = (0..12)
+            .map(|index| {
+                let duplicate = index == 5;
+                let content_hash = if duplicate {
+                    "sha256:0".to_owned()
+                } else {
+                    format!("sha256:{index}")
+                };
+                let perceptual_hash = if duplicate {
+                    "dhash64:0".to_owned()
+                } else {
+                    format!("dhash64:{index}")
+                };
+                curation_record(
+                    &format!("record-{index:02}"),
+                    &format!("Full body person {index}"),
+                    &content_hash,
+                    &perceptual_hash,
+                )
+            })
+            .collect::<Vec<_>>();
+        catalog.append_records(&records).unwrap();
+        let base = CatalogSearchRequest {
+            limit: 4,
+            filters: vec![
+                CatalogRecordFilter {
+                    field: "medium".to_owned(),
+                    values: vec!["photograph".to_owned()],
+                },
+                CatalogRecordFilter {
+                    field: "personCount".to_owned(),
+                    values: vec!["1".to_owned()],
+                },
+                CatalogRecordFilter {
+                    field: "fullBody".to_owned(),
+                    values: vec!["true".to_owned()],
+                },
+            ],
+            sample_seed: Some(41),
+            deduplicate: true,
+            ..CatalogSearchRequest::default()
+        };
+        let first = catalog.search_records(&base).unwrap();
+        let repeated = catalog.search_records(&base).unwrap();
+        assert_eq!(first.records, repeated.records);
+        assert!(first.next_cursor.is_some());
+        assert_eq!(first.total_count, None, "counting is explicitly opt-in");
+        let plan = catalog
+            .connection
+            .prepare(
+                "explain query plan
+                 select record_id from catalog_record_search
+                 where medium='photograph' and person_count=1 and full_body=1
+                 order by sample_key, record_id limit 48",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("idx_catalog_search_primary_flow"),
+            "primary flow must stay index-backed: {plan}"
+        );
+        let second = catalog
+            .search_records(&CatalogSearchRequest {
+                cursor: first.next_cursor.clone(),
+                ..base.clone()
+            })
+            .unwrap();
+        assert!(first
+            .records
+            .iter()
+            .all(|record| second.records.iter().all(|next| next.id != record.id)));
+        assert!(matches!(
+            catalog.search_records(&CatalogSearchRequest {
+                text: "changed".to_owned(),
+                cursor: first.next_cursor,
+                ..base.clone()
+            }),
+            Err(CatalogError::InvalidCatalog(_))
+        ));
+        let other_seed = catalog
+            .search_records(&CatalogSearchRequest {
+                sample_seed: Some(278_020),
+                ..base.clone()
+            })
+            .unwrap();
+        assert_ne!(
+            first
+                .records
+                .iter()
+                .map(|record| &record.id)
+                .collect::<Vec<_>>(),
+            other_seed
+                .records
+                .iter()
+                .map(|record| &record.id)
+                .collect::<Vec<_>>()
+        );
+
+        assert!(catalog
+            .set_record_review(
+                "record-00",
+                CatalogReviewDecision::Exclude,
+                Some("cropped feet".to_owned())
+            )
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            catalog.record_reviews(&["record-00".to_owned()]).unwrap()[0]
+                .rejection_reason
+                .as_deref(),
+            Some("cropped feet")
+        );
+        assert!(catalog
+            .set_record_review(
+                "record-00",
+                CatalogReviewDecision::Include,
+                Some("ignored".into())
+            )
+            .unwrap()
+            .unwrap()
+            .rejection_reason
+            .is_none());
+        assert!(catalog
+            .set_record_review("record-00", CatalogReviewDecision::Default, None)
+            .unwrap()
+            .is_none());
+
+        let view = catalog
+            .save_view(None, "Full body photos".to_owned(), base.clone(), None)
+            .unwrap();
+        assert!(view.query.cursor.is_none());
+        let updated = catalog
+            .save_view(
+                Some(&view.id),
+                "Reviewed photos".to_owned(),
+                base,
+                Some(view.revision),
+            )
+            .unwrap();
+        assert!(matches!(
+            catalog.save_view(
+                Some(&view.id),
+                "Stale edit".to_owned(),
+                updated.query,
+                Some(view.revision)
+            ),
+            Err(CatalogError::Conflict(_))
+        ));
     }
 
     #[test]

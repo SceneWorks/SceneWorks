@@ -155,6 +155,51 @@ describe("DatasetCatalogsScreen", () => {
           payload: JSON.parse(options.body),
         }, 201);
       }
+      if (path.endsWith("/saved-views") && (!options.method || options.method === "GET")) {
+        return response([]);
+      }
+      if (path.endsWith("/saved-views") && options.method === "POST") {
+        return response({
+          id: "view-1",
+          name: JSON.parse(options.body).name,
+          query: JSON.parse(options.body).query,
+          revision: 0,
+          createdAt: "2026-07-26T12:00:00Z",
+          updatedAt: "2026-07-26T12:00:00Z",
+        }, 201);
+      }
+      if (path.endsWith("/curation/query")) {
+        return response({
+          items: [{
+            id: "record-1",
+            thumbnailPath: "thumbnails/record-1.jpg",
+            metadata: {
+              caption: "A full-body photograph outdoors",
+              analysis: { medium: "photograph", fullBody: true, personCount: 1 },
+            },
+          }],
+          reviews: [],
+          nextCursor: "opaque-next",
+          totalCount: 28,
+        });
+      }
+      if (path.endsWith("/curation/facets")) {
+        return response({
+          facets: [{
+            field: "medium",
+            values: [{ value: "photograph", count: 28 }],
+          }],
+        });
+      }
+      if (path.endsWith("/review") && options.method === "PUT") {
+        const body = JSON.parse(options.body);
+        return response(body.decision === "default" ? null : {
+          recordId: "record-1",
+          decision: body.decision,
+          rejectionReason: body.decision === "exclude" ? body.rejectionReason : null,
+          updatedAt: "2026-07-26T12:00:00Z",
+        });
+      }
       if (path.endsWith("/pause")) {
         catalogs[0] = catalog({
           processingControl: {
@@ -225,6 +270,55 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("Analyzing shard 7");
     expect(container.textContent).toContain("6.5 KiB");
     expect(container.querySelector("[role='progressbar']").getAttribute("aria-valuenow")).toBe("54");
+  });
+
+  it("curates a reproducible primary sample with server paging, facets, saved views, and review overrides", async () => {
+    const browse = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Browse catalog"));
+    await act(async () => browse.click());
+    await flush();
+
+    expect(container.textContent).toContain("28 matches");
+    expect(container.textContent).toContain("A full-body photograph outdoors");
+    expect(container.textContent).toContain("photograph (28)");
+    const queryRequest = requests.find((item) => item.path.endsWith("/curation/query"));
+    expect(queryRequest.body.filters).toEqual(expect.arrayContaining([
+      { field: "medium", values: ["photograph"] },
+      { field: "personCount", values: ["1"] },
+      { field: "fullBody", values: ["true"] },
+    ]));
+    expect(queryRequest.body.sampleSeed).toBe(14959);
+    expect(queryRequest.body.deduplicate).toBe(true);
+
+    const thumbnail = container.querySelector(".catalog-thumbnail-card");
+    await act(async () => thumbnail.click());
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Include").click());
+    await flush();
+    expect(requests.find((item) => item.path.endsWith("/review"))?.body).toEqual({
+      decision: "include",
+      rejectionReason: null,
+    });
+
+    const name = container.querySelector("input[placeholder='Full-body photos']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(name, "My seeded sample");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Save view").click());
+    await flush();
+    expect(requests.find((item) => item.path.endsWith("/saved-views")
+      && item.options.method === "POST")?.body.name).toBe("My seeded sample");
+    expect(container.textContent).toContain("Saved views (1)");
+
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Load next page")).click());
+    await flush();
+    const pages = requests.filter((item) => item.path.endsWith("/curation/query"));
+    expect(pages.at(-1).body.cursor).toBe("opaque-next");
+    expect(pages.at(-1).body.includeTotal).toBe(false);
   });
 
   it("renders running progress as indeterminate when the scanner has no total", async () => {

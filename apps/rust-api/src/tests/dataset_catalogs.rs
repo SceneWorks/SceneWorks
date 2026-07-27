@@ -14,6 +14,7 @@ use sceneworks_core::catalog_store::{
     CatalogProcessingState, CatalogRegistry, CatalogSourceConfig, NewCatalogRecord,
 };
 use sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS;
+use tower::ServiceExt as _;
 
 use super::support::*;
 
@@ -156,6 +157,7 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
             catalog_record("four", "illustration", 1),
         ])
         .unwrap();
+    std::fs::write(catalog_root.join("thumbnails/one.jpg"), b"thumbnail-bytes").unwrap();
     let mut contract = catalog.contract_state().unwrap();
     contract.analyzer_versions =
         BTreeMap::from([("person_detector".to_owned(), "model@sha256:abc".to_owned())]);
@@ -249,6 +251,158 @@ async fn catalog_routes_persist_status_and_return_bounded_filtered_pages_and_fac
     );
     assert_eq!(facets["facets"][0]["values"][0]["value"], "photo");
     assert_eq!(facets["facets"][0]["values"][0]["count"], 3);
+
+    let curation_uri = format!("/api/v1/catalogs/{catalog_id}/curation/query");
+    let primary_query = json!({
+        "limit": 2,
+        "filters": [
+            { "field": "medium", "values": ["photo"] },
+            { "field": "personCount", "values": ["1"] },
+            { "field": "fullBody", "values": ["true"] }
+        ],
+        "sampleSeed": 14959,
+        "deduplicate": true,
+        "includeTotal": true
+    });
+    let (status, curated) =
+        request(app.clone(), "POST", &curation_uri, primary_query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{curated}");
+    assert!(
+        !curated["items"].as_array().unwrap().is_empty(),
+        "the seeded keyset may wrap onto a second page"
+    );
+    assert_eq!(curated["totalCount"], 2);
+    assert!(curated["nextCursor"].is_string());
+    let (status, replay) = request(app.clone(), "POST", &curation_uri, primary_query.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["items"], curated["items"]);
+    let thumbnail_response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/api/v1/catalogs/{catalog_id}/records/one/thumbnail"
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(thumbnail_response.status(), StatusCode::OK);
+    assert_eq!(thumbnail_response.headers()["content-type"], "image/jpeg");
+    assert_eq!(
+        axum::body::to_bytes(thumbnail_response.into_body(), 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"thumbnail-bytes"
+    );
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/catalogs/{catalog_id}/records/not-in-catalog/thumbnail"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, indexed_facets) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/catalogs/{catalog_id}/curation/facets"),
+        json!({
+            "query": primary_query,
+            "fields": ["medium", "personCount", "fullBody"],
+            "limitPerFacet": 10
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{indexed_facets}");
+    assert_eq!(indexed_facets["facets"][0]["values"][0]["value"], "photo");
+
+    let review_uri = format!("/api/v1/catalogs/{catalog_id}/records/one/review");
+    let (status, missing_reason) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "exclude" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_reason}");
+    let (status, review) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "exclude", "rejectionReason": "cropped feet" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["rejectionReason"], "cropped feet");
+    let (status, included) = request(
+        app.clone(),
+        "PUT",
+        &review_uri,
+        json!({ "decision": "include", "rejectionReason": "must be cleared" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(included["rejectionReason"].is_null());
+
+    let views_uri = format!("/api/v1/catalogs/{catalog_id}/saved-views");
+    let (status, saved) = request(
+        app.clone(),
+        "POST",
+        &views_uri,
+        json!({ "name": "Full body photos", "query": {
+            "limit": 48,
+            "filters": [
+                { "field": "medium", "values": ["photo"] },
+                { "field": "personCount", "values": ["1"] },
+                { "field": "fullBody", "values": ["true"] }
+            ],
+            "sampleSeed": 14959
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["revision"], 0);
+    let saved_id = saved["id"].as_str().unwrap();
+    let saved_item_uri = format!("{views_uri}/{saved_id}");
+    let (status, updated) = request(
+        app.clone(),
+        "PUT",
+        &saved_item_uri,
+        json!({
+            "name": "Reviewed photos",
+            "expectedRevision": 0,
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["revision"], 1);
+    let (status, stale) = request(
+        app.clone(),
+        "PUT",
+        &saved_item_uri,
+        json!({
+            "name": "Stale edit",
+            "expectedRevision": 0,
+            "query": saved["query"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+    for invalid_body in [
+        json!({"limit": 10, "text": "!!!"}),
+        json!({"limit": 10, "filters": [{
+            "field": "analysis.notIndexed", "values": ["anything"]
+        }]}),
+    ] {
+        let (status, _) = request(app.clone(), "POST", &curation_uri, invalid_body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
 
     for invalid_body in [
         json!({"limit": 0}),

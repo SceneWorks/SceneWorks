@@ -1028,6 +1028,9 @@ fn media_ticket_paths_cover_exactly_the_media_routes() {
     ));
     assert!(is_ticketed_media_path("/api/v1/projects/p1/files/a"));
     assert!(is_ticketed_media_path("/api/v1/poses/preview/job_1/p.png"));
+    assert!(is_ticketed_media_path(
+        "/api/v1/catalogs/catalog_1/records/record_1/thumbnail"
+    ));
     // …nothing else is.
     assert!(!is_ticketed_media_path("/api/v1/projects"));
     assert!(!is_ticketed_media_path("/api/v1/projects/p1"));
@@ -1036,6 +1039,12 @@ fn media_ticket_paths_cover_exactly_the_media_routes() {
     assert!(!is_ticketed_media_path("/api/v1/projects/p1/assets"));
     assert!(!is_ticketed_media_path("/api/v1/projects//files/a"));
     assert!(!is_ticketed_media_path("/api/v1/poses/preview/"));
+    assert!(!is_ticketed_media_path(
+        "/api/v1/catalogs/catalog_1/records/record_1"
+    ));
+    assert!(!is_ticketed_media_path(
+        "/api/v1/catalogs//records/record_1/thumbnail"
+    ));
     assert!(!is_ticketed_media_path("/api/v1/jobs"));
     assert!(!is_ticketed_media_path("/api/v1/credentials"));
 }

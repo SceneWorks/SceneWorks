@@ -109,9 +109,12 @@ mod projects;
 use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
 mod catalogs;
 use catalogs::{
-    attach_catalog, catalog_facets, create_catalog, delete_catalog_on_disk, detach_catalog,
-    get_catalog, get_catalog_status, list_catalogs, pause_catalog, query_catalog, resume_catalog,
-    run_catalog_analysis, update_catalog_analyzer_config,
+    attach_catalog, catalog_curation_facets, catalog_facets, catalog_record_thumbnail,
+    create_catalog, create_catalog_saved_view, curate_catalog, delete_catalog_on_disk,
+    delete_catalog_saved_view, detach_catalog, get_catalog, get_catalog_status,
+    list_catalog_saved_views, list_catalogs, pause_catalog, query_catalog, resume_catalog,
+    review_catalog_record, run_catalog_analysis, update_catalog_analyzer_config,
+    update_catalog_saved_view,
 };
 mod assets;
 use assets::{
@@ -1309,7 +1312,31 @@ fn create_app_with_state_mode(
             get(get_catalog_status),
         )
         .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
+        .route(
+            "/api/v1/catalogs/:catalog_id/curation/query",
+            post(curate_catalog),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/curation/facets",
+            post(catalog_curation_facets),
+        )
         .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
+        .route(
+            "/api/v1/catalogs/:catalog_id/saved-views",
+            get(list_catalog_saved_views).post(create_catalog_saved_view),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/saved-views/:view_id",
+            put(update_catalog_saved_view).delete(delete_catalog_saved_view),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/records/:record_id/review",
+            put(review_catalog_record),
+        )
+        .route(
+            "/api/v1/catalogs/:catalog_id/records/:record_id/thumbnail",
+            get(catalog_record_thumbnail),
+        )
         .route(
             "/api/v1/catalogs/:catalog_id/analyzer-config",
             put(update_catalog_analyzer_config),
