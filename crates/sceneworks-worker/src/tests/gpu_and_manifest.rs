@@ -1078,6 +1078,66 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
     );
 }
 
+/// sc-15256: the shipped Z-Image Turbo rows and provider capability move in lockstep. Pins the real
+/// Q4/Q8/BF16 resident + sequential measurements and proves the fixed 2 GB operational reserve still
+/// admits Q4 on an emulated 8 GB card while rejecting the heavier hosted tiers.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
+    use crate::vram_gate::{
+        apply_vram_cap, fit_decision, predicted_peak_gb, predicted_sequential_peak_gb,
+        resolve_offload, sequential_overflow_gb, FitDecision,
+    };
+
+    let z_image = builtin_model_entry("z_image_turbo");
+    let entry = z_image.as_object().expect("z_image_turbo entry object");
+    assert_eq!(
+        entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .and_then(|candle| candle.get("measured"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        crate::mlx_fit_gate::engine_supports_sequential("z_image_turbo"),
+        "the generic Candle route must derive Sequential support from the provider descriptor"
+    );
+
+    let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak + reserve");
+    let q8_resident = predicted_peak_gb(entry, "q8").expect("real hosted q8 resident peak + reserve");
+    let bf16_resident = predicted_peak_gb(entry, "bf16").expect("bf16 resident peak + reserve");
+    assert!((q4_resident - 20.4).abs() < 1e-6);
+    assert!((q8_resident - 26.2).abs() < 1e-6);
+    assert!((bf16_resident - 34.2).abs() < 1e-6);
+
+    let q4_sequential =
+        predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak + reserve");
+    let q8_sequential =
+        predicted_sequential_peak_gb(entry, "q8").expect("q8 sequential peak + reserve");
+    let bf16_sequential =
+        predicted_sequential_peak_gb(entry, "bf16").expect("bf16 sequential peak + reserve");
+    assert!((q4_sequential - 7.7).abs() < 1e-6);
+    assert!((q8_sequential - 11.8).abs() < 1e-6);
+    assert!((bf16_sequential - 15.9).abs() < 1e-6);
+
+    let card8 = apply_vram_cap(None, Some(8.0));
+    assert!(matches!(
+        resolve_offload(fit_decision(Some(q4_resident), card8), true),
+        FitDecision::Offload { .. }
+    ));
+    assert_eq!(sequential_overflow_gb(Some(q4_sequential), card8), None);
+    assert_eq!(
+        sequential_overflow_gb(Some(q8_sequential), card8),
+        Some(11.8),
+        "the real Q8 row must not inherit q4 or a legacy estimate"
+    );
+    assert_eq!(
+        sequential_overflow_gb(Some(bf16_sequential), card8),
+        Some(15.9)
+    );
+}
+
 /// sc-11754 + sc-11744 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the
 /// pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling
 /// of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control`
