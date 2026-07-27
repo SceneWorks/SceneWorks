@@ -8,14 +8,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, Response, StatusCode};
 use axum::Json;
 use sceneworks_core::catalog_store::{
     AttachedCatalog, Catalog, CatalogAnalyzerConfig, CatalogAnalyzerSettings, CatalogContractState,
     CatalogError, CatalogFacet, CatalogProcessingControl, CatalogProcessingDesiredState,
     CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRecord,
-    CatalogRecordFilter, CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
+    CatalogRecordFilter, CatalogRecordReview, CatalogRegistry, CatalogReviewDecision,
+    CatalogSavedView, CatalogSearchRequest, CatalogSourceConfig, CatalogStorageAccounting,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobType};
 use sceneworks_core::jobs_store::CreateJob;
@@ -39,6 +41,7 @@ const MAX_FACET_LIMIT: u32 = 100;
 const SCHEDULED_SCAN_PASS_ROWS: u64 = 25_000;
 const PARQUET_SCAN_CHECKPOINT_KEY: &str = "scanner.parquet.checkpoint.v1";
 const CATALOG_SCAN_START_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const CATALOG_SCAN_MAX_CONTENTION_RETRIES: u8 = 6;
 const CATALOG_PREFLIGHT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const CATALOG_PREFLIGHT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -76,6 +79,38 @@ pub(crate) struct CatalogFacetsRequest {
     filters: Vec<CatalogRecordFilter>,
     #[serde(default = "default_facet_limit")]
     limit_per_facet: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CatalogCurationFacetsRequest {
+    query: CatalogSearchRequest,
+    fields: Vec<String>,
+    #[serde(default = "default_facet_limit")]
+    limit_per_facet: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CatalogRecordReviewRequest {
+    decision: CatalogReviewDecision,
+    #[serde(default)]
+    rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SaveCatalogViewRequest {
+    name: String,
+    query: CatalogSearchRequest,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeleteCatalogViewRequest {
+    expected_revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +183,16 @@ pub(crate) struct CatalogQueryResponse {
     contract_version: u32,
     items: Vec<CatalogRecord>,
     next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogCurationQueryResponse {
+    contract_version: u32,
+    items: Vec<CatalogRecord>,
+    reviews: Vec<CatalogRecordReview>,
+    next_cursor: Option<String>,
+    total_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,14 +295,21 @@ pub(crate) async fn get_catalog(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    Ok(Json(load_catalog_response(state, catalog_id).await?))
+    Ok(Json(
+        load_catalog_response(state, catalog_id, CatalogStorageMode::Exact).await?,
+    ))
 }
 
 pub(crate) async fn get_catalog_status(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
 ) -> Result<Json<CatalogResponse>, ApiError> {
-    Ok(Json(load_catalog_response(state, catalog_id).await?))
+    // Artifact bytes remain exact on detail/list responses. This polling route
+    // omits storage instead of recursively walking a potentially huge catalog
+    // or returning a stale cached total.
+    Ok(Json(
+        load_catalog_response(state, catalog_id, CatalogStorageMode::Omit).await?,
+    ))
 }
 
 pub(crate) async fn query_catalog(
@@ -286,6 +338,179 @@ pub(crate) async fn query_catalog(
     Ok(Json(response))
 }
 
+pub(crate) async fn curate_catalog(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogSearchRequest>,
+) -> Result<Json<CatalogCurationQueryResponse>, ApiError> {
+    if request.limit == 0 || request.limit > MAX_QUERY_LIMIT {
+        return Err(ApiError::bad_request(format!(
+            "Catalog query limit must be between 1 and {MAX_QUERY_LIMIT}"
+        )));
+    }
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&catalog_id)?;
+        let page = catalog.search_records(&request)?;
+        let record_ids = page
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        Ok(CatalogCurationQueryResponse {
+            contract_version: CATALOG_API_CONTRACT_VERSION,
+            reviews: catalog.record_reviews(&record_ids)?,
+            items: page.records,
+            next_cursor: page.next_cursor,
+            total_count: page.total_count,
+        })
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn review_catalog_record(
+    State(state): State<AppState>,
+    Path((catalog_id, record_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<CatalogRecordReviewRequest>,
+) -> Result<Json<Option<CatalogRecordReview>>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let review = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .set_record_review(&record_id, request.decision, request.rejection_reason)
+    })
+    .await?;
+    Ok(Json(review))
+}
+
+pub(crate) async fn list_catalog_saved_views(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+) -> Result<Json<Vec<CatalogSavedView>>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let views = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .saved_views()
+    })
+    .await?;
+    Ok(Json(views))
+}
+
+pub(crate) async fn create_catalog_saved_view(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<SaveCatalogViewRequest>,
+) -> Result<(StatusCode, Json<CatalogSavedView>), ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let view = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .save_view(None, request.name, request.query, None)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+pub(crate) async fn update_catalog_saved_view(
+    State(state): State<AppState>,
+    Path((catalog_id, view_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<SaveCatalogViewRequest>,
+) -> Result<Json<CatalogSavedView>, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    let view = catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .save_view(
+                Some(&view_id),
+                request.name,
+                request.query,
+                request.expected_revision,
+            )
+    })
+    .await?;
+    Ok(Json(view))
+}
+
+pub(crate) async fn delete_catalog_saved_view(
+    State(state): State<AppState>,
+    Path((catalog_id, view_id)): Path<(String, String)>,
+    ApiJson(request): ApiJson<DeleteCatalogViewRequest>,
+) -> Result<StatusCode, ApiError> {
+    let config_dir = state.settings.config_dir.clone();
+    catalog_call(move || {
+        CatalogRegistry::new(config_dir)
+            .open_attached(&catalog_id)?
+            .delete_saved_view(&view_id, request.expected_revision)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn catalog_record_thumbnail(
+    State(state): State<AppState>,
+    Path((catalog_id, record_id)): Path<(String, String)>,
+) -> Result<Response<Body>, ApiError> {
+    const MAX_THUMBNAIL_BYTES: u64 = 32 * 1024 * 1024;
+    let config_dir = state.settings.config_dir.clone();
+    let (bytes, content_type) = catalog_call(move || {
+        let catalog = CatalogRegistry::new(config_dir).open_attached(&catalog_id)?;
+        let record = catalog.record_by_id(&record_id)?;
+        let relative = record
+            .thumbnail_path
+            .as_deref()
+            .or_else(|| {
+                record
+                    .metadata
+                    .pointer("/acquisition/thumbnailPath")
+                    .and_then(Value::as_str)
+            })
+            .ok_or_else(|| CatalogError::NotFound("Catalog thumbnail was not found".to_owned()))?;
+        let root = std::fs::canonicalize(catalog.root())?;
+        let path = std::fs::canonicalize(catalog.root().join(relative)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CatalogError::NotFound("Catalog thumbnail was not found".to_owned())
+            } else {
+                CatalogError::Io(error)
+            }
+        })?;
+        if !path.starts_with(&root) || !path.is_file() {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog thumbnail escapes its catalog".to_owned(),
+            ));
+        }
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() > MAX_THUMBNAIL_BYTES {
+            return Err(CatalogError::InvalidCatalog(
+                "Catalog thumbnail exceeds its size limit".to_owned(),
+            ));
+        }
+        let content_type = match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("png") => "image/png",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            _ => "application/octet-stream",
+        };
+        Ok((std::fs::read(path)?, content_type))
+    })
+    .await?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .map_err(|error| ApiError::internal(format!("Catalog thumbnail response failed: {error}")))
+}
+
 pub(crate) async fn catalog_facets(
     State(state): State<AppState>,
     Path(catalog_id): Path<String>,
@@ -305,6 +530,32 @@ pub(crate) async fn catalog_facets(
             facets: catalog.facet_counts(
                 &request.fields,
                 &request.filters,
+                request.limit_per_facet,
+            )?,
+        })
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+pub(crate) async fn catalog_curation_facets(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<CatalogCurationFacetsRequest>,
+) -> Result<Json<CatalogFacetsResponse>, ApiError> {
+    if request.limit_per_facet == 0 || request.limit_per_facet > MAX_FACET_LIMIT {
+        return Err(ApiError::bad_request(format!(
+            "Catalog facet limit must be between 1 and {MAX_FACET_LIMIT}"
+        )));
+    }
+    let config_dir = state.settings.config_dir.clone();
+    let response = catalog_call(move || {
+        let catalog = CatalogRegistry::new(config_dir).open_attached(&catalog_id)?;
+        Ok(CatalogFacetsResponse {
+            contract_version: CATALOG_API_CONTRACT_VERSION,
+            facets: catalog.search_facet_counts(
+                &request.query,
+                &request.fields,
                 request.limit_per_facet,
             )?,
         })
@@ -549,6 +800,7 @@ async fn request_processing_state(
 async fn load_catalog_response(
     state: AppState,
     catalog_id: String,
+    storage_mode: CatalogStorageMode,
 ) -> Result<CatalogResponse, ApiError> {
     let config_dir = state.settings.config_dir.clone();
     let mut invalid_reported = state.catalog_scan_invalid_recovery_reported.lock().await;
@@ -564,7 +816,7 @@ async fn load_catalog_response(
             PersistedScanRecovery::None
         };
         Ok((
-            catalog_response_unreconciled(&attached, &catalog)?,
+            catalog_response_unreconciled(&attached, &catalog, storage_mode)?,
             recovery,
         ))
     })
@@ -584,6 +836,12 @@ async fn load_catalog_response(
     Ok(response)
 }
 
+#[derive(Clone, Copy)]
+enum CatalogStorageMode {
+    Exact,
+    Omit,
+}
+
 fn catalog_response(
     attached: &AttachedCatalog,
     catalog: &Catalog,
@@ -595,15 +853,23 @@ fn catalog_response(
         Err(CatalogError::Conflict(_)) => {}
         Err(error) => return Err(error),
     }
-    catalog_response_unreconciled(attached, catalog)
+    catalog_response_unreconciled(attached, catalog, CatalogStorageMode::Exact)
 }
 
 fn catalog_response_unreconciled(
     attached: &AttachedCatalog,
     catalog: &Catalog,
+    storage_mode: CatalogStorageMode,
 ) -> Result<CatalogResponse, CatalogError> {
     let contract_state = catalog.contract_state()?;
-    let storage = catalog.storage_accounting()?;
+    let storage = match storage_mode {
+        CatalogStorageMode::Exact => Some(catalog.storage_accounting()?),
+        CatalogStorageMode::Omit => None,
+    };
+    let record_count = match storage {
+        Some(storage) => storage.record_count,
+        None => catalog.record_count()?,
+    };
     Ok(CatalogResponse {
         contract_version: CATALOG_API_CONTRACT_VERSION,
         id: attached.id.clone(),
@@ -616,11 +882,8 @@ fn catalog_response_unreconciled(
         source_config: contract_state.source_config,
         analyzer_versions: contract_state.analyzer_versions,
         checkpoints: contract_state.checkpoints,
-        counts: Some(counts_response(
-            storage.record_count,
-            &contract_state.processing,
-        )),
-        storage: Some(storage_response(storage)),
+        counts: Some(counts_response(record_count, &contract_state.processing)),
+        storage: storage.map(storage_response),
         processing: contract_state.processing,
         processing_control: catalog.processing_control()?,
         analyzer_config: catalog.analyzer_config()?,
@@ -893,6 +1156,10 @@ async fn schedule_catalog_scan(
     let terminal_exit_reached = state.catalog_scan_terminal_exit_reached.clone();
     #[cfg(test)]
     let terminal_exit_release = state.catalog_scan_terminal_exit_release.clone();
+    #[cfg(test)]
+    let injected_sqlite_busy_failures = state.catalog_scan_injected_sqlite_busy_failures.clone();
+    #[cfg(test)]
+    let contention_backoff_started = state.catalog_scan_contention_backoff_started.clone();
     let work_slots = state.catalog_scan_work_slots.clone();
     let log_catalog_id = catalog_id.clone();
     let rejected_config_dir = config_dir.clone();
@@ -916,7 +1183,9 @@ async fn schedule_catalog_scan(
                 }
             }
             let mut retry_delay = std::time::Duration::from_millis(10);
-            let mut driver = loop {
+            let mut contention_retries = 0_u8;
+            'driver_session: loop {
+                let mut driver = loop {
                 if cancellation.is_cancelled() {
                     reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone()).await;
                     return;
@@ -932,6 +1201,30 @@ async fn schedule_catalog_scan(
                 .await;
                 match start {
                     Ok(Some(Ok(driver))) => break driver,
+                    Ok(Some(Err(error))) if error.is_retryable_contention() => {
+                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                            publish_catalog_scan_contention_exhausted(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        contention_retries = contention_retries.saturating_add(1);
+                        tokio::select! {
+                            _ = tokio::time::sleep(retry_delay) => {}
+                            _ = cancellation.cancelled() => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                ).await;
+                                return;
+                            },
+                        }
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                    }
                     Ok(Some(Err(CatalogParquetScanError::Busy(_)))) => {
                         let retry_config_dir = config_dir.clone();
                         let retry_catalog_id = catalog_id.clone();
@@ -1033,12 +1326,33 @@ async fn schedule_catalog_scan(
                         return;
                     }
                 }
-            };
-            loop {
+                };
+                loop {
                 let pass_source = plan.source.clone();
                 let pass_options = plan.options.clone();
                 let pass_cancellation = cancellation.clone();
+                #[cfg(test)]
+                let pass_injected_sqlite_busy_failures = injected_sqlite_busy_failures.clone();
                 let result = catalog_scan_blocking(work_slots.clone(), &cancellation, move || {
+                    #[cfg(test)]
+                    if pass_injected_sqlite_busy_failures
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |remaining| remaining.checked_sub(1),
+                        )
+                        .is_ok()
+                    {
+                        return (
+                            driver,
+                            Err(CatalogParquetScanError::Catalog(CatalogError::Sqlite(
+                                rusqlite::Error::SqliteFailure(
+                                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                                    Some("injected scheduler contention".to_owned()),
+                                ),
+                            ))),
+                        );
+                    }
                     let result = driver.scan_pass_with_cancel(&pass_source, &pass_options, || {
                         pass_cancellation.is_cancelled()
                     });
@@ -1057,6 +1371,8 @@ async fn schedule_catalog_scan(
                     }
                     Ok(Some((next_driver, Ok(report)))) => {
                         driver = next_driver;
+                        contention_retries = 0;
+                        retry_delay = std::time::Duration::from_millis(10);
                         if report.paused || report.checkpoint.complete {
                             drop(driver);
                             #[cfg(test)]
@@ -1074,15 +1390,15 @@ async fn schedule_catalog_scan(
                                 )
                                 .await;
                             }
-                            break;
+                            break 'driver_session;
                         }
                         #[cfg(test)]
                         if stop_after_pass.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            break;
+                            break 'driver_session;
                         }
                         if cancellation.is_cancelled() {
                             driver.publish_interrupted();
-                            break;
+                            break 'driver_session;
                         }
                     }
                     Ok(Some((_next_driver, Err(CatalogParquetScanError::Interrupted(error))))) => {
@@ -1092,7 +1408,52 @@ async fn schedule_catalog_scan(
                             error,
                             "catalog Parquet scanner stopped for server shutdown"
                         );
-                        break;
+                        break 'driver_session;
+                    }
+                    Ok(Some((next_driver, Err(error)))) if error.is_retryable_contention() => {
+                        tracing::debug!(
+                            event = "catalog_parquet_scan_contention_retry",
+                            catalog_id,
+                            error = %error,
+                            "catalog Parquet scanner will retry transient SQLite contention"
+                        );
+                        if contention_retries >= CATALOG_SCAN_MAX_CONTENTION_RETRIES {
+                            if let Err(publish_error) = next_driver.publish_contention_exhausted() {
+                                tracing::error!(
+                                    event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
+                                    catalog_id,
+                                    error = %publish_error,
+                                    "catalog Parquet scanner could not publish contention exhaustion"
+                                );
+                            }
+                            break 'driver_session;
+                        }
+                        contention_retries = contention_retries.saturating_add(1);
+                        drop(next_driver);
+                        #[cfg(test)]
+                        contention_backoff_started.notify_waiters();
+                        if cancellation.is_cancelled() {
+                            reconcile_cancelled_catalog_scan(
+                                config_dir.clone(),
+                                catalog_id.clone(),
+                            )
+                            .await;
+                            break 'driver_session;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(retry_delay) => {}
+                            _ = cancellation.cancelled() => {
+                                reconcile_cancelled_catalog_scan(
+                                    config_dir.clone(),
+                                    catalog_id.clone(),
+                                ).await;
+                                break 'driver_session;
+                            },
+                        }
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(CATALOG_SCAN_START_MAX_BACKOFF);
+                        continue 'driver_session;
                     }
                     Ok(Some((_next_driver, Err(error)))) => {
                         tracing::error!(
@@ -1101,14 +1462,15 @@ async fn schedule_catalog_scan(
                             error = %error,
                             "catalog Parquet scanner stopped"
                         );
-                        break;
+                        break 'driver_session;
                     }
                     Ok(None) => {
                         reconcile_cancelled_catalog_scan(config_dir.clone(), catalog_id.clone())
                             .await;
-                        break;
+                        break 'driver_session;
                     }
                 }
+            }
             }
         })
         .await;
@@ -1127,6 +1489,49 @@ async fn schedule_catalog_scan(
                 event = "catalog_parquet_scan_rejected_during_shutdown",
                 catalog_id = log_catalog_id,
                 "catalog Parquet scan was not started because the server is shutting down"
+            );
+        }
+    }
+}
+
+async fn publish_catalog_scan_contention_exhausted(config_dir: PathBuf, catalog_id: String) {
+    let log_catalog_id = catalog_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&catalog_id)?;
+        let _lease = CatalogProcessingLease::try_acquire(&catalog)?;
+        let mut progress = catalog.contract_state()?.processing;
+        progress.state = CatalogProcessingState::Failed;
+        progress.message = Some(
+            "Catalog scan stopped after repeated database contention; restart it to resume."
+                .to_owned(),
+        );
+        progress.updated_at = sceneworks_core::catalog_store::catalog_timestamp_now();
+        catalog.set_processing_progress(&progress)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhausted",
+                catalog_id = log_catalog_id,
+                "catalog Parquet scanner exhausted bounded SQLite contention retries"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhaustion_publish_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scanner exhausted retries and could not publish terminal state"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "catalog_parquet_scan_contention_exhaustion_task_failed",
+                catalog_id = log_catalog_id,
+                error = %error,
+                "catalog Parquet scanner exhaustion publisher stopped"
             );
         }
     }
@@ -1151,9 +1556,14 @@ async fn reconcile_cancelled_catalog_scan(config_dir: PathBuf, catalog_id: Strin
         if control.desired_state != CatalogProcessingDesiredState::Running
             || matches!(
                 progress.state,
-                CatalogProcessingState::Completed | CatalogProcessingState::Failed
+                CatalogProcessingState::Paused
+                    | CatalogProcessingState::Completed
+                    | CatalogProcessingState::Failed
             )
         {
+            // A paused processor already published a clean durable boundary.
+            // If shutdown races with its queued successor, preserve that state
+            // and desired=running so a new AppState can discover and resume it.
             return Ok(false);
         }
         progress.state = CatalogProcessingState::Failed;
