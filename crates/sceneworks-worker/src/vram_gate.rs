@@ -1272,21 +1272,6 @@ mod tests {
             None,
             "do not claim a lower-resolution escape when no shipped measured shape fits"
         );
-        assert_eq!(
-            krea_turbo_fit(
-                &manifest,
-                "bf16",
-                1024,
-                1024,
-                Some(VramBudget {
-                    free_gb: 48.0,
-                    total_gb: 48.0,
-                }),
-                true,
-            ),
-            None,
-            "BF16 retains the established resident/sequential gate until it has its own matrix"
-        );
     }
 
     #[test]
@@ -1322,6 +1307,112 @@ mod tests {
                     predicted_gb >= measured_gb && predicted_gb < measured_gb + 1.0,
                     "{rung:?} {edge}² {phase}: curve {predicted_gb:.3} must conservatively cover \
                      measured {measured_gb:.3} without an unrelated tier-derived margin"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_krea_bf16_curves_keep_bf16_and_select_only_measured_useful_rungs() {
+        let manifest = builtin_krea_turbo_manifest();
+        let fit = |free_gb| {
+            krea_turbo_fit(
+                &manifest,
+                "bf16",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+        assert!(matches!(
+            fit(48.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ThreeStage,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(31.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::ChunkedAttention,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(12.0),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::StreamedBlocks,
+                ..
+            })
+        ));
+
+        let three_stage =
+            krea_rung_phase_peaks(&manifest, "bf16", KreaTurboRung::ThreeStage, 1024, 1024)
+                .expect("BF16 three-stage evidence");
+        let tiled = krea_rung_phase_peaks(&manifest, "bf16", KreaTurboRung::TiledVae, 1024, 1024)
+            .expect("BF16 tiled-VAE evidence");
+        assert!(
+            tiled.peak_gb() >= three_stage.peak_gb(),
+            "the measured BF16 tiled-VAE no-op must never displace the cheaper three-stage rung"
+        );
+
+        assert!(matches!(
+            fit(10.64),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::StreamedBlocks,
+                ..
+            })
+        ));
+        assert!(matches!(fit(10.63), Some(KreaTurboFit::Reject { .. })));
+        let immediate_below = Some(VramBudget {
+            free_gb: 10.63,
+            total_gb: 10.63,
+        });
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "bf16", 1024, 1024, immediate_below, true),
+            None,
+            "BF16's measured streamed text floor is resolution-independent, so reject copy must not \
+             promise that lowering resolution can cross the immediate-below boundary"
+        );
+    }
+
+    #[test]
+    fn builtin_krea_bf16_curves_conservatively_cover_every_measured_phase_sample() {
+        let manifest = builtin_krea_turbo_manifest();
+        let samples = [
+            (KreaTurboRung::ThreeStage, 768, [8.694, 28.390, 26.413]),
+            (KreaTurboRung::ThreeStage, 1024, [8.694, 32.014, 26.446]),
+            (KreaTurboRung::TiledVae, 768, [8.694, 28.390, 26.446]),
+            (KreaTurboRung::TiledVae, 1024, [8.560, 32.014, 26.446]),
+            (
+                KreaTurboRung::ChunkedAttention,
+                768,
+                [8.527, 27.552, 26.414],
+            ),
+            (
+                KreaTurboRung::ChunkedAttention,
+                1024,
+                [8.526, 27.652, 26.413],
+            ),
+            (KreaTurboRung::StreamedBlocks, 768, [8.535, 8.533, 2.130]),
+            (KreaTurboRung::StreamedBlocks, 1024, [8.526, 8.526, 3.629]),
+        ];
+        for (rung, edge, measured) in samples {
+            let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge)
+                .expect("every published BF16 matrix cell has a curve");
+            for (phase, predicted_gb, measured_gb) in [
+                ("text", predicted.text_gb, measured[0]),
+                ("denoise", predicted.denoise_gb, measured[1]),
+                ("decode", predicted.decode_gb, measured[2]),
+            ] {
+                assert!(
+                    predicted_gb >= measured_gb && predicted_gb < measured_gb + 1.0,
+                    "{rung:?} {edge}² {phase}: curve {predicted_gb:.3} must conservatively cover \
+                     measured {measured_gb:.3} without a lower-tier-derived margin"
                 );
             }
         }

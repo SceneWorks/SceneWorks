@@ -120,7 +120,7 @@
       "type": "object",
       "required": ["fixedGb", "perMpxGb"],
       "additionalProperties": false,
-      "description": "Conservative phase VRAM curve in base-10 GB: fixedGb + perMpxGb * output megapixels.",
+      "description": "Conservative phase VRAM curve in GiB (legacy field suffix Gb): fixedGb + perMpxGb * output megapixels. NVIDIA budgets are sourced from nvidia-smi MiB and divided by 1024.",
       "properties": {
         "fixedGb": { "type": "number", "minimum": 0 },
         "perMpxGb": { "type": "number", "minimum": 0 }
