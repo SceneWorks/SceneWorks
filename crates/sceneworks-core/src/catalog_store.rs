@@ -31,7 +31,7 @@ pub fn catalog_timestamp_now() -> String {
 }
 
 const CATALOG_APPLICATION_ID: i32 = 0x5343_5743;
-const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 3;
+const CATALOG_DATABASE_SCHEMA_VERSION: u32 = 4;
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAGE_SIZE: u32 = 10_000;
@@ -44,6 +44,7 @@ const MAX_FACET_VALUE_BYTES: u32 = 512;
 const MAX_SEARCH_QUERY_BYTES: usize = 1024;
 const MAX_SAVED_VIEWS: u64 = 200;
 const MAX_REJECTION_REASON_BYTES: usize = 2_048;
+const CATALOG_HEIGHT_INDEX_NAME: &str = "idx_catalog_search_height";
 
 #[derive(Clone, Copy)]
 struct CatalogIndexSpec {
@@ -51,6 +52,12 @@ struct CatalogIndexSpec {
     columns: &'static [&'static str],
     predicate: Option<&'static str>,
 }
+
+const CATALOG_HEIGHT_INDEX_SPEC: CatalogIndexSpec = CatalogIndexSpec {
+    name: CATALOG_HEIGHT_INDEX_NAME,
+    columns: &["height", "record_id"],
+    predicate: Some("height is not null"),
+};
 
 const CURATION_INDEX_SPECS: &[CatalogIndexSpec] = &[
     CatalogIndexSpec {
@@ -98,6 +105,7 @@ const CURATION_INDEX_SPECS: &[CatalogIndexSpec] = &[
         columns: &["width", "height", "record_id"],
         predicate: None,
     },
+    CATALOG_HEIGHT_INDEX_SPEC,
     CatalogIndexSpec {
         name: "idx_catalog_search_availability",
         columns: &["availability", "record_id"],
@@ -3446,6 +3454,12 @@ fn migrate(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
     }
     if version < 3 {
         migrate_curation_indexes_v3(connection, database_path)?;
+        version = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+    }
+    if version < 4 {
+        migrate_height_index_v4(connection, database_path)?;
     }
     Ok(())
 }
@@ -3475,7 +3489,12 @@ fn migrate_curation_indexes_v3(connection: &Connection, database_path: &Path) ->
             .map_err(|error| map_sqlite_error(database_path, error))?;
         return Ok(());
     }
-    for spec in CURATION_INDEX_SPECS {
+    // The canonical set includes the height index introduced by v4. Keep the
+    // v3 migration faithful to the schema that shipped before that addition.
+    for spec in CURATION_INDEX_SPECS
+        .iter()
+        .filter(|spec| spec.name != CATALOG_HEIGHT_INDEX_NAME)
+    {
         transaction
             .execute_batch(&format!(
                 "drop index if exists {}; {}",
@@ -3486,6 +3505,33 @@ fn migrate_curation_indexes_v3(connection: &Connection, database_path: &Path) ->
     }
     transaction
         .pragma_update(None, "user_version", 3)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(database_path, error))
+}
+
+fn migrate_height_index_v4(connection: &Connection, database_path: &Path) -> CatalogResult<()> {
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    let current_version: u32 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    if current_version >= 4 {
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(database_path, error))?;
+        return Ok(());
+    }
+    transaction
+        .execute_batch(&format!(
+            "drop index if exists {}; {}",
+            CATALOG_HEIGHT_INDEX_SPEC.name,
+            curation_index_sql(CATALOG_HEIGHT_INDEX_SPEC)
+        ))
+        .map_err(|error| map_sqlite_error(database_path, error))?;
+    transaction
+        .pragma_update(None, "user_version", 4)
         .map_err(|error| map_sqlite_error(database_path, error))?;
     transaction
         .commit()
@@ -4003,7 +4049,10 @@ mod tests {
 
     fn replace_curation_indexes_with_dense_v2(connection: &Connection) {
         connection.execute_batch("begin immediate;").unwrap();
-        for spec in CURATION_INDEX_SPECS {
+        for spec in CURATION_INDEX_SPECS
+            .iter()
+            .filter(|spec| spec.name != CATALOG_HEIGHT_INDEX_NAME)
+        {
             connection
                 .execute_batch(&format!(
                     "drop index if exists {}; create index {} on catalog_record_search({})",
@@ -4298,7 +4347,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_v2_curation_indexes_upgrade_once_to_exact_sparse_v3_definitions() {
+    fn dense_v2_curation_indexes_upgrade_to_exact_latest_definitions() {
         let temporary = tempdir().expect("temp directory");
         let root = temporary.path().join("catalog");
         let mut catalog = Catalog::create(&root, "V2 curation indexes").unwrap();
@@ -4323,7 +4372,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             upgraded
@@ -4337,6 +4386,7 @@ mod tests {
                 .as_deref(),
             Some("photograph")
         );
+        assert_eq!(CURATION_INDEX_SPECS.len(), 16);
         for spec in CURATION_INDEX_SPECS {
             let actual_sql: String = upgraded
                 .connection
@@ -4349,31 +4399,96 @@ mod tests {
             assert_eq!(
                 normalize_index_sql(&actual_sql),
                 normalize_index_sql(&curation_index_sql(*spec)),
-                "{} should have its canonical v3 definition",
+                "{} should have its canonical latest definition",
                 spec.name
             );
         }
-        let query_plan = upgraded
-            .connection
-            .prepare("explain query plan select record_id from catalog_record_search where medium = 'photograph'")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(3))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .join("\n");
+        let query_plan = |sql: &str| {
+            upgraded
+                .connection
+                .prepare(&format!("explain query plan {sql}"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+        };
+        let medium_plan =
+            query_plan("select record_id from catalog_record_search where medium = 'photograph'");
         assert!(
-            query_plan.contains("idx_catalog_search_medium"),
-            "sparse medium index should remain usable: {query_plan}"
+            medium_plan.contains("idx_catalog_search_medium"),
+            "sparse medium index should remain usable: {medium_plan}"
+        );
+        let height_equality_plan =
+            query_plan("select record_id from catalog_record_search where height = 1536");
+        assert!(
+            height_equality_plan.contains(CATALOG_HEIGHT_INDEX_NAME),
+            "height equality should seek the dedicated index: {height_equality_plan}"
+        );
+        let height_range_plan = query_plan(
+            "select record_id from catalog_record_search
+             where height >= 1024 and height <= 2048",
+        );
+        assert!(
+            height_range_plan.contains(CATALOG_HEIGHT_INDEX_NAME),
+            "height min/max range should seek the dedicated index: {height_range_plan}"
+        );
+        let height_facet_plan = query_plan(
+            "select height, count(*) from catalog_record_search
+             where height is not null group by height",
+        );
+        assert!(
+            height_facet_plan.contains(CATALOG_HEIGHT_INDEX_NAME),
+            "height facets should scan the covering height index: {height_facet_plan}"
         );
         upgraded.close();
 
         let writer = Connection::open(&database_path).unwrap();
         writer.execute_batch("begin immediate;").unwrap();
         Catalog::open(&root)
-            .expect("completed v3 open does not need a writer lock")
+            .expect("completed latest-schema open does not need a writer lock")
             .close();
         writer.execute_batch("rollback;").unwrap();
+    }
+
+    #[test]
+    fn v3_catalog_adds_height_index_once_during_v4_upgrade() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "V3 catalog").unwrap().close();
+        let database_path = root.join(CATALOG_DATABASE_FILE);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "drop index idx_catalog_search_height;
+                 pragma user_version = 3;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let upgraded = Catalog::open(&root).expect("v3 catalog upgrades to v4");
+        let height_sql: String = upgraded
+            .connection
+            .query_row(
+                "select sql from sqlite_master
+                 where type = 'index' and name = 'idx_catalog_search_height'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_index_sql(&height_sql),
+            normalize_index_sql(&curation_index_sql(CATALOG_HEIGHT_INDEX_SPEC))
+        );
+        assert_eq!(
+            upgraded
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
+        upgraded.close();
     }
 
     #[test]
@@ -4454,6 +4569,30 @@ mod tests {
                  create index idx_catalog_search_medium
                     on catalog_record_search(medium, record_id)
                     where medium is null;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Catalog::open(&root),
+            Err(CatalogError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_current_height_index_is_reported_as_corrupt() {
+        let temporary = tempdir().expect("temp directory");
+        let root = temporary.path().join("catalog");
+        Catalog::create(&root, "Height index schema")
+            .expect("catalog creates")
+            .close();
+        let connection = Connection::open(root.join(CATALOG_DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "drop index idx_catalog_search_height;
+                 create index idx_catalog_search_height
+                    on catalog_record_search(height, width, record_id)
+                    where height is not null;",
             )
             .unwrap();
         drop(connection);
