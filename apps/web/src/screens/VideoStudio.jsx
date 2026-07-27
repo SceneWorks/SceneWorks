@@ -1728,10 +1728,18 @@ export function VideoStudio() {
             presetLoraDetails={presetLoraDetails}
           />
 
+          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
+              panel is captioned "Prompt sent" and exists so the user sees exactly what will be
+              generated; general presets are filtered on `kind === "general"` alone, so a preset
+              carrying `defaults.negativePrompt` reaches a CFG-free model too. Since submit now sends
+              `negativePrompt: ""` for such a model, showing the stack's `Negative:` line here would
+              assert something that is NOT sent — the same false-copy class this story exists to
+              remove. (Only the negative needs the guard: the preview's other extras are aspect and
+              count, which every video engine honors.) */}
           <PresetStackPreview
             generalStack={generalStack}
             composed={composedStack}
-            stackAddsNegative={stackAddsNegative}
+            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
 

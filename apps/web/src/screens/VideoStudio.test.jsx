@@ -1878,6 +1878,95 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(payload.advanced.guidanceScale).toBe(6.5);
   });
 
+  // SVD is the OTHER video engine with no guidance / negative axis: `generate_svd`
+  // (video_jobs/svd.rs) hard-sets `negative_prompt: None` and `guidance: None` because it drives
+  // its own frame-wise CFG ramp. `promptless` already hid its prompt field; these two controls
+  // stayed visible and permanently dead until sc-8445. Same `video` block, no new machinery.
+  const SVD = {
+    id: "svd",
+    name: "Stable Video Diffusion",
+    type: "video",
+    family: "svd",
+    adapter: "svd_video",
+    capabilities: ["image_to_video"],
+    promptless: true,
+    video: { supportsGuidance: false, supportsNegativePrompt: false },
+    defaults: { duration: 4, resolution: "1024x576", fps: 7 },
+    limits: {},
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  it("hides both axes for SVD too, and the manifest says so", async () => {
+    const manifestPath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../config/manifests/builtin.models.jsonc",
+    );
+    const manifest = JSON5.parse(readFileSync(manifestPath, "utf8"));
+    const models = Array.isArray(manifest) ? manifest : manifest.models;
+
+    // The fixture is honest about the shipped entry…
+    const shippedSvd = models.find((entry) => entry.id === "svd");
+    expect(shippedSvd?.video).toEqual(SVD.video);
+
+    // …and the polarity claim the manifest/schema comments make is checked against the real
+    // population rather than trusted: exactly these two entries declare the block, every other
+    // video model declares nothing and therefore keeps both controls.
+    const videoEntries = models.filter((entry) => entry.type === "video");
+    const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
+    expect(declaring).toEqual(["krea_realtime_14b", "svd"]);
+    expect(videoEntries.length - declaring.length).toBe(8);
+
+    const context = baseContext({ videoModels: [SVD] });
+    await render(context);
+    await ensureAdvancedOpen();
+    expect(labelStartingWith("Guidance")).toBeFalsy();
+    expect(labelStartingWith("Negative prompt")).toBeFalsy();
+  });
+
+  // ⚠️ Regression guard for a bug this PR introduced. `PresetStackPreview` is captioned
+  // "Prompt sent" and exists so the user sees exactly what will be generated. Once submit started
+  // sending `negativePrompt: ""` for a CFG-free engine, the preview's `Negative:` line became a
+  // claim about something that is NOT sent. General presets are filtered on `kind === "general"`
+  // alone, so a preset carrying `defaults.negativePrompt` reaches Krea.
+  it("drops the stack preview's Negative line on a CFG-free engine but keeps it otherwise", async () => {
+    const stackPreset = {
+      id: "film_look",
+      name: "Film Look",
+      kind: "general",
+      prompt: { suffix: "Kodak Portra 400" },
+      defaults: { negativePrompt: "blurry, low quality" },
+    };
+    const context = baseContext({ videoModels: [BERNINI_V2V, KREA], presets: [stackPreset] });
+    await render(context);
+
+    const chip = [...container.querySelectorAll(".general-preset-chips .preset-chip")].find(
+      (el) => el.textContent.trim() === "Film Look",
+    );
+    expect(chip, "the general preset must be offered").toBeTruthy();
+    await click(chip);
+
+    // Bernini takes a negative prompt, so the preview states it AND the run sends it.
+    let preview = container.querySelector(".preset-stack-preview");
+    expect(preview.textContent).toContain("Kodak Portra 400");
+    expect(preview.textContent).toContain("Negative: blurry, low quality");
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].negativePrompt).toBe("blurry, low quality");
+
+    // Same stack, CFG-free engine: the composed PROMPT is still shown (it is still sent), but the
+    // Negative line is gone — because the payload no longer carries it.
+    await act(async () => setSelect(selectLabelled("Model"), "krea_realtime_14b"));
+    preview = container.querySelector(".preset-stack-preview");
+    expect(preview.textContent).toContain("Kodak Portra 400");
+    expect(preview.textContent).not.toContain("Negative:");
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[1][0];
+    expect(payload.model).toBe("krea_realtime_14b");
+    expect(payload.negativePrompt).toBe("");
+  });
+
   it("submits Krea in each of its three advertised modes", async () => {
     const context = baseContext({
       videoModels: [KREA],

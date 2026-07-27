@@ -491,15 +491,15 @@
           "video": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Video-generation capability metadata (sc-8445, epic 8431) — the video-lane sibling of the `audio` sub-block, declaring which generation AXES a video engine actually has so Video Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Every property is OPTIONAL and, unlike `audio`, an ABSENT property means TRUE: the video population is overwhelmingly guidance-taking (Wan / LTX / SCAIL-2 / Bernini all read a CFG scale and a negative prompt), so absent-means-supported is the correct default for them and leaves an undeclared entry behaving exactly as it did before this block existed. Only a model that genuinely lacks an axis declares it false.",
+            "description": "Video-generation capability metadata (sc-8445, epic 8431) — the video-lane sibling of the `audio` sub-block, declaring which generation AXES a video engine actually has so Video Studio can hide a control the worker would discard rather than offering a knob that silently does nothing. Every property is OPTIONAL and, unlike `audio`, an ABSENT property means TRUE: the video population is majority guidance-taking — eight of the ten shipped video entries (the Wan family, both LTX entries, SCAIL-2, Bernini) read a CFG scale and a negative prompt and declare nothing — so absent-means-supported is the correct default for them and leaves an undeclared entry behaving exactly as it did before this block existed. The two that genuinely lack the axes declare them false: `krea_realtime_14b` (Self-Forcing distilled it out) and `svd` (its engine drives its own frame-wise CFG ramp).",
             "properties": {
               "supportsGuidance": {
                 "type": "boolean",
-                "description": "Does the engine have a classifier-free-guidance axis? False for a CFG-free distilled engine — krea_realtime_14b's Self-Forcing distillation baked guidance out, so the worker runs a single batch-1 forward and never forwards a guidance scale. ABSENT MEANS TRUE. When false, Video Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
+                "description": "Does the engine have a classifier-free-guidance axis? False when the engine exposes no guidance scale at all: krea_realtime_14b's Self-Forcing distillation baked guidance out (a single batch-1 forward), and svd drives its own frame-wise CFG ramp — `generate_svd` hard-sets `guidance: None`. ABSENT MEANS TRUE. When false, Video Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
               },
               "supportsNegativePrompt": {
                 "type": "boolean",
-                "description": "Does the engine accept a negative prompt? A CFG-free engine has no unconditional branch to steer, so there is nothing for a negative prompt to do (`generate_krea_realtime` sets `negative_prompt: None`). ABSENT MEANS TRUE. When false, Video Studio hides its Negative prompt field and sends an empty one."
+                "description": "Does the engine accept a negative prompt? An engine with no steerable unconditional branch has nothing for a negative prompt to do — both `generate_krea_realtime` and `generate_svd` hard-set `negative_prompt: None`. ABSENT MEANS TRUE. When false, Video Studio hides its Negative prompt field and sends an empty one."
               }
             }
           },
