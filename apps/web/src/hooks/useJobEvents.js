@@ -14,6 +14,7 @@ import {
   noticeKindForJob,
   parseSseJson,
   reconcileAuthoritativeJobs,
+  trainingRegistrationFailure,
 } from "../appHelpers.js";
 
 // Owns the live job/worker/queue SSE stream (the EventSource lifecycle: ticket mint,
@@ -213,8 +214,11 @@ export function useJobEvents({
         refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
-        if (job.result?.loraRegistered === false) {
-          pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
+        // sc-15036: a `lora_train` job now produces EITHER an adapter or a full base checkpoint,
+        // and each registrar reports under its own result key. See `trainingRegistrationFailure`.
+        const registrationError = trainingRegistrationFailure(job.result);
+        if (registrationError) {
+          pushNotice("lora-train", `lora training: ${registrationError}`);
         } else {
           dismissNoticeKind("lora-train");
           refreshModelAndLorasRef.current?.(job.projectId ?? activeProjectRef.current?.id);

@@ -760,6 +760,14 @@ async fn apply_progress_side_effects(
         if let Some(status) = register_completed_control_overlay(state, &job_id).await {
             result.extend(status);
         }
+        // A completing FULL base fine-tune registers its trained checkpoint into the MODEL catalog
+        // so it is selectable + runnable in generation (sc-15036, epic 14034 F6). Like the pair
+        // above it self-gates — on the plan's `outputKind`, which is `base_checkpoint` only for a
+        // `networkType: "full"` run — so exactly one of the three registrars fires per job and the
+        // LoRA registrar defers rather than mis-registering an 8 GB base checkpoint as an adapter.
+        if let Some(status) = register_completed_base_checkpoint(state, &job_id).await {
+            result.extend(status);
+        }
     }
     // Fail after catalog registration but before project persistence/CAS so
     // the recovery regression covers a genuinely partial side-effect run. The
@@ -1050,6 +1058,15 @@ pub(crate) async fn register_trained_lora(
     {
         return Ok(None);
     }
+    // sc-15036 — a FULL base fine-tune does not produce an adapter at all. It writes a diffusers
+    // transformer component directory (a full fine-tuned base checkpoint, ~8 GB) into a DIFFERENT
+    // tree, and it belongs in the model catalog, not the LoRA library. `register_completed_base_\
+    // checkpoint` owns it; defer here so exactly one registrar claims each job. Keyed on the plan's
+    // `outputKind` — the one discriminator `sceneworks_core::training::training_output_kind` stamps
+    // — not on a second reading of `networkType`.
+    if job_plan_is_base_checkpoint(job) {
+        return Ok(None);
+    }
     let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
@@ -1083,31 +1100,6 @@ pub(crate) async fn register_trained_lora(
     // name (not the first `.safetensors` on disk) means a step checkpoint sharing
     // the directory is never registered in place of the final adapter, while the
     // validation still rejects any `..`-traversing name a crafted payload injects.
-    // sc-14056 — a FULL base fine-tune does not produce an adapter file at all. It writes a
-    // diffusers-shaped `transformer/` DIRECTORY (a full fine-tuned base checkpoint, ~8 GB), which
-    // `trusted_adapter_files` correctly refuses (it requires `is_file()`), and which the LoRA
-    // registry has no shape for. Registering it as a LoRA would produce an entry the Studio offers
-    // and generation cannot load.
-    //
-    // Detect it up front and say exactly what happened instead of falling through to the generic
-    // "no declared trained adapter found", which reads like the run failed when the checkpoint is
-    // sitting on disk intact. Giving a fine-tuned base a catalog home and making it selectable at
-    // generation is tracked as sc-15036 — see its analysis for why that is a model-catalog /
-    // imported-loader change rather than a training-registry one.
-    if manifest_entry
-        .get("networkType")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("full"))
-    {
-        let checkpoint = output_dir.join("transformer");
-        return Err(ApiError::internal(format!(
-            "This run produced a full fine-tuned base checkpoint at {}, not a LoRA adapter, so \
-             there is nothing to register in the LoRA library. The checkpoint is on disk and loads \
-             with the Mage-Flow transformer loader; selecting a fine-tuned base at generation time \
-             is tracked as sc-15036.",
-            checkpoint.display()
-        )));
-    }
     let Some(files) = trusted_adapter_files(manifest_entry.get("files"), &output_dir) else {
         return Err(ApiError::internal(format!(
             "No declared trained adapter found under {}; skipping LoRA registration",
@@ -1153,6 +1145,213 @@ pub(crate) async fn register_trained_lora(
     })
     .await?;
     Ok(Some((lora_id, manifest_path)))
+}
+
+/// Whether a training job's resolved plan declares it produces a FULL base checkpoint (sc-15036).
+///
+/// Reads the plan's own `target.outputKind` — the single discriminator
+/// `sceneworks_core::training::training_output_kind` stamps at submit — rather than re-deriving the
+/// answer from `advanced.networkType` a second time here. The expected token comes from the enum
+/// itself, so renaming the variant's wire value cannot silently orphan this gate. Fails closed: a
+/// job with no plan, or any other kind, is not a base checkpoint.
+fn job_plan_is_base_checkpoint(job: &JobSnapshot) -> bool {
+    job.payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("outputKind"))
+        .and_then(Value::as_str)
+        == Some(sceneworks_core::training::TrainingOutputKind::BaseCheckpoint.as_str())
+}
+
+/// The model-catalog analog of [`register_completed_training_lora`] (sc-15036, epic 14034 F6).
+///
+/// A completing FULL base fine-tune leaves a diffusers transformer component directory that neither
+/// existing registrar has a shape for: the LoRA registry offers adapters to stack onto a base, and
+/// this artifact IS a base. Without this the run trains, converges, writes a valid checkpoint — and
+/// the checkpoint cannot be selected at generation, which is not a delivered capability.
+///
+/// Registers it into the user MODEL catalog, which is also what makes it appear without a restart:
+/// `mutate_manifest_entries` invalidates `state.model_catalog_cache` on any `"models"` write, and
+/// the web already refetches `/api/v1/models` on a completed `lora_train` job. (Note the
+/// `terminal_model_job_changes_catalog` hook is NOT the right seam for this — it fires in
+/// `update_job_progress` BEFORE `apply_progress_side_effects` runs, so it would invalidate a
+/// generation older than the write it is meant to publish.)
+///
+/// Never errors the progress update: a failure is logged and surfaced via
+/// `baseCheckpointRegistered: false` + `baseCheckpointRegistrationError` so the trained checkpoint is
+/// not silently lost.
+pub(crate) async fn register_completed_base_checkpoint(
+    state: &AppState,
+    job_id: &str,
+) -> Option<JsonObject> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await
+    .ok()?;
+    if !matches!(job.job_type, JobType::LoraTrain) || !job_plan_is_base_checkpoint(&job) {
+        return None;
+    }
+    match register_trained_base_checkpoint(state, &job).await {
+        Ok(None) => None,
+        Ok(Some((model_id, manifest_path))) => {
+            let mut status = JsonObject::new();
+            status.insert("baseCheckpointRegistered".to_owned(), Value::Bool(true));
+            status.insert("baseCheckpointModelId".to_owned(), Value::String(model_id));
+            status.insert(
+                "baseCheckpointManifestPath".to_owned(),
+                Value::String(manifest_path.display().to_string()),
+            );
+            Some(status)
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "base_checkpoint_registration_failed",
+                job_id,
+                status = error.status.as_u16(),
+                detail = %error.detail,
+                "trained base checkpoint could not be registered into the model catalog"
+            );
+            let mut status = JsonObject::new();
+            status.insert("baseCheckpointRegistered".to_owned(), Value::Bool(false));
+            status.insert(
+                "baseCheckpointRegistrationError".to_owned(),
+                Value::String(error.detail.clone()),
+            );
+            Some(status)
+        }
+    }
+}
+
+/// Upsert the completed full fine-tune's checkpoint into the user model catalog (sc-15036).
+///
+/// Same trusted-input discipline as [`register_trained_lora`]: the id is validated to a safe single
+/// path component, and the output dir + manifest path are RECOMPUTED from it rather than read back
+/// from the mutable job payload. Two things differ, both because the artifact is a model:
+///
+/// * the payload's declared `files` are ignored entirely — [`trusted_base_checkpoint_files`]
+///   validates the recomputed directory's SHAPE (both component files present) instead, which is
+///   what `trusted_adapter_files`'s `is_file()` contract cannot express; and
+/// * `paths.model` is stamped with the recomputed absolute directory, so the catalog's install-state
+///   derivation and the worker's render lane resolve the same path the API just validated.
+///
+/// `apply_model_manifest_defaults` then fills the family surface (`adapter`, `capabilities`,
+/// resolutions/defaults, `loraCompatibility`) exactly as the model-import job does, so a fine-tune
+/// arrives in the Studio with its base's surface rather than a bare 4-option resolution list.
+pub(crate) async fn register_trained_base_checkpoint(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<Option<(String, PathBuf)>, ApiError> {
+    if job
+        .payload
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let model_id = manifest_entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("Training manifest entry requires an id"))?
+        .to_owned();
+    validate_lora_id_component(&model_id)?;
+    let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
+
+    let Some(files) = trusted_base_checkpoint_files(&output_dir) else {
+        return Err(ApiError::internal(format!(
+            "No complete fine-tuned base checkpoint found under {} (expected {} and {}); skipping \
+             model registration",
+            output_dir.display(),
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
+        )));
+    };
+
+    // The catalog derives `installState` for a non-downloadable entry from the SceneWorks install
+    // marker in `paths.model` (`model_is_installed`), exactly as it does for an imported model. A
+    // fine-tune has no download to leave one, so write it here — without it the entry lands with
+    // `installState: "missing"` and `modelInstallComplete` drops it from every picker, i.e. the
+    // model would be registered and still not selectable.
+    tokio::fs::write(
+        output_dir.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec_pretty(&json!({
+            "modelId": model_id,
+            "provider": "training",
+            "jobId": job.id,
+            "completedAt": now_rfc3339(),
+        }))
+        .map_err(|error| ApiError::internal(error.to_string()))?,
+    )
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "Could not mark the fine-tuned checkpoint at {} as installed: {error}",
+            output_dir.display()
+        ))
+    })?;
+
+    let model_type = manifest_entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("image")
+        .to_owned();
+    let family = manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let mut entry = manifest_entry;
+    entry.insert("id".to_owned(), Value::String(model_id.clone()));
+    entry.insert(
+        "source".to_owned(),
+        json!({ "provider": "training", "path": format!("models/finetunes/{model_id}") }),
+    );
+    entry.insert(
+        "files".to_owned(),
+        Value::Array(files.into_iter().map(Value::String).collect()),
+    );
+    entry.insert(
+        "paths".to_owned(),
+        json!({ "model": output_dir.display().to_string() }),
+    );
+    entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+    sceneworks_core::lora_family::apply_model_manifest_defaults(
+        &mut entry,
+        &model_type,
+        family.as_deref(),
+    );
+
+    let upsert_id = model_id.clone();
+    mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
+        // Replace any prior entry with this id (a re-run of the same job) so provenance refreshes
+        // without duplicating, preserving the original createdAt — the LoRA registrar's contract.
+        let created_at = entries
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+            .and_then(|item| item.get("createdAt").cloned());
+        let mut entries = entries
+            .into_iter()
+            .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+            .collect::<Vec<_>>();
+        let mut entry = entry;
+        if let Some(created_at) = created_at {
+            entry.insert("createdAt".to_owned(), created_at);
+        }
+        entries.push(Value::Object(entry));
+        Ok((entries, ()))
+    })
+    .await?;
+    Ok(Some((model_id, manifest_path)))
 }
 
 /// The control-overlay analog of [`register_completed_training_lora`] (sc-10165, epic 10159 B4). A

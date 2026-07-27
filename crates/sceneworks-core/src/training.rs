@@ -57,11 +57,54 @@ string_enum! {
     /// What a training run produces. `Lora` is a LoRA/LoKr adapter; `ControlBranch` is a
     /// ControlNet control branch (an "overlay" the engine writes, distinct from a LoRA — it
     /// injects a conditioning residual rather than reparameterizing weights). ControlNet
-    /// training (epic 10159, the `krea_control` kernel) produces the latter.
+    /// training (epic 10159, the `krea_control` kernel) produces the latter. `BaseCheckpoint` is a
+    /// FULL base fine-tune (sc-14056/sc-15036): every backbone weight retrained, emitted as a
+    /// diffusers-shaped transformer component directory (~8 GB) rather than an adapter file — so it
+    /// belongs in the **model catalog**, not the LoRA registry.
+    ///
+    /// Unlike the other two, `BaseCheckpoint` is a per-**job** property, not a per-target one: the
+    /// Mage target advertises `networkTypes: ["lora", "lokr", "full"]`, so the very same target
+    /// produces an adapter or a base checkpoint depending on `advanced.networkType`. See
+    /// [`training_output_kind`] — the single discriminator both the plan builder and the API use.
     pub enum TrainingOutputKind {
         Lora => "lora",
         ControlBranch => "control_branch",
+        BaseCheckpoint => "base_checkpoint",
     }
+}
+
+/// The `advanced.networkType` value that selects a FULL base fine-tune (sc-14056). Every other
+/// value (`lora`, `lokr`, absent, unrecognized) is an adapter run.
+pub const NETWORK_TYPE_FULL: &str = "full";
+
+/// Whether a training config's `advanced.networkType` selects a FULL base fine-tune.
+///
+/// The ONE discriminator, so the plan's declared `outputKind`, the API's output-location fork, and
+/// the worker's `full_finetune` engine flag can never disagree about what a run produces. Trimmed
+/// and case-insensitive, matching the worker's `map_training_config`.
+pub fn config_is_full_finetune(config: &TrainingConfig) -> bool {
+    config
+        .advanced
+        .get("networkType")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(NETWORK_TYPE_FULL))
+}
+
+/// What a run against `target` with `config` actually produces.
+///
+/// A target declares the kind it produces by default, but a target that offers `"full"` among its
+/// `limits.networkTypes` produces a [`TrainingOutputKind::BaseCheckpoint`] for a full run —
+/// derived here rather than copied off the target, so there is one discriminator and not two. A
+/// control-branch target is never a full fine-tune (no control kernel offers `"full"`), so its kind
+/// is returned unchanged.
+pub fn training_output_kind(
+    target_kind: &TrainingOutputKind,
+    config: &TrainingConfig,
+) -> TrainingOutputKind {
+    if matches!(target_kind, TrainingOutputKind::Lora) && config_is_full_finetune(config) {
+        return TrainingOutputKind::BaseCheckpoint;
+    }
+    target_kind.clone()
 }
 
 string_enum! {
@@ -2657,7 +2700,10 @@ pub fn build_training_plan(
             kernel: input.target.kernel.clone(),
             family: input.target.family.clone(),
             modality: input.target.modality.clone(),
-            output_kind: input.target.output_kind.clone(),
+            // sc-15036: DERIVED from the config, not copied off the target. `networkType == "full"`
+            // turns an adapter target into a base-checkpoint run, and the plan is what the worker
+            // and the completion registrar read — so the declared kind must describe THIS job.
+            output_kind: training_output_kind(&input.target.output_kind, &input.config),
             base_model: input.target.base_model.clone(),
             base_model_repo: input.target.base_model_repo.clone(),
             base_model_path: input.base_model_path,
@@ -2976,6 +3022,63 @@ mod tests {
             resolve_item_path(root, "images/photo.png").expect("safe path"),
             expected.display().to_string()
         );
+    }
+
+    /// sc-15036 — the ONE discriminator that says what a run produces. A control-branch target is
+    /// never reclassified (no control kernel offers `"full"`, and silently sending a trained
+    /// ControlNet to the model catalog would be worse than useless); an adapter target IS, because
+    /// the same Mage target produces an adapter or an ~8 GB base checkpoint depending on this one
+    /// config value. Case/whitespace tolerance matches the worker's `map_training_config`, so the
+    /// plan's declared kind and the engine's `full_finetune` flag cannot disagree.
+    ///
+    /// The end-to-end half — that `build_training_plan` DERIVES this rather than copying
+    /// `target.output_kind` — is pinned in `tests/training_contracts.rs` against the real registry.
+    #[test]
+    fn training_output_kind_is_the_one_full_finetune_discriminator() {
+        let with = |network_type: Option<&str>| {
+            let advanced = match network_type {
+                Some(value) => json!({ "networkType": value }),
+                None => json!({}),
+            };
+            let target = builtin_training_targets()
+                .targets
+                .into_iter()
+                .find(|target| target.base_model == "mage_flow_base")
+                .expect("the Mage-Flow Base training target is registered");
+            let mut config = target.defaults.clone();
+            match advanced {
+                Value::Object(map) => {
+                    config.advanced = map;
+                }
+                _ => unreachable!(),
+            }
+            config
+        };
+
+        for adapter in [None, Some("lora"), Some("lokr"), Some("")] {
+            let config = with(adapter);
+            assert!(
+                !config_is_full_finetune(&config),
+                "{adapter:?} is an adapter run"
+            );
+            assert_eq!(
+                training_output_kind(&TrainingOutputKind::Lora, &config).as_str(),
+                "lora"
+            );
+        }
+        for full in ["full", "  FULL ", "Full"] {
+            let config = with(Some(full));
+            assert!(config_is_full_finetune(&config), "{full:?} is a full run");
+            assert_eq!(
+                training_output_kind(&TrainingOutputKind::Lora, &config).as_str(),
+                "base_checkpoint"
+            );
+            // ...and a control-branch target is left alone even then.
+            assert_eq!(
+                training_output_kind(&TrainingOutputKind::ControlBranch, &config).as_str(),
+                "control_branch"
+            );
+        }
     }
 
     /// sc-8892 / F-090: the single shared composer prepends trigger words that are

@@ -213,6 +213,43 @@ describe("ConfigureJobPanel surfaces broken values and stays quiet about unfille
     expect(container.querySelector("[aria-invalid]")).toBeNull();
   });
 
+  // sc-15036: a full base fine-tune produces a MODEL, not an adapter. Two things must follow it
+  // through the panel, or the Studio describes a run it is not making: the name field must say
+  // "base checkpoint", and the Output scope PICKER must be replaced by an explanation (the model
+  // catalog has one global user manifest — a "project" scope it cannot honour would be a control
+  // that silently does nothing, the sc-14056 gradient-checkpointing precedent).
+  //
+  // Discriminating: the SAME props, one field flipped.
+  it("names a full base fine-tune's output field and replaces the scope picker", () => {
+    const labelStarting = (text) =>
+      [...container.querySelectorAll("label")].find((label) => label.textContent.startsWith(text));
+
+    const adapterProps = baseProps({
+      outputScopes: ["project", "global"],
+      configDraft: { ...VALID_DRAFT, networkType: "lora" },
+      isFullFinetune: false,
+    });
+    mount(<ConfigureJobPanel {...adapterProps} />);
+    expect(labelStarting("LoRA name")).toBeTruthy();
+    expect(labelStarting("Base checkpoint name")).toBeFalsy();
+    expect(labelStarting("Output scope").querySelector("select")).toBeTruthy();
+
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          outputScopes: ["project", "global"],
+          configDraft: { ...VALID_DRAFT, networkType: "full" },
+          isFullFinetune: true,
+        })}
+      />,
+    );
+    expect(labelStarting("Base checkpoint name")).toBeTruthy();
+    expect(labelStarting("LoRA name")).toBeFalsy();
+    const scope = labelStarting("Output scope");
+    expect(scope.querySelector("select")).toBeNull();
+    expect(scope.textContent).toContain("global model library");
+  });
+
   it("tones the pill Ready when the draft is whole", () => {
     mount(<ConfigureJobPanel {...baseProps()} />);
     const pill = container.querySelector(".ready-pill");

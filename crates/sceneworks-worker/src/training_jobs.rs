@@ -654,7 +654,7 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
+pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
     let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
         .find(|(name, _)| *name == "builtin.models.jsonc")

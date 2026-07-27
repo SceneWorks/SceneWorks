@@ -173,7 +173,11 @@ export function ConfigureJobPanel({
             </label>
 
             <label>
-              {isControlTarget ? "Control branch name" : "LoRA name"}
+              {/* sc-15036: the same target produces an adapter or a base checkpoint depending on
+                  `networkType`, so the RUN decides this label, not the target alone. Kept as an
+                  explicit three-way branch (rather than `outputKindLabel`) so a target that
+                  declares no `outputKind` still reads "LoRA name" exactly as before. */}
+              {isFullFinetune ? "Base checkpoint name" : isControlTarget ? "Control branch name" : "LoRA name"}
               <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
             </label>
             <label>
@@ -199,17 +203,31 @@ export function ConfigureJobPanel({
               />
             </label>
 
-            <label>
-              Output scope
-              <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
-                {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
-                {outputScopes.map((scope) => (
-                  <option key={scope} value={scope}>
-                    {scope}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {/* sc-15036: a full base fine-tune produces a MODEL, and the model catalog has one
+                global user manifest — there is no project-scoped model store to honour a "project"
+                scope with. Replace the picker with the explanation rather than leaving a control
+                that silently does nothing (the sc-14056 gradient-checkpointing precedent below). */}
+            {isFullFinetune ? (
+              <label>
+                Output scope
+                <p className="training-field-hint">
+                  A full base fine-tune is registered as a model in your global model library, so it is available in
+                  every project. Only adapters are scoped to a single project.
+                </p>
+              </label>
+            ) : (
+              <label>
+                Output scope
+                <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
+                  {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
+                  {outputScopes.map((scope) => (
+                    <option key={scope} value={scope}>
+                      {scope}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               Sample count
               <input

@@ -946,7 +946,16 @@ derive_model_list! {
 /// alone and has no id→family map; keep it aligned with the same-family builtins above and with the
 /// import gate (`sceneworks_core::base_weights::IMPORT_SUPPORTED_FAMILIES`). Pinned by the
 /// `EXPECTED_MLX_ROUTED_FAMILIES` snapshot test.
-pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+///
+/// `mage-flow` (sc-15036, epic 14034 F6) joins for a different reason than the other two: its
+/// non-builtin ids are not community imports but this app's OWN full base fine-tunes — the
+/// `transformer/`-shaped checkpoint a `networkType: "full"` training run produces, registered into
+/// the model catalog and loaded by `image_jobs::mage_finetuned` against the installed base's shared
+/// text encoder + VAE. It is deliberately absent from [`CANDLE_ROUTED_FAMILIES`]: the Mage engine is
+/// MLX-only (`mac_only: true`), and there is no candle Mage generator to route a fine-tune to.
+/// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
+/// underscored id prefix.
+pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
 
 /// Whether an image `family` string routes to an in-process MLX engine via the route-by-family path
 /// (sc-14019) — i.e. it is a member of [`MLX_ROUTED_FAMILIES`]. Consulted only for non-builtin ids.
@@ -1024,6 +1033,27 @@ pub(crate) fn imported_image_request_family_eligible(
     if family == Some("sdxl") {
         return payload.get("mode").and_then(Value::as_str).map(str::trim) != Some("edit_image")
             && !has_reference_list
+            && !has_nonempty_string(payload, "referenceAssetId")
+            && !has_nonempty_string(payload, "sourceAssetId")
+            && !has_poses
+            && !has_phases
+            && !has_nonempty_string(payload, "maskAssetId")
+            && !has_nonempty_string(payload, "characterId")
+            && !has_nonempty_string(payload, "characterLookId");
+    }
+
+    // A Mage-Flow non-builtin id is a full base FINE-TUNE (sc-15036, epic 14034 F6) — the
+    // `transformer/`-shaped checkpoint a `networkType: "full"` training run writes, paired at load
+    // with the installed base's shared text encoder + VAE. The Mage generator advertises no
+    // conditioning on the non-edit variants, and `mlx_gen_mage::load_finetuned` refuses adapters
+    // outright, so this claims the plain **txt2img** surface ONLY. Everything else keeps flowing to
+    // its established route rather than being silently flattened to t2i here — including LoRAs,
+    // which are rejected on EVERY backend (unlike Krea's adapter-capable single-file lane, hence the
+    // explicit check rather than relying on `adapters_supported`).
+    if family == Some("mage-flow") {
+        return payload.get("mode").and_then(Value::as_str).map(str::trim) != Some("edit_image")
+            && !has_reference_list
+            && !has_loras
             && !has_nonempty_string(payload, "referenceAssetId")
             && !has_nonempty_string(payload, "sourceAssetId")
             && !has_poses
@@ -1657,7 +1687,7 @@ mod tests {
     /// The MLX-routed *family* allow-list, pinned like the model lists above. Adding a family here is
     /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
     /// mirrored here — the guardrail that a family is never silently added to the import surface.
-    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
     const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
     #[test]
@@ -1678,10 +1708,18 @@ mod tests {
         // (the routing catalog has no id→family map, so this asserts the family token is real: at
         // least one builtin id begins with the family token, and it is MLX-routed). krea_2 →
         // krea_2_turbo / krea_2_raw. This catches a typo'd or dead family token in the allow-list.
+        //
+        // sc-15036: the token compared is the *manifest* `family` string, whose separator is not
+        // uniform across families — `krea_2` and `sdxl` use `_`, while `mage-flow` (and `z-image`,
+        // `qwen-image`, …) use `-`, and every id uses `_`. Normalize the separator before the
+        // prefix check so the guard keeps asserting "this family token names a real MLX-routed
+        // builtin" instead of accidentally asserting "the family token happens to be spelled with
+        // underscores".
         for family in MLX_ROUTED_FAMILIES {
+            let prefix = family.replace('-', "_");
             let has_routed_builtin = MLX_ROUTED_MODELS
                 .iter()
-                .any(|id| id.starts_with(family) && is_builtin_image_model(id));
+                .any(|id| id.starts_with(&prefix) && is_builtin_image_model(id));
             assert!(
                 has_routed_builtin,
                 "MLX_ROUTED_FAMILIES lists '{family}' but no MLX-routed builtin id shares that family prefix"
@@ -1692,9 +1730,10 @@ mod tests {
     #[test]
     fn candle_routed_families_have_a_same_family_builtin_engine() {
         for family in CANDLE_ROUTED_FAMILIES {
+            let prefix = family.replace('-', "_");
             let has_routed_builtin = CANDLE_ROUTED_MODELS
                 .iter()
-                .any(|id| id.starts_with(family) && is_builtin_image_model(id));
+                .any(|id| id.starts_with(&prefix) && is_builtin_image_model(id));
             assert!(
                 has_routed_builtin,
                 "CANDLE_ROUTED_FAMILIES lists '{family}' but no Candle-routed builtin id shares that family prefix"
@@ -1827,6 +1866,110 @@ mod tests {
         // Base-tier-only shapes stay rejected on both regardless of adapter support.
         let pose = payload(serde_json::json!({ "advanced": { "poses": [{}] } }));
         assert!(!mlx(&pose) && !candle(&pose), "pose rejected on both");
+    }
+
+    /// sc-15036 (epic 14034 F6) — a full base fine-tune's catalog entry must be Mac-routable and
+    /// claimable for plain txt2img, and REFUSED for every shape the fine-tuned lane cannot serve.
+    ///
+    /// This is the routing half of "selectable at generation": before this, a `mage-flow`-family
+    /// non-builtin id fell through `image_model_mac_support` to "not available on Mac", so the
+    /// Studio hid the model entirely.
+    ///
+    /// Discriminating in both directions on ONE entry: t2i eligible, and each of edit / reference /
+    /// LoRA / pose / mask / character refused — a gate that simply returned `true` for the family
+    /// (the generic Krea-shaped arm) would pass the first assertion and fail the LoRA one, because
+    /// `mlx_gen_mage::load_finetuned` refuses adapters outright on EVERY backend.
+    #[test]
+    fn a_fine_tuned_mage_flow_base_is_mac_routable_and_claims_txt2img_only() {
+        let finetune_id = "finetune_9f3c";
+        let payload = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "model": finetune_id,
+                "modelManifestEntry": {
+                    "id": finetune_id,
+                    "family": "mage-flow",
+                    "paths": { "model": "/app/models/finetunes/finetune_9f3c" }
+                }
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value.as_object().unwrap().clone()
+        };
+        let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
+            imported_image_request_family_eligible(finetune_id, p, MLX_ROUTED_FAMILIES, true)
+        };
+
+        // The novel id is in NO routing table; the family path is what makes it Mac-routable.
+        assert!(
+            image_model_mac_support(finetune_id, Some("mage-flow")).supported,
+            "a fine-tuned Mage base must not be hidden behind \"not available on Mac\""
+        );
+        assert!(
+            !image_model_mac_support(finetune_id, None).supported,
+            "...and it is the DECLARED FAMILY that admits it, not the id"
+        );
+
+        assert!(
+            mlx(&payload(serde_json::json!({ "mode": "text_to_image" }))),
+            "plain txt2img is the shape the fine-tuned lane serves"
+        );
+
+        for (label, extra) in [
+            (
+                "edit",
+                serde_json::json!({ "mode": "edit_image", "sourceAssetId": "s" }),
+            ),
+            (
+                "reference",
+                serde_json::json!({ "referenceAssetId": "asset-1" }),
+            ),
+            (
+                "reference list",
+                serde_json::json!({ "referenceAssetIds": ["a"] }),
+            ),
+            ("source", serde_json::json!({ "sourceAssetId": "a" })),
+            (
+                "lora",
+                serde_json::json!({ "loras": [{ "id": "adapter" }] }),
+            ),
+            ("pose", serde_json::json!({ "advanced": { "poses": [{}] } })),
+            (
+                "phases",
+                serde_json::json!({ "advanced": { "phases": [{}] } }),
+            ),
+            ("mask", serde_json::json!({ "maskAssetId": "m" })),
+            ("character", serde_json::json!({ "characterId": "c" })),
+            ("look", serde_json::json!({ "characterLookId": "l" })),
+        ] {
+            assert!(
+                !mlx(&payload(extra)),
+                "{label} must keep flowing to its established route, not be flattened to t2i here"
+            );
+        }
+
+        // Mage is MLX-only (`mac_only` descriptor, no candle Mage engine), so the candle family
+        // list must NOT admit it — otherwise a candle host would claim a job it cannot load.
+        assert!(
+            !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
+            "there is no candle Mage engine to route a fine-tune to"
+        );
+        assert!(!imported_image_request_family_eligible(
+            finetune_id,
+            &payload(serde_json::json!({ "mode": "text_to_image" })),
+            CANDLE_ROUTED_FAMILIES,
+            false
+        ));
+
+        // A BUILTIN Mage id keeps its id-keyed routing — the family path applies only to
+        // non-builtins, so the tiered snapshot lane is untouched.
+        assert!(!imported_image_request_family_eligible(
+            "mage_flow_base",
+            &payload(serde_json::json!({ "mode": "text_to_image" })),
+            MLX_ROUTED_FAMILIES,
+            true
+        ));
     }
 
     #[test]
