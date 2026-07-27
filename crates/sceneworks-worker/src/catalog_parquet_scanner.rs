@@ -26,7 +26,7 @@ const MAX_BATCH_SIZE: usize = 10_000;
 /// Normal running checkpoints never span more source rows than this. Pause,
 /// cancellation, row-budget yield, row-group/shard boundaries, and completion
 /// flush sooner.
-const MAX_DURABLE_REPLAY_ROWS: usize = 500;
+const MAX_DURABLE_REPLAY_ROWS: usize = 2_000;
 const MAX_CAPTION_CHARS: usize = 2_048;
 const MAX_IMAGE_EDGE: u32 = 16_384;
 const MAX_COLUMN_NAME_CHARS: usize = 256;
@@ -2484,8 +2484,11 @@ mod tests {
     fn crash_replays_only_the_bounded_window_with_exact_duplicate_accounting() {
         let temporary = tempfile::tempdir().expect("temp directory");
         let source = temporary.path().join("source.parquet");
-        let urls = (0..1_000)
-            .map(|index| format!("https://example.com/{}.jpg", index % 900))
+        let total_rows = 3_000_usize;
+        let unique_rows = 2_700_usize;
+        let injected_crash_row = MAX_DURABLE_REPLAY_ROWS as u64 + 750;
+        let urls = (0..total_rows)
+            .map(|index| format!("https://example.com/{}.jpg", index % unique_rows))
             .collect::<Vec<_>>();
         let rows = urls
             .iter()
@@ -2508,7 +2511,7 @@ mod tests {
         catalog.close();
         let mut driver = AttachedCatalogParquetScanDriver::try_start(&registry, &catalog_id)
             .expect("driver starts");
-        driver.fail_before_durable_flush_after_rows(800);
+        driver.fail_before_durable_flush_after_rows(injected_crash_row);
         let options = CatalogParquetScanOptions {
             batch_size: 25,
             ..CatalogParquetScanOptions::default()
@@ -2529,14 +2532,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            checkpoint.counts.scanned, 500,
-            "the 300 uncommitted rows are replayed from the last bounded checkpoint"
+            checkpoint.counts.scanned, MAX_DURABLE_REPLAY_ROWS as u64,
+            "only rows after the bounded durable checkpoint are replayed"
         );
-        assert_eq!(checkpoint.counts.accepted, 500);
-        assert_eq!(interrupted.record_count().unwrap(), 500);
+        let replay_rows = injected_crash_row - checkpoint.counts.scanned;
+        assert_eq!(replay_rows, 750);
+        assert!(
+            replay_rows <= MAX_DURABLE_REPLAY_ROWS as u64,
+            "the injected replay gap must stay within the documented durable bound"
+        );
+        assert_eq!(checkpoint.counts.accepted, MAX_DURABLE_REPLAY_ROWS as u64);
+        assert_eq!(
+            interrupted.record_count().unwrap(),
+            MAX_DURABLE_REPLAY_ROWS as u64
+        );
         let progress = interrupted.contract_state().unwrap().processing;
         assert_eq!(
-            progress.processed_count, 500,
+            progress.processed_count, MAX_DURABLE_REPLAY_ROWS as u64,
             "progress cannot advance beyond committed records and checkpoint"
         );
         assert_ne!(progress.state, CatalogProcessingState::Completed);
@@ -2545,17 +2557,23 @@ mod tests {
         let resumed =
             scan_attached_parquet_catalog(&registry, &catalog_id, &source, &options).unwrap();
         assert!(resumed.checkpoint.complete);
-        assert_eq!(resumed.checkpoint.counts.scanned, 1_000);
-        assert_eq!(resumed.checkpoint.counts.accepted, 900);
-        assert_eq!(resumed.checkpoint.counts.duplicate, 100);
-        assert_eq!(resumed.checkpoint.counts.reasons["duplicate_url"], 100);
+        assert_eq!(resumed.checkpoint.counts.scanned, total_rows as u64);
+        assert_eq!(resumed.checkpoint.counts.accepted, unique_rows as u64);
+        assert_eq!(
+            resumed.checkpoint.counts.duplicate,
+            (total_rows - unique_rows) as u64
+        );
+        assert_eq!(
+            resumed.checkpoint.counts.reasons["duplicate_url"],
+            (total_rows - unique_rows) as u64
+        );
         let completed = registry.open_attached(&catalog_id).unwrap();
-        assert_eq!(completed.record_count().unwrap(), 900);
+        assert_eq!(completed.record_count().unwrap(), unique_rows as u64);
         let progress = completed.contract_state().unwrap().processing;
         assert_eq!(progress.state, CatalogProcessingState::Completed);
-        assert_eq!(progress.processed_count, 1_000);
-        assert_eq!(progress.accepted_count, 900);
-        assert_eq!(progress.rejected_count, 100);
+        assert_eq!(progress.processed_count, total_rows as u64);
+        assert_eq!(progress.accepted_count, unique_rows as u64);
+        assert_eq!(progress.rejected_count, (total_rows - unique_rows) as u64);
     }
 
     #[test]
