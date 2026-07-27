@@ -38,6 +38,19 @@ export const NON_GPU_JOB_TYPES = new Set([
   "lora_download",
 ]);
 
+// Job types the Video Editor itself queues (timeline export + frame extraction).
+// Timeline-initiated generation (extend/bridge) rides `video_generate` and is
+// recognized by `advanced.timelineAction` instead — see `isEditorJob`.
+export const EDITOR_JOB_TYPES = new Set(["timeline_export", "frame_extract"]);
+
+// True when a job represents work the Video Editor started, either through a
+// dedicated editor job type or a timeline-initiated generation.
+export function isEditorJob(job) {
+  return (
+    EDITOR_JOB_TYPES.has(job?.type) || Boolean(job?.payload?.advanced?.timelineAction)
+  );
+}
+
 // Terminal job statuses (no further progress expected).
 export const terminalStatuses = new Set(["completed", "failed", "canceled", "interrupted"]);
 

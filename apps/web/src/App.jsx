@@ -15,6 +15,7 @@ import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { fallbackModels, isLibraryAsset, terminalStatuses } from "./constants.js";
+import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { editModelForAsset, workflowModelType } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
@@ -2818,8 +2819,11 @@ export function App() {
   // (sc-11959): it mounts on first visit and then stays mounted (hidden) thereafter.
   const keepAliveMounted = (view) => activeView === view || visitedKeepAliveViews.has(view);
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
+  // The Editor dot means editor work is IN FLIGHT (export / frame extract / timeline-
+  // initiated generation). It used to be `timelines.length > 0`, which lit permanently
+  // once a project had a single saved timeline and so never signalled activity at all.
   const activeIndicators = {
-    Editor: timelines.length > 0,
+    Editor: jobs.some((job) => !terminalStatuses.has(job.status) && isEditorJob(job)),
     Queue: queueCounts.active > 0,
   };
   // First-run gate: until at least one workspace exists, replace the studio area
