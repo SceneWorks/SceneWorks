@@ -46,7 +46,9 @@ const VISION_MODEL_REVISION: &str = "b47a0690b22eaf1d9a63874d967a03781c90f9cf";
 const CLIP_MODEL_ID: &str = "openai/clip-vit-large-patch14";
 const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
+const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
+const INFERENCE_RUNTIME_REVISION: &str = "1d80161ad9c4a86445725e4dab69ba7b460f4101";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -163,6 +165,7 @@ pub struct NormalizedVisionResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawVisionResult {
     medium: RawMedium,
     #[serde(default)]
@@ -170,12 +173,14 @@ struct RawVisionResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawMedium {
     value: String,
     confidence: f64,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTag {
     value: String,
     confidence: f64,
@@ -183,8 +188,8 @@ struct RawTag {
 
 pub fn parse_normalized_vision_result(text: &str) -> Result<NormalizedVisionResult, String> {
     let cleaned = clean_json_output(text);
-    let raw: RawVisionResult =
-        serde_json::from_str(&cleaned).map_err(|error| format!("invalid vision JSON: {error}"))?;
+    let raw: RawVisionResult = serde_json::from_str(&cleaned)
+        .map_err(|_| "vision response did not match the required schema".to_owned())?;
     let medium = match normalize_token(&raw.medium.value).as_str() {
         "photograph" | "photo" => VisualMedium::Photograph,
         "painting" => VisualMedium::Painting,
@@ -195,7 +200,7 @@ pub fn parse_normalized_vision_result(text: &str) -> Result<NormalizedVisionResu
         "render" | "3d_render" => VisualMedium::Render,
         "sculpture" => VisualMedium::Sculpture,
         "unknown" => VisualMedium::Unknown,
-        value => return Err(format!("unsupported visual medium: {value}")),
+        _ => return Err("vision response medium was outside the allowed taxonomy".to_owned()),
     };
     let medium_confidence = valid_confidence(raw.medium.confidence, "medium")?;
     let allowed = TAG_ALLOWLIST.iter().copied().collect::<BTreeSet<_>>();
@@ -261,13 +266,31 @@ fn normalize_token(value: &str) -> String {
         .join("_")
 }
 
-fn valid_confidence(value: f64, field: &str) -> Result<f64, String> {
+fn valid_confidence(value: f64, _field: &str) -> Result<f64, String> {
     if value.is_finite() && (0.0..=1.0).contains(&value) {
         Ok(value)
     } else {
-        Err(format!(
-            "{field} confidence must be finite and between zero and one"
-        ))
+        Err("vision response confidence was outside the allowed range".to_owned())
+    }
+}
+
+fn inference_backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "mlx"
+    } else if cfg!(feature = "backend-candle") {
+        "candle"
+    } else {
+        "unavailable"
+    }
+}
+
+fn vision_provider() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "mlx-llama"
+    } else if cfg!(feature = "backend-candle") {
+        "candle-llama"
+    } else {
+        "unavailable"
     }
 }
 
@@ -309,6 +332,18 @@ fn vision_is_current(record: &CatalogRecord, input_fingerprint: &str) -> bool {
             .and_then(|value| value.get("taxonomyVersion"))
             .and_then(Value::as_str)
             == Some(TAXONOMY_VERSION)
+        && value
+            .and_then(|value| value.get("runtimeRevision"))
+            .and_then(Value::as_str)
+            == Some(INFERENCE_RUNTIME_REVISION)
+        && value
+            .and_then(|value| value.get("backend"))
+            .and_then(Value::as_str)
+            == Some(inference_backend())
+        && value
+            .and_then(|value| value.get("provider"))
+            .and_then(Value::as_str)
+            == Some(vision_provider())
 }
 
 fn embedding_is_current(record: &CatalogRecord, input_fingerprint: &str) -> bool {
@@ -330,6 +365,18 @@ fn embedding_is_current(record: &CatalogRecord, input_fingerprint: &str) -> bool
             .and_then(|value| value.get("modelRevision"))
             .and_then(Value::as_str)
             == Some(CLIP_MODEL_REVISION)
+        && value
+            .and_then(|value| value.get("runtimeRevision"))
+            .and_then(Value::as_str)
+            == Some(INFERENCE_RUNTIME_REVISION)
+        && value
+            .and_then(|value| value.get("backend"))
+            .and_then(Value::as_str)
+            == Some(inference_backend())
+        && value
+            .and_then(|value| value.get("provider"))
+            .and_then(Value::as_str)
+            == Some(CLIP_PROVIDER)
 }
 
 fn bounded_error(error: impl std::fmt::Display) -> String {
@@ -386,6 +433,7 @@ fn clear_filtered_semantics(registry: &CatalogRegistry, catalog_id: &str) -> Wor
                     "semanticEmbedding",
                     "medium",
                     "tagMembership",
+                    "tagConfidence",
                 ] {
                     changed |= analysis.remove(key).is_some();
                 }
@@ -413,6 +461,33 @@ fn clear_filtered_semantics(registry: &CatalogRegistry, catalog_id: &str) -> Wor
         }
     }
     Ok(cleared)
+}
+
+fn embedding_work_required(registry: &CatalogRegistry, catalog_id: &str) -> WorkerResult<bool> {
+    let catalog = registry
+        .open_attached(catalog_id)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let mut cursor = None;
+    loop {
+        let page = catalog
+            .page_records_after(cursor, PAGE_SIZE)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        for record in page.records {
+            if !is_structured_survivor(&record) {
+                continue;
+            }
+            let Some(input_fingerprint) = structured_input_fingerprint(&record) else {
+                continue;
+            };
+            if !embedding_is_current(&record, input_fingerprint) {
+                return Ok(true);
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(false);
+        }
+    }
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> WorkerResult<PathBuf> {
@@ -604,6 +679,70 @@ async fn generate_vision_json(
     }
 }
 
+fn apply_vision_outcome(
+    record: &mut CatalogRecord,
+    input_fingerprint: &str,
+    outcome: WorkerResult<NormalizedVisionResult>,
+) -> WorkerResult<()> {
+    let analysis = metadata_analysis_mut(&mut record.metadata)?;
+    match outcome {
+        Ok(result) => {
+            let membership = result
+                .tags
+                .iter()
+                .map(|tag| (tag.value.clone(), Value::Bool(true)))
+                .collect::<Map<_, _>>();
+            let confidence = result
+                .tags
+                .iter()
+                .map(|tag| (tag.value.clone(), json!(tag.confidence)))
+                .collect::<Map<_, _>>();
+            analysis.insert(
+                "visionLanguage".to_owned(),
+                json!({
+                    "schemaVersion": SEMANTIC_SCHEMA_VERSION,
+                    "status": "succeeded",
+                    "inputFingerprint": input_fingerprint,
+                    "analyzerVersion": VISION_ANALYZER_VERSION,
+                    "taxonomyVersion": TAXONOMY_VERSION,
+                    "modelId": VISION_MODEL_ID,
+                    "modelRevision": VISION_MODEL_REVISION,
+                    "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+                    "backend": inference_backend(),
+                    "provider": vision_provider(),
+                    "medium": result.medium,
+                    "tags": result.tags,
+                }),
+            );
+            analysis.insert("medium".to_owned(), json!(result.medium.value));
+            analysis.insert("tagMembership".to_owned(), Value::Object(membership));
+            analysis.insert("tagConfidence".to_owned(), Value::Object(confidence));
+        }
+        Err(error) => {
+            analysis.remove("medium");
+            analysis.remove("tagMembership");
+            analysis.remove("tagConfidence");
+            analysis.insert(
+                "visionLanguage".to_owned(),
+                json!({
+                    "schemaVersion": SEMANTIC_SCHEMA_VERSION,
+                    "status": "failed",
+                    "inputFingerprint": input_fingerprint,
+                    "analyzerVersion": VISION_ANALYZER_VERSION,
+                    "taxonomyVersion": TAXONOMY_VERSION,
+                    "modelId": VISION_MODEL_ID,
+                    "modelRevision": VISION_MODEL_REVISION,
+                    "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+                    "backend": inference_backend(),
+                    "provider": vision_provider(),
+                    "error": bounded_error(error),
+                }),
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -659,47 +798,7 @@ async fn run_vision_pass(
             if let Err(WorkerError::Canceled(message)) = &outcome {
                 return Err(WorkerError::Canceled(message.clone()));
             }
-            let analysis = metadata_analysis_mut(&mut record.metadata)?;
-            match outcome {
-                Ok(result) => {
-                    let membership = result
-                        .tags
-                        .iter()
-                        .map(|tag| (tag.value.clone(), Value::Bool(true)))
-                        .collect::<Map<_, _>>();
-                    analysis.insert(
-                        "visionLanguage".to_owned(),
-                        json!({
-                            "schemaVersion": SEMANTIC_SCHEMA_VERSION,
-                            "status": "succeeded",
-                            "inputFingerprint": input_fingerprint,
-                            "analyzerVersion": VISION_ANALYZER_VERSION,
-                            "taxonomyVersion": TAXONOMY_VERSION,
-                            "modelId": VISION_MODEL_ID,
-                            "modelRevision": VISION_MODEL_REVISION,
-                            "medium": result.medium,
-                            "tags": result.tags,
-                        }),
-                    );
-                    analysis.insert("medium".to_owned(), json!(result.medium.value));
-                    analysis.insert("tagMembership".to_owned(), Value::Object(membership));
-                }
-                Err(error) => {
-                    analysis.insert(
-                        "visionLanguage".to_owned(),
-                        json!({
-                            "schemaVersion": SEMANTIC_SCHEMA_VERSION,
-                            "status": "failed",
-                            "inputFingerprint": input_fingerprint,
-                            "analyzerVersion": VISION_ANALYZER_VERSION,
-                            "taxonomyVersion": TAXONOMY_VERSION,
-                            "modelId": VISION_MODEL_ID,
-                            "modelRevision": VISION_MODEL_REVISION,
-                            "error": bounded_error(error),
-                        }),
-                    );
-                }
-            }
+            apply_vision_outcome(&mut record, &input_fingerprint, outcome)?;
             registry
                 .open_attached(catalog_id)
                 .and_then(|mut catalog| catalog.append_records(&[record_update(record)]))
@@ -713,6 +812,41 @@ async fn run_vision_pass(
         }
     }
     Ok((examined, updated))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn fetch_catalog_images_with_heartbeat(
+    api: &crate::ApiClient,
+    settings: &crate::Settings,
+    job_id: &str,
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    options: &crate::catalog_image_fetch::CatalogImageFetchOptions,
+    processing: &CatalogProcessingLease,
+) -> WorkerResult<crate::catalog_image_fetch::CatalogImageFetchReport> {
+    use sceneworks_core::contracts::WorkerStatus;
+
+    let fetch = crate::catalog_image_fetch::fetch_attached_catalog_images_under_processing_lease(
+        registry, catalog_id, options, processing,
+    );
+    tokio::pin!(fetch);
+    let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut fetch => {
+                return result
+                    .map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")));
+            }
+            _ = interval.tick() => {
+                crate::heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await?;
+                crate::check_cancel(api, job_id, CANCEL_MESSAGE).await?;
+            }
+        }
+    }
 }
 
 #[cfg(any(
@@ -902,9 +1036,10 @@ fn run_embedding_pass_blocking(
                         "analyzerVersion": EMBEDDING_ANALYZER_VERSION,
                         "modelId": CLIP_MODEL_ID,
                         "modelRevision": CLIP_MODEL_REVISION,
-                        "runtimeRevision": "1d80161ad9c4a86445725e4dab69ba7b460f4101",
+                        "runtimeRevision": INFERENCE_RUNTIME_REVISION,
                         "embedderId": CLIP_EMBEDDER_ID,
                         "backend": descriptor.backend,
+                        "provider": CLIP_PROVIDER,
                         "space": descriptor.space,
                         "dimension": descriptor.embedding_dim,
                         "digest": digest,
@@ -931,7 +1066,6 @@ fn run_embedding_pass_blocking(
             break;
         }
     }
-    rebuild_embedding_index(&registry, &catalog_id)?;
     Ok((examined, updated))
 }
 
@@ -952,8 +1086,10 @@ fn persist_embedding_failure(
             "analyzerVersion": EMBEDDING_ANALYZER_VERSION,
             "modelId": CLIP_MODEL_ID,
             "modelRevision": CLIP_MODEL_REVISION,
-            "runtimeRevision": "1d80161ad9c4a86445725e4dab69ba7b460f4101",
+            "runtimeRevision": INFERENCE_RUNTIME_REVISION,
             "embedderId": CLIP_EMBEDDER_ID,
+            "backend": inference_backend(),
+            "provider": CLIP_PROVIDER,
             "error": bounded_error(error),
         }),
     );
@@ -1131,23 +1267,6 @@ pub(crate) async fn run_catalog_analysis_job(
             })
         })
         .transpose()?;
-    let clip_weights = analyzer_config
-        .settings
-        .semantic_embeddings_enabled
-        .then(|| -> WorkerResult<PathBuf> {
-            crate::model_jobs::huggingface_pinned_snapshot_dir(
-                &settings.data_dir,
-                CLIP_MODEL_ID,
-                CLIP_MODEL_REVISION,
-            )
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "catalog CLIP model exact snapshot {CLIP_MODEL_ID}@{CLIP_MODEL_REVISION} is not cached"
-                ))
-            })
-        })
-        .transpose()?;
-
     let catalog = registry
         .open_attached(&catalog_id)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
@@ -1173,14 +1292,16 @@ pub(crate) async fn run_catalog_analysis_job(
     .await?;
     let mut fetch_options = crate::catalog_image_fetch::CatalogImageFetchOptions::default();
     fetch_options.accepted_target = record_count;
-    let fetch = crate::catalog_image_fetch::fetch_attached_catalog_images_under_processing_lease(
+    let fetch = fetch_catalog_images_with_heartbeat(
+        api,
+        settings,
+        &job.id,
         &registry,
         &catalog_id,
         &fetch_options,
         processing.as_ref(),
     )
-    .await
-    .map_err(|error| WorkerError::Engine(format!("catalog image fetch failed: {error}")))?;
+    .await?;
 
     let structured = if let Some(resources) = structured_resources {
         crate::update_job(
@@ -1212,29 +1333,53 @@ pub(crate) async fn run_catalog_analysis_job(
         config.thresholds.min_pose_coverage = analyzer_config.settings.thresholds.min_pose_coverage;
         let mut analyzers = crate::catalog_analysis::ModelBackedCatalogAnalyzers::new(resources);
         let structured_processing = processing.clone();
+        let cancel = gen_core::CancelFlag::new();
+        let blocking_cancel = cancel.clone();
         Some(
-            tokio::task::spawn_blocking({
+            crate::run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                CANCEL_MESSAGE,
+                "catalog structured analysis",
+                crate::no_cancel_ack(),
+                tokio::task::spawn_blocking({
                 let registry = registry.clone();
                 let catalog_id = catalog_id.clone();
                 move || {
-                    crate::catalog_analysis::analyze_attached_catalog_under_processing_lease(
+                    let mut on_page = |_progress: crate::catalog_analysis::CatalogAnalysisPageProgress| {
+                        Ok(())
+                    };
+                    crate::catalog_analysis::analyze_attached_catalog_under_processing_lease_with_control(
                         &registry,
                         &catalog_id,
                         &config,
                         &mut analyzers,
                         structured_processing.as_ref(),
+                        &blocking_cancel,
+                        &mut on_page,
                     )
+                    .map_err(|error| match error {
+                        crate::catalog_analysis::CatalogAnalysisError::Canceled(message) => {
+                            WorkerError::Canceled(message)
+                        }
+                        error => WorkerError::Engine(error.to_string()),
+                    })
                 }
-            })
-            .await
-            .map_err(|error| crate::task_join_error("catalog structured analysis", error))?
-            .map_err(|error| WorkerError::Engine(error.to_string()))?,
+            }),
+            )
+            .await?,
         )
     } else {
         None
     };
 
     let filtered_semantic_records = clear_filtered_semantics(&registry, &catalog_id)?;
+    // Reconcile the external manifest immediately after pointer cleanup. This
+    // must happen even when embeddings are disabled, there are no survivors,
+    // or a later CLIP resolve/load fails.
+    rebuild_embedding_index(&registry, &catalog_id)?;
 
     let mut vision_counts = (0, 0);
     if let Some(weights) = vision_weights {
@@ -1257,6 +1402,22 @@ pub(crate) async fn run_catalog_analysis_job(
     }
 
     let mut embedding_counts = (0, 0);
+    let embedding_required = analyzer_config.settings.semantic_embeddings_enabled
+        && embedding_work_required(&registry, &catalog_id)?;
+    let clip_weights = embedding_required
+        .then(|| -> WorkerResult<PathBuf> {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                CLIP_MODEL_ID,
+                CLIP_MODEL_REVISION,
+            )
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "catalog CLIP model exact snapshot {CLIP_MODEL_ID}@{CLIP_MODEL_REVISION} is not cached"
+                ))
+            })
+        })
+        .transpose()?;
     if let Some(weights) = clip_weights {
         crate::update_job(
             api,
@@ -1296,6 +1457,7 @@ pub(crate) async fn run_catalog_analysis_job(
             blocking,
         )
         .await?;
+        rebuild_embedding_index(&registry, &catalog_id)?;
     }
 
     let catalog = registry
@@ -1392,6 +1554,27 @@ pub(crate) async fn run_catalog_analysis_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sceneworks_core::catalog_store::CatalogRecordFilter;
+
+    fn survivor_record(id: &str) -> CatalogRecord {
+        CatalogRecord {
+            id: id.to_owned(),
+            image_path: format!("images/{id}.jpg"),
+            thumbnail_path: None,
+            embedding_path: None,
+            artifact_path: None,
+            metadata: json!({
+                "analysis": {
+                    "structured": {
+                        "inputFingerprint": "sha256:abc",
+                        "derived": {"qualifiedSingleFullBody": true}
+                    }
+                }
+            }),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
 
     #[test]
     fn parser_normalizes_medium_tags_deduplicates_and_drops_open_vocabulary() {
@@ -1455,42 +1638,273 @@ mod tests {
     }
 
     #[test]
-    fn survivor_and_freshness_gates_are_record_local_and_exact() {
-        let record = CatalogRecord {
-            id: "r".to_owned(),
-            image_path: "images/r.jpg".to_owned(),
-            thumbnail_path: None,
-            embedding_path: Some("embeddings/clip-vit-l14/r.f32".to_owned()),
-            artifact_path: None,
-            metadata: json!({
-                "analysis": {
-                    "structured": {
-                        "inputFingerprint": "sha256:abc",
-                        "derived": {"qualifiedSingleFullBody": true}
-                    },
-                    "visionLanguage": {
-                        "status": "succeeded",
-                        "inputFingerprint": "sha256:abc",
-                        "analyzerVersion": VISION_ANALYZER_VERSION,
-                        "modelRevision": VISION_MODEL_REVISION,
-                        "taxonomyVersion": TAXONOMY_VERSION
-                    },
-                    "semanticEmbedding": {
-                        "status": "succeeded",
-                        "inputFingerprint": "sha256:abc",
-                        "analyzerVersion": EMBEDDING_ANALYZER_VERSION,
-                        "modelRevision": CLIP_MODEL_REVISION
-                    }
-                }
+    fn schema_errors_reject_unknown_fields_without_echoing_generated_text() {
+        for (payload, secret) in [
+            (
+                r#"{"medium":{"value":"private_person_name","confidence":0.8},"tags":[]}"#,
+                "private_person_name",
+            ),
+            (
+                r#"{"medium":{"value":"photo","confidence":0.8,"private_identity":"Alice"},"tags":[]}"#,
+                "Alice",
+            ),
+            (
+                r#"{"medium":{"value":"photo","confidence":0.8},"tags":[],"private_identity":"Bob"}"#,
+                "Bob",
+            ),
+        ] {
+            let error = parse_normalized_vision_result(payload).expect_err("schema must reject");
+            assert!(
+                !error.contains(secret),
+                "failure metadata must not echo output"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_reanalysis_clears_stale_query_scalars_and_records_exact_runtime() {
+        let mut record = survivor_record("failure");
+        record.metadata["analysis"]["medium"] = json!("photograph");
+        record.metadata["analysis"]["tagMembership"] = json!({"full_body": true});
+        record.metadata["analysis"]["tagConfidence"] = json!({"full_body": 0.99});
+
+        apply_vision_outcome(
+            &mut record,
+            "sha256:abc",
+            Err(WorkerError::Engine(
+                "vision response did not match the required schema".to_owned(),
+            )),
+        )
+        .expect("failure persists");
+
+        assert!(record.metadata.pointer("/analysis/medium").is_none());
+        assert!(record.metadata.pointer("/analysis/tagMembership").is_none());
+        assert!(record.metadata.pointer("/analysis/tagConfidence").is_none());
+        let failure = record
+            .metadata
+            .pointer("/analysis/visionLanguage")
+            .expect("failure metadata");
+        assert_eq!(failure["runtimeRevision"], INFERENCE_RUNTIME_REVISION);
+        assert_eq!(failure["backend"], inference_backend());
+        assert_eq!(failure["provider"], vision_provider());
+    }
+
+    #[test]
+    fn normalized_tag_confidence_is_bounded_and_queryable_by_dotted_path() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry
+            .create_catalog(&root, "confidence")
+            .expect("catalog");
+        let mut record = survivor_record("confidence");
+        apply_vision_outcome(
+            &mut record,
+            "sha256:abc",
+            Ok(NormalizedVisionResult {
+                medium: ConfidentMedium {
+                    value: VisualMedium::Photograph,
+                    confidence: 0.87,
+                },
+                tags: vec![ConfidentTag {
+                    value: "full_body".to_owned(),
+                    confidence: 0.94,
+                }],
             }),
-            created_at: String::new(),
-            updated_at: String::new(),
-        };
+        )
+        .expect("success applies");
+        catalog
+            .append_records(&[record_update(record)])
+            .expect("record persists");
+        let confidence = catalog
+            .page_records(0, 1)
+            .expect("record reads")
+            .pop()
+            .expect("record")
+            .metadata
+            .pointer("/analysis/tagConfidence/full_body")
+            .and_then(Value::as_f64)
+            .expect("confidence scalar");
+        assert!((0.0..=1.0).contains(&confidence));
+        let filtered = catalog
+            .query_records_after(
+                None,
+                10,
+                &[CatalogRecordFilter {
+                    field: "analysis.tagConfidence.full_body".to_owned(),
+                    values: vec!["0.94".to_owned()],
+                }],
+            )
+            .expect("dotted scalar query");
+        assert_eq!(filtered.records.len(), 1);
+    }
+
+    #[test]
+    fn survivor_and_freshness_gates_are_record_local_and_exact() {
+        let mut record = survivor_record("r");
+        record.embedding_path = Some("embeddings/clip-vit-l14/r.f32".to_owned());
+        record.metadata["analysis"]["visionLanguage"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:abc",
+            "analyzerVersion": VISION_ANALYZER_VERSION,
+            "modelRevision": VISION_MODEL_REVISION,
+            "taxonomyVersion": TAXONOMY_VERSION,
+            "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+            "backend": inference_backend(),
+            "provider": vision_provider(),
+        });
+        record.metadata["analysis"]["semanticEmbedding"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:abc",
+            "analyzerVersion": EMBEDDING_ANALYZER_VERSION,
+            "modelRevision": CLIP_MODEL_REVISION,
+            "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+            "backend": inference_backend(),
+            "provider": CLIP_PROVIDER,
+        });
         assert!(is_structured_survivor(&record));
         assert!(vision_is_current(&record, "sha256:abc"));
         assert!(embedding_is_current(&record, "sha256:abc"));
         assert!(!vision_is_current(&record, "sha256:changed"));
         assert!(!embedding_is_current(&record, "sha256:changed"));
+
+        for path in [
+            "/analysis/visionLanguage/runtimeRevision",
+            "/analysis/visionLanguage/backend",
+            "/analysis/visionLanguage/provider",
+            "/analysis/semanticEmbedding/runtimeRevision",
+            "/analysis/semanticEmbedding/backend",
+            "/analysis/semanticEmbedding/provider",
+        ] {
+            let mut stale = record.clone();
+            *stale.metadata.pointer_mut(path).expect("provenance field") = json!("stale");
+            assert!(
+                !vision_is_current(&stale, "sha256:abc")
+                    || !embedding_is_current(&stale, "sha256:abc"),
+                "{path} must participate in freshness"
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_pointer_cleanup_immediately_reconciles_external_index() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry.create_catalog(&root, "filtered").expect("catalog");
+        let mut record = survivor_record("filtered");
+        record.metadata["analysis"]["structured"]["derived"]["qualifiedSingleFullBody"] =
+            json!(false);
+        record.embedding_path = Some("embeddings/clip-vit-l14/stale.f32".to_owned());
+        record.metadata["analysis"]["semanticEmbedding"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:abc",
+            "digest": "sha256:stale",
+            "dimension": 768,
+            "space": CLIP_SPACE,
+            "modelId": CLIP_MODEL_ID,
+            "modelRevision": CLIP_MODEL_REVISION,
+        });
+        catalog
+            .append_records(&[record_update(record)])
+            .expect("record");
+        let catalog_id = catalog.descriptor().id.clone();
+        drop(catalog);
+
+        assert_eq!(
+            clear_filtered_semantics(&registry, &catalog_id).expect("cleanup"),
+            1
+        );
+        rebuild_embedding_index(&registry, &catalog_id).expect("index");
+        let catalog = registry.open_attached(&catalog_id).expect("catalog");
+        assert!(catalog
+            .page_records(0, 1)
+            .expect("record")
+            .pop()
+            .expect("record")
+            .embedding_path
+            .is_none());
+        assert_eq!(
+            fs::read_to_string(root.join("embeddings").join(CLIP_SPACE).join("index.jsonl"))
+                .expect("index"),
+            ""
+        );
+    }
+
+    #[test]
+    fn zero_survivors_require_no_clip_resolution_or_load() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry.create_catalog(&root, "empty").expect("catalog");
+        let mut filtered = survivor_record("filtered");
+        filtered.metadata["analysis"]["structured"]["derived"]["qualifiedSingleFullBody"] =
+            json!(false);
+        catalog
+            .append_records(&[record_update(filtered)])
+            .expect("record");
+        let catalog_id = catalog.descriptor().id.clone();
+        drop(catalog);
+        assert!(!embedding_work_required(&registry, &catalog_id).expect("eligibility"));
+    }
+
+    #[test]
+    fn clip_failure_clears_pointer_and_persists_exact_runtime_backend_provider() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry
+            .create_catalog(&root, "clip-failure")
+            .expect("catalog");
+        let mut record = survivor_record("clip-failure");
+        record.embedding_path = Some("embeddings/clip-vit-l14/stale.f32".to_owned());
+        catalog
+            .append_records(&[record_update(record.clone())])
+            .expect("record");
+        let catalog_id = catalog.descriptor().id.clone();
+        drop(catalog);
+
+        persist_embedding_failure(
+            &registry,
+            &catalog_id,
+            record,
+            "sha256:abc",
+            "generic embedding failure",
+        )
+        .expect("failure persists");
+        let record = registry
+            .open_attached(&catalog_id)
+            .expect("catalog")
+            .page_records(0, 1)
+            .expect("record")
+            .pop()
+            .expect("record");
+        assert!(record.embedding_path.is_none());
+        let failure = record
+            .metadata
+            .pointer("/analysis/semanticEmbedding")
+            .expect("failure");
+        assert_eq!(failure["runtimeRevision"], INFERENCE_RUNTIME_REVISION);
+        assert_eq!(failure["backend"], inference_backend());
+        assert_eq!(failure["provider"], CLIP_PROVIDER);
+    }
+
+    #[test]
+    fn catalog_pipeline_wires_fetch_and_blocking_analysis_keepalives() {
+        let source = include_str!("catalog_semantic_jobs.rs");
+        let fetch = source
+            .split("async fn fetch_catalog_images_with_heartbeat")
+            .nth(1)
+            .and_then(|body| body.split("fn run_embedding_pass_blocking").next())
+            .expect("fetch helper source");
+        assert!(fetch.contains("crate::heartbeat("));
+        assert!(fetch.contains("crate::check_cancel("));
+        let handler = source
+            .split("pub(crate) async fn run_catalog_analysis_job")
+            .nth(1)
+            .expect("handler source");
+        assert!(handler.contains("crate::run_blocking_with_heartbeat("));
+        assert!(handler.contains("analyze_attached_catalog_under_processing_lease_with_control"));
     }
 
     #[test]
