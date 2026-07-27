@@ -145,6 +145,10 @@ const CAPABILITY_LABELS = {
   interleave: "Interleaved",
   image_to_video: "Image to Video",
   text_to_video: "Text to Video",
+  // sc-8445: Krea Realtime advertises text/image/video-to-video, and without this row its third
+  // chip fell to the humanized fallback ("video to video") — visibly out of style beside the two
+  // title-cased siblings on the same card.
+  video_to_video: "Video to Video",
   first_last_frame: "First / Last Frame",
   extend_clip: "Extend Clip",
   video_bridge: "Video Bridge",

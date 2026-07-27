@@ -7949,6 +7949,15 @@
       // any text prompt. The Video Studio keys off this to drop the prompt
       // requirement (the prompt field stays hidden/optional).
       "promptless": true,
+      // Same story as the text prompt, for the other two axes (sc-8445): `generate_svd`
+      // (video_jobs/svd.rs) hard-sets `negative_prompt: None` and `guidance: None` because the
+      // engine drives its own frame-wise CFG ramp — there is no scale to set and no unconditional
+      // branch to steer. `promptless` already hid the prompt field; without this block the Guidance
+      // and Negative prompt controls stayed visible and permanently dead.
+      "video": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "downloads": [
         {
           // Diffusers checkpoint (img2vid-XT): UNet + VAE + CLIP image encoder.
@@ -9377,6 +9386,24 @@
         "image_to_video",
         "video_to_video"
       ],
+      // Which generation AXES this engine actually has (sc-8445), the video-lane sibling of the
+      // `audio` sub-block. Krea Realtime is CFG-FREE: the Self-Forcing distillation baked guidance
+      // out, so `generate_krea_realtime` runs a single batch-1 forward, sets `negative_prompt: None`
+      // and never forwards a guidance scale (video_jobs/krea_realtime.rs). Declaring that here lets
+      // Video Studio HIDE both controls instead of offering knobs the worker discards — and makes
+      // this entry's own `ui.description` ("CFG-off, so there is no negative prompt or guidance
+      // control") a true statement about the shipped UI rather than an aspiration.
+      //
+      // ⚠️ Polarity is the OPPOSITE of the `audio` block's: an ABSENT key here means TRUE. Of the
+      // ten video entries, EIGHT genuinely take both (the Wan family, both LTX entries, SCAIL-2 and
+      // Bernini) and declare nothing; the two that do not — this entry and `svd`, whose engine
+      // drives its own frame-wise CFG ramp — declare it false right here. So absent-means-supported
+      // is the correct default for the majority AND leaves those eight behaving exactly as they did
+      // before this block existed. The schema says the same thing.
+      "video": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "downloads": [
         // macOS quant matrix (epic 8506 shape, mirroring scail2_14b): each tier is a SEPARATE
         // user-selectable artifact tagged with a `variant`; `q4` (default) installs when no tier
