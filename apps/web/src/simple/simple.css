@@ -71,6 +71,21 @@
     transform: none;
   }
 }
+/* The same fade+pop for an element that is centered with `translate(-50%, -50%)`.
+   It has to carry that centering in EVERY keyframe: an animated `transform` replaces
+   the rule's own for the whole run, so a plain `su-pop` would park the card's top-left
+   corner at the container's centre (down-and-right) until the animation ended and then
+   snap it back. */
+@keyframes su-pop-centered {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .su-root *,
@@ -2080,7 +2095,7 @@
   padding: 20px 22px 24px;
   border-radius: 18px;
   transform: translate(-50%, -50%);
-  animation: su-pop 0.2s var(--ease-out);
+  animation: su-pop-centered 0.2s var(--ease-out);
 }
 
 .su-sheet-handle {
