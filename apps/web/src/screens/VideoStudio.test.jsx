@@ -1521,6 +1521,9 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     family: "krea-realtime",
     adapter: "krea_realtime",
     capabilities: KREA_CAPABILITIES,
+    // Krea Realtime is CFG-free, so it declares BOTH axes absent (sc-8445). Every other video model
+    // declares no `video` block at all, and absent means TRUE — see the supportsGuidance derivation.
+    video: { supportsGuidance: false, supportsNegativePrompt: false },
     defaults: {
       duration: 4,
       fps: 24,
@@ -1650,6 +1653,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(shipped.capabilities).toEqual(KREA.capabilities);
     expect(shipped.defaults).toEqual(KREA.defaults);
     expect(shipped.limits).toEqual(KREA.limits);
+    expect(shipped.video).toEqual(KREA.video);
   });
 
   it("offers Krea Realtime in the picker with exactly its three capability tabs enabled", async () => {
@@ -1777,6 +1781,101 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     const payload = context.createVideoJob.mock.calls[0][0];
     expect(payload).toMatchObject({ mode: "image_to_video", model: "krea_realtime_14b", sourceAssetId: "img_still" });
     expect(payload.advanced.videoConditioningStrength).toBeUndefined();
+  });
+
+  // acceptance item 1's install-state half. `videoModels` is what App.jsx has ALREADY filtered
+  // through `generationModelsForType` (installState complete), so a krea that is still `missing`
+  // reaches this screen as an empty picker list plus a catalog entry to offer — exactly the shape
+  // reproduced here. Without this the only evidence for the krea-specific gate was a browser
+  // session nobody can re-run.
+  it("gates the studio and offers Krea for download when it is not installed", async () => {
+    const missingKrea = { ...KREA, installState: "missing", downloadSizeLabel: "18.9 GB" };
+    const context = baseContext({
+      videoModels: [],
+      models: [missingKrea],
+      macCapabilities: MAC_CAPS,
+    });
+    await render(context);
+
+    const gate = container.querySelector(".model-availability-gate");
+    expect(gate, "an empty video picker must render the availability gate").toBeTruthy();
+    expect(gate.textContent).toContain("Video Studio needs a video model");
+    // The studio body is replaced, not merely annotated.
+    expect(container.querySelector(".mode-control")).toBeFalsy();
+
+    // Krea is offered specifically — `videoModelUsable` accepts it (video type, Mac-supported,
+    // serves >=1 mode), so the gate names it rather than falling back to "nothing supports this".
+    const offers = [...gate.querySelectorAll(".model-availability-offer")].map((el) => el.textContent);
+    expect(offers.length).toBe(1);
+    expect(offers[0]).toContain("Krea Realtime 14B");
+    expect(offers[0]).toContain("18.9 GB");
+  });
+
+  // sc-8445 major: Krea is CFG-free — `generate_krea_realtime` sets `negative_prompt: None` and
+  // never forwards a guidance scale — so offering either control would be a knob that silently does
+  // nothing. Driven off the manifest `video` block, not an id check.
+  //
+  // ⚠️ The payload half is asserted after the values have actually been SET on another model and
+  // carried across the model switch. Both fields persist in studio state (and restore from a
+  // recipe), so a user who sets guidance on Bernini and switches to Krea really does arrive here
+  // with a non-empty override — which is the leak the gate has to plug. Asserting on a freshly
+  // mounted Krea would assert the empty default and pass against no implementation at all.
+  it("hides Guidance and Negative prompt for a CFG-free engine and sends neither", async () => {
+    const context = baseContext({ videoModels: [BERNINI_V2V, KREA] });
+    await render(context);
+    await ensureAdvancedOpen();
+
+    // On the guidance-taking model first: set both, so the state is genuinely non-empty.
+    await act(async () => setInput(labelStartingWith("Guidance").querySelector("input"), "7.5"));
+    const negative = labelStartingWith("Negative prompt").querySelector("textarea");
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(negative, "blurry, low quality");
+      negative.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    // Switch to the CFG-free engine. Both controls go away…
+    await act(async () => setSelect(selectLabelled("Model"), "krea_realtime_14b"));
+    await ensureAdvancedOpen();
+    expect(labelStartingWith("Guidance")).toBeFalsy();
+    expect(labelStartingWith("Negative prompt")).toBeFalsy();
+
+    // …and neither retained value reaches the worker.
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.model).toBe("krea_realtime_14b");
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced.guidanceScale).toBeUndefined();
+  });
+
+  // The other half of the same rule, and the reason `!== false` rather than `=== true`: a video
+  // model that declares NO `video` block keeps both controls, so this change is behaviour-neutral
+  // for Wan / LTX / SCAIL-2 / Bernini. Without this leg the test above would also pass against an
+  // implementation that hid the pair for every model.
+  //
+  // Bernini rather than the Wan A14B fixture on purpose: `wan_2_2_t2v_14b` is in
+  // WAN_A14B_LIGHTNING_MODEL_IDS, and Lightning defaults ON and suppresses guidance itself — so it
+  // would have proved nothing about the new `video` gate.
+  it("keeps Guidance and Negative prompt for a model that declares no video axes", async () => {
+    const context = baseContext({ videoModels: [BERNINI_V2V] });
+    await render(context);
+    await ensureAdvancedOpen();
+
+    const guidance = labelStartingWith("Guidance")?.querySelector("input");
+    expect(guidance).toBeTruthy();
+    await act(async () => setInput(guidance, "6.5"));
+    const negative = labelStartingWith("Negative prompt")?.querySelector("textarea");
+    expect(negative).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(negative, "blurry");
+      negative.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.negativePrompt).toBe("blurry");
+    expect(payload.advanced.guidanceScale).toBe(6.5);
   });
 
   it("submits Krea in each of its three advertised modes", async () => {

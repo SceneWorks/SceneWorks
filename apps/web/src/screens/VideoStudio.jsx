@@ -379,6 +379,23 @@ export function VideoStudio() {
   const showClipStrength =
     ["extend_clip", "video_bridge"].includes(mode) ||
     (mode === "video_to_video" && selectedModel?.adapter === "krea_realtime");
+  // Which generation axes the selected engine actually has, declared in the manifest `video`
+  // sub-block (sc-8445) — the video-lane mirror of how Audio Studio reads `audio.supportsGuidance`
+  // / `audio.supportsNegativePrompt`. Neither an id check nor an engine link: the catalog says it.
+  //
+  // ⚠️ ABSENT MEANS TRUE, the opposite polarity to the audio block. Every other video model takes
+  // both a CFG scale and a negative prompt and declares nothing, so `!== false` is what keeps them
+  // byte-identical to their pre-sc-8445 behaviour; only an engine that genuinely lacks the axis
+  // declares it false. Krea Realtime is the one that does: it is CFG-free (Self-Forcing baked
+  // guidance out), so `generate_krea_realtime` runs a single batch-1 forward, sets
+  // `negative_prompt: None`, and never forwards a guidance scale.
+  //
+  // HIDDEN, not disabled: the lightning precedent below disables Steps/Guidance because that
+  // inertness is TRANSIENT (turn Lightning off and the control works again). A missing axis is
+  // permanent for the model, so a forever-dead input is just clutter — Audio Studio hides these two
+  // for the same reason (`showGuidance` / `showNegative`).
+  const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1211,7 +1228,10 @@ export function VideoStudio() {
         // (stack-folded) prompt LAST — send that composed string verbatim. Falls back to the plain
         // stack-folded / raw prompt when no style is applied.
         prompt: styleApplied ? composedStylePrompt : stackActive ? composedStack.prompt : prompt,
-        negativePrompt: stackActive ? composedStack.negativePrompt : negativePrompt,
+        // An engine with no negative-prompt axis gets an empty one rather than whatever a preset
+        // stack composed — the field is hidden for it, so sending text the user cannot see or edit
+        // (and the worker discards anyway) would be a ghost input on the recipe.
+        negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
         duration: Number(duration),
         fps: Number(fps),
@@ -1312,7 +1332,10 @@ export function VideoStudio() {
           ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
-          ...(!lightningActive && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+          ...(supportsGuidance &&
+          !lightningActive &&
+          guidanceOverride !== "" &&
+          Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
@@ -1983,23 +2006,25 @@ export function VideoStudio() {
                   value={lightningActive ? "" : stepsOverride}
                 />
               </label>
-              <label>
-                Guidance
-                <input
-                  min="0"
-                  max="30"
-                  disabled={lightningActive}
-                  onChange={(event) => setGuidanceOverride(event.target.value)}
-                  placeholder={lightningActive ? "off (Lightning)" : (() => {
-                    const value = guidanceDefaultFromModel(selectedModel);
-                    return value == null ? "" : String(value);
-                  })()}
-                  step="0.1"
-                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
-                  type="number"
-                  value={lightningActive ? "" : guidanceOverride}
-                />
-              </label>
+              {supportsGuidance ? (
+                <label>
+                  Guidance
+                  <input
+                    min="0"
+                    max="30"
+                    disabled={lightningActive}
+                    onChange={(event) => setGuidanceOverride(event.target.value)}
+                    placeholder={lightningActive ? "off (Lightning)" : (() => {
+                      const value = guidanceDefaultFromModel(selectedModel);
+                      return value == null ? "" : String(value);
+                    })()}
+                    step="0.1"
+                    title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
+                    type="number"
+                    value={lightningActive ? "" : guidanceOverride}
+                  />
+                </label>
+              ) : null}
               <label>
                 Character
                 <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
@@ -2022,10 +2047,12 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              <label className="prompt-field">
-                Negative prompt
-                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-              </label>
+              {supportsNegativePrompt ? (
+                <label className="prompt-field">
+                  Negative prompt
+                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                </label>
+              ) : null}
               <LoraPickerSection
                 selectedModel={selectedModel}
                 selectedLoras={selectedLoras}

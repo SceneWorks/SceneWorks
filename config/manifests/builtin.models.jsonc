@@ -9377,6 +9377,23 @@
         "image_to_video",
         "video_to_video"
       ],
+      // Which generation AXES this engine actually has (sc-8445), the video-lane sibling of the
+      // `audio` sub-block. Krea Realtime is CFG-FREE: the Self-Forcing distillation baked guidance
+      // out, so `generate_krea_realtime` runs a single batch-1 forward, sets `negative_prompt: None`
+      // and never forwards a guidance scale (video_jobs/krea_realtime.rs). Declaring that here lets
+      // Video Studio HIDE both controls instead of offering knobs the worker discards — and makes
+      // this entry's own `ui.description` ("CFG-off, so there is no negative prompt or guidance
+      // control") a true statement about the shipped UI rather than an aspiration.
+      //
+      // ⚠️ Polarity is the OPPOSITE of the `audio` block's: an ABSENT key here means TRUE. Every
+      // other video entry (Wan / LTX / SCAIL-2 / Bernini) genuinely takes both, so absent-means-
+      // supported is the correct default for the video population AND leaves all of them behaving
+      // exactly as they did before this block existed. Only an engine that truly lacks an axis
+      // declares it false. The schema says the same thing.
+      "video": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "downloads": [
         // macOS quant matrix (epic 8506 shape, mirroring scail2_14b): each tier is a SEPARATE
         // user-selectable artifact tagged with a `variant`; `q4` (default) installs when no tier
