@@ -300,9 +300,9 @@ export function VideoStudio() {
   const [ltxVideoStg, setLtxVideoStg] = useState(saved.videoStgGuidanceScale ?? "");
   const [ltxVideoRescale, setLtxVideoRescale] = useState(saved.videoRescaleScale ?? "");
   // Clip-conditioning strengths for the LTX IC-LoRA extend/bridge paths (sc-3522,
-  // sc-3755). The worker reads these from `advanced` (default 1.0 when absent):
-  // the source/left clip uses videoConditioningStrength, the bridge right clip
-  // uses bridgeRightVideoConditioningStrength.
+  // sc-3755) and for Krea Realtime's video_to_video (sc-8445). The worker reads these from
+  // `advanced` (default 1.0 when absent): the source/left clip uses videoConditioningStrength,
+  // the bridge right clip uses bridgeRightVideoConditioningStrength.
   const [videoConditioningStrength, setVideoConditioningStrength] = useState(saved.videoConditioningStrength ?? "");
   const [bridgeRightVideoConditioningStrength, setBridgeRightVideoConditioningStrength] = useState(
     saved.bridgeRightVideoConditioningStrength ?? "",
@@ -364,6 +364,21 @@ export function VideoStudio() {
   // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
   const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
   const lightningActive = showLightning && lightning;
+  // Clip-conditioning strength (`advanced.videoConditioningStrength`). The LTX/Wan IC-LoRA clip
+  // modes always honor it, so those two modes show it for whichever model serves them. The
+  // `video_to_video` tab is different: the key is honored there ONLY by Krea Realtime, whose v2v
+  // drives a strength-controlled autoregressive init (`FewStepSchedule::for_strength`, wired in
+  // `video_jobs/krea_realtime.rs::krea_realtime_conditioning`). Bernini — the other v2v model —
+  // never reads the key, so gating on the ADAPTER keeps the control off a model that would
+  // silently ignore it, the same shape as the `adapter === "ltx_video"` guidance knobs below.
+  //
+  // Krea's image_to_video deliberately gets NO strength control: an i2v reference still only warms
+  // the AR KV cache and the engine reads the image alone, never `strength` — a documented no-op
+  // (sc-8440 / sc-8443), pinned worker-side by `krea_realtime_conditioning` emitting
+  // `strength: None`. Showing it there would be a knob that does nothing.
+  const showClipStrength =
+    ["extend_clip", "video_bridge"].includes(mode) ||
+    (mode === "video_to_video" && selectedModel?.adapter === "krea_realtime");
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -1312,10 +1327,12 @@ export function VideoStudio() {
           ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
             ? { videoRescaleScale: Number(ltxVideoRescale) }
             : {}),
-          // LTX IC-LoRA clip-conditioning strengths (sc-3522, sc-3755). The worker
-          // reads these from `advanced`, defaulting to 1.0 when absent — extend uses
-          // the source-clip strength, bridge uses both left and right.
-          ...(["extend_clip", "video_bridge"].includes(mode) &&
+          // Clip-conditioning strengths (sc-3522, sc-3755; sc-8445 for Krea Realtime v2v). The
+          // worker reads these from `advanced`, defaulting to 1.0 when absent — extend uses the
+          // source-clip strength, bridge uses both left and right, and Krea Realtime's v2v uses
+          // the source-clip strength. `showClipStrength` is the same predicate that renders the
+          // control, so the payload can never carry a strength the user was never offered.
+          ...(showClipStrength &&
           videoConditioningStrength !== "" &&
           Number.isFinite(Number(videoConditioningStrength))
             ? { videoConditioningStrength: Number(videoConditioningStrength) }
@@ -1842,7 +1859,7 @@ export function VideoStudio() {
                   </label>
                 </>
               ) : null}
-              {["extend_clip", "video_bridge"].includes(mode) ? (
+              {showClipStrength ? (
                 <>
                   <label>
                     {mode === "video_bridge" ? "Left clip strength" : "Clip strength"}

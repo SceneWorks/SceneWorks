@@ -690,6 +690,28 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(chips).toEqual(["Text to Image", "Style Variations"]);
   });
 
+  // sc-8445: Krea Realtime is the first catalog model to advertise all three video generation
+  // capabilities on one card, and `video_to_video` had no CAPABILITY_LABELS row — so its third
+  // chip fell to the humanized fallback and read "video to video" beside two title-cased siblings.
+  // Asserting the whole array (not just the new entry) keeps the three reading as one set.
+  it("title-cases the video_to_video chip alongside its siblings", async () => {
+    await render({
+      models: [
+        {
+          id: "krea_realtime_14b",
+          name: "Krea Realtime 14B",
+          type: "video",
+          family: "krea-realtime",
+          capabilities: ["text_to_video", "image_to_video", "video_to_video"],
+          installState: "missing",
+        },
+      ],
+    });
+    await selectTab(container, "Video Models");
+    const chips = [...container.querySelectorAll(".model-capabilities .chip")].map((c) => c.textContent);
+    expect(chips).toEqual(["Text to Video", "Image to Video", "Video to Video"]);
+  });
+
   it("offers a Fix action when a cached model is incomplete", async () => {
     const createModelDownloadJob = vi.fn();
     await render({

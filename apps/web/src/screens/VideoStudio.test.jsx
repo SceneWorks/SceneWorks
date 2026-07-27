@@ -1,4 +1,9 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import React, { act } from "react";
+import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
@@ -1465,5 +1470,344 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
     const advanced = context.createVideoJob.mock.calls[0][0].advanced;
     expect(advanced.textEncoderModel).toBe(AMORAL_ENCODER.id);
     expect(advanced.useUncensoredEnhancer).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Krea Realtime 14B — the Video Studio surface (sc-8445, epic 8431 S12).
+//
+// The catalog entry (sc-8444) drives most of this screen generically, so these tests exist to
+// PIN that the generic path actually lands the model's real numbers, and to guard the one place
+// the generic path is not enough: the `video_to_video` clip-strength knob.
+//
+// Krea's three capabilities split three ways on `advanced.videoConditioningStrength`:
+//   * text_to_video  — no conditioning media, no strength.
+//   * image_to_video — the reference still only warms the AR KV cache; the engine reads the image
+//                      and never `strength` (`krea_realtime_conditioning` emits `strength: None`).
+//                      A documented NO-OP, so the control must stay hidden there.
+//   * video_to_video — the source clip drives a strength-controlled AR init, so the worker DOES
+//                      read the key (default 1.0). Before this story the control rendered only for
+//                      extend_clip/video_bridge, so the knob was unreachable and every Krea v2v ran
+//                      at 1.0 whatever the user wanted.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
+  let container;
+  let root;
+
+  const ALL_VIDEO_MODES = [
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
+    "animate_character",
+  ];
+
+  const KREA_CAPABILITIES = ["text_to_video", "image_to_video", "video_to_video"];
+
+  // Transcribed from `config/manifests/builtin.models.jsonc`. The first test below holds every
+  // field of this fixture to the SHIPPED entry, so the behavioural tests cannot pass against a
+  // fixture that has drifted away from what a user's catalog actually serves.
+  const KREA = {
+    id: "krea_realtime_14b",
+    name: "Krea Realtime 14B",
+    type: "video",
+    family: "krea-realtime",
+    adapter: "krea_realtime",
+    capabilities: KREA_CAPABILITIES,
+    defaults: {
+      duration: 4,
+      fps: 24,
+      resolution: "832x480",
+      quality: "balanced",
+      steps: 6,
+      sampler: "default",
+      scheduler: "default",
+    },
+    limits: {
+      durations: [2, 3, 4, 5],
+      recommendedMaxDuration: 5,
+      hardMaxDuration: 5,
+      fps: [24],
+      requiresDimensionsMultipleOf: 16,
+      resolutions: ["832x480", "480x832", "1280x720", "720x1280"],
+      samplers: ["default"],
+      schedulers: ["default"],
+    },
+    quantization: {},
+    loraCompatibility: { families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
+    ui: {},
+    macSupport: {
+      supported: true,
+      features: {
+        videoModes: Object.fromEntries(
+          ALL_VIDEO_MODES.map((value) => [value, KREA_CAPABILITIES.includes(value)]),
+        ),
+      },
+    },
+  };
+
+  // Bernini also serves `video_to_video`, but its worker route never reads
+  // `videoConditioningStrength` — the discriminator that proves the new control is gated on the
+  // ENGINE and not merely on the mode.
+  const BERNINI_V2V = {
+    id: "bernini",
+    name: "Bernini",
+    type: "video",
+    family: "bernini",
+    adapter: "bernini",
+    capabilities: ["text_to_video", "video_to_video"],
+    defaults: { duration: 5, resolution: "848x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["848x480", "480x848"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  // The Wan A14B engine that DOES carry the Lightning toggle — the discriminator for "Krea has no
+  // lightning LoRA", so the assertion cannot pass just because the toggle never renders anywhere.
+  const WAN_A14B = {
+    id: "wan_2_2_t2v_14b",
+    name: "Wan 2.2 T2V A14B",
+    type: "video",
+    family: "wan-video",
+    adapter: "wan_video",
+    capabilities: ["text_to_video"],
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  const MAC_CAPS = {
+    macGatingActive: true,
+    platform: "darwin",
+    notAvailableLabel: "Not available on Mac (MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+
+  const still = { id: "img_still", type: "image", projectId: "project_1", displayName: "Opening Still" };
+  const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Source Clip" };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+  const labelStartingWith = (text) =>
+    [...container.querySelectorAll("label")].find((el) => el.textContent.trim().startsWith(text));
+  const selectLabelled = (text) => labelStartingWith(text)?.querySelector("select");
+  const optionValues = (select) => [...select.options].map((option) => option.value);
+  const clipStrengthInput = () => labelStartingWith("Clip strength")?.querySelector("input");
+  // The disclosure's open state survives a re-render into the same root, so a blind toggle would
+  // CLOSE it on the second model of a two-model discriminator test. Open only when it is shut.
+  const ensureAdvancedOpen = async () => {
+    const toggle = container.querySelector(".advanced-section-toggle");
+    if (toggle && toggle.getAttribute("aria-expanded") !== "true") {
+      await click(toggle);
+    }
+  };
+
+  it("keeps the fixture identical to the shipped krea_realtime_14b manifest entry", () => {
+    const manifestPath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../config/manifests/builtin.models.jsonc",
+    );
+    const manifest = JSON5.parse(readFileSync(manifestPath, "utf8"));
+    const models = Array.isArray(manifest) ? manifest : manifest.models;
+    const shipped = models.find((entry) => entry.id === "krea_realtime_14b");
+
+    expect(shipped, "krea_realtime_14b must be in builtin.models.jsonc").toBeTruthy();
+    expect(shipped.adapter).toBe(KREA.adapter);
+    expect(shipped.family).toBe(KREA.family);
+    expect(shipped.type).toBe("video");
+    expect(shipped.capabilities).toEqual(KREA.capabilities);
+    expect(shipped.defaults).toEqual(KREA.defaults);
+    expect(shipped.limits).toEqual(KREA.limits);
+  });
+
+  it("offers Krea Realtime in the picker with exactly its three capability tabs enabled", async () => {
+    await render(baseContext({ videoModels: [KREA], macCapabilities: MAC_CAPS }));
+
+    const picker = selectLabelled("Model");
+    expect(optionValues(picker)).toEqual(["krea_realtime_14b"]);
+    expect(picker.value).toBe("krea_realtime_14b");
+
+    // Mode tabs are gated at the MODE level under Mac gating, so a tab is enabled exactly when
+    // some available model serves it. With Krea the only model, that is exactly its capabilities.
+    const enabled = ALL_VIDEO_MODES.filter((value) => {
+      const label = {
+        text_to_video: "Text → Video",
+        image_to_video: "Image → Video",
+        first_last_frame: "First → Last",
+        extend_clip: "Extend",
+        video_bridge: "Bridge",
+        replace_person: "Replace person",
+        video_to_video: "Video → Video",
+        reference_to_video: "Reference → Video",
+        reference_video_to_video: "Reference + Video",
+        multi_video_to_video: "Multi-Clip → Video",
+        ads2v: "Clip + Ref Video",
+        animate_character: "Animate character",
+      }[value];
+      return !modeButton(label).disabled;
+    });
+    expect(enabled.sort()).toEqual([...KREA_CAPABILITIES].sort());
+  });
+
+  it("surfaces the manifest's own duration / fps / resolution / steps, not the screen's fallbacks", async () => {
+    await render(baseContext({ videoModels: [KREA], macCapabilities: MAC_CAPS }));
+    await ensureAdvancedOpen();
+
+    const durations = selectLabelled("Duration");
+    // `limits.durations[0]` is 2 and the DEFAULT is 4 — asserting the selected value is 4 is
+    // therefore a real discriminator, not the "first entry is the default" tautology.
+    expect(optionValues(durations)).toEqual(["2", "3", "4", "5"]);
+    expect(durations.value).toBe("4");
+    expect(durations.value).not.toBe(String(KREA.limits.durations[0]));
+    // The screen falls back to [4, 6, 8, 10] when a model declares no durations; Krea's lattice
+    // shares none of its endpoints, so a broken wiring shows up here rather than passing silently.
+    expect(optionValues(durations)).not.toEqual(["4", "6", "8", "10"]);
+
+    const fps = selectLabelled("Frames");
+    // The screen's fallback fps menu is [24, 25, 30] and Krea's is the single 24 — same trap:
+    // the VALUE 24 alone would pass under the fallback, the one-entry MENU would not.
+    expect(optionValues(fps)).toEqual(["24"]);
+    expect(fps.value).toBe("24");
+
+    const resolutions = selectLabelled("Resolution");
+    expect(optionValues(resolutions)).toEqual(["832x480", "480x832", "1280x720", "720x1280"]);
+    expect(resolutions.value).toBe("832x480");
+
+    // The Advanced steps control reflects the model's own few-step recipe as its placeholder.
+    const steps = labelStartingWith("Steps").querySelector("input");
+    expect(steps.placeholder).toBe("6");
+    expect(steps.disabled).toBe(false);
+  });
+
+  it("shows no Lightning toggle for Krea while still showing it for a Wan A14B engine", async () => {
+    await render(baseContext({ videoModels: [KREA], macCapabilities: MAC_CAPS }));
+    await ensureAdvancedOpen();
+    expect(container.textContent).not.toContain("Lightning");
+
+    // Same screen, same disclosure, a model that DOES carry the toggle — so the assertion above
+    // cannot be passing merely because the control was removed or renamed.
+    await render(baseContext({ videoModels: [WAN_A14B] }));
+    await ensureAdvancedOpen();
+    expect(container.textContent).toContain("Lightning");
+  });
+
+  it("offers the clip strength for Krea video_to_video and sends it", async () => {
+    const context = baseContext({
+      videoModels: [KREA],
+      macCapabilities: MAC_CAPS,
+      assets: [clip],
+      selectedAsset: clip,
+    });
+    await render(context);
+    await click(modeButton("Video → Video"));
+    await ensureAdvancedOpen();
+
+    const strength = clipStrengthInput();
+    expect(strength, "Krea v2v must expose the clip strength the worker reads").toBeTruthy();
+    await act(async () => setInput(strength, "0.65"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({ mode: "video_to_video", model: "krea_realtime_14b", sourceClipAssetId: "vid_src" });
+    expect(payload.advanced.videoConditioningStrength).toBe(0.65);
+  });
+
+  it("hides the clip strength on a v2v model whose worker route ignores it", async () => {
+    const context = baseContext({ videoModels: [BERNINI_V2V], assets: [clip], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Video → Video"));
+    await ensureAdvancedOpen();
+
+    // Same mode, different engine: Bernini's v2v never reads `videoConditioningStrength`, so the
+    // control must not appear — the gate is the adapter, not the tab.
+    expect(clipStrengthInput()).toBeFalsy();
+
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced.videoConditioningStrength).toBeUndefined();
+  });
+
+  it("hides the clip strength for Krea image_to_video, whose strength is a documented no-op", async () => {
+    const context = baseContext({
+      videoModels: [KREA],
+      macCapabilities: MAC_CAPS,
+      assets: [still],
+      selectedAsset: still,
+    });
+    await render(context);
+    await click(modeButton("Image → Video"));
+    await ensureAdvancedOpen();
+
+    // The i2v reference still only warms the AR KV cache — the engine reads the image and never
+    // `strength`. Offering the knob here would be a control that silently does nothing.
+    expect(clipStrengthInput()).toBeFalsy();
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({ mode: "image_to_video", model: "krea_realtime_14b", sourceAssetId: "img_still" });
+    expect(payload.advanced.videoConditioningStrength).toBeUndefined();
+  });
+
+  it("submits Krea in each of its three advertised modes", async () => {
+    const context = baseContext({
+      videoModels: [KREA],
+      macCapabilities: MAC_CAPS,
+      assets: [still, clip],
+    });
+    await render(context);
+
+    // text_to_video — the default tab, no conditioning media.
+    await click(buttonWithText(container, "Render clip"));
+
+    await click(modeButton("Image → Video"));
+    await click(buttonWithText(container, "Select image"));
+    let modal = document.querySelector(".asset-picker-modal");
+    await click([...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Opening Still")));
+    await click(buttonWithText(modal, "Use Selection"));
+    await click(buttonWithText(container, "Render clip"));
+
+    await click(modeButton("Video → Video"));
+    await click(buttonWithText(container, "Select clip"));
+    modal = document.querySelector(".asset-picker-modal");
+    await click([...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Source Clip")));
+    await click(buttonWithText(modal, "Use Selection"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const modes = context.createVideoJob.mock.calls.map(([payload]) => payload.mode);
+    expect(modes).toEqual(["text_to_video", "image_to_video", "video_to_video"]);
+    for (const [payload] of context.createVideoJob.mock.calls) {
+      expect(payload.model).toBe("krea_realtime_14b");
+    }
   });
 });
