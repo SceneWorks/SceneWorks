@@ -48,30 +48,38 @@ denoising forwards per 3-latent-frame chunk, 24 fps. SceneWorks runs it as the n
 from every other SceneWorks video engine, all of which are full-clip block diffusion. Do not confuse it
 with the unrelated `krea_2_*` **image** lane.
 
-- **It renders a real, watchable clip on Mac.** 832×480, 81 frames @ 24 fps on the Q4 tier: 256 s wall
-  (31 s/AR chunk, 6.2 s/step, 38 s VAE decode), 27.9 GiB MLX-active peak. Subject identity and motion
-  hold across the whole clip.
-- **Known quality caveat — AR stylization drift.** The render progressively saturates/stylizes over the
-  clip. This is the Self-Forcing bounded-window behaviour with `sink_size = 0` and no first-frame VAE
-  re-anchor (the reference's `release_server.py` keeps one; the batch path does not). Tracked as
-  sc-15127. Keep UI guidance to **short shots (~2–4 s)** until an anchor lands, consistent with the
-  rest of this document's short-shot posture.
-- **Known artifact — decode tile seams.** The VAE decode is temporally tiled (8-frame windows,
-  2-frame overlap at 832×480), and the tiling costs ~27/255 mean absolute error versus a single-pass
-  decode of the same latents, visible as a discontinuity every 8 output frames. It is what bounds the
-  memory peak, so it is not simply removable.
+- 🔴 **Do not ship this to users yet: the VAE decode tiling corrupts the output (sc-15325).** Roughly
+  one output frame in eight blows ~a quarter of its pixels to near-white, with violet/green chroma
+  separation and rainbow fringing. The **model is fine** — decoding the identical latents single-pass
+  gives a clean photographic clip (0.08% highlight clipping vs 9.7% tiled). The artifact period is the
+  decode tile stride (8 output frames), not the AR chunk (12), which is how it was distinguished from
+  bounded-window drift. sc-8446 shipped the free half of the fix (the tile overlap was literally 0
+  latent frames and now is not, halving the clipping at identical memory); the remaining fix is a
+  larger decode tile, which costs real memory and re-opens `mlx.minMemoryGb`.
+- **Performance, harness configuration** (832×480, 81 frames, 5 steps/chunk, Q4): 256 s wall
+  (31 s/AR chunk, ≈5.3 s/denoise step, 38 s VAE decode), 27.9 GiB MLX-active peak. ⚠️ **Not a shipped
+  configuration** — `defaults.steps` is 6 and the duration lattice snaps to 45/69/93/117 frames, so 81
+  frames is not requestable; a default 4 s clip (93 frames, 6 steps) projects to **~6.4 minutes**.
+- **Secondary, milder issue — AR stylization drift.** Present but *not* what a viewer notices today.
+  Self-Forcing bounded-window behaviour with `sink_size = 0` and no first-frame VAE re-anchor;
+  tracked as sc-15127. Guidance is already conservative: the manifest caps duration at 5 s
+  (`hardMaxDuration: 5`, lattice `[2,3,4,5]`), and short shots remain the right posture.
 - **CFG is off.** The distillation baked guidance out: no negative prompt, no guidance scale. Video
-  Studio hides both for this model (`video.supportsGuidance/supportsNegativePrompt: false`).
+  Studio hides both (`video.supportsGuidance/supportsNegativePrompt: false`).
 - **LoRA: any Wan-2.1-14B **T2V** LoRA works.** Verified on real published files — a plain style LoRA
-  (`shauray/Origami_WanLora`, 400 per-block targets) installs and moves the render substantially, and a
-  step-distill LoRA (lightx2v Wan2.1-T2V-14B cfg-step-distill v2, which additionally targets the
-  whole-model patch/text/time/head projections) installs 406 targets. Wan-**I2V** LoRAs are correctly
-  rejected: they name `cross_attn.k_img`/`v_img`, modules a T2V backbone does not have.
+  (`shauray/Origami_WanLora`) resolves exactly 400 per-block targets and moves the render; a
+  step-distill LoRA (lightx2v Wan2.1-T2V-14B cfg-step-distill v2) resolves **406** of the 407-wide
+  surface. ⚠️ Two qualifications: `patch_embedding` ships a bias-only delta so it is exposed but
+  unmatched (hence 406, not 407), and **647 of that file's 1459 keys — its `.diff`/`.diff_b` bias and
+  norm deltas — are silently dropped** by the strict low-rank installer (**sc-15326**). So "works"
+  means the low-rank half installs. Wan-**I2V** LoRAs are correctly rejected: they name
+  `cross_attn.k_img`/`v_img`, modules a T2V backbone does not have.
 - **Memory guidance.** `mlx.minMemoryGb: 64` admits the heaviest installable tier (bf16, ~47 GiB active
-  peak, derived from the exact hosted DiT byte counts). The default **Q4** tier needs ~28 GiB active
+  peak, derived from exact hosted DiT byte counts). The default **Q4** tier needs ~28 GiB active
   (~40 GB machine). The AR KV cache is a fixed **7.14 GiB** at 832×480 and does **not** shrink with the
-  weight tier — it holds bf16 activations — so 720p (3600 tokens/frame, ~16.5 GiB of KV) is the
-  memory-relevant resolution jump, not the weight tier.
+  weight tier — it holds bf16 activations — so 720p (~16.5 GiB of KV) is the memory-relevant jump, not
+  the tier. ⚠️ All of it was measured with the *current* decode tiling; fixing sc-15325 will re-open
+  these numbers.
 
 ## Sources
 

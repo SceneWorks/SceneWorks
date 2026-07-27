@@ -20,11 +20,13 @@
    needs fp8/GGUF + expert-swap on 24 GB (bf16 wants 80 GB) and is ~5–6× slower. First-class
    multi-GPU (FSDP + Ulysses) if SceneWorks ever scales out.
 
-> **Update (sc-8446, July 2026):** a fourth family now runs natively on Mac —
-> **`krea_realtime_14b`** (Krea Realtime 14B, Wan-2.1-T2V-14B distilled via Self-Forcing into an
-> autoregressive chunk generator, Apache-2.0). It is the only SceneWorks video engine that is *not*
-> full-clip block diffusion, and the only Wan-2.1-14B-class engine that renders a full 81-frame
-> 832×480 clip inside 28 GiB of MLX-active memory. Measured numbers below.
+> **Update (sc-8446, July 2026):** a **fifth** video family now runs natively on Mac — joining
+> `ltx_2_3`, the Wan2.2 entries, `scail2_14b` and `bernini` — **`krea_realtime_14b`** (Krea Realtime
+> 14B, Wan-2.1-T2V-14B distilled via Self-Forcing into an autoregressive chunk generator, Apache-2.0).
+> It is the only SceneWorks video engine that is *not* full-clip block diffusion, and it generates a
+> full 81-frame 832×480 clip inside 28 GiB of MLX-active memory. 🔴 **Its shipped VAE-decode tiling
+> currently corrupts the output (sc-15325)** — the generation is sound, the decode in front of it is
+> not. Measured numbers below.
 
 **Do not** make MLX video a v1 *gating requirement* on Mac — treat it as best-effort; NVIDIA is the
 supported path. (Apple still runs LTX-2.3 natively — see empirical result — it's just memory-bound.)
@@ -60,54 +62,114 @@ synchronized audio, native MLX, in-process):
 
 ## Empirical result — Krea Realtime 14B ⚙️ (sc-8446, 2026-07-27)
 
-`mlx-gen-krea-realtime` `generate_smoke` on Apple M5 Max / 128 GB, **Q4 tier** of
-`SceneWorks/krea-realtime-14b-mlx` @ `e68e9a3d`, 832×480, 81 frames @ 24 fps, the shipped
-Self-Forcing schedule (5 steps/chunk × 7 autoregressive chunks = 35 forwards), native MLX,
-in-process:
+> 🔴 **The shipped decode path currently corrupts the output.** Read the "Decode defect" subsection
+> before quoting anything here as a quality result. The *model* works; the VAE decode tiling in front
+> of it does not.
 
-| Metric | Value |
+**Harness configuration**, not a shipped one: `mlx-gen-krea-realtime`'s `generate_smoke` on Apple
+M5 Max / 128 GB, **Q4 tier** of `SceneWorks/krea-realtime-14b-mlx` @ `e68e9a3d`, 832×480, **81 frames
+@ 24 fps, 5 steps/chunk** (the reference Self-Forcing `denoising_step_list`), native MLX, in-process.
+
+⚠️ Neither number matches the shipped manifest: `defaults.steps` is **6**, and `limits.durations`
+`[2,3,4,5] @ 24 fps` snaps to 45/69/93/117 frames, so **81 frames is not requestable at all** and the
+default 4 s clip is **93 frames**. A user at defaults should expect roughly **6–6.5 minutes**, not the
+4.3 minutes below — see the projection under the table.
+
+| Metric | Value (harness: 81 f, 5 steps) |
 |---|---|
-| Whole-clip wall | **256 s** (3.4 s of video → ~75× realtime) |
+| Whole-clip wall | **256 s** |
 | Load + UMT5 encode | 4.8–5.9 s |
-| AR denoise | 211 s (**6.2 s/step**, **31 s/chunk** mean; 20 s first chunk → 36 s once the KV window is full) |
+| AR denoise | 211 s — **≈5.3 s/denoise step**, **31 s/chunk** mean (20 s first chunk → 36 s once the KV window fills) |
 | VAE decode (84→81 frames) | 38–39 s |
 | **MLX peak, active** | **27.9 GiB** |
-| MLX peak, active + allocator cache | 90.4 GiB |
+| MLX peak, active + allocator cache (sampled ⇒ lower bound) | ≥90.4 GiB |
 | KV-cache residency (measured) | **7.14 GiB**, flat from chunk 2 on |
 | Manifest `mlx.minMemoryGb` | 64 |
 
-**The peak is set by the VAE decode, and it is now measured rather than hedged.** Cumulative active
-peak by phase: 9.6 GiB after load+encode → 17.4 GiB after the AR loop → **27.9 GiB** after the decode.
-The AR loop's 17.4 GiB closes against the manifest's accounted terms (Q4 DiT 7.8 + KV 7.1 + VAE 0.5 ≈
-15.4 GiB); the decode adds ~10.5 GiB on top. Two things follow:
+> **Per-step vs per-chunk.** A chunk boundary also carries the S5 clean-context KV-recompute forward,
+> which emits no progress event. Averaging across boundaries inflates the per-step figure to 6.2 s; the
+> honest per-*step* cost is **≈5.3 s** and the recompute is accounted inside the 31–36 s/chunk. Use
+> **chunk** time for latency planning.
 
-- **`mlx.minMemoryGb: 64` is correct, but for a different reason than it was written for.** It is not
-  a VAE-decode hedge — that term is +10.5 GiB, not the ~2× that was feared. A single per-model value
-  has to admit the heaviest *installable* tier, and the **bf16** tier swaps a 7.8 GiB DiT for a
-  26.6 GiB one (exact hosted byte counts), putting its active peak at **~47 GiB**. 64 covers that with
-  OS/app headroom. On the default **Q4** tier the true requirement is ~28 GiB active (a ~40 GB
-  machine); a per-tier gate would read **Q4 40 / Q8 48 / bf16 64**.
-- **The ceiling does not grow with clip length.** 33-frame and 81-frame clips both peak at 27.6–27.9
-  GiB active, because the decode is temporally tiled (8-frame windows, 2-frame overlap at 832×480).
-- ⚠️ `mlx::get_peak_memory` is the **active** high-water mark only. The allocator's buffer cache
-  (reclaimable, but real resident memory) took the same run to 90.4 GiB on a 128 GB host. Any
-  `minMemoryGb` derived from `get_peak_memory` alone under-reports the machine's working set.
+**Projection to shipped defaults** (4 s @ 24 fps = 93 frames = 24 latent = 8 chunks; 6 steps + 1
+recompute = 7 forwards/chunk at ~6 s): ≈336 s of AR + ~44 s decode + ~6 s load ≈ **385 s (~6.4 min)**.
 
-**KV cache.** 40 layers × 9360 tokens (a 6-latent-frame window × 1560 tokens/frame) × 40 heads × 128
-dims × {k,v} × bf16 = **7.14 GiB**, confirming the S1 architecture estimate exactly. It holds
-*activations*, so it is **bf16 on every weight tier** — quantizing the DiT to Q4 does not shrink it, and
-it is the single largest term after the weights. Quantizing the KV cache itself remains an available
-lever if 720p (3600 tokens/frame → ~16.5 GiB) is ever targeted on a 64 GB machine.
+### Memory
 
-**Coherence.** The 81-frame clip is genuinely watchable — a fox trotting through snowy pines, stable
-subject identity and plausible motion end to end. It is **not** drift-free: the render progressively
-stylizes (frame 0 photographic → frame 80 noticeably more saturated and contrasty, background
-softening), the expected Self-Forcing bounded-window behaviour with `sink_size = 0` and no first-frame
-re-anchor (tracked as sc-15127). A second artifact is visible in the per-frame delta trace: a
-brightness/detail discontinuity **every 8 output frames**, exactly the decode tile stride — the tiled
-decode costs ~27/255 mean absolute error versus a single-pass decode of the same latents.
+Cumulative **active** peak by phase: 9.6 GiB through the first denoise step → 17.4 GiB after the AR
+loop → **27.9 GiB** after the decode. The AR plateau closes against the components (Q4 DiT 7.8 + KV
+7.14 + VAE 0.5 ≈ 15.4 GiB); the decode adds ~10.5 GiB.
 
-## Capability & spec matrix 🌐
+- **`mlx.minMemoryGb: 64` is now a closed derivation, but not because of the decode.** That term is
+  +10.5 GiB, not the ~2× once feared. A single per-model value must admit the heaviest *installable*
+  tier, and **bf16** swaps a 7.8 GiB DiT for a 26.6 GiB one → **~47 GiB** active peak. Per tier:
+  **Q4 ~40 / Q8 ~48 / bf16 64** (now carried in the per-download `footprint` blocks).
+- **The ceiling does not grow with clip length** — 33- and 81-frame clips both peak at 27.6–27.9 GiB,
+  because the decode is tiled. ⚠️ That is also what breaks the image; see below.
+- ⚠️ `mlx::get_peak_memory` is the **active** high-water mark only. Active is nonetheless the right
+  basis for a floor, because the allocator's cache is reclaimable under pressure — the ≥90.4 GiB
+  active+cache figure is the reason not to quote `get_peak_memory` as "the memory this uses", not
+  itself a requirement. (It is polled at 50 ms, so it is a lower bound.)
+
+**KV cache.** 40 layers × 9360 tokens (a 6-latent-frame window × 1560 tok/frame) × 40 heads × 128 dims
+× {k,v} × bf16 = **7.14 GiB**, confirming the S1 estimate exactly. It holds *activations*, so it is
+bf16 on **every** weight tier — Q4 does not shrink it. 720p (3600 tok/frame → ~16.5 GiB) is therefore
+the memory-relevant jump, not the tier.
+
+### 🔴 Decode defect — the tiled VAE decode corrupts the clip (sc-15325)
+
+**The AR model is fine; the decode in front of it is not.** Decoding the *same* latents single-pass
+versus through the shipped tiling, at 832×480/36 frames (the largest geometry with a valid single-pass
+reference — see the write-bound note):
+
+| decode | latent tile / overlap | mean \|Δ\| vs single-pass | highlight clipping mean / worst | MLX active peak |
+|---|---|---|---|---|
+| single-pass (reference) | — | 0 | **0.08% / 0.25%** | 85.1 GiB |
+| **shipped (tile 8 / overlap 2)** | 2 / **0** | **18.5 /255** | **9.7% / 26.6%** | 19.8 GiB |
+| overlap floored to 8 (the sc-8446 fix) | 2 / 2 | 17.1 | 5.2% / 14.7% | 19.8 GiB |
+| tile 16 / overlap 8 | 4 / 2 | 6.4 | 1.4% / 7.0% | 38.5 GiB |
+| tile 32 / overlap 16 | 8 / 4 | 2.0 | 0.1% / 1.1% | 75.8 GiB |
+
+At the shipped setting roughly **one frame in eight blows a quarter of its pixels to near-white**, with
+violet/green chroma separation and rainbow fringing along moving edges. The same latents decode to a
+clean photographic image single-pass. The artifact period is **8 output frames = the decode tile
+stride**, which is what identifies the cause: it does **not** align with the 12-output-frame AR chunk,
+so this is not the `sink_size = 0` bounded-window drift of sc-15127.
+
+**Mechanism: a starved temporal receptive field, not a blending seam.** Widening the overlap plateaus
+almost immediately (latent overlap 0 → 1 → 2 gives 18.5 → 17.1 → 17.1); growing the *tile* keeps paying
+(latent 2 → 4 → 8 gives 18.5 → 6.4 → 2.0). Two latent frames is less context than the z16 decoder's
+temporal convolutions need, and blending two starved windows cannot reconstruct what neither saw.
+
+**Status.** sc-8446 shipped the free half — the overlap now survives the ÷4 to latent space (it was
+literally 0), which halves the clipping at identical memory. The tile size is *not* raised here because
+tile size **is** the memory bound (19.8 → 38.5 → 75.8 GiB), and raising it re-opens `mlx.minMemoryGb`
+for this engine **and** for `mlx-gen-scail2`, which computes the identical budget. Tracked as
+**sc-15325**.
+
+**Blast radius:** the exposure is the two engines with hand-rolled pxframe budgets — `krea_realtime_14b`
+and `scail2_14b` (identical `overlap = tile_frames/4` formula). The families that route through
+gen-core's `budgeted_plan` (Wan z16/z48, LTX) pick from candidate tables of 24–96-frame tiles with
+8–24-frame overlaps and are **not** in this regime.
+
+⚠️ **Write-bound note.** A single-pass z16 decode is only valid below `96 · frames · h · w ≤ i32::MAX`
+— at 832×480 that is **56 output frames**. An 84-frame single-pass decode is 1.5× over it and MLX
+writes silently wrong results, so it cannot be used as a reference at the full clip length. (This
+caught a bad measurement during S13: against that corrupt reference every tiled candidate scored
+58–71/255 and saturation collapsed 0.33 → 0.07.)
+
+### Coherence — what the clip actually looks like
+
+**Not** "coherent with minor stylization". Through the shipped decode the clip is **visibly broken**:
+violet snow and rainbow fringing by frame 13 (half a second in), a heavy yellow-green cast by frame 78,
+saturation climbing 0.24 → 0.55 while mean brightness falls 133 → 116.
+
+The *underlying generation* is good — subject identity, gait and background hold across all 81 frames,
+and single-pass decoding of the same latents yields a clean photographic clip. There is a *separate*
+and much milder progressive stylization consistent with the sc-15127 bounded-window drift, but it is
+**not** what a viewer notices and it was wrongly blamed for this in the first cut of these notes.
+
+## Capability & spec matrix 🌐## Capability & spec matrix 🌐
 
 | Dimension | **LTX-2.3 (22B)** | **Wan2.2 A14B (27B MoE/14B active)** | **Wan2.2 TI2V-5B (dense)** | **Krea Realtime 14B (dense AR)** ⚙️ |
 |---|---|---|---|---|
@@ -124,7 +186,8 @@ decode costs ~27/255 mean absolute error versus a single-pass decode of the same
 | **License** | **Custom "LTX-2 Community License"** — free commercial **only under $10M ARR**; anti-compete clause; **NOT Apache** | **Apache-2.0** | **Apache-2.0** | **Apache-2.0** |
 | Gating | effectively ungated (verify acceptance click-through) | ungated | ungated | ungated |
 | CFG | Yes | Yes | Yes | **No** — Self-Forcing distilled guidance out; one batch-1 forward/step, no negative prompt |
-| Mac (measured) | 53.4 GB peak, 256²/9f | no measured 14B Mac time | — | **27.9 GiB active peak, 256 s for 832×480/81f @ Q4** ⚙️ |
+| Mac (measured) | 53.4 GB **unified-memory** peak, 256²/9f | no measured 14B Mac time | — | **27.9 GiB MLX-**active** peak (≥90.4 GiB active+cache), 256 s for 832×480/81f @ Q4, harness config** ⚙️ |
+| ↳ basis caveat | host-level unified memory | — | — | MLX allocator only — **not** like-for-like with the LTX cell; the comparable figure is the ≥90.4 GiB active+cache |
 
 ## 24 GB NVIDIA VRAM & runtime 🌐
 
@@ -182,7 +245,15 @@ The repo **already implements** this contract; below are validated deltas, not g
 - **Asset outputs:** `AssetFile` already video-capable (`path, mime_type, width, height, duration,
   fps`) — no new fields needed except optional audio-track metadata.
 
-## Caveats / could-not-verify 🌐 (research limits, not story gaps)
+## Caveats / could-not-verify 🌐
+
+**Krea Realtime (sc-8446):** the headline clip was initially characterized as "coherent with
+progressive stylization" and the degradation attributed to sc-15127 bounded-window drift. Both were
+wrong — the dominant artifact is the tiled VAE decode (**sc-15325**), identified by its 8-output-frame
+period matching the decode tile stride rather than the 12-frame AR chunk. The bf16/Q8 memory ladder is
+**derived** from measured Q4 figures by weight-size substitution, not separately measured. The
+`~47 GiB` bf16 peak and the shipped-default timing projection are likewise derived, not run.
+ (research limits, not story gaps)
 "Wan ~7 s loop" unsupported by any source; "LTX ≤15 s" true as sweet-spot only; Wan A14B fp8 on
 exactly 24 GB @720p unverified (480p is the safe claim); no measured 14B/22B Mac generation times;
 **"LTX-2.3 is Apache-2.0" is a widespread but incorrect claim** (authoritative LICENSE is the custom
