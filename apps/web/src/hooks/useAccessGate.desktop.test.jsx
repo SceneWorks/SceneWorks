@@ -84,4 +84,34 @@ describe("useAccessGate on the desktop shell (sc-15105)", () => {
     expect(get().authenticated).toBe(true);
     expect(get().gateStatus).toBe("open");
   });
+
+  // sc-15165: the cross-tab subscription is the one effect in the hook with NO
+  // isDesktopShell guard, on the grounds that `authenticated` and `gateStatus` both
+  // short-circuit on it before they read `tokenStatus`. That reasoning is only as good as a
+  // test — a desktop shell that locked itself because a browser tab on the same origin hit
+  // "forget" would be an unrecoverable regression (there is no password to type back in).
+  it("never gates the desktop shell when another tab clears the token", async () => {
+    window.localStorage.setItem("sceneworks-token", "some-token");
+    apiResponders.set("/api/v1/access", { authRequired: true });
+    const { get } = mount();
+    await settle();
+
+    act(() => {
+      window.localStorage.removeItem("sceneworks-token");
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "sceneworks-token",
+          newValue: null,
+          storageArea: window.localStorage,
+        }),
+      );
+    });
+    await settle();
+
+    // The token state does follow storage (one live source), but loopback trust is what
+    // authenticates here, so the shell stays open and usable.
+    expect(get().token).toBe("");
+    expect(get().authenticated).toBe(true);
+    expect(get().gateStatus).toBe("open");
+  });
 });
