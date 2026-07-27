@@ -154,8 +154,9 @@ fn builtin_targets_gate_network_types() {
             // `supports_lokr` and has a real LoKr branch, and Mage inference installs LoKr through
             // the same strict adapter seam as LoRA (`apply_mage_adapters`). It was absent from this
             // list only because the target never advertised `lokr` — shipped but unreachable.
-            "mage_flow_base_lora",
-            "mage_flow_edit_base_lora"
+            // Base only: `mage_flow_edit_base_lora` is no longer offered (sc-15277 — no edit
+            // trainer exists, so it could only ever claim-then-fail; restoring it is sc-15320).
+            "mage_flow_base_lora"
         ]
     );
 }
@@ -261,44 +262,51 @@ fn builtin_registry_exposes_z_image_turbo_target() {
     );
 }
 
+/// Mage-Flow offers exactly ONE training target — the Base checkpoint (epic 14034: "Base = training
+/// target", F6 is scoped "vs Base"), which is also the only id `mlx-gen-mage` registers a trainer
+/// under. sc-15277 removed the speculative `mage_flow_edit_base_lora` contract sc-14054 had
+/// registered ahead of any trainer: once sc-14056 routed `mage_flow_lora` to the mlx worker, that
+/// target stopped queueing and started being CLAIMED and then failed ~2s later. The negative half
+/// below is the guard — re-offering an edit target without an edit trainer must fail here (and in
+/// the worker's `every_mlx_routed_training_kernel_resolves_to_a_trainer_…` invariant), not in a
+/// user's job. Restoring it with a real trainer is sc-15320.
 #[test]
-fn builtin_registry_exposes_both_mage_flow_foundation_targets() {
+fn builtin_registry_exposes_the_mage_flow_base_target_and_no_edit_target() {
     let registry = builtin_training_targets();
-    for (id, base_model, repo) in [
-        (
-            "mage_flow_base_lora",
-            "mage_flow_base",
-            "SceneWorks/Mage-Flow-Base",
-        ),
-        (
-            "mage_flow_edit_base_lora",
-            "mage_flow_edit_base",
-            "SceneWorks/Mage-Flow-Edit-Base",
-        ),
-    ] {
-        let target = registry
+    assert!(
+        !registry
             .targets
             .iter()
-            .find(|target| target.id == id)
-            .unwrap_or_else(|| panic!("{id} target present"));
-        assert_eq!(target.modality, TrainingModality::Image);
-        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
-        assert_eq!(target.family, "mage-flow");
-        assert_eq!(target.base_model, base_model);
-        assert_eq!(target.base_model_repo.as_deref(), Some(repo));
-        assert_eq!(target.kernel, "mage_flow_lora");
-        assert_eq!(target.defaults.resolution, 1024);
-        // The Training Studio's network-type picker is built from exactly this list, so this
-        // assertion is what keeps each capability OFFERABLE. All three of Mage's trainer paths must
-        // appear: `lora` and `lokr` (both advertised by the `mlx-gen-mage` trainer and both loadable
-        // back through `apply_mage_adapters`), plus `full` — the base fine-tune, which Mage-Flow is
-        // the only family to have. `lokr` and `full` were each shipped-but-unreachable purely
-        // because they were absent here (sc-14055 / sc-14056).
-        assert_eq!(
-            target.limits.get("networkTypes"),
-            Some(&serde_json::json!(["lora", "lokr", "full"]))
-        );
-    }
+            .any(|target| target.base_model.starts_with("mage_flow_edit")),
+        "no Mage EDIT training target may be advertised until `mlx-gen-mage` registers an edit \
+         trainer (sc-15320) — `engine_trainer_id` resolves nothing for it, so the mlx worker would \
+         claim the job and immediately fail it"
+    );
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "mage_flow_base_lora")
+        .expect("mage_flow_base_lora target present");
+    assert_eq!(target.modality, TrainingModality::Image);
+    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+    assert_eq!(target.family, "mage-flow");
+    assert_eq!(target.base_model, "mage_flow_base");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/Mage-Flow-Base")
+    );
+    assert_eq!(target.kernel, "mage_flow_lora");
+    assert_eq!(target.defaults.resolution, 1024);
+    // The Training Studio's network-type picker is built from exactly this list, so this
+    // assertion is what keeps each capability OFFERABLE. All three of Mage's trainer paths must
+    // appear: `lora` and `lokr` (both advertised by the `mlx-gen-mage` trainer and both loadable
+    // back through `apply_mage_adapters`), plus `full` — the base fine-tune, which Mage-Flow is
+    // the only family to have. `lokr` and `full` were each shipped-but-unreachable purely
+    // because they were absent here (sc-14055 / sc-14056).
+    assert_eq!(
+        target.limits.get("networkTypes"),
+        Some(&serde_json::json!(["lora", "lokr", "full"]))
+    );
 }
 
 /// sc-14056: `full` is a Mage-Flow-only network type. Every other built-in target must keep
@@ -321,8 +329,8 @@ fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
         .collect();
     assert_eq!(
         full_targets,
-        vec!["mage_flow_base_lora", "mage_flow_edit_base_lora"],
-        "only the Mage-Flow targets may advertise the full base fine-tune network type"
+        vec!["mage_flow_base_lora"],
+        "only the Mage-Flow Base target may advertise the full base fine-tune network type"
     );
 }
 
@@ -462,10 +470,11 @@ fn mage_flow_training_repos_are_available_on_macos_windows_and_linux() {
         .expect("builtin.models.jsonc parses as JSON");
     let models = catalog["models"].as_array().expect("catalog models array");
 
-    for (base_model, repo) in [
-        ("mage_flow_base", "SceneWorks/Mage-Flow-Base"),
-        ("mage_flow_edit_base", "SceneWorks/Mage-Flow-Edit-Base"),
-    ] {
+    // Base only: `mage_flow_edit_base` is still a first-class GENERATION model in the catalog, but
+    // it is no longer a training target (sc-15277 / sc-15320), so its tiers are not a training
+    // pre-flight concern and this training contract must not claim otherwise.
+    {
+        let (base_model, repo) = ("mage_flow_base", "SceneWorks/Mage-Flow-Base");
         let model = models
             .iter()
             .find(|model| model["id"] == base_model)

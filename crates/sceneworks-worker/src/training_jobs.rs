@@ -320,6 +320,25 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
             "anima_turbo" => Some("anima_turbo"),
             _ => Some("anima_base"),
         },
+        // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune, mapped here in
+        // sc-15277): `mlx-gen-mage` registers ONE trainer, under the inference-generator id of the
+        // training base — `MODEL_ID = "mage_flow_base"` — serving `lora`, `lokr` AND the
+        // `networkType: "full"` base fine-tune off the same id (the network type travels in
+        // `TrainingConfig`, not in the trainer id).
+        //
+        // The base-model split is load-bearing rather than decorative. Mage registers SIX
+        // *generators* (Base/Turbo/RL and the three Edit variants) but only that one *trainer*, and
+        // `load_trainer` does no variant identity check — it loads whatever diffusers snapshot the
+        // plan's `baseModelPath` points at. So an unconditional `Some("mage_flow_base")` would take
+        // an Edit checkpoint and train it through the generation-only conditioning path, with no
+        // reference-image tokens: the Edit variants require Reference/MultiReference conditioning at
+        // inference, so the adapter would be fitted on a distribution the model never sees and would
+        // train silently WRONG rather than fail. Anything that is not the Base checkpoint therefore
+        // resolves to `None` and fails loudly. See `mage_flow_edit_base` in sc-15320.
+        "mage_flow_lora" => match plan.target.base_model.as_str() {
+            "mage_flow_base" => Some("mage_flow_base"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2305,6 +2324,13 @@ mod tests {
             ("anima_lora", "anima_base", Some("anima_base")),
             ("anima_lora", "anima_aesthetic", Some("anima_aesthetic")),
             ("anima_lora", "anima_turbo", Some("anima_turbo")),
+            // Mage-Flow (sc-15277): the single `mlx-gen-mage` trainer registers under the
+            // inference-generator id of the training base. The same id serves lora/lokr/full.
+            ("mage_flow_lora", "mage_flow_base", Some("mage_flow_base")),
+            // …and every non-Base Mage checkpoint is refused rather than silently trained through
+            // the generation-only conditioning path (the Edit variants need reference tokens).
+            ("mage_flow_lora", "mage_flow_edit_base", None),
+            ("mage_flow_lora", "mage_flow_turbo", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -2326,6 +2352,90 @@ mod tests {
                 "kernel={kernel} base_model={base_model}"
             );
         }
+    }
+
+    /// sc-15277 — THE CLASS GUARD. The case table above is a hand-written list, and that is exactly
+    /// how `mage_flow_lora` shipped broken: sc-14056 added the kernel to
+    /// `MLX_ROUTED_TRAINING_KERNELS` (so the mlx worker claims a Mage training job) without adding
+    /// the `engine_trainer_id` arm (so `run_training_execution` fails it ~2s later with "No native
+    /// trainer for kernel …"), and because the kernel appeared nowhere in the table, nothing went
+    /// red on either side. Claiming is not executing.
+    ///
+    /// This test is DERIVED from the routed set and the shipped target registry instead of restating
+    /// them, so the next family added to `MLX_ROUTED_TRAINING_KERNELS` cannot repeat it: every
+    /// built-in training target whose kernel the mlx worker will claim must resolve to a trainer id
+    /// for EVERY network type the target offers. A routed-but-unmapped target is always a
+    /// claim-then-fail, never anything else.
+    ///
+    /// The second half is what keeps the first half honest: a routed kernel that no built-in target
+    /// uses would make the derivation vacuous, so every routed kernel must be reachable from at
+    /// least one target.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn every_mlx_routed_training_kernel_resolves_to_a_trainer_for_every_offered_network_type() {
+        use sceneworks_core::jobs_store::MLX_ROUTED_TRAINING_KERNELS;
+        use sceneworks_core::training::builtin_training_targets;
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let registry = builtin_training_targets();
+
+        let mut covered: BTreeSet<&str> = BTreeSet::new();
+        for target in &registry.targets {
+            let kernel = target.kernel.as_str();
+            if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+                continue;
+            }
+            covered.insert(kernel);
+            // Every network type the Training Studio will offer for this target. The picker is built
+            // from `limits.networkTypes`, so this is the real submittable surface.
+            let network_types: Vec<String> = target
+                .limits
+                .get("networkTypes")
+                .and_then(Value::as_array)
+                .map(|types| {
+                    types
+                        .iter()
+                        .filter_map(|entry| entry.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["lora".to_owned()]);
+            assert!(
+                !network_types.is_empty(),
+                "target {} advertises an empty networkTypes list",
+                target.id
+            );
+            for network_type in &network_types {
+                let plan = parse(plan_json(
+                    dir.path(),
+                    kernel,
+                    &target.base_model,
+                    network_type,
+                    &[&image.display().to_string()],
+                ));
+                assert!(
+                    engine_trainer_id(&plan).is_some(),
+                    "training target '{}' (kernel '{kernel}', base model '{}', networkType \
+                     '{network_type}') is routed to the mlx worker by \
+                     MLX_ROUTED_TRAINING_KERNELS but engine_trainer_id resolves no trainer — the \
+                     worker will CLAIM the job and then immediately fail it (sc-15277). Either add \
+                     the mapping arm, or stop advertising/routing the target.",
+                    target.id,
+                    target.base_model,
+                );
+            }
+        }
+
+        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS.iter().copied().collect();
+        assert_eq!(
+            covered, routed,
+            "every MLX-routed training kernel must be reachable from at least one built-in \
+             training target, otherwise the resolution check above is vacuous for it"
+        );
     }
 
     #[cfg(any(

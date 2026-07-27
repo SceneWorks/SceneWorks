@@ -1199,7 +1199,11 @@ derive_model_list! {
 /// MMDiT-X Medium training bases), cut over here in sc-7884; it is native-only too,
 /// so it is also in `MLX_ONLY_TRAINING_KERNELS`. A kernel absent here is never routed to
 /// the mlx worker.
-pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+///
+/// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be DERIVED from this list
+/// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
+/// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
+pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",

@@ -5151,14 +5151,18 @@ fn candle_worker_refuses_torch_served_training_kernels() {
 /// kernel is dropped from `MLX_ROUTED_TRAINING_KERNELS` (mlx stops claiming) and it fails if the
 /// kernel is dropped from `MLX_ONLY_TRAINING_KERNELS` (a generic worker starts claiming a job it has
 /// no trainer for and would fail terminally). Both halves are asserted per network type.
+///
+/// sc-15277 — READ THIS BEFORE TRUSTING IT. This test is correct and it PASSED while Mage training
+/// was completely broken from the app, because **claiming is not executing**: the worker claimed the
+/// job and `engine_trainer_id` then had no `mage_flow_lora` arm, so every run died ~2s later with
+/// "No native trainer for kernel 'mage_flow_lora'". The claim→execute hop is guarded in the worker
+/// crate by `every_mlx_routed_training_kernel_resolves_to_a_trainer_for_every_offered_network_type`
+/// (crates/sceneworks-worker/src/training_jobs.rs). The `mage_flow_edit_base` rows are gone with the
+/// target itself — routing is per-KERNEL, so they never added coverage here, and the edit checkpoint
+/// has no trainer at all (sc-15320).
 #[test]
 fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
-    for (base_model, network_type) in [
-        ("mage_flow_base", "lora"),
-        ("mage_flow_base", "full"),
-        ("mage_flow_edit_base", "lora"),
-        ("mage_flow_edit_base", "full"),
-    ] {
+    for (base_model, network_type) in [("mage_flow_base", "lora"), ("mage_flow_base", "full")] {
         let store = store(&format!("mage-training-{base_model}-{network_type}"));
 
         // A generic (non-Rust) training descriptor must still defer: there is no torch Mage trainer,
