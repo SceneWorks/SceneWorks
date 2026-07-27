@@ -149,15 +149,27 @@ so this is not the `sink_size = 0` bounded-window drift of sc-15127.
 | comparison | mean \|Δ\| | worst-frame clipping | MLX active peak |
 |---|---|---|---|
 | overlap ×2 at latent tile 4 (1→2) | 7.5 → 6.4 (**−15%**) | 12.9% → 7.0% (**−46%**) | 38.5 → 38.5 GiB |
-| overlap ×2 at latent tile 8 (2→4) | 2.5 → 2.0 (**−22%**) | already at the single-pass floor | 75.8 → 75.8 GiB |
+| overlap ×2 at latent tile 8 (2→4) | 2.5 → 2.0 (**−22%**) | 0.08% / 0.25% → 0.14% / 1.1% (**worse** — see note) | 75.8 → 75.8 GiB |
 | tile ×2 at matched overlap (4/1 → 8/2) | 7.5 → 2.5 (**−67%**) | 12.9% → 0.25% | 38.5 → **75.8 GiB** |
 | tile ×2 at matched overlap (4/2 → 8/4) | 6.4 → 2.0 (**−70%**) | 7.0% → 1.1% | 38.5 → **75.8 GiB** |
 
 **Tile size dominates** — roughly −67…−70% per doubling — because two latent frames is less temporal
 context than the z16 decoder's convolutions need. But **overlap is a real secondary term**, not a
-negligible one: −15…−22% on mean error and −46% on worst-frame clipping where it has room. An earlier
-cut of these notes called blending a minor contributor on the strength of the tile-2 rows; that was a
-degenerate comparison (the clamp had already capped it) and the claim is withdrawn.
+negligible one. An earlier cut of these notes called blending a minor contributor on the strength of the
+tile-2 rows; that was a degenerate comparison (the clamp had already capped overlap at 1) and the claim
+is withdrawn.
+
+⚠️ **The two metrics disagree in direction at latent tile 8, and it is unexplained.** Mean \|Δ\|
+improves with overlap in *both* pairs (−15%, −22%), and clipping improves sharply at latent tile 4
+(12.9% → 7.0%) — but at latent tile 8 clipping gets **worse** (0.08%/0.25% → 0.14%/1.1%). So the
+conclusion rests on mean \|Δ\| in both pairs plus clipping at tile 4; **clipping does not corroborate it
+at tile 8**. A plausible reading is that at 8 latent frames the decode is already at the reference floor
+and the residual is seam-placement noise rather than signal — but that is a hypothesis, not a
+measurement, and whoever designs the sc-15325 fix should see it rather than a clean story.
+
+(The `32/8` row's `0.08% / 0.25%` is **not** the reference row copied down — it is an independent decode
+whose mean \|Δ\| against single-pass is 2.5/255, i.e. materially different pixels. The clipping metric
+simply saturates at the same floor.)
 
 Practical consequence for sc-15325: **raise the tile *and* scale the overlap with it.** Overlap is free
 in *peak* (identical GiB across each pair — it changes the stride and so the number of passes, i.e.
