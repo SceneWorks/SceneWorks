@@ -290,11 +290,20 @@ pub(crate) fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
-/// Mage-Flow Base/RL/Turbo currently expose only the native plain text-to-image path. Keep this
-/// predicate deliberately narrower than the generic image request shape: the provider has no
-/// edit/reference, ControlNet, mask, or user-adapter implementation yet. Reject those requests at
-/// routing time instead of letting an MLX-only model queue for a worker path that cannot serve them
-/// (or silently dropping conditioning).
+/// Mage-Flow Base/RL/Turbo expose the native plain text-to-image path, **with user LoRA/LoKr
+/// adapters** (sc-15328). Keep this predicate deliberately narrower than the generic image request
+/// shape: the provider has no edit/reference, ControlNet, or mask implementation on the generation
+/// variants. Reject those requests at routing time instead of letting an MLX-only model queue for a
+/// worker path that cannot serve them (or silently dropping conditioning).
+///
+/// **`loras` is deliberately NOT in the exclusion list.** It used to be, and that is what made a
+/// trained Mage adapter unrenderable: the picker offered it (the manifest declares
+/// `loraCompatibility.families = ["mage-flow"]` on all three generation variants), every Mage
+/// `ModelCaps` row is `candle_lora: false`, and so NO backend claimed the job — it sat `queued`
+/// forever with an idle mlx worker and no error. The engine seam is real and now wired: the worker's
+/// `resolve_adapters` → `LoadSpec::with_adapters` plumbing reaches `mlx_gen_mage`'s `assemble`,
+/// which installs stacked/mixed LoRA + LoKr through `apply_mage_adapters` (strict — an unmatched
+/// target errors rather than being silently dropped).
 pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if !matches!(
         payload.get("mode").and_then(Value::as_str),
@@ -307,7 +316,6 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         || has_nonempty_string(payload, "referenceAssetId")
         || has_nonempty_string(payload, "maskAssetId")
         || has_nonempty_array(payload, "referenceAssetIds")
-        || has_nonempty_array(payload, "loras")
         || has_nonempty_array(payload, "controls")
         || has_nonempty_array(payload, "controlnets")
         || has_nonempty_nested_array(payload, "advanced", "poses"))
@@ -315,6 +323,16 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
 /// source in their submitted order; they never make a source-less request eligible.
+///
+/// **`loras` stays refused here, and that is a decision rather than inherited copy-paste
+/// (sc-15328).** The engine could serve it — the edit variants host adapters on the same
+/// `MageTransformer` and the descriptor advertises `supports_lora`/`supports_lokr` for all six — but
+/// the product never offers one: the three `mage_flow_edit_*` manifest rows declare no
+/// `loraCompatibility`, so the picker shows no adapter as compatible, and there is no Mage edit
+/// trainer to produce one (sc-15277 withdrew `mage_flow_edit_base_lora`; a real edit trainer is
+/// sc-15320). Nothing advertised, nothing claimable, no gap — which is exactly what
+/// `every_lora_advertising_image_model_is_claimable_with_a_lora` checks, exception-free. Adding
+/// `loraCompatibility` to an edit row without relaxing this line turns that guard red.
 pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
@@ -893,13 +911,32 @@ mod tests {
         );
     }
 
+    /// The generation variants serve plain text-to-image **and text-to-image + user adapters**
+    /// (sc-15328); every other conditioning shape fails closed.
+    ///
+    /// The single-adapter and stacked/mixed LoRA+LoKr shapes are asserted eligible here because that
+    /// is the whole capability: `mage_flow_lora`'s `limits.networkTypes` offers `lora` and `lokr`,
+    /// the picker offers the trained adapter, and `apply_mage_adapters` stacks mixed kinds. Before
+    /// sc-15328 the `loras` shape sat in the `unsupported` list below and no backend claimed the
+    /// job — it queued forever rather than failing.
     #[test]
-    fn mage_flow_routes_only_plain_text_to_image_requests() {
+    fn mage_flow_routes_plain_text_to_image_and_adapters() {
         let mage_models = ["mage_flow_base", "mage_flow", "mage_flow_turbo"];
         let eligible = [
             json!({}),
             json!({ "mode": "text_to_image", "prompt": "a lighthouse in fog" }),
             json!({ "mode": "text_to_image", "loras": [], "referenceAssetIds": [] }),
+            // One trained LoRA — the sc-15328 reproduction shape.
+            json!({ "mode": "text_to_image", "loras": [{ "id": "adapter-1", "weight": 0.8 }] }),
+            // LoKr (sc-14056 exposes it in `limits.networkTypes`) and a stacked, mixed pair — both
+            // reach the same strict seam, so routing must not discriminate between them.
+            json!({ "mode": "text_to_image", "loras": [{ "id": "a", "networkType": "lokr" }] }),
+            json!({ "mode": "text_to_image", "loras": [
+                { "id": "a", "weight": 0.8 },
+                { "id": "b", "weight": 0.4, "networkType": "lokr" }
+            ] }),
+            // A mode-less payload with adapters is the API default (text-to-image).
+            json!({ "loras": [{ "id": "adapter-1" }] }),
         ];
         for model in mage_models {
             for payload in &eligible {
@@ -920,7 +957,6 @@ mod tests {
             json!({ "mode": "text_to_image", "referenceAssetId": "asset-1" }),
             json!({ "mode": "text_to_image", "referenceAssetIds": ["asset-1"] }),
             json!({ "mode": "text_to_image", "maskAssetId": "mask-1" }),
-            json!({ "mode": "text_to_image", "loras": [{ "id": "adapter-1" }] }),
             json!({ "mode": "text_to_image", "advanced": { "poses": [{}] } }),
             json!({ "mode": "text_to_image", "controls": [{}] }),
             json!({ "mode": "text_to_image", "controlnets": [{}] }),

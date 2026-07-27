@@ -1330,6 +1330,20 @@ pub(crate) async fn register_trained_base_checkpoint(
         &model_type,
         family.as_deref(),
     );
+    // sc-15328 — a fine-tuned checkpoint must not ADVERTISE adapters it cannot render.
+    //
+    // `apply_model_manifest_defaults` synthesizes `loraCompatibility.families = [family]` from the
+    // family token alone, which is right for an imported sibling of a builtin but wrong here: the
+    // fine-tuned lane refuses adapters on every backend (`mlx_gen_mage::load_finetuned`, and the
+    // `!has_loras` term in `imported_image_request_family_eligible`). Left advertised, the API
+    // accepted the job and NO worker could claim it — it queued forever with no error, the exact
+    // failure this story exists to remove, one lane over. Withdrawing the advertisement makes
+    // `validate_lora_specs_for_model` reject at submit with "has no declared LoRA families", so the
+    // combination is refused LOUDLY and terminally instead of hanging.
+    //
+    // Whether a fine-tune SHOULD accept adapters is a separate product question (sc-15334) — this
+    // only guarantees that what is advertised is what can actually run.
+    entry.remove("loraCompatibility");
 
     let upsert_id = model_id.clone();
     mutate_manifest_entries(state, &manifest_path, "models", move |entries| {

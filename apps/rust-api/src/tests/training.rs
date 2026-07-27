@@ -4321,6 +4321,18 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     );
     assert_eq!(entry["provenance"]["kind"], "training");
     assert_eq!(entry["provenance"]["trainingJobId"], json!(job_id.as_str()));
+    // sc-15328 — and it must NOT advertise adapters. `apply_model_manifest_defaults` synthesizes
+    // `loraCompatibility.families = [family]` from the family token, which for a fine-tune is an
+    // advertisement nothing can honour: the router's `mage-flow` arm, `mage_finetuned_available`
+    // and `mlx_gen_mage::load_finetuned` all refuse adapters. Advertised, the API accepted the job
+    // and no worker could claim it — it queued forever with no error. Withdrawn, the same request
+    // is refused at submit by `validate_lora_specs_for_model` ("no declared LoRA families"), which
+    // is loud and terminal. Restoring the key without making a lane claim the job reopens the hang.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "a fine-tuned checkpoint must not advertise LoRA compatibility it cannot render: {:?}",
+        entry.get("loraCompatibility")
+    );
 
     // It is NOT a LoRA — registering it as one would offer it as an adapter the engine cannot load.
     let (status, loras) = request(
