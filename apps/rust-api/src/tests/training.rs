@@ -4356,6 +4356,34 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
         matches[0]["createdAt"], created_at,
         "the original createdAt is preserved across a re-registration"
     );
+
+    // (5) …and it is REMOVABLE. An ~8 GB base checkpoint that the catalog offers but the Models
+    // page cannot delete would be a one-way disk leak, so the lifecycle is closed here rather than
+    // assumed: `<data>/models/finetunes/<id>` sits under the `<data>/models` root
+    // `remove_owned_artifacts` allows, and `paths.model` is what `model_artifact_paths` resolves.
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/models/{model_id}?permanent=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {deleted}");
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(
+        !output_dir.exists(),
+        "the checkpoint directory must be removed from disk: {}",
+        output_dir.display()
+    );
+    let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert!(
+        !models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|model| model["id"] == json!(model_id.as_str())),
+        "the deleted fine-tune must leave the catalog without a restart"
+    );
 }
 
 /// sc-15036 — a TORN checkpoint (weights written, architecture config missing, or vice versa) must
