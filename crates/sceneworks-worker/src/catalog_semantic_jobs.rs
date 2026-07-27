@@ -405,10 +405,53 @@ fn record_update(record: CatalogRecord) -> NewCatalogRecord {
     }
 }
 
-fn clear_filtered_semantics(registry: &CatalogRegistry, catalog_id: &str) -> WorkerResult<u64> {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SemanticReconcileReport {
+    records_reconciled: u64,
+    embedding_required: bool,
+}
+
+fn check_semantic_cancel(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
+    if cancel.is_cancelled() {
+        Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn reconcile_semantics_blocking(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    semantic_embeddings_enabled: bool,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<SemanticReconcileReport> {
+    let metadata =
+        reconcile_semantic_records(registry, catalog_id, semantic_embeddings_enabled, cancel);
+    let index = rebuild_embedding_index_streaming(
+        registry,
+        catalog_id,
+        metadata.as_ref().ok().map(|_| cancel),
+    );
+    match (metadata, index) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+            "{primary}; embedding index reconciliation also failed: {index}"
+        ))),
+    }
+}
+
+fn reconcile_semantic_records(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    semantic_embeddings_enabled: bool,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<SemanticReconcileReport> {
     let mut cursor = None;
-    let mut cleared = 0_u64;
+    let mut examined = 0_u64;
+    let mut report = SemanticReconcileReport::default();
     loop {
+        check_semantic_cancel(cancel)?;
         let page = registry
             .open_attached(catalog_id)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
@@ -418,30 +461,56 @@ fn clear_filtered_semantics(registry: &CatalogRegistry, catalog_id: &str) -> Wor
             break;
         }
         for mut record in page.records {
-            if is_structured_survivor(&record) {
-                continue;
-            }
+            check_semantic_cancel(cancel)?;
+            examined = examined.saturating_add(1);
+            let survivor = is_structured_survivor(&record);
             let structured_fingerprint = structured_input_fingerprint(&record).map(str::to_owned);
-            let mut changed = record.embedding_path.take().is_some();
+            let vision_current = survivor
+                && structured_fingerprint
+                    .as_deref()
+                    .is_some_and(|fingerprint| vision_is_current(&record, fingerprint));
+            let embedding_current = survivor
+                && structured_fingerprint
+                    .as_deref()
+                    .is_some_and(|fingerprint| embedding_is_current(&record, fingerprint));
+            if semantic_embeddings_enabled
+                && survivor
+                && structured_fingerprint.is_some()
+                && !embedding_current
+            {
+                report.embedding_required = true;
+            }
+
+            let mut changed = false;
+            if !embedding_current {
+                changed |= record.embedding_path.take().is_some();
+            }
             if let Some(analysis) = record
                 .metadata
                 .get_mut("analysis")
                 .and_then(Value::as_object_mut)
             {
-                for key in [
-                    "visionLanguage",
-                    "semanticEmbedding",
-                    "medium",
-                    "tagMembership",
-                    "tagConfidence",
-                ] {
-                    changed |= analysis.remove(key).is_some();
+                if !vision_current {
+                    for key in ["visionLanguage", "medium", "tagMembership", "tagConfidence"] {
+                        changed |= analysis.remove(key).is_some();
+                    }
                 }
-                let selection = json!({
-                    "status": "filtered_out",
-                    "predicate": "structured.derived.qualifiedSingleFullBody",
-                    "structuredInputFingerprint": structured_fingerprint,
-                });
+                if !embedding_current {
+                    changed |= analysis.remove("semanticEmbedding").is_some();
+                }
+                let selection = if survivor {
+                    json!({
+                        "status": "selected",
+                        "predicate": "structured.derived.qualifiedSingleFullBody",
+                        "structuredInputFingerprint": structured_fingerprint,
+                    })
+                } else {
+                    json!({
+                        "status": "filtered_out",
+                        "predicate": "structured.derived.qualifiedSingleFullBody",
+                        "structuredInputFingerprint": structured_fingerprint,
+                    })
+                };
                 if analysis.get("semanticSelection") != Some(&selection) {
                     analysis.insert("semanticSelection".to_owned(), selection);
                     changed = true;
@@ -452,42 +521,23 @@ fn clear_filtered_semantics(registry: &CatalogRegistry, catalog_id: &str) -> Wor
                     .open_attached(catalog_id)
                     .and_then(|mut catalog| catalog.append_records(&[record_update(record)]))
                     .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-                cleared = cleared.saturating_add(1);
+                report.records_reconciled = report.records_reconciled.saturating_add(1);
             }
         }
         cursor = page.next_cursor;
+        persist_semantic_checkpoint(
+            registry,
+            catalog_id,
+            "semantic_reconcile",
+            cursor,
+            examined,
+            report.records_reconciled,
+        )?;
         if cursor.is_none() {
             break;
         }
     }
-    Ok(cleared)
-}
-
-fn embedding_work_required(registry: &CatalogRegistry, catalog_id: &str) -> WorkerResult<bool> {
-    let catalog = registry
-        .open_attached(catalog_id)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    let mut cursor = None;
-    loop {
-        let page = catalog
-            .page_records_after(cursor, PAGE_SIZE)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-        for record in page.records {
-            if !is_structured_survivor(&record) {
-                continue;
-            }
-            let Some(input_fingerprint) = structured_input_fingerprint(&record) else {
-                continue;
-            };
-            if !embedding_is_current(&record, input_fingerprint) {
-                return Ok(true);
-            }
-        }
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            return Ok(false);
-        }
-    }
+    Ok(report)
 }
 
 fn resolve_catalog_image(catalog: &Catalog, record: &CatalogRecord) -> WorkerResult<PathBuf> {
@@ -1069,6 +1119,44 @@ fn run_embedding_pass_blocking(
     Ok((examined, updated))
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn run_embedding_pass_with_index_reconciliation(
+    registry: CatalogRegistry,
+    catalog_id: String,
+    weights_dir: PathBuf,
+    batch_size: usize,
+    cancel: gen_core::CancelFlag,
+) -> WorkerResult<(u64, u64)> {
+    let embedding = run_embedding_pass_blocking(
+        registry.clone(),
+        catalog_id.clone(),
+        weights_dir,
+        batch_size,
+        cancel,
+    );
+    // Always publish the SQLite-derived index, including after a persisted
+    // record-local failure followed by cancellation or another fatal error.
+    finish_with_index_reconciliation(embedding, &registry, &catalog_id)
+}
+
+fn finish_with_index_reconciliation<T>(
+    primary: WorkerResult<T>,
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+) -> WorkerResult<T> {
+    let index = rebuild_embedding_index_streaming(registry, catalog_id, None);
+    match (primary, index) {
+        (Ok(counts), Ok(())) => Ok(counts),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+            "{primary}; embedding index reconciliation also failed: {index}"
+        ))),
+    }
+}
+
 fn persist_embedding_failure(
     registry: &CatalogRegistry,
     catalog_id: &str,
@@ -1100,25 +1188,46 @@ fn persist_embedding_failure(
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
-fn rebuild_embedding_index(registry: &CatalogRegistry, catalog_id: &str) -> WorkerResult<()> {
+fn rebuild_embedding_index_streaming(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    cancel: Option<&gen_core::CancelFlag>,
+) -> WorkerResult<()> {
     let catalog = registry
         .open_attached(catalog_id)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let index = catalog
+        .root()
+        .join("embeddings")
+        .join(CLIP_SPACE)
+        .join("index.jsonl");
+    let parent = index.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload("embedding index has no parent directory".to_owned())
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     let mut cursor = None;
-    let mut lines = Vec::new();
+    let mut examined = 0_u64;
+    let mut indexed = 0_u64;
+    let mut canceled = false;
     loop {
+        canceled |= cancel.is_some_and(gen_core::CancelFlag::is_cancelled);
         let page = catalog
             .page_records_after(cursor, PAGE_SIZE)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
         for record in page.records {
+            examined = examined.saturating_add(1);
             let Some(embedding) = record.metadata.pointer("/analysis/semanticEmbedding") else {
                 continue;
             };
-            if embedding.get("status").and_then(Value::as_str) != Some("succeeded") {
+            if embedding.get("status").and_then(Value::as_str) != Some("succeeded")
+                || record.embedding_path.is_none()
+            {
                 continue;
             }
-            lines.push(
-                serde_json::to_string(&json!({
+            serde_json::to_writer(
+                &mut temporary,
+                &json!({
                     "recordId": record.id,
                     "path": record.embedding_path,
                     "inputFingerprint": embedding.get("inputFingerprint"),
@@ -1127,28 +1236,34 @@ fn rebuild_embedding_index(registry: &CatalogRegistry, catalog_id: &str) -> Work
                     "space": embedding.get("space"),
                     "modelId": embedding.get("modelId"),
                     "modelRevision": embedding.get("modelRevision"),
-                }))
-                .map_err(|error| WorkerError::Engine(error.to_string()))?,
-            );
+                }),
+            )
+            .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            temporary.write_all(b"\n")?;
+            indexed = indexed.saturating_add(1);
         }
         cursor = page.next_cursor;
+        persist_semantic_checkpoint(
+            registry,
+            catalog_id,
+            "embedding_index",
+            cursor,
+            examined,
+            indexed,
+        )?;
         if cursor.is_none() {
             break;
         }
     }
-    lines.sort();
-    let mut payload = lines.join("\n");
-    if !payload.is_empty() {
-        payload.push('\n');
+    temporary.as_file_mut().sync_all()?;
+    temporary
+        .persist(&index)
+        .map_err(|error| WorkerError::Io(error.error))?;
+    if canceled {
+        Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()))
+    } else {
+        Ok(())
     }
-    atomic_write(
-        &catalog
-            .root()
-            .join("embeddings")
-            .join(CLIP_SPACE)
-            .join("index.jsonl"),
-        payload.as_bytes(),
-    )
 }
 
 #[cfg(any(
@@ -1375,11 +1490,30 @@ pub(crate) async fn run_catalog_analysis_job(
         None
     };
 
-    let filtered_semantic_records = clear_filtered_semantics(&registry, &catalog_id)?;
-    // Reconcile the external manifest immediately after pointer cleanup. This
-    // must happen even when embeddings are disabled, there are no survivors,
-    // or a later CLIP resolve/load fails.
-    rebuild_embedding_index(&registry, &catalog_id)?;
+    let reconcile_cancel = gen_core::CancelFlag::new();
+    let blocking_reconcile_cancel = reconcile_cancel.clone();
+    let reconcile_registry = registry.clone();
+    let reconcile_catalog_id = catalog_id.clone();
+    let semantic_embeddings_enabled = analyzer_config.settings.semantic_embeddings_enabled;
+    let semantic_reconcile = crate::run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(reconcile_cancel),
+        CANCEL_MESSAGE,
+        "catalog semantic reconciliation",
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || {
+            reconcile_semantics_blocking(
+                &reconcile_registry,
+                &reconcile_catalog_id,
+                semantic_embeddings_enabled,
+                &blocking_reconcile_cancel,
+            )
+        }),
+    )
+    .await?;
+    let filtered_semantic_records = semantic_reconcile.records_reconciled;
 
     let mut vision_counts = (0, 0);
     if let Some(weights) = vision_weights {
@@ -1402,8 +1536,7 @@ pub(crate) async fn run_catalog_analysis_job(
     }
 
     let mut embedding_counts = (0, 0);
-    let embedding_required = analyzer_config.settings.semantic_embeddings_enabled
-        && embedding_work_required(&registry, &catalog_id)?;
+    let embedding_required = semantic_reconcile.embedding_required;
     let clip_weights = embedding_required
         .then(|| -> WorkerResult<PathBuf> {
             crate::model_jobs::huggingface_pinned_snapshot_dir(
@@ -1438,7 +1571,7 @@ pub(crate) async fn run_catalog_analysis_job(
         let cancel = gen_core::CancelFlag::new();
         let blocking_cancel = cancel.clone();
         let blocking = tokio::task::spawn_blocking(move || {
-            run_embedding_pass_blocking(
+            run_embedding_pass_with_index_reconciliation(
                 registry_for_embeddings,
                 catalog_for_embeddings,
                 weights,
@@ -1457,7 +1590,6 @@ pub(crate) async fn run_catalog_analysis_job(
             blocking,
         )
         .await?;
-        rebuild_embedding_index(&registry, &catalog_id)?;
     }
 
     let catalog = registry
@@ -1811,11 +1943,13 @@ mod tests {
         let catalog_id = catalog.descriptor().id.clone();
         drop(catalog);
 
+        let cancel = gen_core::CancelFlag::new();
         assert_eq!(
-            clear_filtered_semantics(&registry, &catalog_id).expect("cleanup"),
+            reconcile_semantics_blocking(&registry, &catalog_id, false, &cancel)
+                .expect("cleanup")
+                .records_reconciled,
             1
         );
-        rebuild_embedding_index(&registry, &catalog_id).expect("index");
         let catalog = registry.open_attached(&catalog_id).expect("catalog");
         assert!(catalog
             .page_records(0, 1)
@@ -1845,7 +1979,78 @@ mod tests {
             .expect("record");
         let catalog_id = catalog.descriptor().id.clone();
         drop(catalog);
-        assert!(!embedding_work_required(&registry, &catalog_id).expect("eligibility"));
+        let report = reconcile_semantics_blocking(
+            &registry,
+            &catalog_id,
+            true,
+            &gen_core::CancelFlag::new(),
+        )
+        .expect("eligibility");
+        assert!(!report.embedding_required);
+    }
+
+    #[test]
+    fn changed_survivor_clears_stale_semantics_when_optional_analyzers_are_disabled() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry.create_catalog(&root, "changed").expect("catalog");
+        let mut record = survivor_record("changed");
+        record.metadata["analysis"]["structured"]["inputFingerprint"] = json!("sha256:new");
+        record.metadata["analysis"]["visionLanguage"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:old",
+            "analyzerVersion": VISION_ANALYZER_VERSION,
+            "modelRevision": VISION_MODEL_REVISION,
+            "taxonomyVersion": TAXONOMY_VERSION,
+            "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+            "backend": inference_backend(),
+            "provider": vision_provider(),
+        });
+        record.metadata["analysis"]["medium"] = json!("photograph");
+        record.metadata["analysis"]["tagMembership"] = json!({"full_body": true});
+        record.metadata["analysis"]["tagConfidence"] = json!({"full_body": 0.9});
+        record.metadata["analysis"]["semanticEmbedding"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:old",
+            "analyzerVersion": EMBEDDING_ANALYZER_VERSION,
+            "modelRevision": CLIP_MODEL_REVISION,
+            "runtimeRevision": INFERENCE_RUNTIME_REVISION,
+            "backend": inference_backend(),
+            "provider": CLIP_PROVIDER,
+        });
+        record.embedding_path = Some("embeddings/clip-vit-l14/old.f32".to_owned());
+        catalog
+            .append_records(&[record_update(record)])
+            .expect("record");
+        let catalog_id = catalog.descriptor().id.clone();
+        drop(catalog);
+
+        let report = reconcile_semantics_blocking(
+            &registry,
+            &catalog_id,
+            false,
+            &gen_core::CancelFlag::new(),
+        )
+        .expect("reconcile");
+        assert_eq!(report.records_reconciled, 1);
+        assert!(!report.embedding_required);
+        let record = registry
+            .open_attached(&catalog_id)
+            .expect("catalog")
+            .page_records(0, 1)
+            .expect("record")
+            .remove(0);
+        assert!(record.embedding_path.is_none());
+        for path in [
+            "/analysis/visionLanguage",
+            "/analysis/medium",
+            "/analysis/tagMembership",
+            "/analysis/tagConfidence",
+            "/analysis/semanticEmbedding",
+        ] {
+            assert!(record.metadata.pointer(path).is_none(), "{path} is stale");
+        }
     }
 
     #[test]
@@ -1858,11 +2063,21 @@ mod tests {
             .expect("catalog");
         let mut record = survivor_record("clip-failure");
         record.embedding_path = Some("embeddings/clip-vit-l14/stale.f32".to_owned());
+        record.metadata["analysis"]["semanticEmbedding"] = json!({
+            "status": "succeeded",
+            "inputFingerprint": "sha256:abc",
+            "digest": "sha256:stale",
+            "dimension": 768,
+            "space": CLIP_SPACE,
+            "modelId": CLIP_MODEL_ID,
+            "modelRevision": CLIP_MODEL_REVISION,
+        });
         catalog
             .append_records(&[record_update(record.clone())])
             .expect("record");
         let catalog_id = catalog.descriptor().id.clone();
         drop(catalog);
+        rebuild_embedding_index_streaming(&registry, &catalog_id, None).expect("stale index");
 
         persist_embedding_failure(
             &registry,
@@ -1887,6 +2102,83 @@ mod tests {
         assert_eq!(failure["runtimeRevision"], INFERENCE_RUNTIME_REVISION);
         assert_eq!(failure["backend"], inference_backend());
         assert_eq!(failure["provider"], CLIP_PROVIDER);
+
+        let terminal = finish_with_index_reconciliation::<()>(
+            Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned())),
+            &registry,
+            &catalog_id,
+        )
+        .expect_err("cancel remains terminal");
+        assert!(matches!(terminal, WorkerError::Canceled(_)));
+        assert_eq!(
+            fs::read_to_string(root.join("embeddings").join(CLIP_SPACE).join("index.jsonl"))
+                .expect("index"),
+            "",
+            "index is reconciled even when the embedding pass ends canceled"
+        );
+    }
+
+    #[test]
+    fn multi_page_reconcile_and_index_are_checkpointed_and_cancel_aware() {
+        let temporary = tempfile::tempdir().expect("temporary");
+        let registry = CatalogRegistry::new(temporary.path().join("state"));
+        let root = temporary.path().join("catalog");
+        let mut catalog = registry
+            .create_catalog(&root, "multi-page")
+            .expect("catalog");
+        let records = (0..=PAGE_SIZE)
+            .map(|index| NewCatalogRecord {
+                id: format!("record-{index:04}"),
+                image_path: format!("images/{index:04}.jpg"),
+                thumbnail_path: None,
+                embedding_path: None,
+                artifact_path: None,
+                metadata: json!({
+                    "analysis": {
+                        "structured": {
+                            "inputFingerprint": format!("sha256:{index:04}"),
+                            "derived": {"qualifiedSingleFullBody": false}
+                        }
+                    }
+                }),
+            })
+            .collect::<Vec<_>>();
+        catalog.append_records(&records).expect("records");
+        let catalog_id = catalog.descriptor().id.clone();
+        drop(catalog);
+
+        let report = reconcile_semantics_blocking(
+            &registry,
+            &catalog_id,
+            true,
+            &gen_core::CancelFlag::new(),
+        )
+        .expect("multi-page reconcile");
+        assert_eq!(report.records_reconciled, u64::from(PAGE_SIZE) + 1);
+        assert!(!report.embedding_required);
+        let checkpoint = registry
+            .open_attached(&catalog_id)
+            .expect("catalog")
+            .contract_state()
+            .expect("state")
+            .checkpoints[SEMANTIC_CHECKPOINT_KEY]
+            .clone();
+        assert_eq!(checkpoint["stage"], "embedding_index");
+        assert_eq!(checkpoint["examined"], u64::from(PAGE_SIZE) + 1);
+        assert!(checkpoint["nextCursor"].is_null());
+
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+        let error = reconcile_semantics_blocking(&registry, &catalog_id, true, &cancel)
+            .expect_err("pre-canceled reconcile");
+        assert!(matches!(error, WorkerError::Canceled(_)));
+        assert!(
+            root.join("embeddings")
+                .join(CLIP_SPACE)
+                .join("index.jsonl")
+                .is_file(),
+            "cancel still leaves a reconciled atomic index"
+        );
     }
 
     #[test]
@@ -1905,6 +2197,7 @@ mod tests {
             .expect("handler source");
         assert!(handler.contains("crate::run_blocking_with_heartbeat("));
         assert!(handler.contains("analyze_attached_catalog_under_processing_lease_with_control"));
+        assert!(handler.contains("\"catalog semantic reconciliation\""));
     }
 
     #[test]
