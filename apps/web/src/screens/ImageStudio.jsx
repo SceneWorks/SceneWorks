@@ -3125,6 +3125,19 @@ export function ImageStudio() {
               noPresetValue={noPresetId}
               presetPromptParts={presetPromptParts}
               presetLoraDetails={presetLoraDetails}
+              savePreset={(
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                />
+              )}
             />
           </div>
 
@@ -3465,19 +3478,6 @@ export function ImageStudio() {
                 Negative prompt
                 <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
               </label>
-              {/* Save-as-preset folds into Advanced with the rest of the power-user
-                  knobs (UI-refinement 2b). */}
-              <SavePresetPanel
-                presetName={presetName}
-                setPresetName={setPresetName}
-                savingPreset={savingPreset}
-                presetSaveMessage={presetSaveMessage}
-                setPresetSaveMessage={setPresetSaveMessage}
-                onSave={handleSaveAsPreset}
-                presetScope={presetScope}
-                setPresetScope={setPresetScope}
-                activeProject={activeProject}
-              />
             </div>
           </AdvancedSection>
 

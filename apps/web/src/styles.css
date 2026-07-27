@@ -5512,28 +5512,36 @@ input.dataset-name-input.boxed:focus {
   min-height: 36px;
 }
 
-/* "Save as Preset" — inline sidebar control that snapshots the current setup. */
-.save-preset {
-  display: grid;
-  gap: 8px;
+/* "Save as preset" — an inline pair at the end of the style-preset chip row (studio-cleanup
+   sc-15372): a fixed-width name field and a dropdown whose menu carries the scope. Both are
+   chip-height so they sit on the chips' baseline rather than reading as a separate panel. */
+.style-axis-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border);
+  flex: 0 0 auto;
 }
 
-.save-preset-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
+/* Full-width wrap point inside the flex chip row: errors and the save confirmation get their
+   own line under the chips instead of squeezing in beside them. */
+.style-axis-row-break {
+  flex: 0 0 100%;
+  display: grid;
+  gap: 6px;
 }
 
 .save-preset-name {
-  flex: 1;
+  width: 140px;
+  flex: 0 0 auto;
   min-width: 0;
-  min-height: 34px;
+  height: 30px;
   padding: 0 11px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-pill);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .save-preset-name:focus {
@@ -5541,24 +5549,38 @@ input.dataset-name-input.boxed:focus {
   border-color: var(--accent);
 }
 
+.save-preset-scope-picker {
+  flex: 0 0 auto;
+}
+
 .save-preset-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  min-height: 34px;
-  padding: 0 13px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 12.5px;
+  height: 30px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
   font-weight: 600;
-  transition: filter var(--t-fast), opacity var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
+}
+
+.save-preset-btn .chev {
+  opacity: 0.6;
 }
 
 .save-preset-btn:hover:not(:disabled) {
-  filter: brightness(1.05);
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+[data-theme="dark"] .save-preset-btn:hover:not(:disabled) {
+  color: var(--accent);
 }
 
 .save-preset-btn:disabled {

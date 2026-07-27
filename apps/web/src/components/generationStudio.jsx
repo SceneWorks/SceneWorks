@@ -131,6 +131,9 @@ export function StyleAxisRow({
   // standalone card below the settings bar (studio-cleanup sc-15371).
   presetPromptParts = [],
   presetLoraDetails = [],
+  // The save-as-preset control, rendered inline at the end of the preset-chip row instead of
+  // buried in Advanced (studio-cleanup sc-15372). Omit it and the row is chips only.
+  savePreset = null,
 }) {
   return (
     <>
@@ -154,6 +157,7 @@ export function StyleAxisRow({
                 {preset.name ?? preset.id}
               </button>
             ))}
+            {savePreset}
           </div>
         </div>
         <PresetGuidanceStrip
@@ -721,7 +725,12 @@ export function useSavePreset({
   // with their weights; the seed is intentionally left out so the preset stays
   // reusable. The backend additionally enforces id uniqueness and model/workflow +
   // LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
+  // `scopeOverride` lets a caller pick the scope and save in one gesture (the studio's
+  // save-as-preset dropdown, sc-15372) without waiting a render for `setPresetScope` to land.
+  // Anything that isn't a real scope — notably a click event, when this is wired straight to
+  // onClick — falls back to the current state.
+  async function handleSaveAsPreset(scopeOverride) {
+    const scope = scopeOverride === "project" || scopeOverride === "global" ? scopeOverride : presetScope;
     const trimmed = presetName.trim();
     if (!trimmed) {
       setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
@@ -736,7 +745,7 @@ export function useSavePreset({
       setPresetSaveMessage({ tone: "error", text: guardMessage });
       return;
     }
-    if (presetScope === "project" && !activeProject) {
+    if (scope === "project" && !activeProject) {
       setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
       return;
     }
@@ -746,7 +755,7 @@ export function useSavePreset({
     }
     const payload = buildStudioPresetPayload({
       name: trimmed,
-      scope: presetScope,
+      scope,
       mode,
       model,
       loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
@@ -760,7 +769,7 @@ export function useSavePreset({
       setPresetName("");
       setPresetSaveMessage({
         tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+        text: `Saved "${trimmed}" to ${scope === "project" ? "this project" : "all projects"}.`,
       });
     } catch (err) {
       setPresetSaveMessage({ tone: "error", text: err.message });
@@ -930,9 +939,12 @@ export function LoraPickerSection({
   );
 }
 
-// The "Save as Preset" panel shared by both studios (sc-4196): name field, save
-// button, project/global scope segment, and the inline save message. The actual
-// save handler differs per studio (different payloads), so it's passed as onSave.
+// The "Save as preset" control shared by both studios (sc-4196). It lives INLINE in the
+// style-preset chip row (studio-cleanup sc-15372) rather than stacked inside Advanced: a fixed
+// name field plus a dropdown whose menu IS the scope choice — picking "This project" or "All
+// projects" both sets the scope and confirms the save, so the wide project/global segment is gone.
+// The actual save handler differs per studio (different payloads), so it's passed as onSave; it
+// takes the chosen scope so the save never races `setPresetScope`.
 export function SavePresetPanel({
   presetName,
   setPresetName,
@@ -952,66 +964,114 @@ export function SavePresetPanel({
   // an unsaveable mode surfaces the tooltip as an always-visible chip.
   const saveDraft = useMemo(() => ({ presetName, saveDisabled, saveTitle }), [presetName, saveDisabled, saveTitle]);
   const saveValidity = useValidation(savePresetDialogValidation, saveDraft, undefined);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!scopeMenuOpen) {
+      return undefined;
+    }
+    function onDocMouseDown(event) {
+      if (!containerRef.current?.contains(event.target)) {
+        setScopeMenuOpen(false);
+      }
+    }
+    function onDocKey(event) {
+      if (event.key === "Escape") {
+        setScopeMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onDocKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onDocKey);
+    };
+  }, [scopeMenuOpen]);
+
+  function saveWithScope(scope) {
+    setScopeMenuOpen(false);
+    setPresetScope(scope);
+    onSave(scope);
+  }
+
+  const saveBlocked = savingPreset || !saveValidity.ready;
   return (
-    <div className="save-preset">
-      <div className="save-preset-row">
-        <input
-          aria-label="Preset name"
-          className="save-preset-name"
-          disabled={savingPreset}
-          onChange={(event) => {
-            setPresetName(event.target.value);
-            if (presetSaveMessage.text) {
-              setPresetSaveMessage({ tone: "neutral", text: "" });
-            }
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              onSave();
-            }
-          }}
-          placeholder="Name this setup…"
-          value={presetName}
-        />
+    <>
+      <span className="style-axis-divider" aria-hidden="true" />
+      <input
+        aria-label="Preset name"
+        className="save-preset-name"
+        disabled={savingPreset}
+        onChange={(event) => {
+          setPresetName(event.target.value);
+          if (presetSaveMessage.text) {
+            setPresetSaveMessage({ tone: "neutral", text: "" });
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onSave(presetScope);
+          }
+        }}
+        placeholder="Name this setup…"
+        value={presetName}
+      />
+      <div className="compact-selector save-preset-scope-picker" ref={containerRef}>
         <button
+          aria-expanded={scopeMenuOpen}
+          aria-haspopup="menu"
           className="save-preset-btn"
-          disabled={savingPreset || !saveValidity.ready}
-          onClick={onSave}
+          disabled={saveBlocked}
+          onClick={() => setScopeMenuOpen((value) => !value)}
           title={saveTitle}
           type="button"
         >
-          <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
+          <Icon.Preset size={13} />
+          {savingPreset ? "Saving…" : "Save as preset"}
+          <Icon.ChevDown className="chev" size={13} />
         </button>
+        {scopeMenuOpen ? (
+          <div className="compact-selector-menu" role="menu" aria-label="Preset scope">
+            <button
+              className={presetScope === "project" ? "compact-selector-item active" : "compact-selector-item"}
+              disabled={!activeProject}
+              onClick={() => saveWithScope("project")}
+              role="menuitem"
+              type="button"
+            >
+              <span className="compact-selector-label">
+                <strong>This project</strong>
+                <span>{activeProject ? `Only ${activeProject.name ?? activeProject.id}` : "Open a project first"}</span>
+              </span>
+            </button>
+            <button
+              className={presetScope === "global" ? "compact-selector-item active" : "compact-selector-item"}
+              onClick={() => saveWithScope("global")}
+              role="menuitem"
+              type="button"
+            >
+              <span className="compact-selector-label">
+                <strong>All projects</strong>
+                <span>Available everywhere</span>
+              </span>
+            </button>
+          </div>
+        ) : null}
       </div>
-      <ValidationSummary issues={saveValidity.surfaced} label="Save-preset errors" />
-      <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
-        <button
-          aria-checked={presetScope === "project"}
-          className={presetScope === "project" ? "active" : ""}
-          disabled={!activeProject}
-          onClick={() => setPresetScope("project")}
-          role="radio"
-          type="button"
-        >
-          <Icon.Folder size={13} /> This project
-        </button>
-        <button
-          aria-checked={presetScope === "global"}
-          className={presetScope === "global" ? "active" : ""}
-          onClick={() => setPresetScope("global")}
-          role="radio"
-          type="button"
-        >
-          <Icon.Stars size={13} /> All projects
-        </button>
-      </div>
-      {presetSaveMessage.text ? (
-        <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
-          {presetSaveMessage.text}
-        </p>
+      {/* Errors and the save confirmation wrap onto their own full-width line under the chips. */}
+      {saveValidity.surfaced.length || presetSaveMessage.text ? (
+        <div className="style-axis-row-break">
+          <ValidationSummary issues={saveValidity.surfaced} label="Save-preset errors" />
+          {presetSaveMessage.text ? (
+            <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
+              {presetSaveMessage.text}
+            </p>
+          ) : null}
+        </div>
       ) : null}
-    </div>
+    </>
   );
 }
 

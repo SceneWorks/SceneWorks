@@ -78,11 +78,21 @@ async function doubleClick(element) {
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
 
+// Save-as-preset is an inline pair in the style-preset row (sc-15372): the dropdown opens a
+// scope menu, and picking a scope both sets it and fires the save.
 const saveButton = (container) =>
-  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
+  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
-// Save-as-Preset folds into the Advanced disclosure (collapsed by default), matching
-// Image Studio — open it before touching the preset controls.
+const saveWithScope = async (container, scopeLabel) => {
+  await click(saveButton(container));
+  await click(
+    [...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) =>
+      b.textContent.includes(scopeLabel),
+    ),
+  );
+};
+// The Advanced disclosure is collapsed by default — open it before touching a knob that lives
+// inside it.
 const openAdvanced = async (container) => {
   const toggle = container.querySelector(".advanced-section-toggle");
   if (toggle) {
@@ -129,12 +139,11 @@ describe("VideoStudio Save as Preset", () => {
   it("snapshots the video config into a text_to_video preset without the seed", async () => {
     const context = baseContext();
     await render(context);
-    await openAdvanced(container);
 
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Push In"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).toHaveBeenCalledTimes(1);
     const payload = context.createPreset.mock.calls[0][0];
@@ -165,10 +174,9 @@ describe("VideoStudio Save as Preset", () => {
       ],
     });
     await render(context);
-    await openAdvanced(container);
 
     await act(async () => setInput(nameInput(container), "Push In"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");

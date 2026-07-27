@@ -65,9 +65,19 @@ function baseContext(overrides = {}) {
   };
 }
 
+// Save-as-preset is an inline pair in the style-preset row (sc-15372): the dropdown opens a
+// scope menu, and picking a scope both sets it and fires the save.
 const saveButton = (container) =>
-  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
+  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
+const saveWithScope = async (container, scopeLabel) => {
+  await click(saveButton(container));
+  await click(
+    [...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) =>
+      b.textContent.includes(scopeLabel),
+    ),
+  );
+};
 const field = (container, labelText) => {
   const label = [...container.querySelectorAll("label")].find((node) =>
     node.textContent.trim().startsWith(labelText),
@@ -126,12 +136,10 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
-    // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
-    await click(document.body.querySelector(".advanced-section-toggle"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).toHaveBeenCalledTimes(1);
     const payload = context.createPreset.mock.calls[0][0];
@@ -163,9 +171,8 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
-    await click(document.body.querySelector(".advanced-section-toggle"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");

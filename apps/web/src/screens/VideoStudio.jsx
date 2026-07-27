@@ -1723,6 +1723,21 @@ export function VideoStudio() {
               noPresetValue={noPresetId}
               presetPromptParts={presetPromptParts}
               presetLoraDetails={presetLoraDetails}
+              savePreset={(
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                  saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
+                  saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
+                />
+              )}
             />
           </div>
 
@@ -2072,21 +2087,6 @@ export function VideoStudio() {
                   </span>
                 </div>
               ) : null}
-              {/* Save-as-preset folds into Advanced with the rest of the power-user
-                  knobs, matching Image Studio. Gated to the presetable video modes. */}
-              <SavePresetPanel
-                presetName={presetName}
-                setPresetName={setPresetName}
-                savingPreset={savingPreset}
-                presetSaveMessage={presetSaveMessage}
-                setPresetSaveMessage={setPresetSaveMessage}
-                onSave={handleSaveAsPreset}
-                presetScope={presetScope}
-                setPresetScope={setPresetScope}
-                activeProject={activeProject}
-                saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
-                saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
-              />
               {/* Video upscale (super-resolve an existing clip) folds into Advanced — it
                   previously lived in the render rail this layout removes. It operates on a
                   selected existing asset, independent of the current generation payload. */}
