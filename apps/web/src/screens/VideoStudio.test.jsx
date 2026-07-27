@@ -1740,6 +1740,64 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(shipped.defaults).toEqual(KREA.defaults);
     expect(shipped.limits).toEqual(KREA.limits);
     expect(shipped.video).toEqual(KREA.video);
+    // sc-15017: the LoRA tests below ride this block, so hold it to the shipped entry too —
+    // otherwise they could pass against a fixture that had drifted away from the real catalog.
+    expect(shipped.loraCompatibility).toEqual(KREA.loraCompatibility);
+  });
+
+  // sc-15017 — Wan-family LoRA selection for Krea Realtime. No bespoke krea control: this is the
+  // generic `generationStudio` picker, and the only thing that lights it up is family
+  // compatibility. Krea declares its OWN `krea-realtime` family, so a Wan LoRA is offered only
+  // because `loraMatchesModel` mirrors the backend's one-directional extra-compatible registry.
+  describe("Wan-family LoRA selection", () => {
+    const ORIGAMI = {
+      id: "origami_wan",
+      name: "Origami Wan Style",
+      family: "wan-video",
+      scope: "global",
+      installState: "installed",
+    };
+    const KREA_NATIVE_LORA = {
+      id: "krea_native",
+      name: "Krea Native Style",
+      family: "krea-realtime",
+      scope: "global",
+      installState: "installed",
+    };
+    const loraPicker = () => container.querySelector(".lora-picker");
+    const openPicker = async () => {
+      const add = loraPicker().querySelector(".lora-add");
+      await act(async () => add.click());
+    };
+
+    it("offers a Wan-family LoRA when Krea Realtime is the selected model", async () => {
+      await render(
+        baseContext({
+          videoModels: [KREA],
+          macCapabilities: MAC_CAPS,
+          loras: [ORIGAMI, KREA_NATIVE_LORA],
+        }),
+      );
+      await openPicker();
+      expect(loraPicker().textContent).toContain("Origami Wan Style");
+      // Its own family is still offered — the extra is additive, not a swap.
+      expect(loraPicker().textContent).toContain("Krea Native Style");
+    });
+
+    it("does NOT offer a Krea-Realtime LoRA on a Wan model (the registry is one-directional)", async () => {
+      await render(
+        baseContext({
+          videoModels: [{ ...WAN_A14B, loraCompatibility: { families: ["wan-video"] } }],
+          macCapabilities: MAC_CAPS,
+          loras: [ORIGAMI, KREA_NATIVE_LORA],
+        }),
+      );
+      await openPicker();
+      // The control: the Wan model DOES offer its own family, so the absence below is the
+      // direction of the relation and not an empty / broken picker.
+      expect(loraPicker().textContent).toContain("Origami Wan Style");
+      expect(loraPicker().textContent).not.toContain("Krea Native Style");
+    });
   });
 
   it("offers Krea Realtime in the picker with exactly its three capability tabs enabled", async () => {

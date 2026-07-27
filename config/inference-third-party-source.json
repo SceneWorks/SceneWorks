@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "1ee443884925242e9f261c6dbdb11289d47780ee",
-  "auditDigest": "ab7a03662e945ac21ef0f4fef503f90a8c9a0f74d25b269f1e4f5a80e3b4cd81",
+  "inferenceRevision": "1deefff6ceb664aa97da6a34a60d21961718b7d9",
+  "auditDigest": "470b60f5488f5a3225aa7d63eff1c3f916304c40800e9ee417b017c301a41143",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "1ee443884925242e9f261c6dbdb11289d47780ee",
+    "revision": "1deefff6ceb664aa97da6a34a60d21961718b7d9",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 547,
-    "populationSha256": "bf2fe5b0811049f9fc31112e2802309263b16f582fd380de02138bb0d654c247"
+    "matchedFiles": 548,
+    "populationSha256": "30b1031e1aaa9a48cf26713c35767a21ce8302d9605416654469a62e241a4740"
   },
   "portedSourceAreas": [
     {
@@ -76,6 +76,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-stable-audio-3",
+      "pathPrefix": "crates/audio/candle-audio-stable-audio-3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-no-shipped-weights",
+      "evidence": "SceneWorks' catalog (config/manifests/builtin.models.jsonc) declares NO Stable Audio 3 model, so the product downloads none of these weights and there is no About->Licenses component to map yet -- unlike the sibling audio crates, whose upstream terms are already displayed. The crate is an architecture reimplementation carrying no copied expressive source; the candidate inventory pins the exact source blob and normalized provenance markers. sc-15427: adding any Stable Audio 3 catalog entry MUST first add the Stability AI Community License component and re-point this area at it."
     },
     {
       "id": "architecture:crates/audio/candle-audio-whisper",

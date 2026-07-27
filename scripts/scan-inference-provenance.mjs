@@ -4,8 +4,41 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-export const REVISION = "2471fb59e02c7b126b9aba32c83bef0c62f1516e";
+// 🔴 The revision to scan is DERIVED from the shipped Cargo pin, never hand-maintained here.
+//
+// It used to be a literal, and that is exactly how the inventory silently went stale (sc-15017):
+// a pin bump updated `config/inference-third-party-source.json`'s revision LABEL by hand, re-ran
+// this scanner — which scanned the untouched literal, an older revision — saw no diff, and
+// committed an inventory that described a revision it was not generated from. The audit was then
+// self-consistent and GREEN while missing a whole crate that had entered in between
+// (`candle-audio-stable-audio-3`). Two revisions kept in sync by discipline is the defect; there
+// is now only one.
+const WORKER_MANIFEST = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../crates/sceneworks-worker/Cargo.toml",
+);
+const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
+
+/** The single inference revision the worker's Cargo manifest pins. Throws if it is not unique. */
+export function pinnedRevision(manifestPath = WORKER_MANIFEST) {
+  const pins = new Set(
+    fs
+      .readFileSync(manifestPath, "utf8")
+      .split("\n")
+      .filter((line) => line.includes(INFERENCE_GIT))
+      .map((line) => line.match(/\brev\s*=\s*"([0-9a-f]{40})"/)?.[1])
+      .filter(Boolean),
+  );
+  if (pins.size !== 1) {
+    throw new Error(
+      `expected exactly one 40-hex inference rev in ${manifestPath}, found: ${[...pins].join(", ") || "none"}`,
+    );
+  }
+  return [...pins][0];
+}
+
 export const MARKER =
   /\b(?:faithful(?:\s+\w+){0,3}\s+ports?|ported\s+from|ports?\s+of|vendors?|vendored|transcribed|copied(?:\s+\w+){0,3}\s+verbatim|adapted\s+from)\b/giu;
 
@@ -48,7 +81,7 @@ function areaFor(file) {
   return `architecture:${src < 0 ? path.posix.dirname(file) : file.slice(0, src)}`;
 }
 
-export function scan(repo, revision = REVISION) {
+export function scan(repo, revision = pinnedRevision()) {
   const files = execFileSync("git", ["-C", repo, "ls-tree", "-r", "--name-only", revision], {
     encoding: "utf8",
   }).trim().split("\n").filter(productionRustPath);
@@ -101,11 +134,14 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const repo = value("--repo");
   const output = value("--write");
   const compare = value("--compare");
-  if (!repo || (!output && !compare)) {
-    console.error("usage: node scripts/scan-inference-provenance.mjs --repo PATH [--write FILE|--compare FILE]");
+  // Defaults to the shipped Cargo pin, so an audit can never scan a revision the product does not
+  // build. `--revision` is for auditing a candidate rev BEFORE bumping, not for routine use.
+  const revision = value("--revision") ?? pinnedRevision();
+  if (!repo || (!output && !compare) || !/^[0-9a-f]{40}$/.test(revision)) {
+    console.error("usage: node scripts/scan-inference-provenance.mjs --repo PATH [--revision SHA40] [--write FILE|--compare FILE]");
     process.exit(2);
   }
-  const candidates = scan(path.resolve(repo));
+  const candidates = scan(path.resolve(repo), revision);
   const rendered = serialize(candidates);
   if (output) fs.writeFileSync(path.resolve(output), rendered);
   if (compare) {
@@ -115,5 +151,5 @@ if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
       process.exit(1);
     }
   }
-  console.log(`${candidates.length} candidates; population sha256 ${populationSha256(candidates)}`);
+  console.log(`${revision}: ${candidates.length} candidates; population sha256 ${populationSha256(candidates)}`);
 }
