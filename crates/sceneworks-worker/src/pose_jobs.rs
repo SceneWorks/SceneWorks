@@ -71,8 +71,10 @@ const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/o
 /// mismatch (host-side swap, corrupted transfer, MITM) fails the job with the
 /// integrity-check error instead of silently loading tampered weights. Digests were
 /// computed from the published bundles (94,223,081 B / 213,433,855 B respectively).
-const DET_ZIP_SHA256: &str = "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
-const POSE_ZIP_SHA256: &str = "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
+pub(crate) const DET_ZIP_SHA256: &str =
+    "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
+pub(crate) const POSE_ZIP_SHA256: &str =
+    "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
 /// The hardware execution provider this build registers before the CPU fallback:
@@ -619,6 +621,63 @@ struct RawSource {
     width: u32,
     height: u32,
     people: Vec<Vec<[f32; 3]>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CatalogPosePerson {
+    /// SceneWorks OpenPose-18 body keypoints normalized to the source frame.
+    pub body_keypoints: Vec<[f32; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CatalogPoseResult {
+    pub people: Vec<CatalogPosePerson>,
+}
+
+/// Detect every person's OpenPose-18 body keypoints for one catalog image,
+/// reusing the same process-wide DWPose sessions as pose jobs and control
+/// preprocessing. Blocking; callers must keep it off async runtime threads.
+pub(crate) fn detect_catalog_poses_blocking(
+    det_path: &Path,
+    pose_path: &Path,
+    image_path: &Path,
+) -> WorkerResult<CatalogPoseResult> {
+    let image = crate::image_decode::decode_image_any(image_path)
+        .map_err(|error| WorkerError::InvalidPayload(format!("pose source open: {error}")))?
+        .to_rgb8();
+    let (width, height) = (image.width(), image.height());
+    let cell = DETECTOR.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    let cache_matches = guard.as_ref().is_some_and(|(cached_det, cached_pose, _)| {
+        resolved_cache_paths_match(
+            [cached_det.as_path(), cached_pose.as_path()],
+            [det_path, pose_path],
+        )
+    });
+    if !cache_matches {
+        *guard = Some((
+            det_path.to_path_buf(),
+            pose_path.to_path_buf(),
+            Detector::load(det_path, pose_path)?,
+        ));
+    }
+    let detector = &mut guard.as_mut().expect("detector loaded").2;
+    let people = detector
+        .detect(&image)?
+        .iter()
+        .map(|keypoints| {
+            wholebody_to_openpose(keypoints, width as f32, height as f32).map(|record| {
+                CatalogPosePerson {
+                    body_keypoints: record.keypoints,
+                }
+            })
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    Ok(CatalogPoseResult { people })
 }
 
 /// Blocking detection over a batch of resolved image paths. All `ort` objects live

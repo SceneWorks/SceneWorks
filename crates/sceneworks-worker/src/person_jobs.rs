@@ -110,9 +110,9 @@ const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-onnx";
 /// for defense-in-depth, mirroring the SeedVR2 pin (sc-8879). HF's tree API still reports
 /// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies the content against.
 #[cfg(target_os = "macos")]
-const DET_REVISION: &str = "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777";
+pub(crate) const DET_REVISION: &str = "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777";
 #[cfg(not(target_os = "macos"))]
-const DET_REVISION: &str = "3cffbaccca4f239ae6301d8b66ba721401ecfa8d";
+pub(crate) const DET_REVISION: &str = "3cffbaccca4f239ae6301d8b66ba721401ecfa8d";
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
 // ---------------------------------------------------------------------------

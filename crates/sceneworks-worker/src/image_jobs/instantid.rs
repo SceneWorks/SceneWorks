@@ -25,7 +25,8 @@ const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
 /// load. Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports
 /// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies against. NOTE: the candle PuLID lane
 /// reuses this SAME repo (`pulid_candle.rs` `PULID_CANDLE_FACE_REPO`); its pin must match this sha.
-const INSTANTID_MLX_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
+pub(crate) const INSTANTID_MLX_REVISION: &str =
+    "bca0cacf8e5e04529bb2b326a521361b02be84fd";
 const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
 // `pub(crate)` so the Dataset Doctor face pass (sc-6538) can join them under the bundle dir that
 // `ensure_face_stack_dir` stages, to load the MLX `FaceAnalysis` (SCRFD + ArcFace) directly.

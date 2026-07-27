@@ -69,6 +69,105 @@ struct FaceAnalysisRecord {
     face_fraction: f64,
 }
 
+/// One SCRFD detection in original-frame pixel coordinates. Catalog analysis
+/// intentionally uses detection-only entry points on both backends and never
+/// computes ArcFace embeddings for an objective face count.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CatalogFaceDetection {
+    pub bbox: [f32; 4],
+    pub confidence: f32,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+enum CatalogFaceBackend {
+    #[cfg(target_os = "macos")]
+    Mlx(FaceAnalysis),
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    Candle(Box<dyn FaceEmbedder>),
+}
+
+/// Loaded SCRFD stack reused across every record in one catalog-analysis pass.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct CatalogFaceDetector {
+    backend: CatalogFaceBackend,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl CatalogFaceDetector {
+    pub(crate) fn load(weights_dir: &Path) -> WorkerResult<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let scrfd =
+                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
+                    .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+            let arcface =
+                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
+                    .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+            let analysis = FaceAnalysis::load(&scrfd, &arcface)
+                .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            Ok(Self {
+                backend: CatalogFaceBackend::Mlx(analysis),
+            })
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            let analysis = runtime_cuda::providers::face::load(weights_dir)
+                .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            Ok(Self {
+                backend: CatalogFaceBackend::Candle(Box::new(analysis)),
+            })
+        }
+    }
+
+    pub(crate) fn detect(
+        &self,
+        image_path: &Path,
+    ) -> WorkerResult<(u32, u32, Vec<CatalogFaceDetection>)> {
+        let image = load_face_image(image_path)?;
+        let detections = match &self.backend {
+            #[cfg(target_os = "macos")]
+            CatalogFaceBackend::Mlx(analysis) => {
+                let (height, width) = (image.height as usize, image.width as usize);
+                analysis
+                    .detect(&image.pixels, height, width)
+                    .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?
+                    .into_iter()
+                    .map(|face| CatalogFaceDetection {
+                        bbox: face.bbox,
+                        // mlx-gen-face's raw SCRFD `Detection` names this field `score`.
+                        confidence: face.score,
+                    })
+                    .collect()
+            }
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            CatalogFaceBackend::Candle(analysis) => analysis
+                .detect(&image)
+                .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?
+                .into_iter()
+                .map(|face| CatalogFaceDetection {
+                    bbox: face.bbox,
+                    // gen-core's face-analysis result names the equivalent field `det_score`.
+                    confidence: face.det_score,
+                })
+                .collect(),
+        };
+        Ok((image.width, image.height, detections))
+    }
+}
+
 /// The largest face's bounding-box area as a fraction of the frame (sc-6538). Pure. SCRFD can return
 /// boxes that extend past the image edge, so the fraction is clamped to `[0, 1]` rather than trusting
 /// `area ≤ frame`. A zero-area frame (degenerate metadata) yields `0.0`.

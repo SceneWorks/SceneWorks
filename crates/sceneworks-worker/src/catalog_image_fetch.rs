@@ -12,7 +12,7 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat, ImageReader};
 use rusqlite::{params, Connection, OptionalExtension};
 use sceneworks_core::catalog_store::{
-    Catalog, CatalogError, CatalogRecord, CatalogRegistry, NewCatalogRecord,
+    Catalog, CatalogError, CatalogProcessingLease, CatalogRecord, CatalogRegistry, NewCatalogRecord,
 };
 use sceneworks_core::time::utc_now;
 use serde::{Deserialize, Serialize};
@@ -260,6 +260,7 @@ enum DiscardFaultPoint {
 
 #[derive(Debug)]
 struct CatalogFetchLease {
+    _processing: CatalogProcessingLease,
     _file: File,
 }
 
@@ -525,6 +526,14 @@ struct DiscardIntentReferenceSummary {
 
 impl CatalogFetchLease {
     fn acquire(catalog: &Catalog) -> CatalogImageFetchResult<Self> {
+        let processing =
+            CatalogProcessingLease::try_acquire(catalog).map_err(|error| match error {
+                CatalogError::Conflict(_) => CatalogImageFetchError::Busy(format!(
+                    "Catalog {} already has active processing.",
+                    catalog.descriptor().id
+                )),
+                error => CatalogImageFetchError::Catalog(error),
+            })?;
         let path = catalog.root().join(FETCH_LOCK_FILE);
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -542,7 +551,10 @@ impl CatalogFetchLease {
             .open(&path)?;
         let contended = fs2::lock_contended_error().raw_os_error();
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self {
+                _processing: processing,
+                _file: file,
+            }),
             Err(error) if error.raw_os_error() == contended => {
                 Err(CatalogImageFetchError::Busy(format!(
                     "Catalog {} already has an active image fetch.",
@@ -557,8 +569,9 @@ impl CatalogFetchLease {
 /// Fetches image candidates for one attached catalog.
 ///
 /// The catalog ID is resolved exclusively through `CatalogRegistry`; callers
-/// cannot supply an arbitrary cache root. A catalog-wide advisory lease prevents
-/// two worker processes from mutating acquisition state concurrently.
+/// cannot supply an arbitrary cache root. The shared catalog-processing lease
+/// excludes scanners, analyzers, and lifecycle changes for the complete pass;
+/// the fetch-specific advisory lock remains for compatibility with older workers.
 pub async fn fetch_attached_catalog_images(
     registry: &CatalogRegistry,
     catalog_id: &str,
@@ -4041,6 +4054,34 @@ mod tests {
         let _first = CatalogFetchLease::acquire(&first_catalog).expect("first lease");
         let error = CatalogFetchLease::acquire(&second_catalog).expect_err("must contend");
         assert!(matches!(error, CatalogImageFetchError::Busy(_)));
+    }
+
+    #[tokio::test]
+    async fn shared_processing_lease_blocks_fetch_before_network_or_mutation() {
+        let (_root, registry, id) = catalog_fixture();
+        let catalog = registry.open_attached(&id).expect("catalog opens");
+        let _processing =
+            CatalogProcessingLease::try_acquire(&catalog).expect("shared processing lease");
+        let calls = Arc::new(Mutex::new(0_u64));
+        let error = fetch_attached_catalog_images_with(
+            &registry,
+            &id,
+            &CatalogImageFetchOptions::default(),
+            {
+                let calls = Arc::clone(&calls);
+                move |_url, _options| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        *calls.lock().expect("calls") += 1;
+                        Ok(png(8, 8))
+                    }
+                }
+            },
+        )
+        .await
+        .expect_err("active scanner or analyzer must block fetch");
+        assert!(matches!(error, CatalogImageFetchError::Busy(_)));
+        assert_eq!(*calls.lock().expect("calls"), 0);
     }
 
     fn walk_regular_files(root: &Path) -> usize {
