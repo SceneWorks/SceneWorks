@@ -495,21 +495,25 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
             wan_i2v_14b_lora_target(),
-            // Keep not-yet-routed foundation contracts after the executable targets so the stable
-            // first-target default remains Z-Image until sc-14055 advertises the Mage kernel.
+            // Mage-Flow keeps the trailing slot so the stable first-target default stays Z-Image.
+            //
+            // ONE Mage target, deliberately (sc-15277): epic 14034 confirms "Base = training
+            // target" and scopes F6 to "LoRA + full base fine-tune vs **Base**", and `mlx-gen-mage`
+            // registers exactly one trainer — under `mage_flow_base`. sc-14054 also registered a
+            // `mage_flow_edit_base_lora` contract ahead of any trainer; while the kernel was in no
+            // routed set that target merely queued forever, but sc-14056's cutover turned it into a
+            // CLAIM-THEN-FAIL: the mlx worker takes the job and `engine_trainer_id` then rejects it
+            // ~2s later. Advertising a target the product cannot execute is the defect, so it is not
+            // offered. Restoring it needs a real Mage EDIT trainer (reference-image latents in the
+            // cache step and the edit input-sequence assembly in the training forward — an Edit
+            // adapter trained through the generation-only path is fitted on a distribution the model
+            // never sees at inference) — tracked in sc-15320, not written off.
             mage_flow_lora_target(
                 "mage_flow_base_lora",
                 "Mage-Flow Base LoRA",
                 "mage_flow_base",
                 "SceneWorks/Mage-Flow-Base",
                 "Train an image LoRA against the undistilled Mage-Flow Base model.",
-            ),
-            mage_flow_lora_target(
-                "mage_flow_edit_base_lora",
-                "Mage-Flow Edit-Base LoRA",
-                "mage_flow_edit_base",
-                "SceneWorks/Mage-Flow-Edit-Base",
-                "Train an image-editing LoRA against the undistilled Mage-Flow Edit-Base model.",
             ),
         ],
         extra: ExtraFields::new(),
