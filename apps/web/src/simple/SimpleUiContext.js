@@ -10,6 +10,7 @@ import { createContext, useContext } from "react";
 //   breakpoint  "phone" | "tablet" | "desktop"
 //   goTo(screenId)
 //   openSheet({ title, kind, options, onSelect })  — kind: "list" | "grid" | "pills"
+//   openSheet({ title, body })                     — a screen-supplied body in the same chrome
 //   closeSheet()
 //   openGuide()
 //   openPreview(asset, { play })  — `play: true` opens an audio asset already playing
