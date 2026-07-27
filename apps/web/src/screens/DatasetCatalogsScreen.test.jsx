@@ -147,6 +147,14 @@ describe("DatasetCatalogsScreen", () => {
         });
         return response(catalogs[0]);
       }
+      if (path.endsWith("/analyze") && options.method === "POST") {
+        return response({
+          id: "job-catalog-analysis",
+          type: "catalog_analysis",
+          status: "queued",
+          payload: JSON.parse(options.body),
+        }, 201);
+      }
       if (path.endsWith("/pause")) {
         catalogs[0] = catalog({
           processingControl: {
@@ -390,6 +398,36 @@ describe("DatasetCatalogsScreen", () => {
     await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Delete files permanently").click());
     await flush();
     expect(requests.some((item) => item.path === "/api/v1/catalogs/cat-1/on-disk" && item.options.method === "DELETE")).toBe(true);
+  });
+
+  it("starts the typed survivor-only analysis job with revision and GPU selection", async () => {
+    catalogs[0] = catalog({
+      processing: { ...catalog().processing, state: "completed" },
+      analyzerConfig: {
+        ...catalog().analyzerConfig,
+        revision: 7,
+        settings: {
+          ...catalog().analyzerConfig.settings,
+          visionAnalysisEnabled: true,
+          semanticEmbeddingsEnabled: true,
+        },
+      },
+    });
+    await remountWithFakeTimers();
+    const gpu = container.querySelector("input[aria-label='Analysis GPU']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")
+        .set.call(gpu, "gpu-1");
+      gpu.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent.includes("Run analysis")).click());
+    await flush();
+    expect(requests.find((item) => item.path === "/api/v1/catalogs/cat-1/analyze")?.body).toEqual({
+      expectedAnalyzerConfigRevision: 7,
+      requestedGpu: "gpu-1",
+      batchSize: 16,
+    });
   });
 
   it("shows actionable sanitized errors without echoing a private server path", async () => {

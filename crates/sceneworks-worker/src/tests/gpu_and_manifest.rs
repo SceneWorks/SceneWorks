@@ -309,6 +309,9 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6535: runtime-macos includes the CLIP `clip_vit_l14` ImageEmbedder, so the registry
         // derives DatasetAnalysis from its descriptor.
         WorkerCapability::DatasetAnalysis,
+        // sc-14958: catalog analysis reuses the linked CLIP and vision providers and is routed to
+        // the same MLX GPU worker.
+        WorkerCapability::CatalogAnalysis,
         // carve-outs
         WorkerCapability::ImageEdit,
         WorkerCapability::ImageDetail,

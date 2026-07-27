@@ -2963,6 +2963,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Analysis — {subject}"))
         }
+        JobType::CatalogAnalysis => {
+            let subject = first_str(payload, &["catalogName", "catalogId"])
+                .unwrap_or("(unnamed catalog)")
+                .to_owned();
+            Some(format!("Catalog Analysis - {subject}"))
+        }
         JobType::DatasetUpscale => {
             let subject = first_str(payload, &["datasetName", "datasetId"])
                 .unwrap_or("(unnamed dataset)")
@@ -4015,6 +4021,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::ControlTraining
             | JobType::TrainingCaption
             | JobType::DatasetAnalysis
+            | JobType::CatalogAnalysis
             | JobType::DatasetUpscale
             | JobType::DatasetFaceAnalysis
             | JobType::FaceLikenessCompare

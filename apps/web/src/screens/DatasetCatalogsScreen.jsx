@@ -173,6 +173,7 @@ export function DatasetCatalogsScreen() {
   const [createDraft, setCreateDraft] = useState(EMPTY_CREATE);
   const [attachPath, setAttachPath] = useState("");
   const [analyzerDraft, setAnalyzerDraft] = useState(DEFAULT_ANALYZER_SETTINGS);
+  const [analysisGpu, setAnalysisGpu] = useState("auto");
   const generationRef = useRef(0);
   const analyzerDraftVersionRef = useRef("");
   const pollAbortRef = useRef(null);
@@ -392,6 +393,26 @@ export function DatasetCatalogsScreen() {
       ),
       (updated) => setCatalogs((current) =>
         current.map((item) => item.id === updated.id ? updated : item)),
+    );
+  }
+
+  async function runAnalysis() {
+    if (!selected) return;
+    await mutate(
+      "start catalog analysis",
+      (signal) => apiFetch(
+        `/api/v1/catalogs/${encodeURIComponent(selected.id)}/analyze`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            expectedAnalyzerConfigRevision: selected.analyzerConfig?.revision ?? 0,
+            requestedGpu: analysisGpu.trim() || "auto",
+            batchSize: 16,
+          }),
+          signal,
+        },
+      ),
     );
   }
 
@@ -634,10 +655,16 @@ export function DatasetCatalogsScreen() {
                       <label key={field}>
                         <input
                           checked={Boolean(analyzerDraft[field])}
-                          disabled={selected.availability !== "available"}
+                          disabled={
+                            selected.availability !== "available"
+                            || (field !== "structuredAnalysisEnabled" && !analyzerDraft.structuredAnalysisEnabled)
+                          }
                           onChange={(event) => setAnalyzerDraft((current) => ({
                             ...current,
                             [field]: event.target.checked,
+                            ...(field === "structuredAnalysisEnabled" && !event.target.checked
+                              ? { visionAnalysisEnabled: false, semanticEmbeddingsEnabled: false }
+                              : {}),
                           }))}
                           type="checkbox"
                         />
@@ -680,6 +707,35 @@ export function DatasetCatalogsScreen() {
                     Save analyzer settings
                   </button>
                 </form>
+                <div className="catalog-analysis-run">
+                  <label className="settings-field">
+                    <span>Analysis GPU</span>
+                    <input
+                      aria-label="Analysis GPU"
+                      onChange={(event) => setAnalysisGpu(event.target.value)}
+                      placeholder="auto, mlx, or gpu-0"
+                      value={analysisGpu}
+                    />
+                    <small className="field-hint">
+                      Use auto for scheduler selection, or enter a worker GPU id.
+                    </small>
+                  </label>
+                  <button
+                    className="primary-action"
+                    disabled={
+                      Boolean(busy)
+                      || selected.availability !== "available"
+                      || selected.processing?.state === "running"
+                    }
+                    onClick={runAnalysis}
+                    type="button"
+                  >
+                    <Icon.Play /> Run analysis
+                  </button>
+                  <p className="field-hint">
+                    Fetches images, runs structured filters, then sends survivors only to enabled vision and embedding analyzers.
+                  </p>
+                </div>
                 <h4>Recorded analyzer versions</h4>
                 {analyzerEntries.length ? (
                   <dl className="catalog-definition-list">

@@ -220,6 +220,8 @@ mod analysis_jobs_common;
 use analysis_jobs_common::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
+mod catalog_semantic_jobs;
+use catalog_semantic_jobs::*;
 mod face_analysis_jobs;
 use face_analysis_jobs::*;
 // sc-4407 — the shared, generator-agnostic face-likeness scorer (epic 4406): the backbone identity-
@@ -1398,6 +1400,9 @@ async fn run_utility_job(
             JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset analysis failed.", error)),
+            JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Catalog analysis failed.", error)),
             // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
             // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
             // the candle lane; off both the handler returns a precise unsupported error.

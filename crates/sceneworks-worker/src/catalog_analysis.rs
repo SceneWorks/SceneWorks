@@ -25,6 +25,7 @@ const STRUCTURED_ANALYSIS_KEY: &str = "structured";
 const STRUCTURED_SCHEMA_VERSION: u32 = 2;
 const MAX_ERROR_CHARS: usize = 2_048;
 const MAX_PAGE_SIZE: u32 = 1_000;
+const STRUCTURED_CHECKPOINT_KEY: &str = "catalog_structured_analysis.checkpoint.v1";
 
 pub const PERSON_ANALYZER_VERSION: &str = "catalog-person-v1";
 pub const FACE_ANALYZER_VERSION: &str = "catalog-face-v1";
@@ -39,6 +40,7 @@ pub enum CatalogAnalysisError {
     Io(std::io::Error),
     InvalidConfig(String),
     Busy(String),
+    Canceled(String),
 }
 
 impl std::fmt::Display for CatalogAnalysisError {
@@ -46,7 +48,9 @@ impl std::fmt::Display for CatalogAnalysisError {
         match self {
             Self::Catalog(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "{error}"),
-            Self::InvalidConfig(detail) | Self::Busy(detail) => formatter.write_str(detail),
+            Self::InvalidConfig(detail) | Self::Busy(detail) | Self::Canceled(detail) => {
+                formatter.write_str(detail)
+            }
         }
     }
 }
@@ -423,8 +427,24 @@ pub struct CatalogAnalysisReport {
     pub analyzer_runs: BTreeMap<String, u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CatalogAnalysisPageProgress {
+    pub next_cursor: Option<i64>,
+    pub report: CatalogAnalysisReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredAnalysisCheckpoint {
+    schema_version: u32,
+    config_fingerprint: String,
+    next_cursor: Option<i64>,
+    completed: bool,
+    report: CatalogAnalysisReport,
+}
+
 struct CatalogAnalysisLease {
-    _processing: CatalogProcessingLease,
+    _processing: Option<CatalogProcessingLease>,
     _files: Vec<File>,
 }
 
@@ -438,6 +458,21 @@ impl CatalogAnalysisLease {
                 )),
                 error => CatalogAnalysisError::Catalog(error),
             })?;
+        Self::acquire_with_processing(catalog, Some(processing))
+    }
+
+    #[allow(dead_code)]
+    fn acquire_under_processing_lease(
+        catalog: &Catalog,
+        _processing: &CatalogProcessingLease,
+    ) -> CatalogAnalysisResult<Self> {
+        Self::acquire_with_processing(catalog, None)
+    }
+
+    fn acquire_with_processing(
+        catalog: &Catalog,
+        processing: Option<CatalogProcessingLease>,
+    ) -> CatalogAnalysisResult<Self> {
         let mut files = Vec::new();
         for name in [FETCH_LOCK_FILE, ANALYSIS_LOCK_FILE] {
             let path = catalog.root().join(name);
@@ -482,18 +517,84 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
     config: &CatalogAnalysisConfig,
     analyzers: &mut A,
 ) -> CatalogAnalysisResult<CatalogAnalysisReport> {
+    analyze_attached_catalog_with_lease(registry, catalog_id, config, analyzers, None, None, None)
+}
+
+/// Pipeline-only sibling that keeps the caller's shared processing lease alive
+/// across fetch, structured analysis, and survivor-only semantic analysis.
+#[allow(dead_code)]
+pub(crate) fn analyze_attached_catalog_under_processing_lease<A: CatalogAnalyzers>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    config: &CatalogAnalysisConfig,
+    analyzers: &mut A,
+    processing: &CatalogProcessingLease,
+) -> CatalogAnalysisResult<CatalogAnalysisReport> {
+    analyze_attached_catalog_with_lease(
+        registry,
+        catalog_id,
+        config,
+        analyzers,
+        Some(processing),
+        None,
+        None,
+    )
+}
+
+/// Pipeline-only controlled sibling. The cancel flag is polled between every
+/// record and page, and the callback observes each durable keyset checkpoint.
+#[allow(dead_code)]
+pub(crate) fn analyze_attached_catalog_under_processing_lease_with_control<A: CatalogAnalyzers>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    config: &CatalogAnalysisConfig,
+    analyzers: &mut A,
+    processing: &CatalogProcessingLease,
+    cancel: &gen_core::CancelFlag,
+    on_page: &mut (dyn FnMut(CatalogAnalysisPageProgress) -> CatalogAnalysisResult<()> + Send),
+) -> CatalogAnalysisResult<CatalogAnalysisReport> {
+    analyze_attached_catalog_with_lease(
+        registry,
+        catalog_id,
+        config,
+        analyzers,
+        Some(processing),
+        Some(cancel),
+        Some(on_page),
+    )
+}
+
+fn analyze_attached_catalog_with_lease<A: CatalogAnalyzers>(
+    registry: &CatalogRegistry,
+    catalog_id: &str,
+    config: &CatalogAnalysisConfig,
+    analyzers: &mut A,
+    processing: Option<&CatalogProcessingLease>,
+    cancel: Option<&gen_core::CancelFlag>,
+    mut on_page: Option<
+        &mut (dyn FnMut(CatalogAnalysisPageProgress) -> CatalogAnalysisResult<()> + Send),
+    >,
+) -> CatalogAnalysisResult<CatalogAnalysisReport> {
     validate_config(config)?;
     let mut catalog = registry.open_attached(catalog_id)?;
-    let _lease = CatalogAnalysisLease::acquire(&catalog)?;
-    let mut report = CatalogAnalysisReport::default();
-    let mut cursor = None;
+    let _lease = match processing {
+        Some(processing) => {
+            CatalogAnalysisLease::acquire_under_processing_lease(&catalog, processing)?
+        }
+        None => CatalogAnalysisLease::acquire(&catalog)?,
+    };
+    let config_fingerprint = structured_config_fingerprint(config)?;
+    let (mut cursor, mut report) =
+        load_structured_checkpoint(&catalog, &config_fingerprint)?.unwrap_or_default();
 
     loop {
+        check_analysis_cancel(cancel)?;
         let page = catalog.page_records_after(cursor, config.page_size)?;
         if page.records.is_empty() {
             break;
         }
         for mut record in page.records {
+            check_analysis_cancel(cancel)?;
             report.records_examined = report.records_examined.saturating_add(1);
             let structured = match resolve_catalog_image(&catalog, &record)
                 .and_then(|path| image_fingerprint(&path).map(|fingerprint| (path, fingerprint)))
@@ -529,6 +630,19 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
             }
         }
         cursor = page.next_cursor;
+        persist_structured_checkpoint(
+            &catalog,
+            &config_fingerprint,
+            cursor,
+            cursor.is_none(),
+            &report,
+        )?;
+        if let Some(callback) = on_page.as_deref_mut() {
+            callback(CatalogAnalysisPageProgress {
+                next_cursor: cursor,
+                report: report.clone(),
+            })?;
+        }
         if cursor.is_none() {
             break;
         }
@@ -551,6 +665,74 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
     }
     catalog.set_contract_state(&state)?;
     Ok(report)
+}
+
+fn check_analysis_cancel(cancel: Option<&gen_core::CancelFlag>) -> CatalogAnalysisResult<()> {
+    if cancel.is_some_and(gen_core::CancelFlag::is_cancelled) {
+        Err(CatalogAnalysisError::Canceled(
+            "Catalog analysis canceled by user.".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn structured_config_fingerprint(config: &CatalogAnalysisConfig) -> CatalogAnalysisResult<String> {
+    let payload = serde_json::to_vec(config).map_err(|error| {
+        CatalogAnalysisError::InvalidConfig(format!(
+            "Structured analysis configuration could not be serialized: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+}
+
+fn load_structured_checkpoint(
+    catalog: &Catalog,
+    config_fingerprint: &str,
+) -> CatalogAnalysisResult<Option<(Option<i64>, CatalogAnalysisReport)>> {
+    let state = catalog.contract_state()?;
+    let Some(value) = state.checkpoints.get(STRUCTURED_CHECKPOINT_KEY) else {
+        return Ok(None);
+    };
+    let Ok(checkpoint) = serde_json::from_value::<StructuredAnalysisCheckpoint>(value.clone())
+    else {
+        return Ok(None);
+    };
+    if checkpoint.schema_version != STRUCTURED_SCHEMA_VERSION
+        || checkpoint.config_fingerprint != config_fingerprint
+        || checkpoint.completed
+        || checkpoint.next_cursor.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some((checkpoint.next_cursor, checkpoint.report)))
+}
+
+fn persist_structured_checkpoint(
+    catalog: &Catalog,
+    config_fingerprint: &str,
+    next_cursor: Option<i64>,
+    completed: bool,
+    report: &CatalogAnalysisReport,
+) -> CatalogAnalysisResult<()> {
+    let mut state = catalog.contract_state()?;
+    state.checkpoints.insert(
+        STRUCTURED_CHECKPOINT_KEY.to_owned(),
+        serde_json::to_value(StructuredAnalysisCheckpoint {
+            schema_version: STRUCTURED_SCHEMA_VERSION,
+            config_fingerprint: config_fingerprint.to_owned(),
+            next_cursor,
+            completed,
+            report: report.clone(),
+        })
+        .map_err(|error| {
+            CatalogAnalysisError::InvalidConfig(format!(
+                "Structured analysis checkpoint could not be serialized: {error}"
+            ))
+        })?,
+    );
+    catalog.set_contract_state(&state)?;
+    Ok(())
 }
 
 fn unavailable_input_analysis(
@@ -1965,5 +2147,114 @@ mod tests {
         assert!(matches!(error, CatalogAnalysisError::Busy(_)));
         assert!(analyzers.calls.is_empty());
         assert!(previous_structured_analysis(&fixture.record("qualified")).is_none());
+    }
+
+    #[test]
+    fn controlled_analysis_honors_cancel_before_inference() {
+        let fixture = Fixture::new("controlled-cancel", &["qualified"]);
+        let catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog");
+        let processing = CatalogProcessingLease::try_acquire(&catalog).expect("processing");
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+        let mut callbacks = 0_usize;
+        let mut on_page = |_progress: CatalogAnalysisPageProgress| {
+            callbacks += 1;
+            Ok(())
+        };
+        let mut analyzers = FakeAnalyzers::default();
+        let error = analyze_attached_catalog_under_processing_lease_with_control(
+            &fixture.registry,
+            &fixture.catalog_id,
+            &CatalogAnalysisConfig::default(),
+            &mut analyzers,
+            &processing,
+            &cancel,
+            &mut on_page,
+        )
+        .expect_err("pre-canceled analysis stops");
+        assert!(matches!(error, CatalogAnalysisError::Canceled(_)));
+        assert!(analyzers.calls.is_empty());
+        assert_eq!(callbacks, 0);
+    }
+
+    #[test]
+    fn per_page_callback_and_keyset_checkpoint_resume_counts_without_reanalysis() {
+        let fixture = Fixture::new("controlled-resume", &["first", "second"]);
+        let config = CatalogAnalysisConfig {
+            page_size: 1,
+            ..CatalogAnalysisConfig::default()
+        };
+        let cancel = gen_core::CancelFlag::new();
+
+        let catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog");
+        let processing = CatalogProcessingLease::try_acquire(&catalog).expect("processing");
+        let mut first_callbacks = 0_usize;
+        let mut stop_after_first = |progress: CatalogAnalysisPageProgress| {
+            first_callbacks += 1;
+            assert_eq!(progress.report.records_examined, 1);
+            assert!(progress.next_cursor.is_some());
+            Err(CatalogAnalysisError::InvalidConfig(
+                "test interruption".to_owned(),
+            ))
+        };
+        let mut first_analyzers = FakeAnalyzers::default();
+        let error = analyze_attached_catalog_under_processing_lease_with_control(
+            &fixture.registry,
+            &fixture.catalog_id,
+            &config,
+            &mut first_analyzers,
+            &processing,
+            &cancel,
+            &mut stop_after_first,
+        )
+        .expect_err("callback simulates interruption");
+        assert!(matches!(error, CatalogAnalysisError::InvalidConfig(_)));
+        assert_eq!(first_callbacks, 1);
+        assert_eq!(first_analyzers.calls.len(), 3);
+        drop(processing);
+        drop(catalog);
+
+        let catalog = fixture
+            .registry
+            .open_attached(&fixture.catalog_id)
+            .expect("catalog");
+        let processing = CatalogProcessingLease::try_acquire(&catalog).expect("processing");
+        let mut resumed_callbacks = 0_usize;
+        let mut observe_resume = |progress: CatalogAnalysisPageProgress| {
+            resumed_callbacks += 1;
+            assert_eq!(progress.report.records_examined, 2);
+            assert!(progress.next_cursor.is_none());
+            Ok(())
+        };
+        let mut resumed_analyzers = FakeAnalyzers::default();
+        let report = analyze_attached_catalog_under_processing_lease_with_control(
+            &fixture.registry,
+            &fixture.catalog_id,
+            &config,
+            &mut resumed_analyzers,
+            &processing,
+            &cancel,
+            &mut observe_resume,
+        )
+        .expect("resume succeeds");
+        assert_eq!(report.records_examined, 2);
+        assert_eq!(resumed_callbacks, 1);
+        assert_eq!(
+            resumed_analyzers.calls.len(),
+            3,
+            "only the second keyset page is analyzed after resume"
+        );
+        let state = catalog.contract_state().expect("contract state");
+        let checkpoint: StructuredAnalysisCheckpoint =
+            serde_json::from_value(state.checkpoints[STRUCTURED_CHECKPOINT_KEY].clone())
+                .expect("checkpoint schema");
+        assert!(checkpoint.completed);
+        assert_eq!(checkpoint.report.records_examined, 2);
     }
 }

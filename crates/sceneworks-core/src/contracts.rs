@@ -292,6 +292,9 @@ string_enum! {
         // GPU-routed (MLX `clip_vit_l14`; in job_requires_gpu, not in NON_GPU_JOB_TYPES),
         // served by the Rust/MLX worker.
         DatasetAnalysis => "dataset_analysis",
+        // End-to-end attached-catalog analysis: bounded image acquisition,
+        // objective survivor filtering, constrained VLM tags, and optional CLIP.
+        CatalogAnalysis => "catalog_analysis",
         // Real-ESRGAN upscale of flagged low-resolution items in a training dataset, then re-point each
         // item at the upscaled child asset (epic 6529 P3, sc-6539 one-tap fixes). GPU-routed like
         // dataset_analysis (reuses the image_upscale ONNX engine), served by the Rust worker.
@@ -459,6 +462,7 @@ string_enum! {
         // (engines::registry_capabilities) — so before the worker re-pin a `dataset_analysis`
         // job stays queued rather than mis-claimed.
         DatasetAnalysis => "dataset_analysis",
+        CatalogAnalysis => "catalog_analysis",
         // Dataset Doctor one-tap upscale (sc-6539). Advertised by the worker that links the
         // Real-ESRGAN ONNX upscaler (the same engine as `image_upscale`); a `dataset_upscale` job
         // stays queued rather than mis-claimed where the upscaler isn't available.

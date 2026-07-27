@@ -17,6 +17,8 @@ use sceneworks_core::catalog_store::{
     CatalogProcessingLease, CatalogProcessingProgress, CatalogProcessingState, CatalogRecord,
     CatalogRecordFilter, CatalogRegistry, CatalogSourceConfig, CatalogStorageAccounting,
 };
+use sceneworks_core::contracts::{JobSnapshot, JobType};
+use sceneworks_core::jobs_store::CreateJob;
 use sceneworks_worker::catalog_parquet_scanner::{
     validate_catalog_parquet_scan_plan_with_cancel, AttachedCatalogParquetScanDriver,
     CatalogParquetScanError, CatalogParquetScanOptions,
@@ -87,6 +89,16 @@ pub(crate) struct CatalogControlRequest {
 pub(crate) struct UpdateCatalogAnalyzerConfigRequest {
     expected_revision: u64,
     settings: CatalogAnalyzerSettings,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunCatalogAnalysisRequest {
+    expected_analyzer_config_revision: u64,
+    #[serde(default)]
+    requested_gpu: String,
+    #[serde(default = "default_catalog_analysis_batch_size")]
+    batch_size: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -365,6 +377,76 @@ pub(crate) async fn update_catalog_analyzer_config(
         }
     })?;
     Ok(Json(response))
+}
+
+pub(crate) async fn run_catalog_analysis(
+    State(state): State<AppState>,
+    Path(catalog_id): Path<String>,
+    ApiJson(request): ApiJson<RunCatalogAnalysisRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if request.batch_size == 0 || request.batch_size > 64 {
+        return Err(ApiError::bad_request(
+            "Catalog analysis batchSize must be between 1 and 64",
+        ));
+    }
+    let config_dir = state.settings.config_dir.clone();
+    let validation_id = catalog_id.clone();
+    let expected_revision = request.expected_analyzer_config_revision;
+    let (catalog_name, analyzer_config) = catalog_call(move || {
+        let registry = CatalogRegistry::new(config_dir);
+        let catalog = registry.open_attached(&validation_id)?;
+        let analyzer_config = catalog.analyzer_config()?;
+        if analyzer_config.revision != expected_revision {
+            return Err(CatalogError::Conflict(
+                "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+            ));
+        }
+        if (analyzer_config.settings.vision_analysis_enabled
+            || analyzer_config.settings.semantic_embeddings_enabled)
+            && !analyzer_config.settings.structured_analysis_enabled
+        {
+            return Err(CatalogError::InvalidCatalog(
+                "Vision analysis and semantic embeddings require structured analysis".to_owned(),
+            ));
+        }
+        if CatalogProcessingLease::is_active(&catalog)? {
+            return Err(CatalogError::Conflict(
+                "Catalog processing is already active".to_owned(),
+            ));
+        }
+        Ok((catalog.descriptor().name.clone(), analyzer_config))
+    })
+    .await?;
+    let requested_gpu = crate::requested_gpu_or_auto(request.requested_gpu);
+    let batch_size = request.batch_size;
+    let payload = serde_json::json!({
+        "provider": "catalog",
+        "kind": "catalog_analysis",
+        "catalogId": catalog_id,
+        "catalogName": catalog_name,
+        "analyzerConfigRevision": analyzer_config.revision,
+        "batchSize": batch_size,
+    })
+    .as_object()
+    .cloned()
+    .expect("catalog analysis payload object");
+    let job = crate::store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::CatalogAnalysis,
+            project_id: None,
+            project_name: None,
+            payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+    })
+    .await?;
+    crate::publish(&state, "job.updated", &job);
+    crate::publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(job)))
 }
 
 pub(crate) async fn pause_catalog(
@@ -1238,6 +1320,10 @@ const fn default_query_limit() -> u32 {
 
 const fn default_facet_limit() -> u32 {
     DEFAULT_FACET_LIMIT
+}
+
+const fn default_catalog_analysis_batch_size() -> u32 {
+    16
 }
 
 #[cfg(test)]

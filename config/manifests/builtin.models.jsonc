@@ -10082,6 +10082,7 @@
         {
           "provider": "huggingface",
           "repo": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
+          "revision": "b47a0690b22eaf1d9a63874d967a03781c90f9cf",
           "files": [],
           "estimatedSizeBytes": 17850000000
         }

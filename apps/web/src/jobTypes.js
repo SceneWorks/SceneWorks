@@ -22,6 +22,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "control_training",
   "training_caption",
   "dataset_analysis",
+  "catalog_analysis",
   "dataset_upscale",
   "dataset_face_analysis",
   "face_likeness_compare",

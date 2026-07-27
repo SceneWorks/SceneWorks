@@ -1775,6 +1775,14 @@ fn validate_contract_state(state: &CatalogContractState) -> CatalogResult<()> {
 }
 
 fn validate_analyzer_settings(settings: &CatalogAnalyzerSettings) -> CatalogResult<()> {
+    if (settings.vision_analysis_enabled || settings.semantic_embeddings_enabled)
+        && !settings.structured_analysis_enabled
+    {
+        return Err(CatalogError::InvalidCatalog(
+            "Catalog vision analysis and semantic embeddings require structured analysis"
+                .to_owned(),
+        ));
+    }
     let thresholds = &settings.thresholds;
     for (name, value) in [
         ("personMinConfidence", thresholds.person_min_confidence),
