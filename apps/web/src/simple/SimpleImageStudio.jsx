@@ -11,6 +11,9 @@ import { preferredResolution } from "./modelDefaults.js";
 import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useSimpleLoras } from "./useSimpleLoras.js";
+import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
+import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
   Chips,
   RefinePanel,
@@ -43,10 +46,12 @@ export function SimpleImageStudio() {
     recentImageAssets = [],
     visibleWorkers = [],
     loras = [],
+    jobs = [],
     createLoraDownloadJob,
     activeProject,
   } = useAppContext();
-  const { breakpoint, openGuide, toast, referenceRequest, clearReferenceRequest } = useSimpleUi();
+  const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
+    useSimpleUi();
   const unifiedMemoryGb = useUnifiedMemoryGb();
   const refine = useSimpleRefine("image");
 
@@ -150,6 +155,32 @@ export function SimpleImageStudio() {
     }
   }, [editLoraMissing]);
 
+  // User-picked LoRAs (epic 15404). The managed edit LoRA is excluded from the picker — it is
+  // applied automatically above, so offering it here would let the user double-add or toggle
+  // off a LoRA the edit lane requires (the advanced studio hides it from its picker too).
+  const lora = useSimpleLoras({
+    loras,
+    selectedModel,
+    jobs,
+    excludeLoraId: editLoraInstalled ? (editLora?.id ?? null) : null,
+  });
+  const openLoraPicker = () =>
+    openSheet({
+      title: "Add LoRA",
+      body: (
+        <SimpleLoraSheet
+          atLimit={lora.atLimit}
+          excludeIds={[...lora.selectedLoraIds, ...(editLoraInstalled && editLora ? [editLora.id] : [])]}
+          onAdd={(picked) => {
+            lora.addLora(picked);
+            closeSheet();
+          }}
+          onImportQueued={lora.noteImportJob}
+          selectedModel={selectedModel}
+        />
+      ),
+    });
+
   const latestJob = newestLocalJob(imageLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "edit_image" && !referenceAssetId;
@@ -192,6 +223,7 @@ export function SimpleImageStudio() {
         img2imgStrength: referenceStrengthFor(selectedModel),
         // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
         editLora: editLoraInstalled ? editLora : null,
+        loras: lora.serializedLoras,
         ...tier,
       });
       if (!request) {
@@ -331,6 +363,20 @@ export function SimpleImageStudio() {
           />
         </div>
         <Chips label="Variations" onChange={setVariations} options={VARIATION_OPTIONS} value={variations} />
+        {/* Last child of the settings bar, so LoRAs read as a peer of Model / Resolution /
+            Variations rather than a card of their own (sc-15370's call, applied to Simple). */}
+        <SimpleLoraField
+          atLimit={lora.atLimit}
+          availableLoras={lora.availableLoras}
+          effectiveLoraWeight={lora.effectiveLoraWeight}
+          onAddKeyword={(keyword) => setPrompt((current) => promptWithKeyword(current, keyword))}
+          onOpenPicker={openLoraPicker}
+          onRemove={lora.removeLora}
+          onWeightChange={lora.setLoraWeight}
+          pendingImports={lora.pendingImports}
+          selectedLoras={lora.selectedLoras}
+          selectedModel={selectedModel}
+        />
       </div>
 
       <StyleStrip onChange={setStyleId} value={styleId} />

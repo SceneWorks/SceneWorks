@@ -2,11 +2,15 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { videoModelServesMode } from "../modelEligibility.js";
+import { WAN_MOE_PAIRED_LORA_MODEL_IDS } from "../constants.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
+import { useSimpleLoras } from "./useSimpleLoras.js";
+import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
+import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
   Chips,
   RefinePanel,
@@ -29,6 +33,10 @@ import {
 
 const DEFAULT_DURATIONS = [3, 5, 8, 10];
 const DEFAULT_RESOLUTIONS = ["1280x720", "720x1280", "720x720", "854x480"];
+// Context, not a warning (design handoff): the pairing is how the model works, not something
+// the user got wrong, so it reads as a hint line rather than a bordered notice.
+const MOE_LORA_HINT =
+  "Wan 2.2 A14B LoRAs are trained as a high/low-noise pair — selecting one loads both experts.";
 
 export function SimpleVideoStudio() {
   const {
@@ -39,9 +47,11 @@ export function SimpleVideoStudio() {
     videoLocalJobs = [],
     assets = [],
     recentImageAssets = [],
+    loras = [],
+    jobs = [],
     activeProject,
   } = useAppContext();
-  const { openGuide, toast } = useSimpleUi();
+  const { openSheet, closeSheet, openGuide, toast } = useSimpleUi();
   const refine = useSimpleRefine("video");
 
   const [mode, setMode] = useState("text_to_video");
@@ -108,6 +118,26 @@ export function SimpleVideoStudio() {
     [recentImageAssets, sourceAssetId],
   );
 
+  // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
+  // the video lane just has no auto-applied managed LoRA to exclude.
+  const lora = useSimpleLoras({ loras, selectedModel, jobs });
+  const openLoraPicker = () =>
+    openSheet({
+      title: "Add LoRA",
+      body: (
+        <SimpleLoraSheet
+          atLimit={lora.atLimit}
+          excludeIds={lora.selectedLoraIds}
+          onAdd={(picked) => {
+            lora.addLora(picked);
+            closeSheet();
+          }}
+          onImportQueued={lora.noteImportJob}
+          selectedModel={selectedModel}
+        />
+      ),
+    });
+
   const latestJob = newestLocalJob(videoLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "image_to_video" && !sourceAssetId;
@@ -132,6 +162,7 @@ export function SimpleVideoStudio() {
         duration,
         styleId,
         sourceAssetId,
+        loras: lora.serializedLoras,
       });
       if (!request) {
         toast("That resolution isn’t valid");
@@ -269,6 +300,19 @@ export function SimpleVideoStudio() {
           onChange={setDuration}
           options={durations.map((value) => ({ value, label: `${value}s` }))}
           value={duration}
+        />
+        <SimpleLoraField
+          atLimit={lora.atLimit}
+          availableLoras={lora.availableLoras}
+          effectiveLoraWeight={lora.effectiveLoraWeight}
+          hint={WAN_MOE_PAIRED_LORA_MODEL_IDS.has(selectedModel?.id) ? MOE_LORA_HINT : null}
+          onAddKeyword={(keyword) => setPrompt((current) => promptWithKeyword(current, keyword))}
+          onOpenPicker={openLoraPicker}
+          onRemove={lora.removeLora}
+          onWeightChange={lora.setLoraWeight}
+          pendingImports={lora.pendingImports}
+          selectedLoras={lora.selectedLoras}
+          selectedModel={selectedModel}
         />
       </div>
 
