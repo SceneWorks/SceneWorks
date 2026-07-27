@@ -12832,3 +12832,52 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
         );
     }
 }
+
+/// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
+/// must be the identity-guard-free one.
+///
+/// Compiling is not proof of either. This calls the real
+/// `runtime_macos::providers::mage::load_finetuned` at the pin, with a weights dir that is NOT a
+/// published snapshot root, and asserts the typed refusal is the FINE-TUNED entrypoint's own
+/// component-staging contract.
+///
+/// What it actually guards, stated precisely rather than overclaimed: the failure mode is a FUTURE
+/// PIN that re-points `load_finetuned` at the guarded path (an alias, or a "just add the
+/// fingerprint check back" edit) or drops the staging requirement for a flat-layout fallback.
+/// Either shows up here — the first as a fingerprint / "cannot open transformer checkpoint
+/// `<root>/transformer/...`" complaint (`load` reads `<weights>/transformer`, which this fixture
+/// deliberately does not have), the second as a missing-FILE error instead of a missing-COMPONENT
+/// one. I could not mutation-check it by swapping the call to `load`, because `load` is not
+/// re-exported from the crate root — only `load_finetuned` is — so that swap does not compile.
+///
+/// The evidence that the bypass is genuinely live at this pin is the real-weights run recorded on
+/// sc-15036: trained a full fine-tune, loaded it through this entrypoint at the merged inference
+/// revision, and rendered. This test is the permanent linkage guard for that fact.
+///
+/// Weights-free and device-free: the refusal happens before any Metal work, so this runs in the
+/// normal suite rather than behind `#[ignore]`.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
+
+    let error = runtime_macos::providers::mage::load_finetuned(
+        runtime_macos::providers::mage::MageVariant::Base,
+        &LoadSpec::new(WeightsSource::Dir(checkpoint.clone())),
+    )
+    .err()
+    .map(|error| error.to_string())
+    .expect("no components are staged, so this must refuse");
+
+    assert!(
+        error.contains(runtime_macos::providers::mage::COMPONENT_TEXT_ENCODER),
+        "the refusal must name the component the caller has to stage, which is the fine-tuned \
+         entrypoint's own contract; got: {error}"
+    );
+    assert!(
+        !error.contains("fingerprint") && !error.contains("cannot open transformer checkpoint"),
+        "this must NOT be the published-checkpoint `load` path — a full fine-tune retrains the \
+         identity tensor, so that path can never serve one; got: {error}"
+    );
+}
