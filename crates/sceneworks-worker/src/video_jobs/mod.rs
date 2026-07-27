@@ -677,10 +677,11 @@ pub(crate) async fn run_video_generate_job(
                 // shipped checkpoint is Wan 2.1 T2V 14B weight-for-weight. `generate_krea_realtime` maps
                 // the supplied media to the engine conditioning (a reference still → i2v `Reference`,
                 // strength no-op; a source clip → v2v `VideoClip`, strength honored; else t2v) and drives
-                // the shared `generate_video` heartbeat funnel. CFG off; no LoRA yet (S15). It resolves
-                // the installed quant tier and returns which one LOADED, so the record names the tier
-                // that actually ran rather than the one the request asked for (sc-15258).
-                let (decoded, tier) = generate_krea_realtime(
+                // the shared `generate_video` heartbeat funnel. CFG off; Wan-family LoRAs ride
+                // `LoadSpec::adapters` (sc-15017 S15). It returns its own `rawSettings` because the tier
+                // that actually LOADED (sc-15258) and any partial LoRA application are only knowable
+                // inside the arm — so the record names what actually ran, not what the request asked for.
+                let (decoded, raw_settings) = generate_krea_realtime(
                     api,
                     settings,
                     job,
@@ -690,12 +691,7 @@ pub(crate) async fn run_video_generate_job(
                     backend,
                 )
                 .await?;
-                (
-                    decoded,
-                    KREA_REALTIME_ADAPTER,
-                    krea_realtime_raw_settings(&request, tier),
-                    None,
-                )
+                (decoded, KREA_REALTIME_ADAPTER, raw_settings, None)
             }
             VideoRoute::Mochi(engine_id) => {
                 // Mochi 1 (epic 1788 / sc-11992): 10B AsymmDiT text-to-video, true CFG, pre-quantized
@@ -1569,8 +1565,7 @@ use scail2::{scail2_engine_id, scail2_raw_settings};
 mod krea_realtime;
 #[cfg(target_os = "macos")]
 use krea_realtime::{
-    generate_krea_realtime, krea_realtime_available, krea_realtime_engine_id,
-    krea_realtime_raw_settings, KREA_REALTIME_ADAPTER,
+    generate_krea_realtime, krea_realtime_available, krea_realtime_engine_id, KREA_REALTIME_ADAPTER,
 };
 pub(crate) mod ltx;
 #[cfg(target_os = "macos")]

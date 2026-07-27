@@ -2814,6 +2814,37 @@ fn model_lora_families(model: &Value) -> Vec<String> {
     )
 }
 
+/// Every LoRA family this model can load: the families it DECLARES plus each one's
+/// extra-compatible families from the shared registry (`sceneworks-core`'s
+/// `accepted_lora_families`). Normalized and de-duplicated, declared entries first.
+///
+/// 🔴 The generate-time gate must use this, not [`model_lora_families`]. Keying the gate on the
+/// declared set alone made the API stricter than the registry it shares with the worker: Krea
+/// Realtime 14B declares only `krea-realtime` and additionally accepts `wan-video`, so a Wan style
+/// LoRA the engine installs happily was rejected at submit with "appears to be a wan-video LoRA,
+/// which is not compatible" (sc-15017 — caught by running it, not by a test). The same divergence
+/// applied to `chroma`←`flux` and `flux2-klein`/`flux2-dev`←`flux2`.
+///
+/// One-directional, like the registry: nothing here gives a Wan model Krea-Realtime LoRAs.
+///
+/// ⚠️ Every family that comes back is re-normalized through [`normalize_lora_family`] (the API's
+/// CANONICAL spelling — `krea_2`, underscore) because `accepted_lora_families` returns core's
+/// hyphenated `normalize_model_family` form (`krea-2`). Both sides of the membership test in
+/// `validate_lora_specs_for_model` are in the canonical form, so skipping this re-normalization
+/// silently un-does sc-8185 and falsely rejects a Krea 2 LoRA.
+fn accepted_model_lora_families(model: &Value) -> Vec<String> {
+    let mut accepted: Vec<String> = Vec::new();
+    for declared in model_lora_families(model) {
+        for family in sceneworks_core::lora_family::accepted_lora_families(&declared) {
+            let family = normalize_lora_family(&family);
+            if !accepted.contains(&family) {
+                accepted.push(family);
+            }
+        }
+    }
+    accepted
+}
+
 fn families_from_value_chain(
     value: &Value,
     direct_fields: &[&str],

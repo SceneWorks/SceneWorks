@@ -126,6 +126,47 @@ export function modelLoraFamilies(model) {
   return normalizeFamilies(values);
 }
 
+// Architecture families a model can load LoRAs from *in addition to* the families it
+// declares — the web mirror of the backend registry `extra_compatible_lora_families`
+// (crates/sceneworks-core/src/lora_family.rs), which is what `accepted_lora_families`
+// (and therefore the worker's generate-time gate) already honors. Without this mirror the
+// picker is STRICTER than the backend: it would hide a LoRA the backend would happily run,
+// which is the failure this table exists to close (sc-15017).
+//
+// ⚠️ Keyed by the MODEL's family and read in ONE direction only, exactly like the backend:
+// `krea-realtime` accepts `wan-video` LoRAs (Krea Realtime 14B's DiT is Wan 2.1 T2V 14B
+// weight-for-weight), but a `wan-video` model is NOT thereby given `krea-realtime` LoRAs —
+// there is no entry under `wan-video`, so the relation cannot run backwards. Same shape for
+// Chroma (FLUX.1-derived) and the FLUX.2 klein/dev variants, whose LoRAs are detected and
+// declared as the base `flux2`.
+//
+// Exported so `presetUtils.test.jsx` can parse the Rust registry's own match arms off disk and
+// assert the two tables are EQUAL — "keep in lockstep" as a gate, not a comment. Each entry's two
+// directions are pinned separately too, so a table copied blindly in both directions is also red.
+export const EXTRA_COMPATIBLE_LORA_FAMILIES = {
+  chroma: ["flux"],
+  "flux2-klein": ["flux2"],
+  "flux2-dev": ["flux2"],
+  "krea-realtime": ["wan-video"],
+};
+
+// Every LoRA family `model` can load: the families it declares plus their
+// extra-compatible families (the web twin of the backend `accepted_lora_families`).
+// Normalized and de-duplicated. Empty when the model declares nothing — callers treat
+// that as "cannot gate" and stay permissive.
+export function acceptedLoraFamilies(model) {
+  const declared = modelLoraFamilies(model);
+  const accepted = [...declared];
+  for (const family of declared) {
+    for (const extra of EXTRA_COMPATIBLE_LORA_FAMILIES[family] ?? []) {
+      if (!accepted.includes(extra)) {
+        accepted.push(extra);
+      }
+    }
+  }
+  return accepted;
+}
+
 export function normalizeLoraFamily(family) {
   const normalized = String(family ?? "").trim().toLowerCase().replaceAll("_", "-");
   // Mirror the backend's canonical resolver: the separator-less `krea2` (ostris
@@ -153,7 +194,11 @@ export function loraHasResolvableFamily(lora) {
 }
 
 export function loraMatchesModel(lora, model) {
-  const modelFamilies = modelLoraFamilies(model);
+  // The model's DECLARED families plus its extra-compatible ones, so the picker matches the
+  // backend's `accepted_lora_families` rather than being stricter than it (sc-15017 — Krea
+  // Realtime 14B declares `krea-realtime` and additionally loads `wan-video` LoRAs). The
+  // relation is one-directional: nothing here gives a Wan model Krea-Realtime LoRAs.
+  const modelFamilies = acceptedLoraFamilies(model);
   const families = loraFamilies(lora);
   // Model side stays permissive: when no model is selected yet, or a model
   // declares no LoRA families, we can't gate — keep showing the LoRA (preset
