@@ -2090,7 +2090,9 @@ mod tests {
     fn every_lora_advertising_image_model_is_claimable_with_a_lora() {
         // The three conditioning shapes, each in a with-LoRA and a without-LoRA form. Anything a
         // model gates on beyond these is out of scope for what this guard can decide.
-        let probes = |model: &str, with_lora: bool| -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let probes = |model: &str,
+                      with_lora: bool|
+         -> Vec<serde_json::Map<String, serde_json::Value>> {
             [
                 serde_json::json!({ "model": model, "mode": "text_to_image" }),
                 serde_json::json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset-1" }),
