@@ -2741,10 +2741,24 @@ label {
 }
 
 /* LoRAs are part of model configuration, so the shared picker lives inside the settings
-   container instead of the Advanced disclosure. Keep it visually grouped with the model row. */
+   container instead of the Advanced disclosure. It is a SECTION of that container, not a card
+   inside it (studio-cleanup sc-15370): same hairline separator the Style axis uses, so LoRAs,
+   Model and Style all read as peers. Other consumers (the editor rails) keep the card. */
 .settings-bar > .lora-picker {
-  border-color: var(--border);
-  background: var(--surface);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 0 0;
+  gap: 8px;
+}
+
+.lora-picker-head {
+  align-items: baseline;
+}
+
+.lora-picker-head > span:last-child {
+  font-size: 11px;
 }
 
 .settings-field-aspect {
@@ -2755,6 +2769,13 @@ label {
 .settings-field-count {
   flex: 0 1 96px;
   min-width: 82px;
+}
+
+/* Quant tier sits with Model / Aspect / Variations (studio-cleanup sc-15374). Its warning wraps
+   full-width under the select rather than stretching the cell. */
+.settings-field-tier {
+  flex: 1 1 130px;
+  min-width: 120px;
 }
 
 .settings-field select,
@@ -2787,27 +2808,60 @@ label {
 }
 
 /* Style axis row (sc-13135): the Style Catalog picker and the model's Style presets share one row —
-   catalog first, presets filling the remaining width and wrapping under it on narrow viewports. */
+   catalog first, presets filling the remaining width. A GRID rather than a flex row
+   (studio-cleanup sc-15371) so the two columns' eyebrows and controls line up instead of sitting
+   at whatever offset their differing control heights produce. The preset-description row spans
+   both columns at the bottom. */
 .settings-bar-style-axis {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(240px, auto) minmax(0, 1fr);
   gap: 16px 20px;
-  align-items: flex-start;
+  align-items: start;
+}
+
+/* No Style Catalog for this model — the presets column takes the whole width. */
+.settings-bar-style-axis-single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .style-axis-field {
   display: grid;
   gap: 7px;
   align-content: start;
-}
-
-.style-axis-catalog {
-  flex: 0 0 auto;
-}
-
-.style-axis-presets {
-  flex: 1 1 240px;
   min-width: 0;
+}
+
+/* One shared control-row height so the pill and the chip row bottom out together. */
+.style-axis-control {
+  min-height: 44px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* The preset description: the grid's last row, a hairline under the two columns rather than a
+   floating bordered card between the settings bar and Advanced. */
+.style-axis-guidance {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.style-axis-guidance strong {
+  font-weight: 600;
+}
+
+.style-axis-guidance span {
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .settings-bar-style-axis {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .refine-control {
@@ -4203,35 +4257,17 @@ label {
   height: 14px;
 }
 
-/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. Reuses the
-   .studio-source-band shell, .reference-strength slider, .checkline toggle, and .asset-picker-field /
-   .pose-library inner surfaces; only the mode tabs + section spacing are panel-specific. */
-.control-panel {
-  display: grid;
+/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock. The shell is now
+   the shared .advanced-section disclosure (studio-cleanup sc-15369) — this class only carries the
+   body-specific spacing. .reference-strength slider, .checkline toggle, and .asset-picker-field /
+   .pose-library inner surfaces are reused as before; the mode tabs are panel-specific. */
+.control-panel > .advanced-section-body {
   gap: 12px;
 }
 
-/* Section header reuses the shared .advanced-toggle disclosure look (13px/500/muted). The
-   whole Structure Control body folds under it; the chevron points down when open and rotates
-   -90deg when collapsed (design handoff sc-8245 Fix 1). */
-.control-panel-toggle {
-  justify-self: start;
-  margin-left: -6px;
-}
-
-.control-panel-chev {
-  flex: 0 0 auto;
-  transition: transform 0.18s ease;
-}
-
-.control-panel-chev.collapsed {
-  transform: rotate(-90deg);
-}
-
-/* The former section caption, now a quiet helper line inside the expanded body, indented to
-   align under the label text (past the chevron). */
+/* Section caption: a quiet helper line leading the disclosure body. */
 .control-panel-desc {
-  margin: 0 0 0 20px;
+  margin: 0;
   font-size: 12px;
   color: var(--text-faint);
 }
@@ -5483,28 +5519,36 @@ input.dataset-name-input.boxed:focus {
   min-height: 36px;
 }
 
-/* "Save as Preset" — inline sidebar control that snapshots the current setup. */
-.save-preset {
-  display: grid;
-  gap: 8px;
+/* "Save as preset" — an inline pair at the end of the style-preset chip row (studio-cleanup
+   sc-15372): a fixed-width name field and a dropdown whose menu carries the scope. Both are
+   chip-height so they sit on the chips' baseline rather than reading as a separate panel. */
+.style-axis-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border);
+  flex: 0 0 auto;
 }
 
-.save-preset-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
+/* Full-width wrap point inside the flex chip row: errors and the save confirmation get their
+   own line under the chips instead of squeezing in beside them. */
+.style-axis-row-break {
+  flex: 0 0 100%;
+  display: grid;
+  gap: 6px;
 }
 
 .save-preset-name {
-  flex: 1;
+  width: 140px;
+  flex: 0 0 auto;
   min-width: 0;
-  min-height: 34px;
+  height: 30px;
   padding: 0 11px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-pill);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .save-preset-name:focus {
@@ -5512,24 +5556,38 @@ input.dataset-name-input.boxed:focus {
   border-color: var(--accent);
 }
 
+.save-preset-scope-picker {
+  flex: 0 0 auto;
+}
+
 .save-preset-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  min-height: 34px;
-  padding: 0 13px;
-  border: 0;
-  border-radius: var(--r-sm);
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 12.5px;
+  height: 30px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
   font-weight: 600;
-  transition: filter var(--t-fast), opacity var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
+}
+
+.save-preset-btn .chev {
+  opacity: 0.6;
 }
 
 .save-preset-btn:hover:not(:disabled) {
-  filter: brightness(1.05);
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+[data-theme="dark"] .save-preset-btn:hover:not(:disabled) {
+  color: var(--accent);
 }
 
 .save-preset-btn:disabled {
@@ -7044,6 +7102,14 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: pointer;
 }
 
+/* The same import band embedded in a studio's Add-LoRA picker (studio-cleanup sc-15373). It sits
+   inside an already-padded panel, so it runs a notch tighter than the Model Manager copy. */
+.studio-lora-import {
+  gap: 11px;
+  padding: 13px;
+  border-radius: var(--r-md);
+}
+
 /* Full-width trigger-keyword + notes fields below the import grid (epic 10328). */
 .lora-import-metadata {
   display: grid;
@@ -8506,13 +8572,16 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
 }
 
+/* Tightened to the settings-bar type scale (studio-cleanup sc-15370): a selected LoRA is one
+   compact row of the model panel, not a card of its own. Applied to every consumer so the slot
+   reads the same in the editor rails. */
 .lora-slot {
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   background: var(--surface);
-  padding: 12px 14px;
+  padding: 9px 11px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .lora-slot-head {
@@ -8523,7 +8592,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-head strong {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -8546,8 +8615,8 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-remove {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
   border-radius: var(--r-sm);
@@ -8576,7 +8645,7 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
@@ -8599,12 +8668,13 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 14px;
-  border: 1.5px dashed var(--border-strong);
-  border-radius: var(--r-md);
+  height: 34px;
+  padding: 0 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
   color: var(--text-muted);
   background: transparent;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
 }
@@ -8613,7 +8683,7 @@ details[open] > summary.lora-scope-group-heading::before,
   content: attr(data-count);
   opacity: 0.7;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 11px;
   margin-left: 4px;
 }
 
@@ -8634,11 +8704,11 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .lora-picker-panel {
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   background: var(--bg-2);
-  padding: 12px 14px;
+  padding: 8px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .lora-picker-panel > strong {
@@ -8656,12 +8726,12 @@ details[open] > summary.lora-scope-group-heading::before,
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface);
   text-align: left;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   transition: border-color var(--t-fast);
 }
@@ -8695,7 +8765,7 @@ details[open] > summary.lora-scope-group-heading::before,
 /* Mono weight readout in an added LoRA slot's Weight header row. */
 .lora-slot-weight-value {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text);
 }
 

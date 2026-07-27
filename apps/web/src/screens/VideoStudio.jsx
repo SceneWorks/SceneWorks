@@ -6,6 +6,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -47,7 +48,6 @@ import {
 import {
   LoraPickerSection,
   onPromptKeyDown,
-  PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
   ModeTabs,
@@ -123,6 +123,7 @@ export function VideoStudio() {
     refinePrompt,
     createModelDownloadJob,
     createLoraDownloadJob,
+    createLoraImportJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -379,6 +380,17 @@ export function VideoStudio() {
   const showClipStrength =
     ["extend_clip", "video_bridge"].includes(mode) ||
     (mode === "video_to_video" && selectedModel?.adapter === "krea_realtime");
+  // `quality` (fast/balanced/best) is read by exactly ONE adapter: `svd_steps` (video_jobs/svd.rs)
+  // maps it to 15/25/30 inference steps. Every other video engine — LTX, Wan, Bernini, Krea
+  // Realtime — never reads the key, so this gates on the ADAPTER for the same reason
+  // `showClipStrength` does: a knob that does nothing on the selected model shouldn't be shown
+  // (sc-15398). The field itself stays in the payload, the snapshot, and preset defaults —
+  // recipe replay round-trips it — so this hides the control, it does not drop the value.
+  //
+  // Note the manifest `steps[quality]` override `svd_steps` documents is dead: every `steps` in
+  // builtin.models.jsonc is a scalar, so the builtin ladder always wins. And an explicit
+  // `advanced.steps` beats quality outright, which is why the control says so.
+  const showQualitySegment = selectedModel?.adapter === "svd_video";
   // Which generation axes the selected engine actually has, declared in the manifest `video`
   // sub-block (sc-8445) — the video-lane mirror of how Audio Studio reads `audio.supportsGuidance`
   // / `audio.supportsNegativePrompt`. Neither an id check nor an engine link: the catalog says it.
@@ -1676,23 +1688,26 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              <label className="settings-field">
-                Quality
-                <div className="quality-segment" role="radiogroup" aria-label="Quality">
-                  {qualityChoices.map(([value, label]) => (
-                    <button
-                      aria-checked={quality === value}
-                      className={quality === value ? "active" : ""}
-                      key={value}
-                      onClick={() => setQuality(value)}
-                      role="radio"
-                      type="button"
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </label>
+              {/* Quant tier, not the abstract Fast/Balanced/Best segment (studio-cleanup
+                  sc-15374): the settings bar names the concrete thing that will load. Quality
+                  itself is still a live payload/preset field and moves to Advanced. */}
+              {showTierPicker ? (
+                <TierPickerField
+                  className="settings-field settings-field-tier"
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
+                  title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
+                  warning={tierHasMemoryRisk ? (
+                    <span className="field-hint quant-tier-memory-note">
+                      Higher MLX video tiers may run out of memory on long or high-resolution clips.
+                      Your pick is honored.
+                    </span>
+                  ) : null}
+                />
+              ) : null}
             </div>
             <LoraPickerSection
               selectedModel={selectedModel}
@@ -1705,6 +1720,13 @@ export function VideoStudio() {
               setLoraWeight={setLoraWeight}
               loraEmptyMessage={loraEmptyMessage}
               onUpdateLora={createLoraDownloadJob}
+              importPanel={(
+                <StudioLoraImportPanel
+                  activeProject={activeProject}
+                  createLoraImportJob={createLoraImportJob}
+                  models={models}
+                />
+              )}
             />
             {/* Style axis (sc-13135): the Style Catalog picker leads this row (hidden for promptless
                 image-conditioned models and for booru-tag models), followed by the model's Style
@@ -1722,6 +1744,23 @@ export function VideoStudio() {
               generalStackIds={generalStackIds}
               onToggleGeneral={toggleGeneralPreset}
               noPresetValue={noPresetId}
+              presetPromptParts={presetPromptParts}
+              presetLoraDetails={presetLoraDetails}
+              savePreset={(
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                  saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
+                  saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
+                />
+              )}
             />
           </div>
 
@@ -1729,12 +1768,6 @@ export function VideoStudio() {
               from the same base the submit uses so it can never drift. Sits under the Style axis row.
               Hidden when no style applies. */}
           <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} />
-
-          <PresetGuidanceStrip
-            selectedPreset={selectedPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-          />
 
           {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
               panel is captioned "Prompt sent" and exists so the user sees exactly what will be
@@ -1928,21 +1961,27 @@ export function VideoStudio() {
                   ) : null}
                 </>
               ) : null}
-              {showTierPicker ? (
-                <TierPickerField
-                  value={quantTier}
-                  onChange={handleTierChange}
-                  items={tierPickerItems}
-                  tierSwitching={tierSwitching}
-                  tierLabel={tierLabel}
-                  title="Switch which installed MLX quant tier generates. Higher precision uses more memory; switching a heavy tier reloads it before the next generation."
-                  warning={tierHasMemoryRisk ? (
-                    <span className="field-hint quant-tier-memory-note">
-                      Higher MLX video tiers may run out of memory on long or high-resolution clips.
-                      Your pick is honored.
-                    </span>
-                  ) : null}
-                />
+              {showQualitySegment ? (
+                <label
+                  className="video-quality-field"
+                  title="Step-count preset for Stable Video Diffusion: Draft 15, Balanced 25, Final 30. An explicit Steps value below overrides it."
+                >
+                  Quality
+                  <div className="quality-segment" role="radiogroup" aria-label="Quality">
+                    {qualityChoices.map(([value, label]) => (
+                      <button
+                        aria-checked={quality === value}
+                        className={quality === value ? "active" : ""}
+                        key={value}
+                        onClick={() => setQuality(value)}
+                        role="radio"
+                        type="button"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </label>
               ) : null}
               {showTorchQuantization ? (
                 <label>
@@ -2077,21 +2116,6 @@ export function VideoStudio() {
                   </span>
                 </div>
               ) : null}
-              {/* Save-as-preset folds into Advanced with the rest of the power-user
-                  knobs, matching Image Studio. Gated to the presetable video modes. */}
-              <SavePresetPanel
-                presetName={presetName}
-                setPresetName={setPresetName}
-                savingPreset={savingPreset}
-                presetSaveMessage={presetSaveMessage}
-                setPresetSaveMessage={setPresetSaveMessage}
-                onSave={handleSaveAsPreset}
-                presetScope={presetScope}
-                setPresetScope={setPresetScope}
-                activeProject={activeProject}
-                saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
-                saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
-              />
               {/* Video upscale (super-resolve an existing clip) folds into Advanced — it
                   previously lived in the render rail this layout removes. It operates on a
                   selected existing asset, independent of the current generation payload. */}

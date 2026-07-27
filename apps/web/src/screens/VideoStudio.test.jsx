@@ -78,17 +78,98 @@ async function doubleClick(element) {
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
 
+// Save-as-preset is an inline pair in the style-preset row (sc-15372): the dropdown opens a
+// scope menu, and picking a scope both sets it and fires the save.
 const saveButton = (container) =>
-  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
+  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
-// Save-as-Preset folds into the Advanced disclosure (collapsed by default), matching
-// Image Studio — open it before touching the preset controls.
+const saveWithScope = async (container, scopeLabel) => {
+  await click(saveButton(container));
+  await click(
+    [...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) =>
+      b.textContent.includes(scopeLabel),
+    ),
+  );
+};
+// The Advanced disclosure is collapsed by default — open it before touching a knob that lives
+// inside it.
 const openAdvanced = async (container) => {
   const toggle = container.querySelector(".advanced-section-toggle");
   if (toggle) {
     await click(toggle);
   }
 };
+
+// sc-15398 — `quality` (fast/balanced/best) is read by exactly ONE adapter: `svd_steps` maps it to
+// 15/25/30 inference steps for `svd_video`. Every other video engine ignores the key, so the
+// control is gated on the adapter that honors it. This pair is what makes the gate meaningful:
+// asserting only the hidden case would pass just as well if the segment were deleted outright.
+describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
+  let container;
+  let root;
+
+  const SVD = {
+    id: "svd",
+    name: "Stable Video Diffusion",
+    type: "video",
+    family: "svd",
+    adapter: "svd_video",
+    capabilities: ["image_to_video"],
+    promptless: true,
+    defaults: { duration: 4, fps: 7, resolution: "1024x576", quality: "balanced" },
+    limits: {},
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("shows Quality in Advanced for the SVD adapter, which honors it", async () => {
+    await render(baseContext({ videoModels: [SVD] }));
+    await openAdvanced(container);
+
+    const segment = container.querySelector(".quality-segment");
+    expect(segment).toBeTruthy();
+    expect([...segment.querySelectorAll("button")].map((b) => b.textContent.trim())).toEqual([
+      "Draft",
+      "Balanced",
+      "Final",
+    ]);
+  });
+
+  it("hides Quality for an adapter that never reads the key", async () => {
+    await render(baseContext({ videoModels: [LTX] }));
+    await openAdvanced(container);
+
+    expect(container.querySelector(".quality-segment")).toBeNull();
+    // The Steps override — which beats `quality` even on SVD — is still there, so the run is not
+    // left without a way to trade speed for fidelity.
+    expect(
+      [...container.querySelectorAll("label")].some((label) => label.textContent.trim().startsWith("Steps")),
+    ).toBe(true);
+  });
+});
 
 describe("VideoStudio Save as Preset", () => {
   let container;
@@ -129,12 +210,11 @@ describe("VideoStudio Save as Preset", () => {
   it("snapshots the video config into a text_to_video preset without the seed", async () => {
     const context = baseContext();
     await render(context);
-    await openAdvanced(container);
 
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Push In"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).toHaveBeenCalledTimes(1);
     const payload = context.createPreset.mock.calls[0][0];
@@ -165,10 +245,9 @@ describe("VideoStudio Save as Preset", () => {
       ],
     });
     await render(context);
-    await openAdvanced(container);
 
     await act(async () => setInput(nameInput(container), "Push In"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
@@ -935,7 +1014,14 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
         macCapabilities: MAC_CAPS,
       }),
     );
+
+    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374) — no disclosure
+    // needs opening. Quality is gone from that row entirely, and on a Bernini (non-SVD) adapter it
+    // is not in Advanced either (sc-15398) — nothing reads the key there.
+    expect(container.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
+    expect(container.querySelector(".settings-bar-row .quality-segment")).toBeNull();
     await openAdvanced();
+    expect(container.querySelector(".quality-segment")).toBeNull();
 
     // All bits-based tiers appear (NVFP4 filtered on MLX); bf16 is declared-but-not-installed → disabled.
     expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);

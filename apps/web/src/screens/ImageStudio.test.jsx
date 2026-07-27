@@ -65,9 +65,19 @@ function baseContext(overrides = {}) {
   };
 }
 
+// Save-as-preset is an inline pair in the style-preset row (sc-15372): the dropdown opens a
+// scope menu, and picking a scope both sets it and fires the save.
 const saveButton = (container) =>
-  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
+  [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
+const saveWithScope = async (container, scopeLabel) => {
+  await click(saveButton(container));
+  await click(
+    [...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) =>
+      b.textContent.includes(scopeLabel),
+    ),
+  );
+};
 const field = (container, labelText) => {
   const label = [...container.querySelectorAll("label")].find((node) =>
     node.textContent.trim().startsWith(labelText),
@@ -126,12 +136,10 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
-    // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
-    await click(document.body.querySelector(".advanced-section-toggle"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).toHaveBeenCalledTimes(1);
     const payload = context.createPreset.mock.calls[0][0];
@@ -163,9 +171,8 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
-    await click(document.body.querySelector(".advanced-section-toggle"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
-    await click(saveButton(container));
+    await saveWithScope(container, "This project");
 
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
@@ -1102,8 +1109,9 @@ describe("ImageStudio model picker capability gating", () => {
 
   it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
-    await openAdvanced(container);
     await act(async () => {});
+    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374).
+    expect(document.body.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
     const picker = tierPicker(container);
     expect(picker).toBeTruthy();
     const options = [...picker.options].map((o) => o.value);
@@ -2179,7 +2187,8 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
   // The structure-control panel is collapsed by default; expand it so the gated inner content
   // (mode tabs, control-image upload, slider) mounts before the assertions below.
-  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-toggle"));
+  const expandControlPanel = async () =>
+    click(document.body.querySelector(".control-panel .advanced-section-toggle"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 

@@ -96,9 +96,11 @@ export function useQuantTierPicker({
   };
 }
 
-export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning }) {
+// `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an
+// Advanced-panel label (studio-cleanup sc-15374) without a wrapper element around the <label>.
+export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning, className = "" }) {
   return (
-    <label className="quant-tier-picker" title={title}>
+    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
       <select onChange={(event) => onChange(event.target.value)} value={value}>
         {items.map((item) => (
@@ -127,27 +129,44 @@ export function StyleAxisRow({
   generalStackIds,
   onToggleGeneral,
   noPresetValue,
+  // The "what this preset adds" line, rendered as the last row of this grid rather than a
+  // standalone card below the settings bar (studio-cleanup sc-15371).
+  presetPromptParts = [],
+  presetLoraDetails = [],
+  // The save-as-preset control, rendered inline at the end of the preset-chip row instead of
+  // buried in Advanced (studio-cleanup sc-15372). Omit it and the row is chips only.
+  savePreset = null,
 }) {
   return (
     <>
-      <div className="settings-bar-styles settings-bar-style-axis">
+      <div
+        className={`settings-bar-styles settings-bar-style-axis${available ? "" : " settings-bar-style-axis-single"}`}
+      >
         {available ? (
           <div className="style-axis-field style-axis-catalog">
             <span className="settings-bar-label">Style</span>
-            <StylePicker groups={groups} selectedId={styleId} onSelect={onStyleChange} label="Style" />
+            <div className="style-axis-control">
+              <StylePicker groups={groups} selectedId={styleId} onSelect={onStyleChange} label="Style" />
+            </div>
           </div>
         ) : null}
         <div className="style-axis-field style-axis-presets">
           <span className="settings-bar-label">Style preset</span>
-          <div className="preset-chips">
+          <div className="style-axis-control preset-chips">
             <button className={!selectedPreset ? "preset-chip active" : "preset-chip"} onClick={() => onPresetChange(noPresetValue)} type="button">None</button>
             {presets.map((preset) => (
               <button className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"} key={preset.id} onClick={() => onPresetChange(preset.id)} type="button">
                 {preset.name ?? preset.id}
               </button>
             ))}
+            {savePreset}
           </div>
         </div>
+        <PresetGuidanceStrip
+          presetLoraDetails={presetLoraDetails}
+          presetPromptParts={presetPromptParts}
+          selectedPreset={selectedPreset}
+        />
       </div>
       {generalPresets.length ? (
         <div className="settings-bar-styles">
@@ -708,7 +727,12 @@ export function useSavePreset({
   // with their weights; the seed is intentionally left out so the preset stays
   // reusable. The backend additionally enforces id uniqueness and model/workflow +
   // LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
+  // `scopeOverride` lets a caller pick the scope and save in one gesture (the studio's
+  // save-as-preset dropdown, sc-15372) without waiting a render for `setPresetScope` to land.
+  // Anything that isn't a real scope — notably a click event, when this is wired straight to
+  // onClick — falls back to the current state.
+  async function handleSaveAsPreset(scopeOverride) {
+    const scope = scopeOverride === "project" || scopeOverride === "global" ? scopeOverride : presetScope;
     const trimmed = presetName.trim();
     if (!trimmed) {
       setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
@@ -723,7 +747,7 @@ export function useSavePreset({
       setPresetSaveMessage({ tone: "error", text: guardMessage });
       return;
     }
-    if (presetScope === "project" && !activeProject) {
+    if (scope === "project" && !activeProject) {
       setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
       return;
     }
@@ -733,7 +757,7 @@ export function useSavePreset({
     }
     const payload = buildStudioPresetPayload({
       name: trimmed,
-      scope: presetScope,
+      scope,
       mode,
       model,
       loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
@@ -747,7 +771,7 @@ export function useSavePreset({
       setPresetName("");
       setPresetSaveMessage({
         tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+        text: `Saved "${trimmed}" to ${scope === "project" ? "this project" : "all projects"}.`,
       });
     } catch (err) {
       setPresetSaveMessage({ tone: "error", text: err.message });
@@ -785,6 +809,10 @@ export function LoraPickerSection({
   loraEmptyMessage,
   onUpdateLora,
   showIncompatibleControl = false,
+  // Optional node appended to the open picker — the studios pass the in-place Import LoRA form
+  // (studio-cleanup sc-15373) so "no compatible LoRAs" has a fix right where it is reported. The
+  // editor rails omit it and keep a list-only picker.
+  importPanel = null,
 }) {
   // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
   // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
@@ -801,11 +829,14 @@ export function LoraPickerSection({
 
   return (
     <section className="lora-picker" aria-label="LoRA selection">
-      <div>
-        <strong>LoRAs</strong>
+      {/* Eyebrow + status, not a card heading (studio-cleanup sc-15370): inside the settings bar
+          this reads as a peer of the Model and Style sections, so the label uses the same
+          `.settings-bar-label` scale they do. */}
+      <div className="lora-picker-head">
+        <span className="settings-bar-label">LoRAs</span>
         <span>
           {selectedLoras.length
-            ? `${selectedLoras.length} selected`
+            ? `${selectedLoras.length} selected · installed and compatible`
             : selectedModel
               ? "Installed and compatible"
               : "Choose a model"}
@@ -822,101 +853,105 @@ export function LoraPickerSection({
         </label>
       ) : null}
 
-      {!selectedLoras.length && !availableLoras.length ? (
-        <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
-      ) : (
-        <>
-          {selectedLoras.length ? (
-            <div className="lora-stack">
-              {selectedLoras.map((lora) => {
-                const weight = effectiveLoraWeight(lora);
+      {selectedLoras.length ? (
+        <div className="lora-stack">
+          {selectedLoras.map((lora) => {
+            const weight = effectiveLoraWeight(lora);
+            return (
+              <div className="lora-slot" key={lora.id}>
+                <div className="lora-slot-head">
+                  <span className="lora-slot-meta">
+                    <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
+                    <small>{loraMeta(lora)}</small>
+                  </span>
+                  <button
+                    aria-label={`Remove ${lora.name ?? lora.id}`}
+                    className="lora-slot-remove"
+                    onClick={() => toggleLora(lora)}
+                    title="Remove"
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+                <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
+                <LoraKeywordSummary lora={lora} />
+                <div className="lora-slot-weight">
+                  <label>
+                    <span>Weight</span>
+                    <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
+                  </label>
+                  <input
+                    aria-label={`${lora.name ?? lora.id} weight`}
+                    max={LORA_WEIGHT_MAX}
+                    min={LORA_WEIGHT_MIN}
+                    onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                    step={LORA_WEIGHT_STEP}
+                    type="range"
+                    value={weight}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* Always enabled (studio-cleanup sc-15373): with nothing available the picker is exactly
+          where the user needs to be — it explains WHY the list is empty and (in the studios)
+          carries the import form that fixes it. Disabling it left a dead end. */}
+      <button
+        className="lora-add"
+        data-count={`· ${availableLoras.length} available`}
+        onClick={() => setPickerOpen((open) => !open)}
+        type="button"
+      >
+        <Icon.Plus size={15} />
+        <span>Add LoRA</span>
+      </button>
+
+      {pickerOpen ? (
+        <div className="lora-picker-panel">
+          {availableLoras.length ? (
+            <div className="lora-picker-list">
+              {availableLoras.map((lora) => {
+                const disabled = lora.scope !== "builtin" && atUserLimit;
                 return (
-                  <div className="lora-slot" key={lora.id}>
-                    <div className="lora-slot-head">
-                      <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
-                        <small>{loraMeta(lora)}</small>
-                      </span>
-                      <button
-                        aria-label={`Remove ${lora.name ?? lora.id}`}
-                        className="lora-slot-remove"
-                        onClick={() => toggleLora(lora)}
-                        title="Remove"
-                        type="button"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
-                    <LoraKeywordSummary lora={lora} />
-                    <div className="lora-slot-weight">
-                      <label>
-                        <span>Weight</span>
-                        <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
-                      </label>
-                      <input
-                        aria-label={`${lora.name ?? lora.id} weight`}
-                        max={LORA_WEIGHT_MAX}
-                        min={LORA_WEIGHT_MIN}
-                        onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                        step={LORA_WEIGHT_STEP}
-                        type="range"
-                        value={weight}
-                      />
-                    </div>
-                  </div>
+                  <button
+                    className="lora-pick-row"
+                    disabled={disabled}
+                    key={lora.id}
+                    onClick={() => {
+                      toggleLora(lora);
+                      setPickerOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <span className="lora-slot-meta">
+                      <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
+                      <small>{loraMeta(lora)}</small>
+                    </span>
+                    <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
+                  </button>
                 );
               })}
             </div>
-          ) : null}
-
-          <button
-            className="lora-add"
-            data-count={`· ${availableLoras.length} available`}
-            disabled={!availableLoras.length}
-            onClick={() => setPickerOpen((open) => !open)}
-            type="button"
-          >
-            <Icon.Plus size={15} />
-            <span>Add LoRA</span>
-          </button>
-
-          {pickerOpen && availableLoras.length ? (
-            <div className="lora-picker-panel">
-              <div className="lora-picker-list">
-                {availableLoras.map((lora) => {
-                  const disabled = lora.scope !== "builtin" && atUserLimit;
-                  return (
-                    <button
-                      className="lora-pick-row"
-                      disabled={disabled}
-                      key={lora.id}
-                      onClick={() => {
-                        toggleLora(lora);
-                        setPickerOpen(false);
-                      }}
-                      type="button"
-                    >
-                      <span className="lora-slot-meta">
-                        <strong>{lora.name ?? lora.id}{lora.updateAvailable ? <StudioUpdateBadge item={lora} /> : null}</strong>
-                        <small>{loraMeta(lora)}</small>
-                      </span>
-                      <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
-        </>
-      )}
+          ) : (
+            <p className="lora-pick-empty">{loraEmptyMessage}</p>
+          )}
+          {importPanel}
+        </div>
+      ) : null}
     </section>
   );
 }
 
-// The "Save as Preset" panel shared by both studios (sc-4196): name field, save
-// button, project/global scope segment, and the inline save message. The actual
-// save handler differs per studio (different payloads), so it's passed as onSave.
+// The "Save as preset" control shared by both studios (sc-4196). It lives INLINE in the
+// style-preset chip row (studio-cleanup sc-15372) rather than stacked inside Advanced: a fixed
+// name field plus a dropdown whose menu IS the scope choice — picking "This project" or "All
+// projects" both sets the scope and confirms the save, so the wide project/global segment is gone.
+// The actual save handler differs per studio (different payloads), so it's passed as onSave; it
+// takes the chosen scope so the save never races `setPresetScope`.
 export function SavePresetPanel({
   presetName,
   setPresetName,
@@ -936,66 +971,114 @@ export function SavePresetPanel({
   // an unsaveable mode surfaces the tooltip as an always-visible chip.
   const saveDraft = useMemo(() => ({ presetName, saveDisabled, saveTitle }), [presetName, saveDisabled, saveTitle]);
   const saveValidity = useValidation(savePresetDialogValidation, saveDraft, undefined);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!scopeMenuOpen) {
+      return undefined;
+    }
+    function onDocMouseDown(event) {
+      if (!containerRef.current?.contains(event.target)) {
+        setScopeMenuOpen(false);
+      }
+    }
+    function onDocKey(event) {
+      if (event.key === "Escape") {
+        setScopeMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onDocKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onDocKey);
+    };
+  }, [scopeMenuOpen]);
+
+  function saveWithScope(scope) {
+    setScopeMenuOpen(false);
+    setPresetScope(scope);
+    onSave(scope);
+  }
+
+  const saveBlocked = savingPreset || !saveValidity.ready;
   return (
-    <div className="save-preset">
-      <div className="save-preset-row">
-        <input
-          aria-label="Preset name"
-          className="save-preset-name"
-          disabled={savingPreset}
-          onChange={(event) => {
-            setPresetName(event.target.value);
-            if (presetSaveMessage.text) {
-              setPresetSaveMessage({ tone: "neutral", text: "" });
-            }
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              onSave();
-            }
-          }}
-          placeholder="Name this setup…"
-          value={presetName}
-        />
+    <>
+      <span className="style-axis-divider" aria-hidden="true" />
+      <input
+        aria-label="Preset name"
+        className="save-preset-name"
+        disabled={savingPreset}
+        onChange={(event) => {
+          setPresetName(event.target.value);
+          if (presetSaveMessage.text) {
+            setPresetSaveMessage({ tone: "neutral", text: "" });
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onSave(presetScope);
+          }
+        }}
+        placeholder="Name this setup…"
+        value={presetName}
+      />
+      <div className="compact-selector save-preset-scope-picker" ref={containerRef}>
         <button
+          aria-expanded={scopeMenuOpen}
+          aria-haspopup="menu"
           className="save-preset-btn"
-          disabled={savingPreset || !saveValidity.ready}
-          onClick={onSave}
+          disabled={saveBlocked}
+          onClick={() => setScopeMenuOpen((value) => !value)}
           title={saveTitle}
           type="button"
         >
-          <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
+          <Icon.Preset size={13} />
+          {savingPreset ? "Saving…" : "Save as preset"}
+          <Icon.ChevDown className="chev" size={13} />
         </button>
+        {scopeMenuOpen ? (
+          <div className="compact-selector-menu" role="menu" aria-label="Preset scope">
+            <button
+              className={presetScope === "project" ? "compact-selector-item active" : "compact-selector-item"}
+              disabled={!activeProject}
+              onClick={() => saveWithScope("project")}
+              role="menuitem"
+              type="button"
+            >
+              <span className="compact-selector-label">
+                <strong>This project</strong>
+                <span>{activeProject ? `Only ${activeProject.name ?? activeProject.id}` : "Open a project first"}</span>
+              </span>
+            </button>
+            <button
+              className={presetScope === "global" ? "compact-selector-item active" : "compact-selector-item"}
+              onClick={() => saveWithScope("global")}
+              role="menuitem"
+              type="button"
+            >
+              <span className="compact-selector-label">
+                <strong>All projects</strong>
+                <span>Available everywhere</span>
+              </span>
+            </button>
+          </div>
+        ) : null}
       </div>
-      <ValidationSummary issues={saveValidity.surfaced} label="Save-preset errors" />
-      <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
-        <button
-          aria-checked={presetScope === "project"}
-          className={presetScope === "project" ? "active" : ""}
-          disabled={!activeProject}
-          onClick={() => setPresetScope("project")}
-          role="radio"
-          type="button"
-        >
-          <Icon.Folder size={13} /> This project
-        </button>
-        <button
-          aria-checked={presetScope === "global"}
-          className={presetScope === "global" ? "active" : ""}
-          onClick={() => setPresetScope("global")}
-          role="radio"
-          type="button"
-        >
-          <Icon.Stars size={13} /> All projects
-        </button>
-      </div>
-      {presetSaveMessage.text ? (
-        <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
-          {presetSaveMessage.text}
-        </p>
+      {/* Errors and the save confirmation wrap onto their own full-width line under the chips. */}
+      {saveValidity.surfaced.length || presetSaveMessage.text ? (
+        <div className="style-axis-row-break">
+          <ValidationSummary issues={saveValidity.surfaced} label="Save-preset errors" />
+          {presetSaveMessage.text ? (
+            <p className={presetSaveMessage.tone === "success" ? "inline-success" : "inline-warning"}>
+              {presetSaveMessage.text}
+            </p>
+          ) : null}
+        </div>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1037,7 +1120,9 @@ export function PresetStackPreview({ generalStack, composed, stackAddsNegative, 
   );
 }
 
-// The "what this preset adds" strip shown under the preset picker in both studios.
+// The "what this preset adds" strip shown under the preset picker in both studios. It is the last
+// row of the style-axis grid (studio-cleanup sc-15371), not a card of its own — hence
+// `.style-axis-guidance` rather than the bordered `.guidance-strip`.
 export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails }) {
   // Nothing to say when no preset is active — the visible controls already describe the run.
   if (!selectedPreset) {
@@ -1048,7 +1133,7 @@ export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetL
   // they aren't installed, so the user knows to import them before the preset fully applies.
   const missingLoras = presetLoraDetails.filter((lora) => lora.missing);
   return (
-    <div className="guidance-strip">
+    <div className="style-axis-guidance">
       <strong>{selectedPreset.ui?.description ?? "Preset defaults active"}</strong>
       <span>
         {presetPromptParts.length ? `Adds: ${presetPromptParts.join(", ")}` : "No prompt fragments"}

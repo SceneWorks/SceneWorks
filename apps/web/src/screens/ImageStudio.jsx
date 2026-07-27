@@ -4,6 +4,7 @@ import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import {
   buildTurboFinishPhases,
@@ -112,7 +113,6 @@ import {
 import {
   LoraPickerSection,
   onPromptKeyDown,
-  PresetGuidanceStrip,
   PresetStackPreview,
   SavePresetPanel,
   ModeTabs,
@@ -285,6 +285,7 @@ export function ImageStudio() {
     imageDescribe,
     createModelDownloadJob,
     createLoraDownloadJob,
+    createLoraImportJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -3055,44 +3056,6 @@ export function ImageStudio() {
           </div>
         ) : null}
 
-        {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
-            text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
-            supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
-            take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
-            submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale. */}
-        {showControlPanel ? (
-          <div className="studio-source-band">
-            <ControlPanel
-              supportedModes={controlModes}
-              controlMode={activeControlMode}
-              onControlModeChange={setControlMode}
-              selectedPoseIds={selectedPoseIds}
-              onTogglePose={(id) =>
-                setSelectedPoseIds((ids) =>
-                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
-                )
-              }
-              onClearPoses={() => setSelectedPoseIds([])}
-              loadUserPoses={loadUserPoses}
-              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
-              controlImageAssetId={controlImageAssetId}
-              onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={controlImagePassthrough}
-              onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={editImageAssets}
-              importAsset={importAsset}
-              projectId={activeProject?.id}
-              characters={characters}
-              controlScaleConfig={controlScaleConfig}
-              controlScale={effectiveControlScale}
-              onControlScaleChange={setControlScale}
-              controlOverlayBaseModel={controlOverlayBaseModel}
-              selectedOverlayId={controlOverlayId}
-              onOverlayChange={setControlOverlayId}
-            />
-          </div>
-        ) : null}
-
           {/* Generation settings (UI-refinement 2b): the everyday knobs — Model, Aspect,
               Variations, Style preset — sit in a bar directly under the composer instead of a
               detached right rail. Power-user knobs fold into Advanced below; the results area
@@ -3131,6 +3094,26 @@ export function ImageStudio() {
                 Variations
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
               </label>
+              {/* Quant tier belongs with the everyday model knobs, not buried in Advanced
+                  (studio-cleanup sc-15374): it names the build that will actually load. */}
+              {showTierPicker ? (
+                <TierPickerField
+                  className="settings-field settings-field-tier"
+                  value={quantTier}
+                  onChange={handleTierChange}
+                  items={tierPickerItems}
+                  tierSwitching={tierSwitching}
+                  tierLabel={tierLabel}
+                  title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
+                  warning={tierBelowFloor ? (
+                    <span className="field-hint quant-tier-floor-note">
+                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
+                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
+                      here (quantization error is amplified under CFG). Your pick is honored.
+                    </span>
+                  ) : null}
+                />
+              ) : null}
             </div>
             <LoraPickerSection
               selectedModel={selectedModel}
@@ -3143,6 +3126,13 @@ export function ImageStudio() {
               setLoraWeight={setLoraWeight}
               loraEmptyMessage={loraEmptyMessage}
               onUpdateLora={createLoraDownloadJob}
+              importPanel={(
+                <StudioLoraImportPanel
+                  activeProject={activeProject}
+                  createLoraImportJob={createLoraImportJob}
+                  models={models}
+                />
+              )}
             />
             {/* Style axis (sc-13135): the Style Catalog picker sits FIRST in this row, followed by the
                 model's Style presets — both are style controls, so they share one row instead of the
@@ -3162,6 +3152,21 @@ export function ImageStudio() {
               generalStackIds={generalStackIds}
               onToggleGeneral={toggleGeneralPreset}
               noPresetValue={noPresetId}
+              presetPromptParts={presetPromptParts}
+              presetLoraDetails={presetLoraDetails}
+              savePreset={(
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                />
+              )}
             />
           </div>
 
@@ -3173,18 +3178,50 @@ export function ImageStudio() {
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
-          <PresetGuidanceStrip
-            selectedPreset={selectedPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-          />
-
           <PresetStackPreview
             generalStack={generalStack}
             composed={composedStack}
             stackAddsNegative={stackAddsNegative}
             stackAddsCount={stackAddsCount}
           />
+
+          {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
+              text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
+              supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
+              take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
+              submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale.
+              Sits directly above Advanced (studio-cleanup sc-15369): it is a disclosure of the same
+              kind, so it belongs beside the other one rather than in a source band above the settings. */}
+          {showControlPanel ? (
+            <ControlPanel
+              supportedModes={controlModes}
+              controlMode={activeControlMode}
+              onControlModeChange={setControlMode}
+              selectedPoseIds={selectedPoseIds}
+              onTogglePose={(id) =>
+                setSelectedPoseIds((ids) =>
+                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+                )
+              }
+              onClearPoses={() => setSelectedPoseIds([])}
+              loadUserPoses={loadUserPoses}
+              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
+              controlImageAssetId={controlImageAssetId}
+              onControlImageChange={setControlImageAssetId}
+              controlImagePassthrough={controlImagePassthrough}
+              onControlImagePassthroughChange={setControlImagePassthrough}
+              controlImageAssets={editImageAssets}
+              importAsset={importAsset}
+              projectId={activeProject?.id}
+              characters={characters}
+              controlScaleConfig={controlScaleConfig}
+              controlScale={effectiveControlScale}
+              onControlScaleChange={setControlScale}
+              controlOverlayBaseModel={controlOverlayBaseModel}
+              selectedOverlayId={controlOverlayId}
+              onOverlayChange={setControlOverlayId}
+            />
+          ) : null}
 
           <AdvancedSection
             hint="cleared values → model default"
@@ -3352,23 +3389,6 @@ export function ImageStudio() {
                   Enhance prompt
                 </label>
               ) : null}
-              {showTierPicker ? (
-                <TierPickerField
-                  value={quantTier}
-                  onChange={handleTierChange}
-                  items={tierPickerItems}
-                  tierSwitching={tierSwitching}
-                  tierLabel={tierLabel}
-                  title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
-                  warning={tierBelowFloor ? (
-                    <span className="field-hint quant-tier-floor-note">
-                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
-                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
-                      here (quantization error is amplified under CFG). Your pick is honored.
-                    </span>
-                  ) : null}
-                />
-              ) : null}
               {precisionToggle && !showTierPicker ? (
                 <label
                   className="checkline boogu-precision-toggle"
@@ -3470,19 +3490,6 @@ export function ImageStudio() {
                 Negative prompt
                 <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
               </label>
-              {/* Save-as-preset folds into Advanced with the rest of the power-user
-                  knobs (UI-refinement 2b). */}
-              <SavePresetPanel
-                presetName={presetName}
-                setPresetName={setPresetName}
-                savingPreset={savingPreset}
-                presetSaveMessage={presetSaveMessage}
-                setPresetSaveMessage={setPresetSaveMessage}
-                onSave={handleSaveAsPreset}
-                presetScope={presetScope}
-                setPresetScope={setPresetScope}
-                activeProject={activeProject}
-              />
             </div>
           </AdvancedSection>
 
