@@ -477,6 +477,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let too_big_reject = candle_stream
         .find("FitDecision::TooBig")
         .expect("resident reject");
+    let shared_krea_selection = candle_stream
+        .find("let shared_krea_fit =")
+        .expect("shared Krea selection");
+    let shared_krea_resident = shared_krea_selection
+        + candle_stream[shared_krea_selection..]
+            .find("KreaTurboFit::Resident {")
+            .expect("shared Krea resident result");
+    let legacy_gate = candle_stream
+        .find("let gate_decision =")
+        .expect("legacy defense gate");
+    assert!(
+        shared_krea_selection < shared_krea_resident && shared_krea_resident < legacy_gate,
+        "the shared selector must make Krea's resident decision before the legacy defense gate"
+    );
+    assert!(
+        candle_stream.contains("image_memory_context.as_ref()")
+            && base.contains("crate::image_memory::generate_with_scope("),
+        "the selected Krea contract must reach provider safety and lifecycle hooks"
+    );
     let probes: Vec<usize> = candle_stream
         .match_indices("installed_tier_keys(")
         .map(|(offset, _)| offset)
@@ -2246,6 +2265,7 @@ fn smoke_generate_one(
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -2427,6 +2447,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         false,
+        None,
         None,
         None,
         &PromptEnhance::default(),
@@ -2717,6 +2738,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2788,6 +2810,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2855,6 +2878,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |_| {},
@@ -2912,6 +2936,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         false,
+        None,
         None,
         None,
         &PromptEnhance::default(),
@@ -3071,6 +3096,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -3125,6 +3151,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         false,
+        None,
         None,
         None,
         &PromptEnhance::default(),
@@ -3499,6 +3526,7 @@ fn smoke_generate_one_true_cfg(
         false,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         &cancel,
         &mut |p| {
@@ -3855,6 +3883,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         false,
+        None,
         None,
         None,
         &PromptEnhance::default(),
@@ -8708,6 +8737,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             false,
             None,
             None,
+            None,
             &enhance,
             &cancel,
             &mut |p| {
@@ -8900,6 +8930,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             false,
             None,
             None,
+            None,
             &enhance,
             &cancel,
             &mut |_| {},
@@ -9022,6 +9053,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             false,
+            None,
             None,
             None,
             &enhance,
@@ -9222,6 +9254,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             false,
+            None,
             None,
             None,
             &enhance,

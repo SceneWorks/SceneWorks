@@ -1337,6 +1337,70 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "bf16": 47.2,
     }
     turbo_fit = krea["candle"]["turboFit"]
+    assert {
+        key: turbo_fit[key]
+        for key in (
+            "calibrationAbi",
+            "calibrationFingerprint",
+            "sceneWorksRevision",
+            "inferenceRevision",
+            "measured",
+        )
+    } == {
+        "calibrationAbi": 1,
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "sceneWorksRevision": "sc-15449-contract-v1",
+        "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+        "measured": True,
+    }
+    assert turbo_fit["strategyParameters"] == {
+        "resident": {},
+        "threeStage": {},
+        "tiledVae": {"decodeTileEdge": 512, "decodeOverlap": 128},
+        "chunkedAttention": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+        },
+        "streamedBlocks": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1,
+        },
+    }
+    assert set(turbo_fit["verification"]) == {
+        "hardware",
+        "stories",
+        "method",
+        "numericPolicy",
+        "outputParity",
+    }
+    assert turbo_fit["verification"]["stories"] == [
+        "sc-15117",
+        "sc-15205",
+        "sc-15206",
+    ]
+    assert {
+        (record["tier"], record["width"], record["height"])
+        for record in turbo_fit["evidenceRecords"]
+    } == {
+        ("q4", 768, 768),
+        ("q4", 1024, 1024),
+        ("q8", 1024, 1024),
+        ("bf16", 1024, 1024),
+    }
+    for record in turbo_fit["evidenceRecords"]:
+        assert set(record["predictedPeaksGb"]) == {
+            "threeStage",
+            "tiledVae",
+            "chunkedAttention",
+            "streamedBlocks",
+        }
+        assert set(record["observedPeaksGb"]) == set(record["predictedPeaksGb"])
+        assert record["parity"]["result"] == "passed"
+        assert len(record["sceneWorksCommit"]) == 40
+        assert len(record["inferenceCommit"]) == 40
     assert turbo_fit["maxMeasuredPixels"] == 1024 * 1024
     assert set(turbo_fit["phaseCurvesByTier"]) == {"q4", "q8", "bf16"}
     for tier in ("q4", "q8", "bf16"):
@@ -1368,6 +1432,71 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "decode": {"fixedGb": 0.30, "perMpxGb": 3.27},
         },
     }
+
+
+def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
+    """sc-15449: calibrated optimization evidence stays closed and revision-bound."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+
+    def assert_rejected(label, mutate):
+        candidate = copy.deepcopy(manifest)
+        turbo_fit = candidate["models"][krea_index]["candle"]["turboFit"]
+        mutate(turbo_fit)
+        assert list(validator.iter_errors(candidate)), label
+
+    assert_rejected("unknown calibration ABI", lambda fit: fit.__setitem__("calibrationAbi", 2))
+    assert_rejected(
+        "malformed calibration fingerprint",
+        lambda fit: fit.__setitem__("calibrationFingerprint", "Krea Turbo"),
+    )
+    assert_rejected(
+        "stale SceneWorks contract",
+        lambda fit: fit.__setitem__("sceneWorksRevision", "sc-15449-contract-v0"),
+    )
+    assert_rejected(
+        "mutable inference revision",
+        lambda fit: fit.__setitem__("inferenceRevision", "main"),
+    )
+    assert_rejected("estimated evidence", lambda fit: fit.__setitem__("measured", False))
+    assert_rejected(
+        "missing output parity evidence",
+        lambda fit: fit["verification"].pop("outputParity"),
+    )
+    assert_rejected(
+        "unknown verification evidence",
+        lambda fit: fit["verification"].__setitem__("notes", "unchecked"),
+    )
+    assert_rejected(
+        "incomplete cumulative parameters",
+        lambda fit: fit["strategyParameters"]["chunkedAttention"].pop("decodeOverlap"),
+    )
+    assert_rejected(
+        "resident optimization parameter",
+        lambda fit: fit["strategyParameters"]["resident"].__setitem__("window", 1),
+    )
+    assert_rejected(
+        "missing exact evidence records",
+        lambda fit: fit.pop("evidenceRecords"),
+    )
+    assert_rejected(
+        "evidence without observed peak",
+        lambda fit: fit["evidenceRecords"][0]["observedPeaksGb"].pop("streamedBlocks"),
+    )
+    assert_rejected(
+        "mutable artifact revision",
+        lambda fit: fit["evidenceRecords"][0].__setitem__("sceneWorksCommit", "main"),
+    )
+    assert_rejected(
+        "unexecuted parity",
+        lambda fit: fit["evidenceRecords"][0]["parity"].__setitem__("result", "not_run"),
+    )
 
 
 def test_boogu_candle_vram_tiers_cover_and_pin_the_default_q8_tier():

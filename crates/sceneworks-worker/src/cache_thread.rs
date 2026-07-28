@@ -101,6 +101,17 @@ struct Entry<K, M> {
     model: M,
 }
 
+/// Whether the current cache run loaded a new entry or reused the resident one.
+///
+/// This is deliberately reported to the run closure instead of being encoded in the key: request
+/// policy must be re-evaluated on every warm run without fragmenting a single loaded model by
+/// geometry or strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheAccess {
+    Cold,
+    Warm,
+}
+
 impl<K, M> CacheThread<K, M>
 where
     K: Clone + PartialEq,
@@ -125,6 +136,7 @@ where
     /// per-lane policy the load needs (fit-gate/residency selection for the generator, error-context
     /// wrapping for either). `entry_missing_msg` is the (should-be-impossible) error surfaced if the
     /// entry vanished after a successful load.
+    #[cfg(test)]
     pub(crate) fn with_model<R>(
         &mut self,
         key: K,
@@ -132,7 +144,21 @@ where
         run: impl FnOnce(&M) -> WorkerResult<R>,
         entry_missing_msg: &str,
     ) -> WorkerResult<R> {
-        if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
+        self.with_model_access(key, load, |model, _access| run(model), entry_missing_msg)
+    }
+
+    /// Load or reuse the resident model while also reporting the request's true cold/warm cache
+    /// access state.
+    pub(crate) fn with_model_access<R>(
+        &mut self,
+        key: K,
+        load: impl FnOnce() -> WorkerResult<M>,
+        run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
+        entry_missing_msg: &str,
+    ) -> WorkerResult<R> {
+        let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
+            CacheAccess::Warm
+        } else {
             self.entry = None;
             if self.evict_before_load {
                 release_backend_cache_after_evict();
@@ -142,12 +168,13 @@ where
                 key: key.clone(),
                 model,
             });
-        }
+            CacheAccess::Cold
+        };
 
         let Some(entry) = self.entry.as_ref() else {
             return Err(WorkerError::Engine(entry_missing_msg.to_owned()));
         };
-        run(&entry.model)
+        run(&entry.model, access)
     }
 
     /// Whether a model is currently resident. Test/introspection helper.
@@ -264,6 +291,22 @@ where
     M: 'static,
     R: Send + 'static,
 {
+    run_cached_with_access(worker, key, load, |model, _access| run(model), msgs).await
+}
+
+/// [`run_cached`] plus the true cold/warm access state for request-scoped policy evaluation.
+pub(crate) async fn run_cached_with_access<K, M, R>(
+    worker: &'static mpsc::Sender<CacheJob<K, M>>,
+    key: K,
+    load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
+    run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
+    msgs: SeamMessages,
+) -> WorkerResult<R>
+where
+    K: Clone + PartialEq + Send + 'static,
+    M: 'static,
+    R: Send + 'static,
+{
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
         // Contain a panic from inside the load/run so it fails THIS job with a clean error instead of
@@ -271,7 +314,7 @@ where
         // The cached model is evicted on panic — post-abort backend state is suspect, so the next
         // job reloads fresh.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.with_model(key, load, run, msgs.entry_missing)
+            cache.with_model_access(key, load, run, msgs.entry_missing)
         })) {
             Ok(result) => result,
             Err(panic) => {
@@ -374,6 +417,34 @@ mod tests {
         assert_eq!(run(&mut cache, 9), 9);
         assert_eq!(loads.get(), 2, "a new key reloads");
         assert_eq!(cache.resident_key(), Some(&9));
+    }
+
+    #[test]
+    fn with_model_access_reports_cold_then_warm_without_rekeying() {
+        use std::cell::Cell;
+        let mut cache = CacheThread::<u32, u32>::new(false);
+        let loads = Cell::new(0u32);
+        let run = |cache: &mut CacheThread<u32, u32>| {
+            cache
+                .with_model_access(
+                    7,
+                    || {
+                        loads.set(loads.get() + 1);
+                        Ok(70)
+                    },
+                    |model, access| Ok((*model, access)),
+                    "missing",
+                )
+                .unwrap()
+        };
+
+        assert_eq!(run(&mut cache), (70, CacheAccess::Cold));
+        assert_eq!(run(&mut cache), (70, CacheAccess::Warm));
+        assert_eq!(
+            loads.get(),
+            1,
+            "request policy does not fragment the cache key"
+        );
     }
 
     // The evict-before-load flag is preserved per-cache: only when set does a miss free the backend

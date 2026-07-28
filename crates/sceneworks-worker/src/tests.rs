@@ -46,8 +46,8 @@ use super::downloads::{
 use super::gpu::mlx_gpu;
 use super::gpu::{
     cached_gpu_utilization_with, cpu_gpu, cpu_worker_id, fallback_gpu, gpu_worker_id,
-    parse_max_compute_cap, parse_nvidia_smi_gpus, run_bounded_command, visible_gpu_ids,
-    worker_capabilities_with_utility, GpuDiscoveryAttempt, GpuDiscoveryFailure,
+    parse_max_compute_cap, parse_nvidia_smi_gpus, parse_selected_compute_cap, run_bounded_command,
+    visible_gpu_ids, worker_capabilities_with_utility, GpuDiscoveryAttempt, GpuDiscoveryFailure,
 };
 use super::media_jobs::{
     candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,

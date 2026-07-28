@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/image-memory-matrix.schema.json",
+  "title": "SceneWorks image memory-ladder matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "sourceEvidence": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": { "source": { "type": "string", "minLength": 1 } }
+    },
+    "declaredEvidence": {
+      "type": "object",
+      "required": ["source", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 }
+      }
+    },
+    "parityEvidence": {
+      "type": "object",
+      "required": ["contract", "result", "metric", "maximumError", "fixture"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": { "enum": ["exact", "tolerance", "golden"] },
+        "result": { "enum": ["passed", "failed", "not_run"] },
+        "metric": { "type": "string", "minLength": 1 },
+        "maximumError": { "type": "number", "minimum": 0 },
+        "fixture": { "type": "string", "minLength": 1 }
+      }
+    },
+    "historicalEvidence": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "hardware": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 },
+        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "type": "string", "minLength": 1 },
+        "observedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "parity": { "$ref": "#/$defs/parityEvidence" }
+      }
+    },
+    "loadabilityEvidence": {
+      "type": "object",
+      "required": ["repository", "revision", "variant"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"] },
+        "variant": { "type": ["string", "null"] }
+      }
+    },
+    "strategyEvidence": {
+      "type": "object",
+      "required": ["source", "tier", "geometry", "predictedPeakGb", "exactParameters"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 },
+        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+        "predictedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "exactParameters": { "type": "object" }
+      }
+    },
+    "structuralEvidence": {
+      "type": "object",
+      "required": ["source", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "generatedFrom",
+    "conformanceStates",
+    "evidenceDimensions",
+    "summary",
+    "models",
+    "cells",
+    "calibrationRuns",
+    "modelSlices"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedFrom": { "type": "object" },
+    "conformanceStates": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "Verified",
+          "Implemented/unverified",
+          "Structurally N/A",
+          "Missing",
+          "Route unavailable/broken"
+        ]
+      }
+    },
+    "evidenceDimensions": { "type": "array", "items": { "type": "string" } },
+    "summary": {
+      "type": "object",
+      "required": [
+        "imageModels",
+        "cells",
+        "mlxStagedStaticCoverage",
+        "mlxStagedStaticCoverageDenominator",
+        "fullModels"
+      ]
+    },
+    "models": {
+      "type": "array",
+      "minItems": 53,
+      "maxItems": 53,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "family",
+          "resolvedRoute",
+          "routeKind",
+          "backends",
+          "owningFamilyStory",
+          "owningModelStory"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "family": { "type": ["string", "null"] },
+          "resolvedRoute": { "type": "string" },
+          "routeKind": { "enum": ["registry", "bespoke"] },
+          "backends": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "enum": ["mlx", "candle"] },
+            "uniqueItems": true
+          },
+          "owningFamilyStory": { "type": "integer" },
+          "owningModelStory": { "type": "integer" }
+        }
+      }
+    },
+    "cells": {
+      "type": "array",
+      "minItems": 265,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "modelId",
+          "resolvedRoute",
+          "provider",
+          "backend",
+          "tier",
+          "mode",
+          "overlay",
+          "rung",
+          "geometryEnvelope",
+          "strategyParameters",
+          "state",
+          "evidenceRevision",
+          "calibrationFingerprint",
+          "owningFamilyStory",
+          "owningModelStory",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "modelId": { "type": "string" },
+          "resolvedRoute": { "type": "string" },
+          "provider": { "type": "string" },
+          "backend": { "enum": ["mlx", "candle"] },
+          "tier": { "type": "string" },
+          "mode": { "type": "string" },
+          "overlay": { "type": "string" },
+          "rung": {
+            "enum": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ]
+          },
+          "geometryEnvelope": { "type": "object" },
+          "strategyParameters": { "type": "object" },
+          "state": {
+            "enum": [
+              "Verified",
+              "Implemented/unverified",
+              "Structurally N/A",
+              "Missing",
+              "Route unavailable/broken"
+            ]
+          },
+          "evidenceRevision": {
+            "type": "object",
+            "required": ["sceneWorks", "inference"]
+          },
+          "calibrationFingerprint": { "type": ["string", "null"] },
+          "owningFamilyStory": { "type": "integer" },
+          "owningModelStory": { "type": "integer" },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "staticImplementation",
+              "declaredCalibration",
+              "historicalVerification",
+              "currentEnvironmentVerification",
+              "loadability",
+              "strategyParameterVerification",
+              "structural"
+            ],
+            "properties": {
+              "staticImplementation": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/sourceEvidence" }
+              },
+              "declaredCalibration": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/declaredEvidence" }
+              },
+              "historicalVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/historicalEvidence" }
+              },
+              "currentEnvironmentVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/historicalEvidence" }
+              },
+              "loadability": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/loadabilityEvidence" }
+              },
+              "strategyParameterVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/strategyEvidence" }
+              },
+              "structural": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/structuralEvidence" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "calibrationRuns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cellId", "binding", "semantics", "record"],
+        "properties": {
+          "cellId": { "type": "string", "minLength": 1 },
+          "binding": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["eligible", "reasons"],
+            "properties": {
+              "eligible": { "type": "boolean" },
+              "reasons": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "semantics": { "enum": ["current", "historical", "gated", "negative", "fixture"] },
+          "record": { "$ref": "image-memory-calibration.schema.json#/$defs/record" }
+        }
+      }
+    },
+    "modelSlices": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 5,
+        "items": { "type": "string" }
+      }
+    }
+  }
+}
