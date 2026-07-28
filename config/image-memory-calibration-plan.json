@@ -13,7 +13,7 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
-      "calibrationFingerprint": "qwen-vae-identical-latent-v2",
+      "calibrationFingerprint": "qwen-vae-identical-latent-v3",
       "fixture": "qwen-vae-encoded-latent-1024",
       "cases": [
         { "parameters": { "decodeTileEdge": 768, "decodeOverlap": 64 }, "expectedResult": "passed" },
@@ -23,7 +23,7 @@
         { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 320, "decodeOverlap": 64 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 64 }, "expectedResult": "passed" },
-        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 32 }, "expectedResult": "failed", "negative": true }
+        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 32, "comparisonOutputBias": 0.05 }, "expectedResult": "failed", "negative": true }
       ]
     },
     {
