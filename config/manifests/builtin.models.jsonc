@@ -4485,11 +4485,28 @@
               "sourceActivity": 15189,
               "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
               "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "q4",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
               "predictedPeaksGb": {
                 "threeStage": 11.85679552,
                 "tiledVae": 11.85679552,
                 "chunkedAttention": 11.18799616,
                 "streamedBlocks": 4.8491392
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 4.0, "denoise": 11.85679552, "decode": 10.95593472 },
+                "tiledVae": { "text": 4.0, "denoise": 11.85679552, "decode": 9.80718592 },
+                "chunkedAttention": { "text": 4.0, "denoise": 11.18799616, "decode": 9.81 },
+                "streamedBlocks": { "text": 4.0, "denoise": 3.86928384, "decode": 4.8491392 }
               },
               "observedPeaksGb": {
                 "threeStage": 11.747,
@@ -4515,11 +4532,28 @@
               "sourceActivity": 15189,
               "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
               "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "q4",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
               "predictedPeaksGb": {
                 "threeStage": 15.55721728,
                 "tiledVae": 15.51763648,
                 "chunkedAttention": 11.45865984,
                 "streamedBlocks": 5.7895808
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 4.0, "denoise": 15.51763648, "decode": 15.55721728 },
+                "tiledVae": { "text": 4.0, "denoise": 15.51763648, "decode": 9.84388608 },
+                "chunkedAttention": { "text": 4.0, "denoise": 11.45865984, "decode": 9.81 },
+                "streamedBlocks": { "text": 4.0, "denoise": 4.17206016, "decode": 5.7895808 }
               },
               "observedPeaksGb": {
                 "threeStage": 15.440,
@@ -4545,11 +4579,28 @@
               "sourceActivity": 15272,
               "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
               "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "q8",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
               "predictedPeaksGb": {
                 "threeStage": 22.12763648,
                 "tiledVae": 22.12763648,
                 "chunkedAttention": 18.26731968,
                 "streamedBlocks": 6.9534336
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 6.45, "denoise": 22.12763648, "decode": 16.62 },
+                "tiledVae": { "text": 6.45, "denoise": 22.12763648, "decode": 16.65 },
+                "chunkedAttention": { "text": 6.45, "denoise": 18.26731968, "decode": 16.62 },
+                "streamedBlocks": { "text": 6.9534336, "denoise": 6.8682912, "decode": 4.94 }
               },
               "observedPeaksGb": {
                 "threeStage": 22.015,
@@ -4575,11 +4626,28 @@
               "sourceActivity": 15314,
               "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
               "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "bf16",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
               "predictedPeaksGb": {
                 "threeStage": 32.1137504,
                 "tiledVae": 32.1137504,
                 "chunkedAttention": 27.76068672,
                 "streamedBlocks": 8.64
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
+                "tiledVae": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
+                "chunkedAttention": { "text": 8.63, "denoise": 27.76068672, "decode": 26.52 },
+                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 3.72884352 }
               },
               "observedPeaksGb": {
                 "threeStage": 32.014,

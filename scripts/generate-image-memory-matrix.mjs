@@ -20,6 +20,11 @@ const RUNGS = [
   "bounded_attention",
   "bounded_transformer_residency",
 ];
+
+export function canonicalSourceText(body) {
+  return body.replace(/\r\n?/g, "\n");
+}
+
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -452,7 +457,9 @@ export async function buildMatrix() {
   };
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
-    Object.values(sourcePaths).map((relative) => readFile(path.join(ROOT, relative), "utf8")),
+    Object.values(sourcePaths).map(async (relative) =>
+      canonicalSourceText(await readFile(path.join(ROOT, relative), "utf8")),
+    ),
   );
   const bodies = Object.fromEntries(
     sourceEntries.map(([name], index) => [name, sourceBodies[index]]),
@@ -668,10 +675,12 @@ async function main() {
   const markdown = renderMarkdown(matrix);
   const check = process.argv.includes("--check");
   if (check) {
-    const [existingJson, existingMarkdown] = await Promise.all([
+    const [existingJsonBody, existingMarkdownBody] = await Promise.all([
       readFile(path.join(ROOT, OUTPUT_JSON), "utf8"),
       readFile(path.join(ROOT, OUTPUT_MD), "utf8"),
     ]);
+    const existingJson = canonicalSourceText(existingJsonBody);
+    const existingMarkdown = canonicalSourceText(existingMarkdownBody);
     if (existingJson !== json || existingMarkdown !== markdown) {
       throw new Error("generated image memory matrix is stale; run npm run generate:image-memory-matrix");
     }

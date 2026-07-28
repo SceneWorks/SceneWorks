@@ -4891,6 +4891,41 @@ fn krea_turbo_memory_route(
         && !use_pid
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_runtime_evidence_context(
+    request: &ImageRequest,
+    settings: &Settings,
+    tier: &str,
+    resolved_artifact_root: &Path,
+) -> Option<crate::vram_gate::KreaRuntimeEvidenceContext> {
+    let download = request
+        .model_manifest_entry
+        .get("downloads")?
+        .as_array()?
+        .iter()
+        .find(|download| download.get("variant").and_then(Value::as_str) == Some(tier))?;
+    let provider = download.get("provider")?.as_str()?;
+    let repository = download.get("repo")?.as_str()?;
+    let revision = download.get("revision")?.as_str()?;
+    let pinned_snapshot_root = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        repository,
+        revision,
+    )?;
+    crate::vram_gate::KreaRuntimeEvidenceContext::inspect(
+        "krea_2_turbo",
+        "candle",
+        &settings.gpu_id,
+        crate::gpu::cached_compute_cap(),
+        provider,
+        repository,
+        revision,
+        tier,
+        resolved_artifact_root,
+        &pinned_snapshot_root,
+    )
+}
+
 /// The constrained Krea ladder preserves the precision selected for the request. Its memory rungs
 /// change residency only; they must never make the generic capability clamp silently cross from Q8
 /// to Q4 before the ladder can return its measured reject/lower-resolution result.
@@ -4905,6 +4940,36 @@ fn capability_downtier_floor<'a>(
     } else {
         manifest_floor
     }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn log_krea_turbo_evidence_exclusion(
+    model: &str,
+    tier: &str,
+    width: u32,
+    height: u32,
+    consumer: &str,
+    reason: Option<gen_core::ImageMemoryEvidenceVerdict>,
+) {
+    tracing::warn!(
+        model,
+        tier,
+        width,
+        height,
+        consumer,
+        reason = ?reason.unwrap_or(gen_core::ImageMemoryEvidenceVerdict::Missing),
+        "shared Krea image-memory evidence excluded; optimized execution is disabled"
+    );
+}
+
+/// Unverified Krea evidence may retain only the baseline resident behavior. In particular, a legacy
+/// sequential estimate fitting does not authorize an optimized load after the shared contract failed.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_unverified_resident_decision(
+    needed_gb: Option<f64>,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> crate::vram_gate::FitDecision {
+    crate::vram_gate::fit_decision(needed_gb, budget)
 }
 
 /// Truthful Krea Turbo capability-clamp rejection. The ladder's same-tier floor prevents a silent
@@ -4953,7 +5018,7 @@ fn krea_turbo_capability_reject_message(
 mod krea_turbo_memory_route_tests {
     use super::{
         capability_downtier_floor, krea_turbo_capability_reject_message,
-        krea_turbo_memory_route,
+        krea_turbo_memory_route, krea_unverified_resident_decision,
     };
 
     #[test]
@@ -4991,9 +5056,30 @@ mod krea_turbo_memory_route_tests {
     }
 
     #[test]
+    fn unverified_krea_never_uses_legacy_sequential_even_when_it_would_fit() {
+        use crate::vram_gate::{FitDecision, VramBudget};
+
+        let budget = Some(VramBudget {
+            free_gb: 24.0,
+            total_gb: 24.0,
+        });
+        assert!(matches!(
+            krea_unverified_resident_decision(Some(27.7), budget),
+            FitDecision::TooBig {
+                needed_gb: 27.7,
+                available_gb: 24.0,
+            }
+        ));
+        assert!(
+            crate::vram_gate::sequential_overflow_gb(Some(23.9), budget).is_none(),
+            "the regression boundary intentionally leaves the legacy sequential estimate fitting"
+        );
+    }
+
+    #[test]
     fn constrained_q8_reject_never_capability_downtiers_to_q4() {
         use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
-        use crate::vram_gate::{krea_turbo_fit, KreaTurboFit, VramBudget};
+        use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
         use serde_json::Value;
 
         let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
@@ -5012,9 +5098,11 @@ mod krea_turbo_memory_route_tests {
             free_gb: available_gb,
             total_gb: available_gb,
         });
-        let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
-            .expect("Q8 and Q4 have measured ladder curves")
-        {
+        let fit = |tier| {
+            let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
+            match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+                .expect("Q8 and Q4 have measured ladder curves")
+            {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
             KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
                 needed_gb,
@@ -5024,6 +5112,7 @@ mod krea_turbo_memory_route_tests {
                 needed_gb: f64::INFINITY,
                 available_gb,
             },
+            }
         };
         assert!(matches!(fit("q8"), TierFit::TooBig { .. }));
         assert_eq!(fit("q4"), TierFit::Fits);
@@ -5043,7 +5132,7 @@ mod krea_turbo_memory_route_tests {
     #[test]
     fn constrained_bf16_reject_never_capability_downtiers_to_q8_or_q4() {
         use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
-        use crate::vram_gate::{krea_turbo_fit, KreaTurboFit, VramBudget};
+        use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
         use serde_json::Value;
 
         let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
@@ -5062,9 +5151,11 @@ mod krea_turbo_memory_route_tests {
             free_gb: available_gb,
             total_gb: available_gb,
         });
-        let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
-            .expect("BF16, Q8, and Q4 have measured ladder curves")
-        {
+        let fit = |tier| {
+            let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
+            match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+                .expect("BF16, Q8, and Q4 have measured ladder curves")
+            {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
             KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
                 needed_gb,
@@ -5074,6 +5165,7 @@ mod krea_turbo_memory_route_tests {
                 needed_gb: f64::INFINITY,
                 available_gb,
             },
+            }
         };
         assert!(matches!(fit("bf16"), TierFit::TooBig { .. }));
         assert_eq!(fit("q8"), TierFit::Fits);
@@ -5604,13 +5696,20 @@ async fn generate_candle_stream(
                 .into_iter()
                 .map(|candidate| {
                     let fit = if krea_turbo_ladder {
-                        match crate::vram_gate::krea_turbo_fit(
+                        let candidate_runtime = resolve_tier_dir(request, settings, candidate)
+                            .and_then(|dir| {
+                                krea_runtime_evidence_context(
+                                    request, settings, candidate, &dir,
+                                )
+                            });
+                        match crate::vram_gate::krea_turbo_fit_with_runtime(
                             &request.model_manifest_entry,
                             candidate,
                             width,
                             height,
                             budget,
                             krea_allow_streamed_blocks,
+                            candidate_runtime.as_ref(),
                         ) {
                             Some(
                                 crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -5622,12 +5721,38 @@ async fn generate_candle_stream(
                                     available_gb: budget.map_or(0.0, |budget| budget.free_gb),
                                 }
                             }
-                            Some(crate::vram_gate::KreaTurboFit::Unverified { .. }) | None => candle_tier_fit(
-                                &request.model_manifest_entry,
-                                candidate,
-                                budget,
-                                false,
-                            ),
+                            Some(crate::vram_gate::KreaTurboFit::Unverified { reason }) => {
+                                log_krea_turbo_evidence_exclusion(
+                                    &request.model,
+                                    candidate,
+                                    width,
+                                    height,
+                                    "capability_downtier",
+                                    Some(reason),
+                                );
+                                candle_tier_fit(
+                                    &request.model_manifest_entry,
+                                    candidate,
+                                    budget,
+                                    false,
+                                )
+                            }
+                            None => {
+                                log_krea_turbo_evidence_exclusion(
+                                    &request.model,
+                                    candidate,
+                                    width,
+                                    height,
+                                    "capability_downtier",
+                                    None,
+                                );
+                                candle_tier_fit(
+                                    &request.model_manifest_entry,
+                                    candidate,
+                                    budget,
+                                    false,
+                                )
+                            }
                         }
                     } else {
                         candle_tier_fit(
@@ -5671,27 +5796,38 @@ async fn generate_candle_stream(
                 available_gb,
             } => {
                 if krea_turbo_ladder {
-                    let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit(
+                    let smallest_runtime = resolve_tier_dir(request, settings, smallest).and_then(
+                        |dir| krea_runtime_evidence_context(request, settings, smallest, &dir),
+                    );
+                    let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                         &request.model_manifest_entry,
                         smallest,
                         width,
                         height,
                         budget,
                         krea_allow_streamed_blocks,
+                        smallest_runtime.as_ref(),
                     );
                     let installed_smaller: Vec<&'static str> =
                         installed_tier_keys(request, settings)
                             .into_iter()
                             .filter(|candidate| {
+                                let candidate_runtime =
+                                    resolve_tier_dir(request, settings, candidate).and_then(|dir| {
+                                        krea_runtime_evidence_context(
+                                            request, settings, candidate, &dir,
+                                        )
+                                    });
                                 tier_quality_rank(candidate) < tier_quality_rank(smallest)
                                     && matches!(
-                                        crate::vram_gate::krea_turbo_fit(
+                                        crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
                                             width,
                                             height,
                                             budget,
                                             krea_allow_streamed_blocks,
+                                            candidate_runtime.as_ref(),
                                         ),
                                         Some(
                                             crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -5726,6 +5862,9 @@ async fn generate_candle_stream(
         }
     }
     let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    let krea_runtime_context = krea_turbo_ladder
+        .then(|| krea_runtime_evidence_context(request, settings, tier, &weights_dir))
+        .flatten();
     // sc-12090 AC#4/#5: the reject suggestions name only tiers actually INSTALLED and lower-fidelity than
     // the one being rejected — never the rejected tier, never the picker (hidden when ≤1 tier installed).
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
@@ -5738,16 +5877,40 @@ async fn generate_candle_stream(
     // unverified path; only then may the established gate remain as provider-safe fallback.
     let shared_krea_fit = krea_turbo_ladder
         .then(|| {
-            crate::vram_gate::krea_turbo_fit(
+            crate::vram_gate::krea_turbo_fit_with_runtime(
                 &request.model_manifest_entry,
                 tier,
                 width,
                 height,
                 budget,
                 krea_allow_streamed_blocks,
+                krea_runtime_context.as_ref(),
             )
         })
         .flatten();
+    if krea_turbo_ladder {
+        match shared_krea_fit {
+            Some(crate::vram_gate::KreaTurboFit::Unverified { reason }) => {
+                log_krea_turbo_evidence_exclusion(
+                    &request.model,
+                    tier,
+                    width,
+                    height,
+                    "final_admission",
+                    Some(reason),
+                );
+            }
+            None => log_krea_turbo_evidence_exclusion(
+                &request.model,
+                tier,
+                width,
+                height,
+                "final_admission",
+                None,
+            ),
+            _ => {}
+        }
+    }
     let use_sequential =
         if let Some(crate::vram_gate::KreaTurboFit::Resident {
             peak_gb,
@@ -5787,7 +5950,7 @@ async fn generate_candle_stream(
                     _ => crate::vram_gate::FitDecision::Unknown,
                 }
             } else if krea_turbo_ladder {
-                crate::vram_gate::fit_decision(needed, budget)
+                krea_unverified_resident_decision(needed, budget)
             } else {
                 crate::vram_gate::resolve_offload(
                     crate::vram_gate::fit_decision(needed, budget),
@@ -5801,8 +5964,9 @@ async fn generate_candle_stream(
             } => {
                 // The resident peak does not fit. Krea Turbo first evaluates its measured three-stage
                 // ladder, even when the older two-stage sequential estimate would fit, so a 24 GB card
-                // physically drops the DiT before VAE decode. Other models and unmeasured Krea tiers
-                // retain the established sequential-overflow gate below.
+                // physically drops the DiT before VAE decode. Other models retain the established
+                // sequential-overflow gate below; unverified Krea evidence reaches the explicit
+                // resident-or-reject path instead of this arm.
                 let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
                     &request.model_manifest_entry,
                     tier,
@@ -5866,15 +6030,24 @@ async fn generate_candle_stream(
                                 installed_tier_keys(request, settings)
                                     .into_iter()
                                     .filter(|candidate| {
+                                        let candidate_runtime =
+                                            resolve_tier_dir(request, settings, candidate).and_then(
+                                                |dir| {
+                                                    krea_runtime_evidence_context(
+                                                        request, settings, candidate, &dir,
+                                                    )
+                                                },
+                                            );
                                         tier_quality_rank(candidate) < tier_quality_rank(tier)
                                             && matches!(
-                                                crate::vram_gate::krea_turbo_fit(
+                                                crate::vram_gate::krea_turbo_fit_with_runtime(
                                                     &request.model_manifest_entry,
                                                     candidate,
                                                     width,
                                                     height,
                                                     budget,
                                                     krea_allow_streamed_blocks,
+                                                    candidate_runtime.as_ref(),
                                                 ),
                                                 Some(
                                                     crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -5883,13 +6056,15 @@ async fn generate_candle_stream(
                                             )
                                     })
                                     .collect();
-                            let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit(
+                            let lower_resolution =
+                                crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                                 &request.model_manifest_entry,
                                 tier,
                                 width,
                                 height,
                                 budget,
                                 krea_allow_streamed_blocks,
+                                krea_runtime_context.as_ref(),
                             );
                             let mut options = Vec::new();
                             if let Some((smaller_w, smaller_h)) = lower_resolution {
@@ -5929,7 +6104,28 @@ async fn generate_candle_stream(
                                     options = options.join(", or "),
                                 )));
                         }
-                        Some(crate::vram_gate::KreaTurboFit::Unverified { .. }) | None => false,
+                        Some(crate::vram_gate::KreaTurboFit::Unverified { reason }) => {
+                            log_krea_turbo_evidence_exclusion(
+                                &request.model,
+                                tier,
+                                width,
+                                height,
+                                "optimized_rung",
+                                Some(reason),
+                            );
+                            false
+                        }
+                        None => {
+                            log_krea_turbo_evidence_exclusion(
+                                &request.model,
+                                tier,
+                                width,
+                                height,
+                                "optimized_rung",
+                                None,
+                            );
+                            false
+                        }
                     }
                 } else {
                     false
@@ -5974,16 +6170,23 @@ async fn generate_candle_stream(
                     installed_tier_keys(request, settings)
                         .into_iter()
                         .filter(|candidate| {
+                            let candidate_runtime =
+                                resolve_tier_dir(request, settings, candidate).and_then(|dir| {
+                                    krea_runtime_evidence_context(
+                                        request, settings, candidate, &dir,
+                                    )
+                                });
                             tier_quality_rank(candidate) < tier_quality_rank(tier)
                                 && (!krea_turbo_ladder
                                     || matches!(
-                                        crate::vram_gate::krea_turbo_fit(
+                                        crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
                                             width,
                                             height,
                                             budget,
                                             krea_allow_streamed_blocks,
+                                            candidate_runtime.as_ref(),
                                         ),
                                         Some(
                                             crate::vram_gate::KreaTurboFit::Resident { .. }

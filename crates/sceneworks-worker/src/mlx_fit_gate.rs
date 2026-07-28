@@ -754,6 +754,7 @@ fn generic_mlx_shared_observation(
     );
     crate::image_memory::select_strategy(
         RequestScope {
+            resolved_route: "generic_mlx_cold_load",
             backend: "mlx",
             tier,
             mode: "image_generation",
@@ -771,7 +772,6 @@ fn generic_mlx_shared_observation(
         }),
         &[Candidate {
             selection,
-            needed_gb: total_bytes as f64 / BYTES_PER_GIB,
             evidence: &evidence,
         }],
     )

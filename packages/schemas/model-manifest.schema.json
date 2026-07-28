@@ -147,6 +147,27 @@
         "streamedBlocks": { "type": "number", "exclusiveMinimum": 0 }
       }
     },
+    "kreaTurboEvidencePhaseVector": {
+      "type": "object",
+      "required": ["text", "denoise", "decode"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "number", "minimum": 0 },
+        "denoise": { "type": "number", "minimum": 0 },
+        "decode": { "type": "number", "minimum": 0 }
+      }
+    },
+    "kreaTurboEvidencePhases": {
+      "type": "object",
+      "required": ["threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+      "additionalProperties": false,
+      "properties": {
+        "threeStage": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "tiledVae": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "chunkedAttention": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "streamedBlocks": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" }
+      }
+    },
     "kreaTurboEvidenceRecord": {
       "type": "object",
       "required": [
@@ -159,7 +180,11 @@
         "sourceActivity",
         "sceneWorksCommit",
         "inferenceCommit",
+        "compatibleSceneWorksRevision",
+        "compatibleInferenceRevision",
+        "loadability",
         "predictedPeaksGb",
+        "predictedPhasesGb",
         "observedPeaksGb",
         "parity"
       ],
@@ -174,7 +199,28 @@
         "sourceActivity": { "type": "integer", "minimum": 1 },
         "sceneWorksCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "inferenceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "compatibleSceneWorksRevision": { "const": "sc-15449-contract-v1" },
+        "compatibleInferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "loadability": {
+          "type": "object",
+          "required": ["provider", "repository", "resolvedRevision", "tierRoot", "route", "backend", "computeCapability"],
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "const": "huggingface" },
+            "repository": { "type": "string", "minLength": 1 },
+            "resolvedRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "tierRoot": { "enum": ["q4", "q8", "bf16"] },
+            "route": { "const": "krea_2_turbo" },
+            "backend": { "const": "candle" },
+            "computeCapability": { "const": 12.0 }
+          },
+          "description": "Exact immutable artifact and canonical runtime route exercised by this evidence cell."
+        },
         "predictedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
+        "predictedPhasesGb": {
+          "$ref": "#/$defs/kreaTurboEvidencePhases",
+          "description": "Exact phase-curve outputs for this evidence cell. Every emitted text/denoise/decode value must match these values within the declared 0.01 GiB tolerance."
+        },
         "observedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
         "parity": {
           "type": "object",

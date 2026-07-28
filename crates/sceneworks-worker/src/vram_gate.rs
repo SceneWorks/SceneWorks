@@ -338,6 +338,123 @@ pub(crate) enum KreaTurboFit {
 const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
 const KREA_TURBO_INFERENCE_REVISION: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
 
+#[derive(Clone, Debug)]
+pub(crate) struct KreaRuntimeEvidenceContext {
+    resolved_route: String,
+    backend: String,
+    gpu_id: String,
+    compute_capability: f32,
+    artifact_provider: String,
+    artifact_repository: String,
+    resolved_revision: String,
+    tier_root: String,
+    resolved_artifact_root: std::path::PathBuf,
+}
+
+impl KreaRuntimeEvidenceContext {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn inspect(
+        resolved_route: &str,
+        backend: &str,
+        gpu_id: &str,
+        compute_capability: Option<f32>,
+        artifact_provider: &str,
+        artifact_repository: &str,
+        resolved_revision: &str,
+        tier_root: &str,
+        resolved_artifact_root: &std::path::Path,
+        pinned_snapshot_root: &std::path::Path,
+    ) -> Option<Self> {
+        let compute_capability = compute_capability?;
+        let expected = pinned_snapshot_root.join(tier_root);
+        if resolved_artifact_root.canonicalize().ok()? != expected.canonicalize().ok()? {
+            return None;
+        }
+        let components = sceneworks_core::mlx_tier_completeness::tier_declared_components(
+            resolved_artifact_root,
+        )?;
+        if components.is_empty()
+            || !components.iter().all(|component| {
+                std::fs::read_dir(resolved_artifact_root.join(component)).is_ok_and(|entries| {
+                    entries
+                        .flatten()
+                        .any(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
+                })
+            })
+        {
+            return None;
+        }
+        let parse_json = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        };
+        let weights_loadable = |component: &str| {
+            let dir = resolved_artifact_root.join(component);
+            if parse_json(&dir.join("config.json")).is_none() {
+                return false;
+            }
+            let index = std::fs::read_dir(&dir).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".safetensors.index.json"))
+                })
+            });
+            if let Some(index) = index {
+                return parse_json(&index)
+                    .and_then(|value| value.get("weight_map")?.as_object().cloned())
+                    .is_some_and(|weight_map| {
+                        !weight_map.is_empty()
+                            && weight_map.values().all(|shard| {
+                                shard
+                                    .as_str()
+                                    .is_some_and(|shard| dir.join(shard).is_file())
+                            })
+                    });
+            }
+            sceneworks_core::mlx_tier_completeness::dir_has_visible_file_ending(
+                &dir,
+                ".safetensors",
+            )
+        };
+        if !["transformer", "text_encoder", "vae"]
+            .into_iter()
+            .all(weights_loadable)
+            || parse_json(&resolved_artifact_root.join("tokenizer/tokenizer.json")).is_none()
+            || parse_json(&resolved_artifact_root.join("scheduler/scheduler_config.json")).is_none()
+        {
+            return None;
+        }
+        Some(Self {
+            resolved_route: resolved_route.to_owned(),
+            backend: backend.to_owned(),
+            gpu_id: gpu_id.to_owned(),
+            compute_capability,
+            artifact_provider: artifact_provider.to_owned(),
+            artifact_repository: artifact_repository.to_owned(),
+            resolved_revision: resolved_revision.to_owned(),
+            tier_root: tier_root.to_owned(),
+            resolved_artifact_root: resolved_artifact_root.to_owned(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verified_for_test(tier_root: &str) -> Self {
+        Self {
+            resolved_route: "krea_2_turbo".into(),
+            backend: "candle".into(),
+            gpu_id: "test-gpu".into(),
+            compute_capability: 12.0,
+            artifact_provider: "huggingface".into(),
+            artifact_repository: "SceneWorks/krea-2-turbo-mlx".into(),
+            resolved_revision: "d009674080cc1bccf2b629d834c34bf5eccdb723".into(),
+            tier_root: tier_root.into(),
+            resolved_artifact_root: std::path::PathBuf::new(),
+        }
+    }
+}
+
 /// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
 /// allocator residency separately from the geometry-dependent activation slope, fitted from real
 /// renders at multiple resolutions. Invalid or incomplete evidence fails closed to `None`; callers
@@ -409,13 +526,14 @@ fn krea_rung_parameters(
 ///
 /// Returns `None` when live budget or complete measured manifest evidence is absent. This is distinct
 /// from `Reject`: unknown evidence must not masquerade as proof that a configuration cannot fit.
-pub(crate) fn krea_turbo_fit(
+pub(crate) fn krea_turbo_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
     allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<KreaTurboFit> {
     use crate::image_memory::{self, Budget, Candidate, RequestScope, Selection};
     use gen_core::{
@@ -444,10 +562,13 @@ pub(crate) fn krea_turbo_fit(
             reason: ImageMemoryEvidenceVerdict::OutOfEnvelope,
         });
     }
+    let load_root = runtime
+        .map(|runtime| runtime.resolved_artifact_root.clone())
+        .unwrap_or_default();
     let provider_contract = crate::inference_runtime::media()
         .image_memory_contract(
             "krea_2_turbo",
-            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
+            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(load_root)),
         )
         .ok()
         .flatten()?;
@@ -461,6 +582,7 @@ pub(crate) fn krea_turbo_fit(
         },
     };
     let request = RequestScope {
+        resolved_route: "krea_2_turbo",
         backend: "candle",
         tier: numeric_tier,
         mode: "text_to_image",
@@ -496,10 +618,19 @@ pub(crate) fn krea_turbo_fit(
         });
     let make_evidence = |selection: ImageMemorySelection,
                          manifest_rung: Option<&str>,
-                         fallback_predicted_peak_gb: f64| {
+                         fallback_predicted_peak_gb: f64,
+                         fallback_phases: Option<KreaTurboPhasePeaks>| {
         let record_peak = |field: &str| {
             let rung = manifest_rung?;
             evidence_record?.get(field)?.get(rung).and_then(json_f64)
+        };
+        let record_phase = |phase: &str| {
+            let rung = manifest_rung?;
+            evidence_record?
+                .get("predictedPhasesGb")?
+                .get(rung)?
+                .get(phase)
+                .and_then(json_f64)
         };
         let predicted_peak_gb =
             record_peak("predictedPeaksGb").unwrap_or(fallback_predicted_peak_gb);
@@ -511,22 +642,150 @@ pub(crate) fn krea_turbo_fit(
         let parity = evidence_record
             .and_then(|record| record.get("parity"))
             .and_then(Value::as_object);
-        let verified = manifest_rung.is_some()
-            && observed_peak_gb.is_some()
-            && !harness_version.is_empty()
-            && parity.is_some();
-        let evidence_dimensions = if verified {
-            ImageMemoryEvidenceDimensions::VERIFIED
-        } else {
-            ImageMemoryEvidenceDimensions {
-                static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
-                declared_calibration: ImageMemoryEvidenceVerdict::Satisfied,
-                historical_verification: ImageMemoryEvidenceVerdict::Unverified,
-                current_environment_verification: ImageMemoryEvidenceVerdict::Unverified,
-                canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
-                exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+        let verdict = |condition, failure| {
+            if condition {
+                ImageMemoryEvidenceVerdict::Satisfied
+            } else {
+                failure
             }
         };
+        let static_valid = provider_contract.conformance_errors().is_empty()
+            && provider_contract.validate_selection(&selection).is_ok();
+        let declared_calibration = provider_contract
+            .calibration
+            .as_ref()
+            .is_some_and(|identity| {
+                identity.abi == calibration_abi && identity.fingerprint == calibration_fingerprint
+            });
+        let valid_commit = |field: &str| {
+            evidence_record
+                .and_then(|record| record.get(field))
+                .and_then(Value::as_str)
+                .is_some_and(|revision| {
+                    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        };
+        let historical_compatible = valid_commit("sceneWorksCommit")
+            && valid_commit("inferenceCommit")
+            && evidence_record
+                .and_then(|record| record.get("compatibleSceneWorksRevision"))
+                .and_then(Value::as_str)
+                == Some(KREA_TURBO_SCENEWORKS_REVISION)
+            && evidence_record
+                .and_then(|record| record.get("compatibleInferenceRevision"))
+                .and_then(Value::as_str)
+                == Some(KREA_TURBO_INFERENCE_REVISION);
+        let loadability = evidence_record
+            .and_then(|record| record.get("loadability"))
+            .and_then(Value::as_object);
+        let expected_compute_capability = loadability
+            .and_then(|loadability| loadability.get("computeCapability"))
+            .and_then(json_f64);
+        let current_environment = scene_works_revision == KREA_TURBO_SCENEWORKS_REVISION
+            && inference_revision == KREA_TURBO_INFERENCE_REVISION
+            && turbo_fit.get("measured").and_then(Value::as_bool) == Some(true)
+            && runtime.is_some_and(|runtime| {
+                !runtime.gpu_id.trim().is_empty()
+                    && expected_compute_capability.is_some_and(|expected| {
+                        (f64::from(runtime.compute_capability) - expected).abs() < f64::EPSILON
+                    })
+            });
+        let loadability_matches_record =
+            loadability
+                .zip(runtime)
+                .is_some_and(|(loadability, runtime)| {
+                    loadability.get("provider").and_then(Value::as_str)
+                        == Some(runtime.artifact_provider.as_str())
+                        && loadability.get("repository").and_then(Value::as_str)
+                            == Some(runtime.artifact_repository.as_str())
+                        && loadability.get("resolvedRevision").and_then(Value::as_str)
+                            == Some(runtime.resolved_revision.as_str())
+                        && loadability.get("tierRoot").and_then(Value::as_str)
+                            == Some(runtime.tier_root.as_str())
+                        && loadability.get("route").and_then(Value::as_str)
+                            == Some(runtime.resolved_route.as_str())
+                        && loadability.get("backend").and_then(Value::as_str)
+                            == Some(runtime.backend.as_str())
+                        && runtime.resolved_route == provider_contract.provider_id
+                        && runtime.backend == provider_contract.backend.backend_id()
+                        && runtime.tier_root == tier
+                        && manifest_entry
+                            .get("downloads")
+                            .and_then(Value::as_array)
+                            .is_some_and(|downloads| {
+                                downloads.iter().any(|download| {
+                                    download.get("provider").and_then(Value::as_str)
+                                        == loadability.get("provider").and_then(Value::as_str)
+                                        && download.get("repo").and_then(Value::as_str)
+                                            == loadability.get("repository").and_then(Value::as_str)
+                                        && download.get("revision").and_then(Value::as_str)
+                                            == loadability
+                                                .get("resolvedRevision")
+                                                .and_then(Value::as_str)
+                                        && download.get("variant").and_then(Value::as_str)
+                                            == Some(tier)
+                                })
+                            })
+                });
+        let phases_match = fallback_phases.is_some_and(|phases| {
+            [
+                ("text", phases.text_gb),
+                ("denoise", phases.denoise_gb),
+                ("decode", phases.decode_gb),
+            ]
+            .into_iter()
+            .all(|(name, predicted)| {
+                record_phase(name).is_some_and(|recorded| (recorded - predicted).abs() <= 0.01)
+            })
+        });
+        let exact_parameters = manifest_rung.is_some()
+            && record_peak("predictedPeaksGb").is_some_and(|record_peak_gb| {
+                (record_peak_gb - fallback_predicted_peak_gb).abs() <= 0.01
+            })
+            && phases_match
+            && provider_contract.validate_selection(&selection).is_ok();
+        let evidence_dimensions = ImageMemoryEvidenceDimensions {
+            static_implementation: verdict(static_valid, ImageMemoryEvidenceVerdict::Invalid),
+            declared_calibration: verdict(
+                declared_calibration,
+                ImageMemoryEvidenceVerdict::FingerprintMismatch,
+            ),
+            historical_verification: verdict(
+                historical_compatible,
+                if evidence_record.is_some() {
+                    ImageMemoryEvidenceVerdict::Stale
+                } else {
+                    ImageMemoryEvidenceVerdict::Missing
+                },
+            ),
+            current_environment_verification: verdict(
+                current_environment,
+                if evidence_record.is_some() {
+                    ImageMemoryEvidenceVerdict::Stale
+                } else {
+                    ImageMemoryEvidenceVerdict::Missing
+                },
+            ),
+            canonical_route_loadability: verdict(
+                loadability_matches_record,
+                if evidence_record.is_some() {
+                    ImageMemoryEvidenceVerdict::Unverified
+                } else {
+                    ImageMemoryEvidenceVerdict::Missing
+                },
+            ),
+            exact_strategy_parameters: verdict(
+                exact_parameters,
+                ImageMemoryEvidenceVerdict::OutOfEnvelope,
+            ),
+        };
+        let verified = observed_peak_gb.is_some()
+            && !harness_version.is_empty()
+            && parity.is_some_and(|parity| {
+                parity.get("contract").and_then(Value::as_str) == Some("golden")
+                    && parity.get("result").and_then(Value::as_str) == Some("passed")
+            })
+            && evidence_dimensions.all_satisfied();
         let parity_contract = parity.map_or(ImageMemoryParityContract::Exact, |parity| {
             ImageMemoryParityContract::Golden {
                 fixture: parity
@@ -599,8 +858,13 @@ pub(crate) fn krea_turbo_fit(
             ImageMemoryStrategy::BoundedTransformerResidency,
         ),
     ];
-    let mut evidence = vec![make_evidence(resident_selection, None, resident_peak_gb)];
-    let mut selections = vec![(resident_selection, resident_peak_gb)];
+    let mut evidence = vec![make_evidence(
+        resident_selection,
+        None,
+        resident_peak_gb,
+        None,
+    )];
+    let mut selections = vec![resident_selection];
     let mut measured = Vec::new();
     for (rung, strategy) in rung_pairs {
         let phases = krea_rung_phase_peaks(manifest_entry, tier, rung, width, height)?;
@@ -617,15 +881,15 @@ pub(crate) fn krea_turbo_fit(
             selection,
             Some(rung.manifest_key()),
             phase_peak_gb,
+            Some(phases),
         ));
-        selections.push((selection, phase_peak_gb));
+        selections.push(selection);
     }
     let candidates = selections
         .iter()
         .zip(&evidence)
-        .map(|((selection, needed_gb), evidence)| Candidate {
+        .map(|(selection, evidence)| Candidate {
             selection: *selection,
-            needed_gb: *needed_gb,
             evidence,
         })
         .collect::<Vec<_>>();
@@ -647,44 +911,71 @@ pub(crate) fn krea_turbo_fit(
                     strategy: ImageMemoryStrategy::Resident,
                     ..
                 },
+            needed_gb,
             ..
         } => Some(KreaTurboFit::Resident {
             peak_gb: resident_peak_gb,
-            needed_gb: resident_peak_gb + HEADROOM_GB,
+            needed_gb: needed_gb + HEADROOM_GB,
             selection: selected,
         }),
         Selection::Selected {
             selection: selected,
+            needed_gb,
             ..
         } => {
-            let (rung, phases, needed_gb, _) = measured
+            let (rung, phases, _, _) = measured
                 .into_iter()
                 .find(|(_, _, _, selection)| selection.strategy == selected.strategy)?;
             Some(KreaTurboFit::Fits {
                 rung,
                 phases,
-                needed_gb,
+                needed_gb: needed_gb + HEADROOM_GB,
                 selection: selected,
             })
         }
-        Selection::Reject { .. } => {
-            let (_, phases, needed_gb, _) = measured.last().copied()?;
-            Some(KreaTurboFit::Reject { phases, needed_gb })
+        Selection::Reject { needed_gb, .. } => {
+            let (_, phases, _, _) = measured.last().copied()?;
+            Some(KreaTurboFit::Reject {
+                phases,
+                needed_gb: needed_gb + HEADROOM_GB,
+            })
         }
         Selection::Unverified { reason } => Some(KreaTurboFit::Unverified { reason }),
     }
 }
 
-/// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
-/// Used only to make rejection copy truthful: if this returns `None`, lowering resolution is not
-/// presented as an escape hatch.
-pub(crate) fn krea_turbo_smaller_fit(
+#[cfg(test)]
+fn krea_turbo_fit(
     manifest_entry: &JsonObject,
     tier: &str,
     width: u32,
     height: u32,
     budget: Option<VramBudget>,
     allow_streamed_blocks: bool,
+) -> Option<KreaTurboFit> {
+    let runtime = KreaRuntimeEvidenceContext::verified_for_test(tier);
+    krea_turbo_fit_with_runtime(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        allow_streamed_blocks,
+        Some(&runtime),
+    )
+}
+
+/// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
+/// Used only to make rejection copy truthful: if this returns `None`, lowering resolution is not
+/// presented as an escape hatch.
+pub(crate) fn krea_turbo_smaller_fit_with_runtime(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<(u32, u32)> {
     let current_pixels = u64::from(width) * u64::from(height);
     let resolutions = manifest_entry
@@ -701,10 +992,39 @@ pub(crate) fn krea_turbo_smaller_fit(
     candidates.sort_by_key(|(w, h)| std::cmp::Reverse(u64::from(*w) * u64::from(*h)));
     candidates.into_iter().find(|(w, h)| {
         matches!(
-            krea_turbo_fit(manifest_entry, tier, *w, *h, budget, allow_streamed_blocks),
+            krea_turbo_fit_with_runtime(
+                manifest_entry,
+                tier,
+                *w,
+                *h,
+                budget,
+                allow_streamed_blocks,
+                runtime,
+            ),
             Some(KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. })
         )
     })
+}
+
+#[cfg(test)]
+fn krea_turbo_smaller_fit(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    allow_streamed_blocks: bool,
+) -> Option<(u32, u32)> {
+    let runtime = KreaRuntimeEvidenceContext::verified_for_test(tier);
+    krea_turbo_smaller_fit_with_runtime(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        allow_streamed_blocks,
+        Some(&runtime),
+    )
 }
 
 /// Resolve the [`LoadPlan`] for `needed` (resident peak) and `sequential_needed` (measured staged peak,
@@ -1194,6 +1514,12 @@ mod tests {
     fn krea_fit_manifest() -> JsonObject {
         let curve = |fixed: f64, per_mpx: f64| json!({ "fixedGb": fixed, "perMpxGb": per_mpx });
         obj(json!({
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "SceneWorks/krea-2-turbo-mlx",
+                "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "variant": "q4"
+            }],
             "limits": {
                 "resolutions": ["768x768", "1024x1024", "1536x1536", "2048x2048"]
             },
@@ -1211,11 +1537,46 @@ mod tests {
                         "width": 1024,
                         "height": 1024,
                         "harnessVersion": "unit-test",
+                        "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
+                        "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+                        "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+                        "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+                        "loadability": {
+                            "provider": "huggingface",
+                            "repository": "SceneWorks/krea-2-turbo-mlx",
+                            "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                            "tierRoot": "q4",
+                            "route": "krea_2_turbo",
+                            "backend": "candle",
+                            "computeCapability": 12.0
+                        },
                         "predictedPeaksGb": {
                             "threeStage": 17.291456,
                             "tiledVae": 16.097152,
                             "chunkedAttention": 14.097152,
                             "streamedBlocks": 11.097152
+                        },
+                        "predictedPhasesGb": {
+                            "threeStage": {
+                                "text": 7.524288,
+                                "denoise": 16.097152,
+                                "decode": 17.291456
+                            },
+                            "tiledVae": {
+                                "text": 7.524288,
+                                "denoise": 16.097152,
+                                "decode": 11.097152
+                            },
+                            "chunkedAttention": {
+                                "text": 7.524288,
+                                "denoise": 14.097152,
+                                "decode": 11.097152
+                            },
+                            "streamedBlocks": {
+                                "text": 7.524288,
+                                "denoise": 8.048576,
+                                "decode": 11.097152
+                            }
                         },
                         "observedPeaksGb": {
                             "threeStage": 17.0,
@@ -1224,6 +1585,8 @@ mod tests {
                             "streamedBlocks": 11.0
                         },
                         "parity": {
+                            "contract": "golden",
+                            "result": "passed",
                             "fixture": "unit-test",
                             "metric": "max_abs",
                             "maximumError": 0.0
@@ -1391,6 +1754,206 @@ mod tests {
             })
         ));
         assert!(matches!(fit(10.0), Some(KreaTurboFit::Reject { .. })));
+    }
+
+    #[test]
+    fn krea_admission_uses_record_peak_not_a_lower_mutated_curve() {
+        let mut manifest = krea_fit_manifest();
+        let curves = manifest
+            .get_mut("candle")
+            .and_then(Value::as_object_mut)
+            .and_then(|candle| candle.get_mut("turboFit"))
+            .and_then(Value::as_object_mut)
+            .and_then(|fit| fit.get_mut("phaseCurvesByTier"))
+            .and_then(Value::as_object_mut)
+            .and_then(|tiers| tiers.get_mut("q4"))
+            .and_then(Value::as_object_mut)
+            .and_then(|tier| tier.get_mut("threeStage"))
+            .and_then(Value::as_object_mut)
+            .expect("three-stage curves");
+        for phase in ["text", "denoise", "decode"] {
+            curves.insert(phase.to_owned(), json!({ "fixedGb": 1.0, "perMpxGb": 0.0 }));
+        }
+        assert!(matches!(
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: 19.0,
+                    total_gb: 19.0,
+                }),
+                true,
+            ),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::TiledVae,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn krea_non_max_phase_mutation_excludes_only_the_unbound_rung() {
+        let mut manifest = krea_fit_manifest();
+        manifest["candle"]["turboFit"]["phaseCurvesByTier"]["q4"]["threeStage"]["text"]
+            ["fixedGb"] = json!(8.0);
+        assert!(matches!(
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            ),
+            Some(KreaTurboFit::Fits {
+                rung: KreaTurboRung::TiledVae,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn krea_evidence_dimension_mutations_fail_closed_with_specific_reasons() {
+        let fit = |manifest: &JsonObject| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            )
+        };
+
+        let mut stale = krea_fit_manifest();
+        stale["candle"]["turboFit"]["evidenceRecords"][0]["compatibleInferenceRevision"] =
+            Value::String("1111111111111111111111111111111111111111".into());
+        assert_eq!(
+            fit(&stale),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::ImageMemoryEvidenceVerdict::Stale,
+            })
+        );
+
+        let mut unloadable = krea_fit_manifest();
+        unloadable["candle"]["turboFit"]["evidenceRecords"][0]["loadability"]["resolvedRevision"] =
+            Value::String("2222222222222222222222222222222222222222".into());
+        assert_eq!(
+            fit(&unloadable),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+            })
+        );
+
+        let mut fingerprint = krea_fit_manifest();
+        fingerprint["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("mutated-fingerprint".into());
+        assert_eq!(
+            fit(&fingerprint),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::ImageMemoryEvidenceVerdict::FingerprintMismatch,
+            })
+        );
+    }
+
+    #[test]
+    fn krea_runtime_context_is_required_and_hardware_and_artifact_bound() {
+        let manifest = krea_fit_manifest();
+        let budget = Some(VramBudget {
+            free_gb: 20.0,
+            total_gb: 20.0,
+        });
+        let run = |runtime: Option<&KreaRuntimeEvidenceContext>| {
+            krea_turbo_fit_with_runtime(&manifest, "q4", 1024, 1024, budget, true, runtime)
+        };
+        assert!(matches!(run(None), Some(KreaTurboFit::Unverified { .. })));
+
+        let mut wrong_hardware = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        wrong_hardware.compute_capability = 8.9;
+        assert!(matches!(
+            run(Some(&wrong_hardware)),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::ImageMemoryEvidenceVerdict::Stale,
+            })
+        ));
+
+        let mut wrong_artifact = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        wrong_artifact.resolved_revision = "2222222222222222222222222222222222222222".into();
+        assert!(matches!(
+            run(Some(&wrong_artifact)),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+            })
+        ));
+    }
+
+    #[test]
+    fn runtime_artifact_inspection_rejects_a_missing_index_shard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let revision = "d009674080cc1bccf2b629d834c34bf5eccdb723";
+        let snapshot = temp.path().join("snapshots").join(revision);
+        let tier = snapshot.join("q4");
+        for component in [
+            "transformer",
+            "text_encoder",
+            "vae",
+            "tokenizer",
+            "scheduler",
+        ] {
+            std::fs::create_dir_all(tier.join(component)).expect("component dir");
+        }
+        std::fs::write(
+            tier.join("model_index.json"),
+            r#"{
+              "transformer": ["lib", "Transformer"],
+              "text_encoder": ["lib", "TextEncoder"],
+              "vae": ["lib", "Vae"],
+              "tokenizer": ["lib", "Tokenizer"],
+              "scheduler": ["lib", "Scheduler"]
+            }"#,
+        )
+        .expect("model index");
+        for component in ["transformer", "text_encoder", "vae"] {
+            std::fs::write(tier.join(component).join("config.json"), "{}").expect("config");
+        }
+        let transformer_shard = tier.join("transformer/model-00001-of-00001.safetensors");
+        std::fs::write(
+            tier.join("transformer/model.safetensors.index.json"),
+            r#"{"weight_map":{"tensor":"model-00001-of-00001.safetensors"}}"#,
+        )
+        .expect("weight index");
+        std::fs::write(&transformer_shard, b"weights").expect("transformer shard");
+        std::fs::write(tier.join("text_encoder/model.safetensors"), b"weights")
+            .expect("text weights");
+        std::fs::write(tier.join("vae/model.safetensors"), b"weights").expect("vae weights");
+        std::fs::write(tier.join("tokenizer/tokenizer.json"), "{}").expect("tokenizer");
+        std::fs::write(tier.join("scheduler/scheduler_config.json"), "{}").expect("scheduler");
+
+        let inspect = || {
+            KreaRuntimeEvidenceContext::inspect(
+                "krea_2_turbo",
+                "candle",
+                "0",
+                Some(12.0),
+                "huggingface",
+                "SceneWorks/krea-2-turbo-mlx",
+                revision,
+                "q4",
+                &tier,
+                &snapshot,
+            )
+        };
+        assert!(inspect().is_some());
+        std::fs::remove_file(transformer_shard).expect("remove shard");
+        assert!(inspect().is_none());
     }
 
     #[test]
@@ -1624,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn q8_and_bf16_768_measurements_remain_fail_closed_without_geometry_parity_records() {
+    fn q8_and_bf16_768_measurements_report_out_of_envelope_without_exact_records() {
         let manifest = builtin_krea_turbo_manifest();
         for tier in ["q8", "bf16"] {
             assert!(matches!(
@@ -1640,7 +2203,7 @@ mod tests {
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+                    reason: gen_core::ImageMemoryEvidenceVerdict::OutOfEnvelope,
                 })
             ));
         }
