@@ -139,7 +139,8 @@ It resolves the wired ceiling from the explicit override first, then the host's 
 the untouched MLX default memory limit. MLX documents that default as 1.5 times Metal's recommended
 working-set size, so the final fallback uses `get_memory_limit() / 3 * 2`, matching the production
 worker's current-host derivation and rounding down to remain at or below the ceiling. The selected
-source is recorded in `hardware.probe` and must resolve to a nonzero value.
+source is recorded in `hardware.probe` and must resolve to a nonzero value. A present explicit
+override must parse as a positive byte count; malformed or zero values fail closed.
 
 After this workflow change is present on the repository default branch, the self-hosted macOS ARM64
 NAX runner can execute the same adapter through a guarded manual dispatch:

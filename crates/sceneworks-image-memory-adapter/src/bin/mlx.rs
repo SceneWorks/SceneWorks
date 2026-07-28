@@ -62,7 +62,11 @@ fn resolve_wired_limit(
     kernel_limit_bytes: Option<&str>,
     mlx_default_memory_limit: usize,
 ) -> Result<WiredLimit, String> {
-    if let Some(bytes) = positive_integer(override_bytes, "SCENEWORKS_MLX_WIRED_LIMIT_BYTES")? {
+    if let Some(value) = override_bytes {
+        let bytes = integer(value, "SCENEWORKS_MLX_WIRED_LIMIT_BYTES")?;
+        if bytes == 0 {
+            return Err("SCENEWORKS_MLX_WIRED_LIMIT_BYTES must be greater than zero".to_owned());
+        }
         return Ok(WiredLimit {
             bytes,
             source: "SCENEWORKS_MLX_WIRED_LIMIT_BYTES",
@@ -131,11 +135,12 @@ fn probe() -> Result<Value, String> {
     let override_bytes = std::env::var("SCENEWORKS_MLX_WIRED_LIMIT_BYTES").ok();
     let iogpu_limit_mb = sysctl("iogpu.wired_limit_mb").ok();
     let kernel_limit_bytes = sysctl("kern.memorystatus_wired_mem_limit").ok();
+    let mlx_default_memory_limit = get_memory_limit();
     let wired_limit = resolve_wired_limit(
         override_bytes.as_deref(),
         iogpu_limit_mb.as_deref(),
         kernel_limit_bytes.as_deref(),
-        get_memory_limit(),
+        mlx_default_memory_limit,
     )?;
     Ok(json!({
         "hardware": {
@@ -148,7 +153,7 @@ fn probe() -> Result<Value, String> {
             "chip": sysctl("machdep.cpu.brand_string")?,
             "osVersion": command("/usr/bin/sw_vers", &["-productVersion"])?,
             "metalDevice": metal_device()?,
-            "mlxMemoryLimitBytes": get_memory_limit(),
+            "mlxMemoryLimitBytes": mlx_default_memory_limit,
             "wiredLimitBytes": wired_limit.bytes,
         }
     }))
@@ -215,6 +220,15 @@ mod tests {
         assert!(resolve_wired_limit(Some("not-a-number"), None, None, 1_000)
             .unwrap_err()
             .contains("SCENEWORKS_MLX_WIRED_LIMIT_BYTES"));
+    }
+
+    #[test]
+    fn wired_limit_rejects_zero_explicit_override() {
+        assert!(
+            resolve_wired_limit(Some("0"), Some("456"), Some("789"), 1_000)
+                .unwrap_err()
+                .contains("SCENEWORKS_MLX_WIRED_LIMIT_BYTES must be greater than zero")
+        );
     }
 
     #[test]
