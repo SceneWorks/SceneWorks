@@ -145,11 +145,21 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(workflow, /if \[\[ -d "\$QWEN_HF_ROOT" \]\]; then/);
   assert.match(workflow, /elif \[\[ -d "\$QWEN_APP_ROOT" \]\]; then/);
   assert.doesNotMatch(workflow, /\bfind\b.*qwen|\bls\b.*qwen/i);
+  assert.doesNotMatch(workflow, /actions\/setup-python@/);
+  assert.match(workflow, /command -v python3 >\/dev\/null 2>&1/);
+  assert.match(workflow, /python3 --version/);
   assert.match(
     workflow,
-    /actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/,
+    /python3 -m venv "\$RUNNER_TEMP\/qwen-provision-venv"/,
   );
-  assert.match(workflow, /python-version: "3\.12"/);
+  assert.match(
+    workflow,
+    /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
+  );
+  assert.match(
+    workflow,
+    /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" - <<'PY'/,
+  );
   assert.match(workflow, /huggingface_hub==0\.36\.0/);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
@@ -163,7 +173,7 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
     /"Library",\s+"Application Support",\s+"SceneWorks",\s+"data",\s+"cache",\s+"huggingface",\s+"hub"/,
   );
   const provisioning = workflow.slice(
-    workflow.indexOf("- name: Set up pinned Python for Qwen provisioning"),
+    workflow.indexOf("- name: Create isolated Qwen provisioning environment"),
     workflow.indexOf("- name: Resolve exact Qwen calibration snapshot"),
   );
   assert.doesNotMatch(

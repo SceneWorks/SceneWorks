@@ -155,16 +155,18 @@ jobs:
             echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
             exit 1
           fi
-      - name: Set up pinned Python for Qwen provisioning
+      - name: Create isolated Qwen provisioning environment
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: ".github/workflows/macos-mlx.yml"
-      - name: Install pinned Qwen provisioning client
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
-        run: python -m pip install --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+        run: |
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "python3 is required to provision the Qwen calibration snapshot" >&2
+            exit 1
+          fi
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else "python3 >= 3.8 is required")'
+          python3 -m venv "$RUNNER_TEMP/qwen-provision-venv"
+          "$RUNNER_TEMP/qwen-provision-venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
       - name: Provision exact public Qwen calibration snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
         env:
@@ -174,7 +176,7 @@ jobs:
           HF_HUB_DISABLE_TELEMETRY: "1"
           HF_HUB_VERBOSITY: "error"
         run: |
-          python - <<'PY'
+          "$RUNNER_TEMP/qwen-provision-venv/bin/python" - <<'PY'
           import os
           from huggingface_hub import snapshot_download
 

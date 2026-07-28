@@ -164,10 +164,12 @@ post-merge.
 
 When both canonical roots are absent, explicitly set `provision_qwen_snapshot=true` on the same
 calibration dispatch. Provisioning is rejected unless `run_image_memory_calibration=true`. That
-opt-in lane uses pinned Python 3.12 tooling and `huggingface_hub==0.36.0` to resumably and
-idempotently download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository
-at the exact `qwen_revision`. It uses no token and writes only to the canonical SceneWorks
-application-data Hugging Face cache. Progress and paths are not logged. Because the snapshot is
+opt-in lane verifies the runner's existing `python3` without printing its path, creates an isolated
+`$RUNNER_TEMP/qwen-provision-venv`, and installs `huggingface_hub==0.36.0` with that venv's
+interpreter. It then resumably and idempotently downloads only `bf16/**` from the fixed public
+`SceneWorks/qwen-image-mlx` repository at the exact `qwen_revision`. It uses no token and writes
+only to the canonical SceneWorks application-data Hugging Face cache. Progress and paths are not
+logged. Because the snapshot is
 approximately 57 GiB, only a provisioning dispatch receives the extended four-hour job timeout;
 ordinary MLX CI and non-provisioning calibration retain the 45-minute ceiling. A provisioning or
 calibration failure cannot upload a schema-checked evidence artifact.
