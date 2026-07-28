@@ -1047,6 +1047,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         frames: (0..149).map(|_| frame(())).collect(),
         fps: 25,
         audio: None,
+        adapter_apply_reports: Vec::new(),
     };
     let clip = EncodedClip::measure(&decoded);
     assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
@@ -1067,6 +1068,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         frames: vec![frame(()), frame(())],
         fps: 0,
         audio: None,
+        adapter_apply_reports: Vec::new(),
     };
     let clip = EncodedClip::measure(&zero_fps);
     assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
@@ -1764,6 +1766,8 @@ struct ArmProbe {
     request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
     /// The `LoadSpec` the arm resolved — carries the tier dir + quant marker.
     spec: std::sync::Arc<std::sync::Mutex<Option<LoadSpec>>>,
+    /// Provider-owned adapter outcomes returned after generation.
+    adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
 }
 
 #[cfg(any(
@@ -1779,6 +1783,7 @@ impl ArmProbe {
     ) -> impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static {
         let seen_spec = std::sync::Arc::clone(&self.spec);
         let seen_request = std::sync::Arc::clone(&self.request);
+        let adapter_reports = std::sync::Arc::clone(&self.adapter_reports);
         move |engine_id, spec| {
             *seen_spec.lock().unwrap() = Some(spec.clone());
             Ok(Box::new(ProbeGenerator {
@@ -1793,6 +1798,7 @@ impl ArmProbe {
                     required_components: &[],
                 },
                 request: seen_request,
+                adapter_reports,
             }))
         }
     }
@@ -1832,6 +1838,7 @@ impl ArmProbe {
 struct ProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
+    adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
 }
 
 #[cfg(any(
@@ -1845,6 +1852,10 @@ impl Generator for ProbeGenerator {
 
     fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
         Ok(())
+    }
+
+    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+        self.adapter_reports.lock().unwrap().clone()
     }
 
     fn generate(
@@ -3035,26 +3046,6 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
 // Krea Realtime Wan-family LoRA passthrough (sc-15017, S15).
 // ---------------------------------------------------------------------------
 
-/// Minimal valid safetensors carrying explicit TENSOR keys (zero-length, so no data section is
-/// needed — `max_tensor_data_end` reads `data_offsets[1]`). Lets a test build a header that looks
-/// like a real adapter file: low-rank `lora_down`/`lora_up` stems, ComfyUI `.diff`/`.diff_b`
-/// diff-patch deltas, or a mixture.
-#[cfg(target_os = "macos")]
-fn write_lora_fixture_with_keys(path: &Path, keys: &[&str]) {
-    let mut header = serde_json::Map::new();
-    header.insert("__metadata__".to_owned(), json!({ "format": "pt" }));
-    for key in keys {
-        header.insert(
-            (*key).to_owned(),
-            json!({ "dtype": "F32", "shape": [0], "data_offsets": [0, 0] }),
-        );
-    }
-    let header_bytes = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
-    buffer.extend_from_slice(&header_bytes);
-    std::fs::write(path, buffer).unwrap();
-}
-
 /// 🔴 The story: a user-selected Wan-family LoRA must actually REACH the engine on
 /// `LoadSpec::adapters`. Before this the krea arm hard-coded an empty `adapters` (the S15 seam), so
 /// a selected LoRA was silently ignored and the base DiT rendered.
@@ -3215,109 +3206,58 @@ fn krea_realtime_rejects_more_loras_than_the_cap_before_loading_anything() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The pure diff-patch classifier: only `.diff` / `.diff_b` suffixes count, `__metadata__` is not a
-/// tensor, and low-rank stems are untouched. The lightx2v shape (a mixture) is the case that matters.
+/// Coverage comes only from the engine's actual report. A fully-applied lightx2v-shaped file must not
+/// inherit the old header prediction, while a genuinely out-of-surface target produces an accurate
+/// 1-of-2 stamp.
+///
+/// Mutation checks (verified RED): substitute stale header-derived counts; sever the
+/// `Generator::adapter_apply_reports` read in the decoded-video funnel.
 #[cfg(target_os = "macos")]
 #[test]
-fn krea_realtime_diff_patch_key_counts_only_counts_diff_patch_tensors() {
-    assert_eq!(
-        krea_realtime_diff_patch_key_counts([
-            "__metadata__",
-            "blocks.0.self_attn.q.lora_down.weight",
-            "blocks.0.self_attn.q.lora_up.weight",
-        ]),
-        (0, 2),
-        "a plain low-rank style LoRA drops nothing"
-    );
-    assert_eq!(
-        krea_realtime_diff_patch_key_counts([
-            "__metadata__",
-            "blocks.0.self_attn.q.lora_down.weight",
-            "blocks.0.norm1.diff",
-            "blocks.0.norm1.diff_b",
-        ]),
-        (2, 3),
-        "the lightx2v mixture: the diff-patch deltas are counted, the low-rank stem is not"
-    );
-    assert_eq!(krea_realtime_diff_patch_key_counts(["head.diff_b"]), (1, 1));
-    // Not a suffix match by accident: `.diffusion` / a bare `diff` must not count.
-    assert_eq!(
-        krea_realtime_diff_patch_key_counts(["blocks.0.diffusion", "diff_bias"]),
-        (0, 2)
-    );
-}
+fn krea_realtime_coverage_uses_engine_reports_not_header_predictions() {
+    #[derive(Clone)]
+    struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
-/// 🔴 A partially-applied LoRA must not read as a clean apply. `apply_adapters_strict` silently
-/// ignores `.diff`/`.diff_b` deltas (they are not "unmatched targets", just not the shape that pass
-/// looks for), so a lightx2v-style file installs its low-rank half and drops 647 keys — tracked as
-/// sc-15326, out of scope to FIX here, but it must not be invisible.
-///
-/// Discriminating: the plain style LoRA in the same call produces NO entry, so the stamp cannot pass
-/// by being emitted unconditionally.
-///
-/// Mutation check (verified RED): make `stamp()` return `Some` unconditionally, or drop the
-/// `dropped > 0` filter in `krea_realtime_lora_coverage`.
-#[cfg(target_os = "macos")]
-#[test]
-fn krea_realtime_stamps_a_partially_applied_lora_and_stays_silent_on_a_clean_one() {
-    let dir = std::env::temp_dir().join(format!("sw_krea_cov_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let plain = dir.join("origami_style.safetensors");
-    let distill = dir.join("lightx2v_step_distill.safetensors");
-    write_lora_fixture_with_keys(
-        &plain,
-        &[
-            "blocks.0.self_attn.q.lora_down.weight",
-            "blocks.0.self_attn.q.lora_up.weight",
-        ],
-    );
-    write_lora_fixture_with_keys(
-        &distill,
-        &[
-            "blocks.0.self_attn.q.lora_down.weight",
-            "blocks.0.self_attn.q.lora_up.weight",
-            "blocks.0.norm1.diff",
-            "blocks.0.norm1.diff_b",
-            "head.diff_b",
-        ],
-    );
-    let settings = Settings {
-        data_dir: dir.clone(),
-        ..Settings::from_env()
-    };
-
-    let clean = request(json!({
-        "projectId": "p",
-        "loras": [{ "path": plain.to_string_lossy(), "weight": 0.8 }],
-    }));
-    let clean_specs = resolve_krea_realtime_adapters(&settings, &clean).expect("resolves");
-    let clean_coverage = krea_realtime_lora_coverage(&clean_specs);
+    let reports = vec![
+        gen_core::AdapterApplyReport {
+            adapter_path: PathBuf::from("/models/lightx2v_step_distill.safetensors"),
+            applied: 647,
+            skipped: Vec::new(),
+        },
+        gen_core::AdapterApplyReport {
+            adapter_path: PathBuf::from("/models/i2v_foreign_target.safetensors"),
+            applied: 1,
+            skipped: vec!["blocks.0.cross_attn.norm_k_img".to_owned()],
+        },
+    ];
+    let clean_coverage = krea_realtime_lora_coverage(&reports[..1]);
     assert!(
         clean_coverage.partial.is_empty(),
-        "a fully low-rank style LoRA applies in full — nothing to report"
+        "all 647 real lightx2v diff-patch targets landed, so no partial stamp is truthful"
     );
-    assert!(
-        krea_realtime_raw_settings(&clean, "q4", &clean_coverage)
-            .get("kreaRealtimeLoraPartial")
-            .is_none(),
-        "the clean render's sidecar must not grow a key"
-    );
-
-    let mixed = request(json!({
-        "projectId": "p",
-        "loras": [
-            { "path": plain.to_string_lossy(), "weight": 0.8 },
-            { "path": distill.to_string_lossy(), "weight": 1.0 },
-        ],
-    }));
-    let mixed_specs = resolve_krea_realtime_adapters(&settings, &mixed).expect("resolves");
-    let coverage = krea_realtime_lora_coverage(&mixed_specs);
+    let coverage = krea_realtime_lora_coverage(&reports);
     assert_eq!(
         coverage.partial,
-        vec![("lightx2v_step_distill.safetensors".to_owned(), 3, 5)],
-        "only the diff-patch-bearing file is reported, by NAME, with the dropped/total counts"
+        vec![("i2v_foreign_target.safetensors".to_owned(), 1, 2)],
+        "only the engine-reported skip is partial, with applied+skipped as the exact target total"
     );
-    let raw = krea_realtime_raw_settings(&mixed, "q4", &coverage);
+    let req = request(json!({ "projectId": "p", "model": "krea_realtime_14b" }));
+    let raw = krea_realtime_raw_settings(&req, "q4", &coverage);
     let stamped = raw
         .get("kreaRealtimeLoraPartial")
         .and_then(Value::as_array)
@@ -3325,14 +3265,88 @@ fn krea_realtime_stamps_a_partially_applied_lora_and_stays_silent_on_a_clean_one
     assert_eq!(stamped.len(), 1);
     assert_eq!(
         stamped[0].get("file").and_then(Value::as_str),
-        Some("lightx2v_step_distill.safetensors")
+        Some("i2v_foreign_target.safetensors")
     );
     assert_eq!(
         stamped[0].get("unappliedKeys").and_then(Value::as_u64),
-        Some(3)
+        Some(1)
     );
-    assert_eq!(stamped[0].get("totalKeys").and_then(Value::as_u64), Some(5));
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(stamped[0].get("totalKeys").and_then(Value::as_u64), Some(2));
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(LogWriter(std::sync::Arc::clone(&captured)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || coverage.warn());
+    let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("\"event\":\"krea_realtime_lora_partially_applied\"")
+            && log.contains("\"unapplied_keys\":1")
+            && log.contains("\"total_keys\":2")
+            && log.contains("i2v_foreign_target.safetensors"),
+        "the warn event carries the same accurate engine counts as the stamp: {log}"
+    );
+}
+
+/// The Krea arm must carry the provider report through the shared generation funnel before building
+/// raw settings. This is the non-circular plumbing witness: the injected generator owns the report;
+/// neither the request nor any adapter header contains these counts.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_realtime_arm_stamps_the_report_returned_by_the_loaded_generator() {
+    let root = krea_fake_model_dir("reported_coverage");
+    let settings = Settings {
+        data_dir: root.clone(),
+        ..offline_settings()
+    };
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_realtime_14b",
+        "mode": "text_to_video",
+        "prompt": "p",
+    }));
+    let probe = ArmProbe::default();
+    *probe.adapter_reports.lock().unwrap() = vec![gen_core::AdapterApplyReport {
+        adapter_path: PathBuf::from("/engine/resolved/out_of_surface.safetensors"),
+        applied: 1,
+        skipped: vec!["blocks.0.cross_attn.norm_k_img".to_owned()],
+    }];
+    let result = temp_env_var(
+        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+        root.to_str().unwrap(),
+        || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(generate_krea_realtime_using(
+                    &ApiClient::new(&settings),
+                    &settings,
+                    &krea_job_snapshot(),
+                    &req,
+                    &root,
+                    "krea_realtime_14b",
+                    "mlx",
+                    probe.loader(),
+                ))
+        },
+    )
+    .expect("probe generation succeeds");
+    let stamp = result
+        .1
+        .get("kreaRealtimeLoraPartial")
+        .and_then(Value::as_array)
+        .expect("the provider report reaches rawSettings");
+    assert_eq!(
+        stamp,
+        &[json!({
+            "file": "out_of_surface.safetensors",
+            "unappliedKeys": 1,
+            "totalKeys": 2,
+        })]
+    );
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// 🔴 The hard-error class a real user hits: an I2V-family Wan LoRA targets `cross_attn.k_img` /
@@ -3347,14 +3361,12 @@ fn krea_realtime_stamps_a_partially_applied_lora_and_stays_silent_on_a_clean_one
 #[test]
 fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     let loras = vec!["Squish_I2V.safetensors".to_owned()];
-    // No file was wholly diff-patch, so the format branch stays out of the way in this test.
-    let clean = KreaRealtimeLoraCoverage::default();
     let i2v = gen_core::Error::Msg(
         "krea_realtime_14b adapters: 80 adapter target(s) matched no module (surfaced, not \
          silently dropped): [\"blocks.0.cross_attn.k_img\", \"blocks.0.cross_attn.v_img\"]"
             .to_owned(),
     );
-    let annotated = annotate_krea_realtime_lora_error(i2v, &loras, &clean).to_string();
+    let annotated = annotate_krea_realtime_lora_error(i2v, &loras).to_string();
     assert!(
         annotated.contains("Squish_I2V.safetensors"),
         "the message must name the LoRA the user picked: {annotated}"
@@ -3373,7 +3385,7 @@ fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     let other = gen_core::Error::Msg(
         "krea_realtime_14b adapters: no target modules matched across 1 adapter file(s)".to_owned(),
     );
-    let generic = annotate_krea_realtime_lora_error(other, &loras, &clean).to_string();
+    let generic = annotate_krea_realtime_lora_error(other, &loras).to_string();
     assert!(
         !generic.contains("image-to-video"),
         "a non-I2V failure must not claim an I2V cause: {generic}"
@@ -3386,104 +3398,20 @@ fn krea_realtime_lora_load_errors_are_rewritten_into_actionable_guidance() {
     // Not an adapter failure → untouched.
     let unrelated = gen_core::Error::Msg("missing dit.safetensors".to_owned());
     assert_eq!(
-        annotate_krea_realtime_lora_error(unrelated, &loras, &clean).to_string(),
+        annotate_krea_realtime_lora_error(unrelated, &loras).to_string(),
         "missing dit.safetensors"
     );
     // No LoRA selected → untouched even if the text mentions adapters.
     let no_loras = gen_core::Error::Msg("krea_realtime_14b adapters: something".to_owned());
     assert_eq!(
-        annotate_krea_realtime_lora_error(no_loras, &[], &clean).to_string(),
+        annotate_krea_realtime_lora_error(no_loras, &[]).to_string(),
         "krea_realtime_14b adapters: something"
     );
     // 🔴 The typed cancellation must survive: the funnel matches on it to report a clean cancel.
     assert!(matches!(
-        annotate_krea_realtime_lora_error(gen_core::Error::Canceled, &loras, &clean),
+        annotate_krea_realtime_lora_error(gen_core::Error::Canceled, &loras),
         gen_core::Error::Canceled
     ));
-}
-
-/// 🔴 A LoRA whose keys are 100% diff-patch installs NOTHING, so the engine reports "no target
-/// modules matched" — byte-for-byte the same text a genuinely foreign LoRA produces. Without the
-/// coverage-keyed branch the generic arm fires and tells the user their file "was trained for a
-/// different architecture", which is a confident MISDIAGNOSIS: the file may be built for this exact
-/// model and simply be in a format this installer does not read (sc-15326).
-///
-/// Every arm is discriminated here — the same error text produces three different answers depending
-/// only on the evidence available, so none of them can be the one that always renders.
-///
-/// Mutation checks (each verified RED): drop the `wholly_unapplied` branch; change its predicate
-/// from `dropped == total` to `dropped > 0`; move the diff-patch arm ahead of the I2V arm.
-#[cfg(target_os = "macos")]
-#[test]
-fn krea_realtime_diagnoses_an_all_diff_patch_file_as_format_not_architecture() {
-    // The engine text is IDENTICAL in the first two cases — only the coverage differs.
-    let matched_nothing = || {
-        gen_core::Error::Msg(
-            "krea_realtime_14b adapters: no target modules matched across 1 adapter file(s) — \
-             check the format/prefix"
-                .to_owned(),
-        )
-    };
-    let loras = vec!["wan_lightning_diffpatch.safetensors".to_owned()];
-    let all_diff_patch = KreaRealtimeLoraCoverage {
-        partial: vec![("wan_lightning_diffpatch.safetensors".to_owned(), 647, 647)],
-    };
-
-    let format_hint =
-        annotate_krea_realtime_lora_error(matched_nothing(), &loras, &all_diff_patch).to_string();
-    assert!(
-        format_hint.contains("wan_lightning_diffpatch.safetensors")
-            && format_hint.contains("diff-patch")
-            && format_hint.contains("sc-15326"),
-        "an all-diff-patch file must be diagnosed as a FORMAT problem, by name: {format_hint}"
-    );
-    assert!(
-        format_hint.contains("NOT an architecture mismatch"),
-        "it must actively contradict the architecture reading, not merely omit it: {format_hint}"
-    );
-    assert!(
-        !format_hint.contains("trained for a different architecture"),
-        "the misdiagnosis this branch exists to prevent must not appear: {format_hint}"
-    );
-
-    // Same error, EMPTY coverage → the generic architecture wording. This is the discriminator:
-    // the branch is keyed on the header scan, not on the message.
-    let generic = annotate_krea_realtime_lora_error(matched_nothing(), &loras, &Default::default())
-        .to_string();
-    assert!(
-        generic.contains("trained for a different architecture") && !generic.contains("sc-15326"),
-        "with no coverage evidence the generic arm is the honest answer: {generic}"
-    );
-
-    // A file that is only PARTLY diff-patch installs its low-rank half, so a "matched nothing"
-    // failure cannot be blamed on the format — it stays generic.
-    let partly = KreaRealtimeLoraCoverage {
-        partial: vec![("wan_lightning_diffpatch.safetensors".to_owned(), 647, 1053)],
-    };
-    let partial_case =
-        annotate_krea_realtime_lora_error(matched_nothing(), &loras, &partly).to_string();
-    assert!(
-        !partial_case.contains("sc-15326") && partial_case.contains("Wan-family"),
-        "a partially-applying file is not a wholly-unreadable one: {partial_case}"
-    );
-
-    // 🔴 Precedence: when a job mixes an I2V file with an all-diff-patch one, the engine names the
-    // unmatched `k_img` modules — direct evidence beats the header inference, so I2V wins.
-    let mixed = gen_core::Error::Msg(
-        "krea_realtime_14b adapters: 80 adapter target(s) matched no module (surfaced, not \
-         silently dropped): [\"blocks.0.cross_attn.k_img\"]"
-            .to_owned(),
-    );
-    let mixed_hint = annotate_krea_realtime_lora_error(
-        mixed,
-        &["squish_i2v.safetensors".to_owned(), loras[0].clone()],
-        &all_diff_patch,
-    )
-    .to_string();
-    assert!(
-        mixed_hint.contains("image-to-video") && !mixed_hint.contains("sc-15326"),
-        "the engine's own unmatched-target list is the more actionable finding: {mixed_hint}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -10266,6 +10194,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         }],
         fps: 24,
         audio: None,
+        adapter_apply_reports: Vec::new(),
     };
 
     let error = encode_media(&media_path, decoded, None)

@@ -1437,6 +1437,7 @@ pub(super) fn run_loaded_video_generation(
                 sample_rate: track.sample_rate,
                 channels: track.channels,
             }),
+            adapter_apply_reports: generator.adapter_apply_reports(),
         }),
         GenerationOutput::Images(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
