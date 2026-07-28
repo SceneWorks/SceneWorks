@@ -155,7 +155,8 @@ override those locations when the runner cache lives elsewhere. The override is 
 must still end in the fixed
 repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`
 suffix. The dispatch validates but never prints the resolved path, checks out the exact inference
-revision, builds the release adapter, runs the authoritative provider through the harness,
+revision using `SCENEWORKS_INFERENCE_READ_TOKEN` when configured and the workflow's scoped token
+otherwise, builds the release adapter, runs the authoritative provider through the harness,
 schema-checks the raw bundle, and uploads it as a workflow artifact. The workflow
 cannot prove in advance that the private runner has the requested snapshot; an absent exact
 directory fails before model load. GitHub only accepts `workflow_dispatch` input schemas from a
@@ -164,13 +165,17 @@ post-merge.
 
 When both canonical roots are absent, explicitly set `provision_qwen_snapshot=true` on the same
 calibration dispatch. Provisioning is rejected unless `run_image_memory_calibration=true`. That
-opt-in lane uses pinned Python 3.12 tooling and `huggingface_hub==0.36.0` to resumably and
-idempotently download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository
-at the exact `qwen_revision`. It uses no token and writes only to the canonical SceneWorks
-application-data Hugging Face cache. Progress and paths are not logged. Because the snapshot is
-approximately 57 GiB, only a provisioning dispatch receives the extended four-hour job timeout;
-ordinary MLX CI and non-provisioning calibration retain the 45-minute ceiling. A provisioning or
-calibration failure cannot upload a schema-checked evidence artifact.
+opt-in lane validates the self-hosted runner's Python 3.12 prerequisite, creates an isolated
+job-local virtual environment, and pins `huggingface_hub==0.36.0` to resumably and idempotently
+download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository at the exact
+`qwen_revision`. It uses no token and writes to the canonical SceneWorks application-data Hugging
+Face cache unless the fixed repository already exists in the standard Hugging Face cache; in that
+case it resumes there and reuses existing blobs. The pinned client always verifies and resumes the
+requested `bf16/**` files rather than treating a progressively created snapshot directory as
+complete. Progress and paths are not logged. Because the snapshot is approximately 57 GiB, only a
+provisioning dispatch receives the extended four-hour job timeout; ordinary MLX CI and
+non-provisioning calibration retain the 45-minute ceiling. A provisioning or calibration failure
+cannot upload a schema-checked evidence artifact.
 
 It loads the real pinned `QwenVae`, deterministically encodes a 1024-square gradient fixture, runs
 untiled and requested tiled decode on the identical latent, and reports the actual MLX active/cache
