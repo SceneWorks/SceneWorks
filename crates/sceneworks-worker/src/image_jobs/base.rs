@@ -4615,6 +4615,42 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+    let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec(engine_id, &spec);
+    let has_request_reference =
+        identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
+    let mut memory_overlays = Vec::new();
+    if has_request_reference {
+        memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
+    }
+    if ideogram_edit_mask.is_some() {
+        memory_overlays.push("mask".to_owned());
+    }
+    if spec.control.is_some() || !spec.extra_controls.is_empty() {
+        memory_overlays.push(format!(
+            "control:{}",
+            usize::from(spec.control.is_some()) + spec.extra_controls.len()
+        ));
+    }
+    if spec.ip_adapter.is_some() {
+        memory_overlays.push("ip_adapter".to_owned());
+    }
+    if adapter_count > 0 {
+        memory_overlays.push(format!("adapters:{adapter_count}"));
+    }
+    if use_pid {
+        memory_overlays.push("pid".to_owned());
+    }
+    let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+        adapter_count,
+        has_reference: has_request_reference,
+        use_pid,
+        has_phases: false,
+    };
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
     // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒
@@ -4637,24 +4673,54 @@ async fn generate_stream(
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator, cache_state, load_policy, external_committed_bytes, tx, cancel| {
             // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
             // face stack lives here); source embedded once, reused across every output (sc-4411). `None`
             // ⇒ not a With-Character generation, or non-fatal staging/construction failure ⇒ omitted.
+            let scorer_requested = face_stack_dir.is_some() && likeness_source.is_some();
+            let scorer_active_before = if scorer_requested {
+                mlx_rs::memory::clear_cache();
+                mlx_rs::memory::get_active_memory() as u64
+            } else {
+                0
+            };
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
                     crate::face_likeness::build_face_likeness_scorer(dir, source)
                 }
                 _ => None,
             };
+            let request_external_committed_bytes = if scorer_requested {
+                // The MLX face scorer is constructed after the generator cache recorded its
+                // pre-load baseline. Add only its active-memory delta so scorer weights cannot be
+                // credited as generation weights without double-charging the cached generator.
+                // Measure attempted construction too: a failed scorer may still have allocated.
+                mlx_rs::memory::clear_cache();
+                let scorer_active_after = mlx_rs::memory::get_active_memory() as u64;
+                crate::mlx_fit_gate::add_post_load_external_delta(
+                    external_committed_bytes,
+                    scorer_active_before,
+                    scorer_active_after,
+                )
+            } else {
+                external_committed_bytes
+            };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
             drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &mlx_request_plan,
+                    &mlx_request_inputs,
+                    cache_state,
+                    load_policy,
+                    request_external_committed_bytes,
+                )?;
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one(
                         generator,
@@ -4675,8 +4741,8 @@ async fn generate_stream(
                         guidance_method.as_deref(),
                         use_pid,
                         text_style_gain,
-                        None,
-                        None,
+                        Some(memory_evaluation.memory),
+                        Some(&memory_evaluation.context),
                         &enhance,
                         &cancel,
                         on_progress,
@@ -6227,6 +6293,13 @@ async fn generate_candle_stream(
     let image_memory_context = image_memory_selection.and_then(|selection| {
         let budget = budget?;
         let predicted_peak_gb = adapted_peak_gb?;
+        let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
+        let calibration_abi =
+            u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
+        let calibration_fingerprint = turbo_fit
+            .get("calibrationFingerprint")?
+            .as_str()?
+            .to_owned();
         let gb_to_bytes = |gb: f64| {
             (gb * 1024.0 * 1024.0 * 1024.0)
                 .round()
@@ -6234,7 +6307,7 @@ async fn generate_candle_stream(
         };
         tracing::info!(
             backend = "candle",
-            evidence_revision = "sc-15449-contract-v1@0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+            evidence_revision = "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
             reclaimable_gb,
             raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
             effective_available_gb = budget.free_gb,
@@ -6245,6 +6318,8 @@ async fn generate_candle_stream(
         );
         Some(gen_core::ImageMemoryRunContext {
             selection,
+            calibration_abi,
+            calibration_fingerprint,
             mode: gen_core::ImageMemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
@@ -6269,7 +6344,7 @@ async fn generate_candle_stream(
                 gen_core::ImageMemoryCacheState::Cold
             },
             evidence_revision:
-                "sc-15449-contract-v1@0c85bc9ff9fe161227efebf396a83db5e967d9ad".to_owned(),
+                "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
         })
     });
     let mut spec = load_spec(weights_dir, quant, adapters, None);

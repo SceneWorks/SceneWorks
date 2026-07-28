@@ -1173,6 +1173,8 @@ mod tests {
                 parameters: Default::default(),
                 tier: tier(),
             },
+            calibration_abi: 0,
+            calibration_fingerprint: String::new(),
             mode: ImageMemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,

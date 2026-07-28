@@ -336,7 +336,9 @@ pub(crate) enum KreaTurboFit {
 }
 
 const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-const KREA_TURBO_INFERENCE_REVISION: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
+// The 1c4354 inference merge is additive to Mage/request contracts and leaves the Krea CUDA
+// implementation plus its calibration fingerprint unchanged.
+const KREA_TURBO_INFERENCE_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -1529,7 +1531,7 @@ mod tests {
                     "calibrationAbi": 1,
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
                     "sceneWorksRevision": "sc-15449-contract-v1",
-                    "inferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+                    "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
                     "evidenceRecords": [{
@@ -1540,7 +1542,7 @@ mod tests {
                         "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
                         "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
                         "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-                        "compatibleInferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+                        "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
                         "loadability": {
                             "provider": "huggingface",
                             "repository": "SceneWorks/krea-2-turbo-mlx",
