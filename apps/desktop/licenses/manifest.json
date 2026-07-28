@@ -1131,6 +1131,16 @@
       "homepage": "https://github.com/huggingface/diffusers",
       "usage": "Native provider modules include structural Rust ports of Diffusers implementations, including ACE-Step OobleckDecoder.",
       "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
+    },
+    {
+      "id": "joycaption-source",
+      "models": [],
+      "name": "JoyCaption prompt taxonomy",
+      "publisher": "fpgaminer",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/fpgaminer/joycaption",
+      "usage": "The caption-type taxonomy, prompt template bodies and name option reproduced in the native captioners are near-verbatim copies of gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION) from fpgaminer/joycaption, which is Apache-2.0. This covers BOTH caption lanes: the Candle provider (crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs) and the MLX provider (crates/media/mlx-gen/src/caption/joycaption.rs). SceneWorks MODIFIED the reproduced text: punctuation was normalized (em dash to hyphen, curly to straight quotes, backticks dropped) and upstream's \"Note any watermarks, signatures, or compression artifacts.\" sentence was folded into the \"Never mention...\" clause of the Straightforward bodies. The upstream repository ships no NOTICE file. This entry covers the reproduced PROMPT CONTENT only; the JoyCaption model WEIGHTS declare no license of their own and remain undetermined.",
+      "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
     }
   ]
 }

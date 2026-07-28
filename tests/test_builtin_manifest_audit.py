@@ -1886,3 +1886,166 @@ def test_recipe_preset_schema_rejects_a_bad_id_pattern():
         error.validator == "pattern" and list(error.absolute_path) == ["presets", 0, "id"]
         for error in errors
     )
+
+
+# --------------------------------------------------------------------------------------
+# sc-15299 — the `image` capability sub-block (Guidance / Negative prompt axes).
+#
+# The image-lane sibling of the `video` block sc-8445 shipped for Krea Realtime. Image Studio
+# reads `image.supportsGuidance` / `image.supportsNegativePrompt` with ABSENT-MEANS-TRUE polarity
+# (the opposite of `audio`), so these audits pin BOTH directions: the declarations that must be
+# present, and the entries that must stay silent so the change is behaviour-neutral for them.
+#
+# Ground truth is the engine descriptor each model resolves to through
+# `crates/sceneworks-worker/src/engines.rs` MODEL_TABLE, which is exactly what the worker's
+# `resolve_guidance` / `resolve_negative_prompt` / `resolve_true_cfg` gate on.
+# --------------------------------------------------------------------------------------
+
+# Both axes absent: the engine descriptor is supports_guidance=false AND
+# supports_negative_prompt=false, so `resolve_guidance`, `resolve_true_cfg` and
+# `resolve_negative_prompt` ALL return None. Every one is a guidance-distilled student.
+IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
+    {
+        "z_image_turbo",
+        "z_image_edit",  # runs on the z_image_turbo ENGINE
+        "flux_schnell",
+        "ideogram_4_turbo",
+        "boogu_image_turbo",
+        "krea_2_turbo",
+        "sd3_5_large_turbo",
+        "anima_turbo",
+        "mage_flow_turbo",
+        "mage_flow_edit_turbo",
+    }
+)
+
+# Guidance is real (embedded/distilled scale, or a bespoke lane that forwards one) but there is no
+# unconditional branch for a negative prompt to steer, so `resolve_negative_prompt` returns None.
+IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
+    {
+        "flux_dev",
+        "ideogram_4",
+        "boogu_image",
+        "boogu_image_edit",
+        "flux2_dev",
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+        "sana_sprint_1600m",
+        "pulid_flux_dev",  # image_jobs/pulid.rs hard-sets negative_prompt: None
+    }
+)
+
+
+def _image_models_by_id() -> dict:
+    return {
+        model["id"]: model
+        for model in _load_builtin_models_manifest()["models"]
+        if model.get("type") == "image"
+    }
+
+
+def test_cfg_free_image_models_declare_both_axes_absent():
+    """sc-15299: a guidance-distilled image engine declares BOTH axes false so Image Studio
+    hides Guidance and Negative prompt instead of offering knobs the worker discards."""
+    models = _image_models_by_id()
+    missing = sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS - set(models))
+    assert not missing, f"CFG-free ids no longer in the catalog: {missing}"
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS):
+        block = models[model_id].get("image")
+        assert block is not None, f"{model_id} is CFG-free but declares no `image` block"
+        assert block.get("supportsGuidance") is False, (
+            f"{model_id} is CFG-free — its engine descriptor advertises supports_guidance=false "
+            "and it is not a true-CFG family, so no guidance scale reaches the engine"
+        )
+        assert block.get("supportsNegativePrompt") is False, (
+            f"{model_id} is CFG-free — resolve_negative_prompt returns None for it"
+        )
+
+
+def test_negative_only_image_models_keep_their_guidance_axis():
+    """sc-15299: the two keys are INDEPENDENT. An embedded-guidance engine (FLUX dev, Ideogram 4,
+    SenseNova, SANA-Sprint, …) takes a real guidance scale and no negative prompt, so it must
+    declare ONLY `supportsNegativePrompt: false` — declaring guidance false too would hide a live
+    control."""
+    models = _image_models_by_id()
+    missing = sorted(IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY - set(models))
+    assert not missing, f"negative-free ids no longer in the catalog: {missing}"
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY):
+        block = models[model_id].get("image")
+        assert block is not None, f"{model_id} takes no negative prompt but declares no `image` block"
+        assert block.get("supportsNegativePrompt") is False, f"{model_id} must declare the negative axis absent"
+        assert "supportsGuidance" not in block, (
+            f"{model_id} DOES take a guidance scale — declaring supportsGuidance would hide a live control"
+        )
+
+
+def test_guidance_taking_image_models_declare_nothing():
+    """sc-15299 polarity guard: absent means TRUE, so every image entry that genuinely takes both
+    axes must stay silent. Includes the true-CFG Chroma family, whose descriptor reads
+    supports_guidance=false but whose Guidance control IS live — the worker forwards
+    `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
+    an `image` block for Chroma would break a working knob."""
+    models = _image_models_by_id()
+    declared = {model_id for model_id, model in models.items() if model.get("image") is not None}
+    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
+    assert declared == expected, (
+        "unexpected `image` declarations — every other image entry must stay silent so it keeps "
+        f"both controls: unexpected={sorted(declared - expected)}, missing={sorted(expected - declared)}"
+    )
+    for model_id in ("chroma1_hd", "chroma1_base", "chroma1_flash", "sana_1600m", "krea_2_raw", "sdxl"):
+        assert models[model_id].get("image") is None, (
+            f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
+        )
+
+
+def test_cfg_free_image_models_carry_no_default_negative_prompt():
+    """sc-15299: a model with no negative axis must not seed one — the box is hidden and the value
+    is never sent, so `ui.defaultNegativePrompt` would plant a ghost. Mirrors the krea_2_turbo rule
+    already pinned in crates/sceneworks-core/src/builtin_manifests.rs."""
+    models = _image_models_by_id()
+    for model_id in sorted(IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY):
+        assert not models[model_id].get("ui", {}).get("defaultNegativePrompt"), (
+            f"{model_id} declares no negative-prompt axis, so it must not declare a default negative"
+        )
+
+
+def test_schema_rejects_an_unknown_key_inside_the_image_block():
+    """The `image` object is additionalProperties:false like its `video` sibling."""
+    manifest = _load_builtin_models_manifest()
+    target = next(model for model in manifest["models"] if model["id"] == "z_image_turbo")
+    target["image"]["supportsGuidnce"] = False
+    schema = _load_schema(SCHEMA_PATH)
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(manifest))
+    assert any("supportsGuidnce" in error.message for error in errors)
+
+
+# --------------------------------------------------------------------------------------
+# sc-15299 audio half — `audio.supportsGuidance` / `audio.supportsNegativePrompt` were READ by
+# AudioStudio.jsx but never PRODUCIBLE: the `audio` object is additionalProperties:false and the
+# schema listed neither key, so the Music tab's Guidance/Negative controls were hidden by accident
+# rather than by declaration. The schema now lists them and ACE-Step declares them.
+# --------------------------------------------------------------------------------------
+
+
+def test_audio_block_can_declare_the_guidance_axes():
+    """Mutation guard: drop either property from the schema and the shipped manifest stops
+    validating — which is exactly the state this story fixed."""
+    schema = _load_schema(SCHEMA_PATH)
+    audio_properties = schema["properties"]["models"]["items"]["properties"]["audio"]["properties"]
+    for key in ("supportsGuidance", "supportsNegativePrompt"):
+        assert audio_properties[key]["type"] == "boolean", f"audio.{key} must be declarable"
+
+
+def test_acestep_declares_its_distilled_guidance_axes_explicitly():
+    """ACE-Step v1.5 Turbo is guidance-distilled (candle-audio-acestep's descriptor is
+    supports_guidance=false / supports_negative_prompt=false, and its generate path never reads
+    either). AUDIO polarity is absent-means-FALSE, so this is UI-neutral — it makes the hiding
+    intentional and lets a future non-distilled music model turn the controls on."""
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    audio_block = models["acestep_v15_turbo"]["audio"]
+    assert audio_block["supportsGuidance"] is False
+    assert audio_block["supportsNegativePrompt"] is False

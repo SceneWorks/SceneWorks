@@ -438,6 +438,14 @@
     },
     {
       "id": "mage_flow_edit_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Same distilled Mage-Flow student, edit variant.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "name": "Mage-Flow Edit-Turbo",
       "family": "mage-flow",
       "type": "image",
@@ -1029,6 +1037,14 @@
       // Mage-Flow Turbo: few-step distilled, CFG-free sibling. Its SceneWorks mirror is flat and
       // complete; q4/q8/bf16 remain load-time choices over the same installed snapshot.
       "id": "mage_flow_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. The distilled Mage-Flow variant (`is_distilled`), so both axes are absent.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "name": "Mage-Flow Turbo",
       "family": "mage-flow",
       "type": "image",
@@ -1215,6 +1231,15 @@
     },
     {
       "id": "z_image_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Z-Image-Turbo is guidance-distilled: `mlx-gen-z-image`'s descriptor sets
+      // supports_guidance/supports_negative_prompt=false on BOTH lanes.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       // `recommended` flags the curated "getting started" set surfaced in the Setup
       // Wizard, the Models page Recommended section, and per-Studio availability gates.
       // `autoDownload: false` keeps a recommended model badged-but-unchecked in the
@@ -1508,6 +1533,15 @@
     },
     {
       "id": "z_image_edit",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. The edit variant runs on the `z_image_turbo` ENGINE (engines.rs MODEL_TABLE), so it
+      // inherits the distilled turbo capability surface verbatim.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "name": "Z-Image-Edit",
       "family": "z-image",
       "type": "image",
@@ -2341,6 +2375,14 @@
     },
     {
       "id": "sensenova_u1_8b",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. SenseNova U1 takes a guidance scale but no negative prompt (`sensenova.rs` never
+      // reads one); the descriptor is supports_guidance=true / supports_negative_prompt=false.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B",
       "family": "sensenova-u1",
       "type": "image",
@@ -2509,6 +2551,13 @@
       // engine change — only a new hosted quant-matrix re-host + this catalog entry. Not `recommended`
       // yet (pending on-device A/B vs V1). Full capability surface, identical to V1.
       "id": "sensenova_u1_8b_infographic_v2",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Same `sensenova_u1_8b` engine, same capability surface.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B Infographic V2",
       "family": "sensenova-u1",
       "type": "image",
@@ -2633,6 +2682,13 @@
       // the same dense-text / stable-layout strengths. Coexists with V2 — new id, V2 stays loadable so
       // recipes/replays that pin V2 keep their output.
       "id": "sensenova_u1_8b_infographic_v3",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Same `sensenova_u1_8b` engine, same capability surface.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B Infographic V3",
       "family": "sensenova-u1",
       "type": "image",
@@ -2748,6 +2804,13 @@
     },
     {
       "id": "sensenova_u1_8b_fast",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. The `sensenova_u1_8b_fast` engine advertises the same guidance-yes / negative-no surface.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B Fast",
       "family": "sensenova-u1",
       "type": "image",
@@ -2908,6 +2971,13 @@
       // (distill_merged.json marker → load_fast skips the load-time merge), riding the existing
       // sensenova_u1_8b_fast engine. T2I / edit / character only (no VQA / interleave), 8 steps / cfg 1.0.
       "id": "sensenova_u1_8b_infographic_v2_fast",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Same `sensenova_u1_8b_fast` engine, same capability surface.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B Infographic V2 Fast",
       "family": "sensenova-u1",
       "type": "image",
@@ -3039,6 +3109,13 @@
       // 8-step render quality on V3 is validated on-device in S3 (independent training run — not assumed
       // from V2's result).
       "id": "sensenova_u1_8b_infographic_v3_fast",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Same `sensenova_u1_8b_fast` engine, same capability surface.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "SenseNova-U1 8B Infographic V3 Fast",
       "family": "sensenova-u1",
       "type": "image",
@@ -3164,6 +3241,15 @@
     },
     {
       "id": "flux_schnell",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. FLUX.1 [schnell] is the 4-step timestep-distilled student: the `flux1_schnell`
+      // descriptor is false/false on both lanes.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "name": "FLUX.1 [schnell]",
       "family": "flux",
       "type": "image",
@@ -3268,6 +3354,14 @@
     },
     {
       "id": "flux_dev",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. FLUX.1 [dev] carries EMBEDDED (distilled) guidance — the scale is real, so Guidance
+      // stays — but it has no unconditional branch, so `supports_negative_prompt` is false.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "FLUX.1 [dev]",
       "family": "flux",
       "type": "image",
@@ -3410,6 +3504,13 @@
     },
     {
       "id": "ideogram_4",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Embedded-guidance DiT: a real guidance scale, no negative branch.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "Ideogram 4",
       "family": "ideogram",
       "type": "image",
@@ -3591,6 +3692,14 @@
     },
     {
       "id": "ideogram_4_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. The turbo student is guidance-distilled; `ideogram_4_turbo`'s descriptor is false/false.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       "name": "Ideogram 4 Turbo",
       "family": "ideogram",
       "type": "image",
@@ -3738,6 +3847,13 @@
     },
     {
       "id": "boogu_image",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Embedded-guidance DiT: a real guidance scale, no negative branch.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       // Available (render quality validated real-weight in S5, sc-6402), but no longer in the curated
       // Recommended set. autoDownload:false because the Q8 turnkey is ~23 GB/variant — users opt in.
       "autoDownload": false,
@@ -3866,6 +3982,14 @@
     },
     {
       "id": "boogu_image_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. DMD few-step student, CFG-free by construction; `boogu_image_turbo` is false/false.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       // Available: the fast few-step variant (S5-validated); same autoDownload:false opt-in as Base.
       // No longer in the curated Recommended set. Edit stays Edit-tab-only.
       "autoDownload": false,
@@ -3980,6 +4104,13 @@
     },
     {
       "id": "boogu_image_edit",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Embedded-guidance DiT: a real guidance scale, no negative branch.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "Boogu Image Edit",
       "family": "boogu",
       "type": "image",
@@ -4061,6 +4192,15 @@
     },
     {
       "id": "krea_2_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Krea 2 Turbo is the distilled single-forward regime — `krea_turbo_raw.rs` even
+      // hard-sets `guidance: None` / `negative_prompt: None` on the turbo-on-Raw path.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       // Krea 2 Turbo (epic 7565) — Krea AI's from-scratch foundation image model, TDM-distilled to a
       // few-step (~8), CFG-free rectified-flow student: a Qwen3-VL-4B text encoder (12-layer learned
       // aggregator) + a 28-block single-stream DiT + the Qwen-Image VAE, native MLX (Apple Silicon).
@@ -5106,6 +5246,13 @@
     },
     {
       "id": "flux2_dev",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. FLUX.2 [dev] uses embedded guidance (`uses_embedded_guidance`), so no negative branch.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "FLUX.2 [dev]",
       "family": "flux2-dev",
       "type": "image",
@@ -5814,6 +5961,14 @@
     },
     {
       "id": "sd3_5_large_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. SD3.5 Large Turbo is the ADD-distilled student; `sd3_5_large_turbo` is false/false.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       // Available: the few-step distilled flagship, but no longer in the curated Recommended set.
       // autoDownload:false because it is a gated, large turnkey (mirrors the Boogu / krea_2 opt-in
       // pattern) — users acknowledge the license + opt in rather than the wizard auto-pulling it.
@@ -6220,6 +6375,14 @@
     },
     {
       "id": "sana_sprint_1600m",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. SANA-Sprint keeps its guidance scale but drops the negative branch (unlike the
+      // non-distilled `sana_1600m`, which is a true-CFG family and declares nothing).
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       // SANA-Sprint 1.6B 1024px (epic 8485 / sc-8490) — NVIDIA's few-step distillation of SANA, ported
       // natively to mlx-gen (engine id `sana_sprint_1600m`). SAME 1.6B Linear-DiT trunk (ReLU linear
       // attention + Mix-FFN + NoPE) + gemma-2-2b-it Complex-Human-Instruction (CHI) caption encoder
@@ -6608,6 +6771,15 @@
     },
     {
       "id": "anima_turbo",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. Anima Turbo is the merged CFG-free student (`Variant::Turbo.uses_cfg() == false`),
+      // unlike Base/Aesthetic which run true classifier-free guidance.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
+      },
       // Anima 2B Turbo (epic 10512 / sc-10523) — the merged CFG-free few-step student of Anima 2B. Same
       // architecture + convert-at-install flow + NC posture as the base; the guidance-distilled merged DiT
       // runs in ~10 steps CFG-free (the `anima_turbo` descriptor advertises supports_guidance=false, so
@@ -6682,10 +6854,15 @@
         "label": "Anima 2B Turbo",
         "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
-        // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base. (Turbo is CFG-free,
+        // Booru quality prefix (sc-10523, sc-10760) — same seam as anima_base. (Turbo is CFG-free,
         // so its q4 tier stays crisp — no painterly note in the description.)
+        //
+        // No `defaultNegativePrompt` (sc-15299): Turbo is the merged CFG-free student, so the worker's
+        // `resolve_negative_prompt` returns None for it and the booru negative was seeded into a box
+        // whose contents were then discarded. The same rule krea_2_turbo already follows ("Turbo is
+        // CFG-free — it must NOT carry a default negative", builtin_manifests.rs). anima_base and
+        // anima_aesthetic run true CFG and keep theirs.
         "defaultPrompt": "masterpiece, best quality, ",
-        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
         "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
         "promptGuide": {
           "title": "Anima Prompt Guide",
@@ -7623,6 +7800,14 @@
     },
     {
       "id": "pulid_flux_dev",
+      // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
+      // `video` sub-block sc-8445 added for Krea Realtime. The PuLID identity lane hard-sets `negative_prompt: None` (image_jobs/pulid.rs);
+      // its FLUX.1 [dev] backbone still takes an embedded-guidance scale.
+      // ⚠️ Polarity matches `video` and is the OPPOSITE of `audio`: an ABSENT key means TRUE, so
+      // every entry that declares nothing here is byte-identical to its pre-sc-15299 behaviour.
+      "image": {
+        "supportsNegativePrompt": false
+      },
       "name": "PuLID-FLUX (FLUX.1 [dev])",
       "family": "flux",
       "type": "image",
@@ -10905,7 +11090,20 @@
         "conditioning": [
           "AudioEdit"
         ],
-        "supportsMultiSpeaker": false
+        "supportsMultiSpeaker": false,
+        // AudioStudio.jsx has read these two since the Music tab shipped, but until sc-15299 neither
+        // was declarable — the `audio` object is additionalProperties:false and the schema listed
+        // neither key, so both were permanently falsy and the Music tab's Guidance/Negative controls
+        // were hidden BY ACCIDENT rather than by declaration. Declaring them makes the hiding
+        // intentional and lets a future non-distilled music model turn them on.
+        //
+        // ⚠️ The AUDIO polarity is the opposite of `image`/`video`: absent means FALSE here, so these
+        // explicit `false`s change nothing about today's rendered UI — ACE-Step v1.5 Turbo really is
+        // guidance-distilled (`candle-audio-acestep`'s descriptor is supports_guidance=false /
+        // supports_negative_prompt=false, and its generate path never reads `req.guidance` or
+        // `req.negative_prompt`; a scale sent anyway is a typed Unsupported at the gen-core floor).
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false
       },
       "downloads": [
         {
