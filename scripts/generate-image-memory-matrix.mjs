@@ -20,6 +20,11 @@ const RUNGS = [
   "bounded_attention",
   "bounded_transformer_residency",
 ];
+
+export function canonicalSourceText(body) {
+  return body.replace(/\r\n?/g, "\n");
+}
+
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -236,6 +241,17 @@ function geometryFor(model, backend) {
   );
 }
 
+function geometryWithinPixels(model, backend, maxPixels) {
+  const envelope = geometryFor(model, backend);
+  return {
+    ...envelope,
+    resolutions: (envelope.resolutions ?? []).filter((resolution) => {
+      const [width, height] = resolution.split("x").map(Number);
+      return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width * height <= maxPixels;
+    }),
+  };
+}
+
 function artifactEvidence(model, route, tier) {
   const downloads = model.downloads ?? [];
   const tierMatches = downloads.filter((download) => download.variant === tier);
@@ -277,8 +293,11 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-function strategyStatus({ backend, rung, route, sequentialEngines, model }) {
-  if (rung === "resident") {
+function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, mode, overlay }) {
+  if (
+    rung === "resident" &&
+    !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image")
+  ) {
     return {
       state: "Implemented/unverified",
       source: `crates/sceneworks-worker/src/engines.rs#${route.kind === "registry" ? "MODEL_TABLE" : "bespoke_advertised"}`,
@@ -287,6 +306,7 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model }) {
   }
   if (
     rung === "staged_residency" &&
+    !(model.id === "krea_2_turbo" && backend === "candle") &&
     ((backend === "mlx" && sequentialEngines.has(route.engine)) ||
       (backend === "candle" &&
         (model.candle?.sequentialPeakGb !== undefined || model.candle?.turboFit !== undefined)))
@@ -299,6 +319,78 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model }) {
           : `config/manifests/builtin.models.jsonc#models/${model.id}/candle`,
       parameters: { phaseOrder: ["conditioning", "denoise", "decode"] },
     };
+  }
+  if (
+    model.id === "krea_2_turbo" &&
+    backend === "candle" &&
+    mode === "text_to_image" &&
+    model.candle?.turboFit?.phaseCurvesByTier?.[tier]
+  ) {
+    const rungKeys = {
+      resident: "resident",
+      staged_residency: "threeStage",
+      bounded_decode: "tiledVae",
+      bounded_attention: "chunkedAttention",
+      bounded_transformer_residency: "streamedBlocks",
+    };
+    const manifestRung = rungKeys[rung];
+    if (manifestRung && overlay === "none") {
+      const verification = model.candle.turboFit.verification;
+      const evidenceRecords = (model.candle.turboFit.evidenceRecords ?? []).filter(
+        (record) => record.tier === tier,
+      );
+      const strategyParameters = model.candle.turboFit.strategyParameters?.[manifestRung];
+      return {
+        // This catalog cell spans the manifest's full resolution envelope. Exact measured records
+        // are narrower, so the aggregate cell must remain unverified; runtime may promote only an
+        // exact tier+geometry record after provider fingerprint/loadability checks.
+        state: "Implemented/unverified",
+        source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
+        parameters: {
+          manifestRung,
+          formula:
+            manifestRung === "resident"
+              ? "vramGbByTier+cudaHeadroom"
+              : "max(text,denoise,decode)+cudaHeadroom",
+          ...strategyParameters,
+        },
+        calibrationFingerprint: model.candle.turboFit.calibrationFingerprint,
+        maxPixels: model.candle.turboFit.maxMeasuredPixels,
+        historicalVerification: evidenceRecords.map((record) => ({
+          source: `Shortcut ${record.sourceStory} activity ${record.sourceActivity}`,
+          hardware: verification?.hardware,
+          tier: record.tier,
+          geometry: `${record.width}x${record.height}`,
+          capturedAt: record.capturedAt,
+          harnessVersion: record.harnessVersion,
+          observedPeakGb: record.observedPeaksGb?.[manifestRung],
+          parity: record.parity,
+        })),
+        currentEnvironmentVerification: [],
+        strategyParameterVerification: evidenceRecords
+          .filter((record) => Number.isFinite(record.predictedPeaksGb?.[manifestRung]))
+          .map((record) => ({
+            source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/evidenceRecords`,
+            tier: record.tier,
+            geometry: `${record.width}x${record.height}`,
+            predictedPeakGb: record.predictedPeaksGb[manifestRung],
+            exactParameters: strategyParameters,
+          })),
+      };
+    }
+    if (rung === "bounded_transformer_residency" && overlay !== "none") {
+      return {
+        state: "Structurally N/A",
+        source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
+        parameters: {},
+        structural: [
+          {
+            source: "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
+            reason: "load-time adapters are incompatible with streamed transformer blocks",
+          },
+        ],
+      };
+    }
   }
   return { state: "Missing", source: null, parameters: {} };
 }
@@ -358,12 +450,16 @@ export async function buildMatrix() {
     manifest: "config/manifests/builtin.models.jsonc",
     engines: "crates/sceneworks-worker/src/engines.rs",
     mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+    imageMemory: "crates/sceneworks-worker/src/image_memory.rs",
+    vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
     instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
     cargo: "Cargo.toml",
   };
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
-    Object.values(sourcePaths).map((relative) => readFile(path.join(ROOT, relative), "utf8")),
+    Object.values(sourcePaths).map(async (relative) =>
+      canonicalSourceText(await readFile(path.join(ROOT, relative), "utf8")),
+    ),
   );
   const bodies = Object.fromEntries(
     sourceEntries.map(([name], index) => [name, sourceBodies[index]]),
@@ -409,11 +505,21 @@ export async function buildMatrix() {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend)) {
             for (const rung of RUNGS) {
-              const status = strategyStatus({ backend, rung, route, sequentialEngines, model });
+              const status = strategyStatus({
+                backend,
+                rung,
+                route,
+                sequentialEngines,
+                model,
+                tier,
+                mode,
+                overlay,
+              });
               const fingerprint =
                 status.state === "Missing"
                   ? null
-                  : sha256(
+                  : status.calibrationFingerprint ??
+                    sha256(
                       JSON.stringify({
                         sceneWorksRevision,
                         inferencePin: pin,
@@ -437,7 +543,9 @@ export async function buildMatrix() {
                 mode,
                 overlay,
                 rung,
-                geometryEnvelope: geometryFor(model, backend),
+                geometryEnvelope: status.maxPixels
+                  ? geometryWithinPixels(model, backend, status.maxPixels)
+                  : geometryFor(model, backend),
                 strategyParameters: status.parameters,
                 state: status.state,
                 evidenceRevision: {
@@ -450,11 +558,11 @@ export async function buildMatrix() {
                 evidence: {
                   staticImplementation: status.source ? [{ source: status.source }] : [],
                   declaredCalibration: declaredEvidence(model, backend, tier),
-                  historicalVerification: [],
-                  currentEnvironmentVerification: [],
+                  historicalVerification: status.historicalVerification ?? [],
+                  currentEnvironmentVerification: status.currentEnvironmentVerification ?? [],
                   loadability: artifactEvidence(model, route, tier),
-                  strategyParameterVerification: [],
-                  structural: [],
+                  strategyParameterVerification: status.strategyParameterVerification ?? [],
+                  structural: status.structural ?? [],
                 },
               });
             }
@@ -567,10 +675,12 @@ async function main() {
   const markdown = renderMarkdown(matrix);
   const check = process.argv.includes("--check");
   if (check) {
-    const [existingJson, existingMarkdown] = await Promise.all([
+    const [existingJsonBody, existingMarkdownBody] = await Promise.all([
       readFile(path.join(ROOT, OUTPUT_JSON), "utf8"),
       readFile(path.join(ROOT, OUTPUT_MD), "utf8"),
     ]);
+    const existingJson = canonicalSourceText(existingJsonBody);
+    const existingMarkdown = canonicalSourceText(existingMarkdownBody);
     if (existingJson !== json || existingMarkdown !== markdown) {
       throw new Error("generated image memory matrix is stale; run npm run generate:image-memory-matrix");
     }

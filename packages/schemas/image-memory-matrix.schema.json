@@ -4,6 +4,81 @@
   "title": "SceneWorks image memory-ladder matrix",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "sourceEvidence": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": { "source": { "type": "string", "minLength": 1 } }
+    },
+    "declaredEvidence": {
+      "type": "object",
+      "required": ["source", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 }
+      }
+    },
+    "parityEvidence": {
+      "type": "object",
+      "required": ["contract", "result", "metric", "maximumError", "fixture"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": { "enum": ["exact", "tolerance", "golden"] },
+        "result": { "enum": ["passed", "failed", "not_run"] },
+        "metric": { "type": "string", "minLength": 1 },
+        "maximumError": { "type": "number", "minimum": 0 },
+        "fixture": { "type": "string", "minLength": 1 }
+      }
+    },
+    "historicalEvidence": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "hardware": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 },
+        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "type": "string", "minLength": 1 },
+        "observedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "parity": { "$ref": "#/$defs/parityEvidence" }
+      }
+    },
+    "loadabilityEvidence": {
+      "type": "object",
+      "required": ["repository", "revision", "variant"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"] },
+        "variant": { "type": ["string", "null"] }
+      }
+    },
+    "strategyEvidence": {
+      "type": "object",
+      "required": ["source", "tier", "geometry", "predictedPeakGb", "exactParameters"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 },
+        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+        "predictedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "exactParameters": { "type": "object" }
+      }
+    },
+    "structuralEvidence": {
+      "type": "object",
+      "required": ["source", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
   "required": [
     "schemaVersion",
     "generatedFrom",
@@ -148,13 +223,34 @@
               "structural"
             ],
             "properties": {
-              "staticImplementation": { "type": "array" },
-              "declaredCalibration": { "type": "array" },
-              "historicalVerification": { "type": "array" },
-              "currentEnvironmentVerification": { "type": "array" },
-              "loadability": { "type": "array" },
-              "strategyParameterVerification": { "type": "array" },
-              "structural": { "type": "array" }
+              "staticImplementation": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/sourceEvidence" }
+              },
+              "declaredCalibration": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/declaredEvidence" }
+              },
+              "historicalVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/historicalEvidence" }
+              },
+              "currentEnvironmentVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/historicalEvidence" }
+              },
+              "loadability": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/loadabilityEvidence" }
+              },
+              "strategyParameterVerification": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/strategyEvidence" }
+              },
+              "structural": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/structuralEvidence" }
+              }
             }
           }
         }

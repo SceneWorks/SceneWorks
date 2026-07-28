@@ -33,7 +33,8 @@ use std::sync::OnceLock;
 
 use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 
-pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
+use crate::fit_gate::resolve_offload;
+pub(crate) use crate::fit_gate::FitDecision;
 use crate::{WorkerError, WorkerResult};
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
@@ -634,6 +635,23 @@ fn decide_residency_by_peak_with_headroom(
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
+    // Generic MLX has no provider-supplied image-memory contract or request-scoped evidence yet.
+    // Enter the shared selector explicitly as ImplementedUnverified, then keep the established
+    // cold-load gate. This adopts one selector API without manufacturing VERIFIED evidence or
+    // copying optimized selection logic; request-aware providers can promote only after exposing
+    // their own contract, fingerprint, and exact request evidence.
+    let shared_observation = generic_mlx_shared_observation(total_bytes, budget, headroom_gb);
+    debug_assert!(matches!(
+        shared_observation,
+        crate::image_memory::Selection::Selected {
+            selection: gen_core::ImageMemorySelection {
+                strategy: gen_core::ImageMemoryStrategy::Resident,
+                ..
+            },
+            ..
+        } | crate::image_memory::Selection::Reject { .. }
+            | crate::image_memory::Selection::Unverified { .. }
+    ));
     let resident = fit_decision(
         predicted_peak_gb_with_headroom(total_bytes, headroom_gb),
         budget,
@@ -644,7 +662,6 @@ fn decide_residency_by_peak_with_headroom(
             needed_gb,
             available_gb,
         } => {
-            // Second stage: reject if even the staged max-single-component peak won't fit.
             let staged =
                 predicted_sequential_peak_gb_with_headroom(total_bytes, te_bytes, headroom_gb);
             match sequential_overflow_gb(staged, budget) {
@@ -665,6 +682,99 @@ fn decide_residency_by_peak_with_headroom(
             staged_gb: None,
         },
     }
+}
+
+fn generic_mlx_shared_observation(
+    total_bytes: u64,
+    budget: Option<MemoryBudget>,
+    headroom_gb: f64,
+) -> crate::image_memory::Selection {
+    use crate::image_memory::{Budget, Candidate, RequestScope};
+    use gen_core::{
+        ImageMemoryBackendRealization, ImageMemoryConformanceState, ImageMemoryEvidence,
+        ImageMemoryEvidenceDimensions, ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict,
+        ImageMemoryGeometry, ImageMemoryNumericTier, ImageMemoryParityContract,
+        ImageMemoryParityResult, ImageMemoryProviderContract, ImageMemorySelection,
+        ImageMemoryStrategy,
+    };
+
+    let tier = ImageMemoryNumericTier {
+        precision: gen_core::Precision::Bf16,
+        quant: None,
+    };
+    let geometry = ImageMemoryGeometry {
+        width: 1,
+        height: 1,
+        batch: 1,
+        frames: 1,
+    };
+    let selection = ImageMemorySelection {
+        strategy: ImageMemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier,
+    };
+    let evidence = ImageMemoryEvidence {
+        key: ImageMemoryEvidenceKey {
+            resolved_route: "generic_mlx_cold_load".into(),
+            backend: "mlx".into(),
+            tier,
+            mode: "image_generation".into(),
+            overlay: Some("resolved_load_spec".into()),
+            geometry,
+            strategy: ImageMemoryStrategy::Resident,
+            parameters: Default::default(),
+        },
+        conformance: ImageMemoryConformanceState::ImplementedUnverified,
+        dimensions: ImageMemoryEvidenceDimensions {
+            static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
+            declared_calibration: ImageMemoryEvidenceVerdict::Missing,
+            historical_verification: ImageMemoryEvidenceVerdict::Missing,
+            current_environment_verification: ImageMemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+        },
+        calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: String::new(),
+        sceneworks_revision: "sc-15449-contract-v1".into(),
+        inference_revision: "0c85bc9ff9fe161227efebf396a83db5e967d9ad".into(),
+        harness_version: String::new(),
+        predicted_peak_bytes: total_bytes,
+        observed_peak_bytes: None,
+        parity: ImageMemoryParityContract::Exact,
+        parity_result: ImageMemoryParityResult::NotRun,
+    };
+    let contract = ImageMemoryProviderContract::compatibility_default(
+        "generic_mlx_cold_load",
+        ImageMemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: false,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: false,
+            cache_eviction: true,
+        },
+    );
+    crate::image_memory::select_strategy(
+        RequestScope {
+            resolved_route: "generic_mlx_cold_load",
+            backend: "mlx",
+            tier,
+            mode: "image_generation",
+            overlay: Some("resolved_load_spec"),
+            geometry,
+            expected_sceneworks_revision: "sc-15449-contract-v1",
+            expected_inference_revision: "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+        },
+        &contract,
+        budget.map(|budget| Budget {
+            available_gb: budget.total_gb,
+            reclaimable_gb: 0.0,
+            total_gb: budget.total_gb,
+            reserved_headroom_gb: headroom_gb,
+        }),
+        &[Candidate {
+            selection,
+            evidence: &evidence,
+        }],
+    )
 }
 
 /// Weights-fit floor (sc-12179, GitHub #1544): a machine that can hold the model's RESIDENT WEIGHTS
@@ -1811,6 +1921,25 @@ mod tests {
             decide_residency_by_peak(0, 0, Some(MemoryBudget { total_gb: 8.0 }), true),
             ResidencyOutcome::Resident
         );
+    }
+
+    #[test]
+    fn generic_mlx_adopts_shared_selector_without_an_optimized_claim() {
+        let observation = generic_mlx_shared_observation(
+            4 * 1024 * 1024 * 1024,
+            Some(MemoryBudget { total_gb: 32.0 }),
+            HEADROOM_GB,
+        );
+        assert!(matches!(
+            observation,
+            crate::image_memory::Selection::Selected {
+                selection: gen_core::ImageMemorySelection {
+                    strategy: gen_core::ImageMemoryStrategy::Resident,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     /// The weights-fit floor (sc-12179, GitHub #1544): a would-be peak-layer REJECT becomes a

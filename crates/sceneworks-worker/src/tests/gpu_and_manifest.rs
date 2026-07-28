@@ -58,6 +58,15 @@ fn compute_cap_parse_takes_the_highest_and_tolerates_junk() {
     assert_eq!(parse_max_compute_cap("\n[N/A]\n"), None);
 }
 
+#[test]
+fn selected_compute_capability_never_borrows_a_later_gpu_row() {
+    assert_eq!(parse_selected_compute_cap("8.9\n12.0\n"), Some(8.9));
+    assert_eq!(parse_selected_compute_cap("N/A\n12.0\n"), None);
+    assert_eq!(parse_selected_compute_cap("12.0\n"), Some(12.0));
+    assert_eq!(parse_selected_compute_cap(""), None);
+    assert_eq!(parse_selected_compute_cap("N/A\n"), None);
+}
+
 /// sc-11042 (epic 11037): the NVFP4 tier's Blackwell gate floors at compute cap **12.0** (consumer
 /// Blackwell sm_120 — the FP4 tensor cores the cuBLASLt NVFP4 GEMM dispatches on).
 ///

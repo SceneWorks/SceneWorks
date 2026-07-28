@@ -136,11 +136,221 @@
         "decode": { "$ref": "#/$defs/phaseVramCurve" }
       }
     },
-    "kreaTurboFit": {
+    "kreaTurboEvidencePeaks": {
       "type": "object",
-      "required": ["maxMeasuredPixels", "phaseCurvesByTier"],
+      "required": ["threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
       "additionalProperties": false,
       "properties": {
+        "threeStage": { "type": "number", "exclusiveMinimum": 0 },
+        "tiledVae": { "type": "number", "exclusiveMinimum": 0 },
+        "chunkedAttention": { "type": "number", "exclusiveMinimum": 0 },
+        "streamedBlocks": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "kreaTurboEvidencePhaseVector": {
+      "type": "object",
+      "required": ["text", "denoise", "decode"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "number", "minimum": 0 },
+        "denoise": { "type": "number", "minimum": 0 },
+        "decode": { "type": "number", "minimum": 0 }
+      }
+    },
+    "kreaTurboEvidencePhases": {
+      "type": "object",
+      "required": ["threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+      "additionalProperties": false,
+      "properties": {
+        "threeStage": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "tiledVae": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "chunkedAttention": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" },
+        "streamedBlocks": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" }
+      }
+    },
+    "kreaTurboEvidenceRecord": {
+      "type": "object",
+      "required": [
+        "tier",
+        "width",
+        "height",
+        "capturedAt",
+        "harnessVersion",
+        "sourceStory",
+        "sourceActivity",
+        "sceneWorksCommit",
+        "inferenceCommit",
+        "compatibleSceneWorksRevision",
+        "compatibleInferenceRevision",
+        "loadability",
+        "predictedPeaksGb",
+        "predictedPhasesGb",
+        "observedPeaksGb",
+        "parity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tier": { "enum": ["q4", "q8", "bf16"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "type": "string", "minLength": 1 },
+        "sourceStory": { "type": "string", "pattern": "^sc-[0-9]+$" },
+        "sourceActivity": { "type": "integer", "minimum": 1 },
+        "sceneWorksCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "inferenceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "compatibleSceneWorksRevision": { "const": "sc-15449-contract-v1" },
+        "compatibleInferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "loadability": {
+          "type": "object",
+          "required": ["provider", "repository", "resolvedRevision", "tierRoot", "route", "backend", "computeCapability"],
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "const": "huggingface" },
+            "repository": { "type": "string", "minLength": 1 },
+            "resolvedRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "tierRoot": { "enum": ["q4", "q8", "bf16"] },
+            "route": { "const": "krea_2_turbo" },
+            "backend": { "const": "candle" },
+            "computeCapability": { "const": 12.0 }
+          },
+          "description": "Exact immutable artifact and canonical runtime route exercised by this evidence cell."
+        },
+        "predictedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
+        "predictedPhasesGb": {
+          "$ref": "#/$defs/kreaTurboEvidencePhases",
+          "description": "Exact phase-curve outputs for this evidence cell. Every emitted text/denoise/decode value must match these values within the declared 0.01 GiB tolerance."
+        },
+        "observedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
+        "parity": {
+          "type": "object",
+          "required": ["contract", "result", "metric", "maximumError", "fixture"],
+          "additionalProperties": false,
+          "properties": {
+            "contract": { "const": "golden" },
+            "result": { "const": "passed" },
+            "metric": { "type": "string", "minLength": 1 },
+            "maximumError": { "type": "number", "minimum": 0 },
+            "fixture": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "kreaTurboFit": {
+      "type": "object",
+      "required": [
+        "calibrationAbi",
+        "calibrationFingerprint",
+        "sceneWorksRevision",
+        "inferenceRevision",
+        "measured",
+        "verification",
+        "evidenceRecords",
+        "strategyParameters",
+        "maxMeasuredPixels",
+        "phaseCurvesByTier"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "calibrationAbi": {
+          "const": 1,
+          "description": "Image-memory calibration ABI consumed by the worker and supplied by the provider contract. A new ABI requires an explicit schema and worker migration."
+        },
+        "calibrationFingerprint": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "description": "Stable provider/calibration identity. It must exactly match the provider contract before any optimized fit may be selected."
+        },
+        "sceneWorksRevision": {
+          "const": "sc-15449-contract-v1",
+          "description": "SceneWorks selector/calibration contract revision. The worker rejects evidence from any other revision."
+        },
+        "inferenceRevision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Exact merged inference commit against which this calibration and its provider hooks were verified."
+        },
+        "measured": {
+          "const": true,
+          "description": "Krea Turbo fit curves are verified evidence only when measured on real hardware; estimated curves require a different unverified authoring contract."
+        },
+        "verification": {
+          "type": "object",
+          "required": ["hardware", "stories", "method", "numericPolicy", "outputParity"],
+          "additionalProperties": false,
+          "properties": {
+            "hardware": { "type": "string", "minLength": 1 },
+            "stories": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^sc-[0-9]+$" }
+            },
+            "method": { "type": "string", "minLength": 1 },
+            "numericPolicy": { "type": "string", "minLength": 1 },
+            "outputParity": { "type": "string", "minLength": 1 }
+          },
+          "description": "Human-auditable measurement, numerical-equivalence, and output-parity provenance for the calibrated envelope."
+        },
+        "evidenceRecords": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/kreaTurboEvidenceRecord" },
+          "description": "Exact, immutable measured request cells. Curves may predict other geometries, but optimized selection is eligible only when one of these records matches tier and geometry exactly."
+        },
+        "strategyParameters": {
+          "type": "object",
+          "required": ["resident", "threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+          "additionalProperties": false,
+          "properties": {
+            "resident": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Resident execution has no optimization parameters."
+            },
+            "threeStage": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Staged residency uses provider lifecycle hooks and has no tunable parameter."
+            },
+            "tiledVae": {
+              "type": "object",
+              "required": ["decodeTileEdge", "decodeOverlap"],
+              "additionalProperties": false,
+              "properties": {
+                "decodeTileEdge": { "type": "integer", "minimum": 1 },
+                "decodeOverlap": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "chunkedAttention": {
+              "type": "object",
+              "required": ["decodeTileEdge", "decodeOverlap", "attentionChunkSize"],
+              "additionalProperties": false,
+              "properties": {
+                "decodeTileEdge": { "type": "integer", "minimum": 1 },
+                "decodeOverlap": { "type": "integer", "minimum": 0 },
+                "attentionChunkSize": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "streamedBlocks": {
+              "type": "object",
+              "required": [
+                "decodeTileEdge",
+                "decodeOverlap",
+                "attentionChunkSize",
+                "transformerWindowSize"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "decodeTileEdge": { "type": "integer", "minimum": 1 },
+                "decodeOverlap": { "type": "integer", "minimum": 0 },
+                "attentionChunkSize": { "type": "integer", "minimum": 1 },
+                "transformerWindowSize": { "type": "integer", "minimum": 1 }
+              }
+            }
+          },
+          "description": "Exact, cumulative provider parameters for each calibrated strategy. The worker validates these values against the provider contract before selection."
+        },
         "maxMeasuredPixels": {
           "type": "integer",
           "minimum": 1,

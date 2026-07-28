@@ -41,12 +41,13 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
             .find(|gpu| gpu.id == requested_gpu_id)
             .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
     };
-    // Compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300) and the NVFP4 sm_120 gate
+    // Selected-GPU compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300), the NVFP4
+    // sm_120 gate, and request-scoped calibration evidence. Never borrow another visible GPU's cap.
     // (sc-11042). Probed here (the async discovery) and threaded into the sync
     // `with_candle_capabilities` — the worker has no nvml, so this is a bounded
     // `nvidia-smi --query-gpu=compute_cap` subprocess like the utilization query.
     // Only meaningful on the candle lane; a cheap no-op probe on CPU / non-NVIDIA (returns `None`).
-    let compute_cap = nvidia_max_compute_cap().await;
+    let compute_cap = nvidia_compute_cap(&gpu.id).await;
     // Publish the probed cap for the SYNC tier-select path (sc-11042). `discover_gpu` runs once at
     // startup (`lib.rs`) BEFORE the job-claim loop, so every generation resolves against a populated
     // value; a worker that somehow never probed reads `None` and is treated as NVFP4-INELIGIBLE
@@ -394,29 +395,43 @@ pub(crate) const INT8_CONVROT_CAPABILITY: &str = "int8_convrot";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const INT8_CONVROT_MIN_COMPUTE_CAP: f32 = 8.9;
 
-/// Highest CUDA compute capability across the visible NVIDIA GPUs, via
+/// CUDA compute capability for the exact GPU selected by this worker, via
 /// `nvidia-smi --query-gpu=compute_cap` (e.g. `8.9`, `12.0`). `None` when nvidia-smi is absent /
 /// times out / reports no parseable cap (a non-NVIDIA or CPU worker) — the caller then treats the
 /// worker as ConvRot-ineligible. Cheap, bounded (3s) subprocess, matching [`query_nvidia_gpus`]; the
 /// `compute_cap` query field is a stable nvidia-smi column (driver R495+, well below any CUDA-12 box).
-pub(crate) async fn nvidia_max_compute_cap() -> Option<f32> {
+pub(crate) async fn nvidia_compute_cap(gpu_id: &str) -> Option<f32> {
+    if gpu_id.trim().is_empty() || gpu_id == "auto" || gpu_id == "cpu" {
+        return None;
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(3),
         Command::new("nvidia-smi")
+            .arg(format!("--id={gpu_id}"))
             .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
             .output(),
     )
     .await;
     match output {
         Ok(Ok(output)) if output.status.success() => {
-            parse_max_compute_cap(&String::from_utf8_lossy(&output.stdout))
+            parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
         }
         _ => None,
     }
 }
 
+pub(crate) fn parse_selected_compute_cap(output: &str) -> Option<f32> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .parse::<f32>()
+        .ok()
+}
+
 /// Parse the highest `major.minor` compute cap from the `nvidia-smi --query-gpu=compute_cap` CSV
 /// (one row per GPU). Ignores blank / unparseable rows; `None` when nothing parses.
+#[cfg(test)]
 pub(crate) fn parse_max_compute_cap(output: &str) -> Option<f32> {
     output
         .lines()
@@ -458,7 +473,7 @@ pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= NVFP4_MIN_COMPUTE_CAP)
 }
 
-/// Process-wide cache of the startup compute-cap probe, published by [`discover_gpu`].
+/// Process-wide cache of the selected GPU's startup compute-cap probe, published by [`discover_gpu`].
 ///
 /// The NVFP4 tier gate (sc-11042) is consulted from the SYNC tier-select path (`image_jobs/base.rs`),
 /// which has no async context to re-probe `nvidia-smi` from and must not spawn a subprocess per job.
@@ -467,8 +482,7 @@ pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
 /// "never probed" (⇒ `None` ⇒ ineligible, fail-safe) from "probed, no NVIDIA GPU" (also `None`).
 static COMPUTE_CAP: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
 
-/// Publish the startup compute-cap probe. First call wins; later calls are ignored (the cap of a
-/// running worker's GPU cannot change mid-process, and tests set it explicitly).
+/// Publish the selected GPU's startup compute-cap probe. First call wins; later calls are ignored.
 pub(crate) fn cache_compute_cap(cap: Option<f32>) {
     let _ = COMPUTE_CAP.set(cap);
 }
