@@ -230,3 +230,35 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_image_memory_calibration \}\}/,
   );
 });
+
+test("MLX calibration probe derives the production wired ceiling without guessing", async () => {
+  const adapter = await source(
+    "crates/sceneworks-image-memory-adapter/src/bin/mlx.rs",
+  );
+  assert.match(adapter, /sysctl\("iogpu\.wired_limit_mb"\)/);
+  assert.match(adapter, /sysctl\("kern\.memorystatus_wired_mem_limit"\)/);
+  assert.match(adapter, /\.checked_mul\(1024 \* 1024\)/);
+  assert.match(
+    adapter,
+    /u64::try_from\(mlx_default_memory_limit\)[\s\S]*?\/ 3[\s\S]*?\* 2/,
+  );
+  assert.match(adapter, /source: "mlx_default_memory_limit\/1\.5"/);
+  const probe = adapter.slice(
+    adapter.indexOf("fn probe()"),
+    adapter.indexOf("#[cfg(test)]"),
+  );
+  assert.equal(probe.match(/get_memory_limit\(\)/g)?.length, 1);
+  assert.match(
+    probe,
+    /let mlx_default_memory_limit = get_memory_limit\(\);/,
+  );
+  assert.match(
+    probe,
+    /"mlxMemoryLimitBytes": mlx_default_memory_limit/,
+  );
+  assert.match(
+    adapter,
+    /SCENEWORKS_MLX_WIRED_LIMIT_BYTES must be greater than zero/,
+  );
+  assert.match(adapter, /"wiredLimitBytes": wired_limit\.bytes/);
+});
