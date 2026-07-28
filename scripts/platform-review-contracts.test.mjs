@@ -119,6 +119,20 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
     workflow,
     /models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/bf16/,
   );
+  const huggingFaceRoot =
+    "$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16";
+  const sceneWorksRoot =
+    "$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16";
+  assert.equal(workflow.split(huggingFaceRoot).length - 1, 1);
+  assert.equal(workflow.split(sceneWorksRoot).length - 1, 1);
+  assert.ok(workflow.indexOf(huggingFaceRoot) < workflow.indexOf(sceneWorksRoot));
+  assert.match(
+    workflow,
+    /if \[\[ -n "\$QWEN_ROOT_OVERRIDE" \]\]; then\s+QWEN_ROOT="\$QWEN_ROOT_OVERRIDE"\s+else/,
+  );
+  assert.match(workflow, /if \[\[ -d "\$QWEN_HF_ROOT" \]\]; then/);
+  assert.match(workflow, /elif \[\[ -d "\$QWEN_APP_ROOT" \]\]; then/);
+  assert.doesNotMatch(workflow, /\bfind\b.*qwen|\bls\b.*qwen/i);
   assert.match(
     workflow,
     /QWEN_REPOSITORY" != "SceneWorks\/qwen-image-mlx"/,

@@ -135,7 +135,20 @@ jobs:
             echo "qwen_repository must be the fixed SceneWorks/qwen-image-mlx calibration artifact" >&2
             exit 1
           fi
-          QWEN_ROOT="${QWEN_ROOT_OVERRIDE:-$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16}"
+          if [[ -n "$QWEN_ROOT_OVERRIDE" ]]; then
+            QWEN_ROOT="$QWEN_ROOT_OVERRIDE"
+          else
+            QWEN_HF_ROOT="$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
+            QWEN_APP_ROOT="$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
+            if [[ -d "$QWEN_HF_ROOT" ]]; then
+              QWEN_ROOT="$QWEN_HF_ROOT"
+            elif [[ -d "$QWEN_APP_ROOT" ]]; then
+              QWEN_ROOT="$QWEN_APP_ROOT"
+            else
+              echo "the exact Qwen calibration snapshot is not available on this runner" >&2
+              exit 1
+            fi
+          fi
           if [[ ! -d "$QWEN_ROOT" ]]; then
             echo "the exact Qwen calibration snapshot is not available on this runner" >&2
             exit 1
