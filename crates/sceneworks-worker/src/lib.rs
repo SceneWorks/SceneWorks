@@ -924,9 +924,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         gpuId = %settings.gpu_id,
         "rust_worker gen-core contract version"
     );
-    // sc-7820 (epic 7819): apply the user's GPU memory ceiling to the MLX runtime once at startup,
-    // before any model load. The MLX limit is process-global, so this single call covers
-    // generations, upscales, AND LoRA training. No-op when unset (0) and on non-macOS/candle builds.
+    // sc-7820 (epic 7819): apply the GPU memory ceiling to the MLX runtime once at startup, before
+    // any model load. The MLX limit is process-global, so this single call covers generations,
+    // upscales, AND LoRA training. When the user configured no ceiling (0) a default derived from
+    // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
+    // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
     generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which

@@ -140,7 +140,11 @@ const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
 /// It leaves ~6 GiB of weight budget on an 8 GB Mac — comfortably admitting that baseline and the
 /// other small tiers — while still rejecting a model whose weights alone can't be held resident.
 /// See [`weights_fit_floor`] and the `z_image_turbo_q4_admits_on_an_8gb_mac` baseline test.
-const OS_RESERVE_GB: f64 = 2.0;
+///
+/// Shared with [`crate::generator_cache::resolve_gpu_memory_limit`], which reserves the same floor
+/// when it derives the default MLX process memory limit — the admission floor and the runtime
+/// ceiling must agree, or the gate admits a tier the runtime then refuses to hold.
+pub(crate) const OS_RESERVE_GB: f64 = 2.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
@@ -349,12 +353,20 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
 /// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
 /// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
 fn probe_total_unified_memory_gib() -> Option<f64> {
-    static TOTAL_GIB: OnceLock<Option<f64>> = OnceLock::new();
-    *TOTAL_GIB.get_or_init(sysctl_total_unified_memory_gib)
+    probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
+}
+
+/// Total unified memory (bytes) — the raw probe [`probe_total_unified_memory_gib`] scales. Cached
+/// process-wide behind one `OnceLock`, so the `sysctl` subprocess runs at most once however many
+/// callers ask. Also read by [`crate::generator_cache::apply_gpu_memory_limit`] at worker startup,
+/// which needs the byte figure rather than the GiB one.
+pub(crate) fn probe_total_unified_memory_bytes() -> Option<u64> {
+    static TOTAL_BYTES: OnceLock<Option<u64>> = OnceLock::new();
+    *TOTAL_BYTES.get_or_init(sysctl_total_unified_memory_bytes)
 }
 
 #[cfg(target_os = "macos")]
-fn sysctl_total_unified_memory_gib() -> Option<f64> {
+fn sysctl_total_unified_memory_bytes() -> Option<u64> {
     let output = std::process::Command::new("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
@@ -362,15 +374,11 @@ fn sysctl_total_unified_memory_gib() -> Option<f64> {
     if !output.status.success() {
         return None;
     }
-    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .ok()?;
-    Some(bytes as f64 / BYTES_PER_GIB)
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn sysctl_total_unified_memory_gib() -> Option<f64> {
+fn sysctl_total_unified_memory_bytes() -> Option<u64> {
     None
 }
 
