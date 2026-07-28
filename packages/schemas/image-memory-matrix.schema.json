@@ -87,6 +87,7 @@
     "summary",
     "models",
     "cells",
+    "calibrationRuns",
     "modelSlices"
   ],
   "properties": {
@@ -253,6 +254,28 @@
               }
             }
           }
+        }
+      }
+    },
+    "calibrationRuns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cellId", "binding", "semantics", "record"],
+        "properties": {
+          "cellId": { "type": "string", "minLength": 1 },
+          "binding": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["eligible", "reasons"],
+            "properties": {
+              "eligible": { "type": "boolean" },
+              "reasons": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "semantics": { "enum": ["current", "historical", "gated", "negative", "fixture"] },
+          "record": { "$ref": "image-memory-calibration.schema.json#/$defs/record" }
         }
       }
     },

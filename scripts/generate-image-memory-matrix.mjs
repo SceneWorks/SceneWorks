@@ -7,6 +7,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import {
+  evidenceSemantics,
+  validateBundle as validateCalibrationBundle,
+} from "./image-memory-calibration-harness.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/image-memory-matrix.json";
@@ -123,6 +127,43 @@ function sha256(body) {
 
 function sortedUnique(values) {
   return [...new Set(values)].sort();
+}
+
+function runtimeStrategyParameters(parameters) {
+  return Object.fromEntries(
+    Object.entries(parameters).filter(([key]) =>
+      ["decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key),
+    ),
+  );
+}
+
+export function calibrationBinding(record, cell) {
+  const reasons = [];
+  if (record.status !== "complete") reasons.push("record-not-complete");
+  if (record.quality.result !== "passed") reasons.push("quality-not-passed");
+  if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
+  if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
+  if (
+    JSON.stringify(record.strategy.parameters) !==
+    JSON.stringify(runtimeStrategyParameters(cell.strategyParameters))
+  ) reasons.push("strategy-parameters-mismatch");
+  const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
+  if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
+  if (record.target.geometry.batch !== 1) reasons.push("batch-out-of-envelope");
+  if (record.target.geometry.frames !== 1) reasons.push("frames-out-of-envelope");
+  if (
+    !cell.evidence.loadability.some(
+      (artifact) =>
+        artifact.repository === record.artifact.repository &&
+        artifact.revision === record.artifact.resolvedRevision &&
+        artifact.variant === record.artifact.variant,
+    )
+  ) reasons.push("artifact-loadability-mismatch");
+  if (
+    record.loadability.result !== "passed" ||
+    !record.loadability.resolvedPathFingerprint
+  ) reasons.push("loadability-not-passed");
+  return { eligible: reasons.length === 0, reasons };
 }
 
 function parseExpectedImageIds(source) {
@@ -453,6 +494,7 @@ export async function buildMatrix() {
     imageMemory: "crates/sceneworks-worker/src/image_memory.rs",
     vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
     instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+    calibrationEvidence: "docs/generated/image-memory-calibration-evidence.json",
     cargo: "Cargo.toml",
   };
   const sourceEntries = Object.entries(sourcePaths);
@@ -468,6 +510,7 @@ export async function buildMatrix() {
   const enginesBody = bodies.engines;
   const mlxFitBody = bodies.mlxFitGate;
   const cargoBody = bodies.cargo;
+  const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));
@@ -476,7 +519,12 @@ export async function buildMatrix() {
   const sequentialEngines = parseMlxSequentialEngines(mlxFitBody);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   const pin = inferencePin(cargoBody);
-  const sceneWorksRevision = `source-tree:${sha256(sourceBodies.join(""))}`;
+  const sceneWorksRevision = `source-tree:${sha256(
+    sourceEntries
+      .filter(([name]) => name !== "calibrationEvidence")
+      .map(([name]) => bodies[name])
+      .join(""),
+  )}`;
 
   const models = images
     .map((model) => {
@@ -533,6 +581,61 @@ export async function buildMatrix() {
                         parameters: status.parameters,
                       }),
                     );
+              const calibrationRuns = calibrationBundle.records.filter(
+                (record) =>
+                  record.target.modelId === model.id &&
+                  record.target.provider === route.engine &&
+                  record.backend === backend &&
+                  record.target.tier === tier &&
+                  record.target.mode === mode &&
+                  record.target.overlay === overlay &&
+                  record.strategy.rung === rung,
+              );
+              const runSummary = (record) => {
+                const overall = record.observedMemory?.overall?.deviceBytes;
+                return {
+                  source: `docs/generated/image-memory-calibration-evidence.json#${record.id}`,
+                  hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
+                  tier: record.target.tier,
+                  geometry: `${record.target.geometry.width}x${record.target.geometry.height}`,
+                  capturedAt: record.capturedAt,
+                  harnessVersion: record.harnessVersion,
+                  ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
+                  parity: {
+                    contract: record.quality.contract,
+                    result: record.quality.result === "not_run" ? "not_run" : record.quality.result,
+                    metric: "maximum_absolute_error",
+                    maximumError: record.quality.maximumError,
+                    fixture: record.fixture,
+                  },
+                };
+              };
+              const eligibleRuns = calibrationRuns.filter(
+                (record) => calibrationBinding(record, {
+                  ...{
+                    calibrationFingerprint: fingerprint,
+                    strategyParameters: status.parameters,
+                    geometryEnvelope: status.maxPixels
+                      ? geometryWithinPixels(model, backend, status.maxPixels)
+                      : geometryFor(model, backend),
+                    evidence: { loadability: artifactEvidence(model, route, tier) },
+                  },
+                }).eligible,
+              );
+              const historicalRuns = eligibleRuns.filter(
+                (record) =>
+                  evidenceSemantics(record, {
+                    sceneWorks: sceneWorksRevision,
+                    inference: pin,
+                  }) === "historical",
+              );
+              const currentRuns = eligibleRuns.filter(
+                (record) =>
+                  evidenceSemantics(record, {
+                    sceneWorks: sceneWorksRevision,
+                    inference: pin,
+                  }) === "current" && record.status === "complete",
+              );
               cells.push({
                 id: [model.id, route.engine, backend, tier, mode, overlay, rung].join(":"),
                 modelId: model.id,
@@ -558,8 +661,14 @@ export async function buildMatrix() {
                 evidence: {
                   staticImplementation: status.source ? [{ source: status.source }] : [],
                   declaredCalibration: declaredEvidence(model, backend, tier),
-                  historicalVerification: status.historicalVerification ?? [],
-                  currentEnvironmentVerification: status.currentEnvironmentVerification ?? [],
+                  historicalVerification: [
+                    ...(status.historicalVerification ?? []),
+                    ...historicalRuns.map(runSummary),
+                  ],
+                  currentEnvironmentVerification: [
+                    ...(status.currentEnvironmentVerification ?? []),
+                    ...currentRuns.map(runSummary),
+                  ],
                   loadability: artifactEvidence(model, route, tier),
                   strategyParameterVerification: status.strategyParameterVerification ?? [],
                   structural: status.structural ?? [],
@@ -572,6 +681,28 @@ export async function buildMatrix() {
     }
   }
   cells.sort((left, right) => left.id.localeCompare(right.id));
+  const calibrationRuns = calibrationBundle.records.map((record) => {
+    const cell = cells.find(
+      (candidate) =>
+        candidate.modelId === record.target.modelId &&
+        candidate.resolvedRoute === record.target.provider &&
+        candidate.backend === record.backend &&
+        candidate.tier === record.target.tier &&
+        candidate.mode === record.target.mode &&
+        candidate.overlay === record.target.overlay &&
+        candidate.rung === record.strategy.rung,
+    );
+    if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
+    return {
+      cellId: cell.id,
+      binding: calibrationBinding(record, cell),
+      semantics: evidenceSemantics(record, {
+        sceneWorks: sceneWorksRevision,
+        inference: pin,
+      }),
+      record,
+    };
+  });
 
   const modelSlices = Object.fromEntries(
     models.map((model) => [
@@ -622,9 +753,15 @@ export async function buildMatrix() {
       mlxStagedStaticCoverage: mlxStagedModels.size,
       mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
       fullModels: 0,
+      calibrationRuns: calibrationBundle.records.length,
+      currentCalibrationRuns: cells.reduce(
+        (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
+        0,
+      ),
     },
     models,
     cells,
+    calibrationRuns,
     modelSlices,
   };
   validateMatrix(matrix, expectedIds, backendTierOverrides);
