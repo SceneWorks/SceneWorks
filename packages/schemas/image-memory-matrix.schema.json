@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/image-memory-matrix.schema.json",
+  "title": "SceneWorks image memory-ladder matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedFrom",
+    "conformanceStates",
+    "evidenceDimensions",
+    "summary",
+    "models",
+    "cells",
+    "modelSlices"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedFrom": { "type": "object" },
+    "conformanceStates": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "Verified",
+          "Implemented/unverified",
+          "Structurally N/A",
+          "Missing",
+          "Route unavailable/broken"
+        ]
+      }
+    },
+    "evidenceDimensions": { "type": "array", "items": { "type": "string" } },
+    "summary": {
+      "type": "object",
+      "required": [
+        "imageModels",
+        "cells",
+        "mlxStagedStaticCoverage",
+        "mlxStagedStaticCoverageDenominator",
+        "fullModels"
+      ]
+    },
+    "models": {
+      "type": "array",
+      "minItems": 53,
+      "maxItems": 53,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "family",
+          "resolvedRoute",
+          "routeKind",
+          "backends",
+          "owningFamilyStory",
+          "owningModelStory"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "family": { "type": ["string", "null"] },
+          "resolvedRoute": { "type": "string" },
+          "routeKind": { "enum": ["registry", "bespoke"] },
+          "backends": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "enum": ["mlx", "candle"] },
+            "uniqueItems": true
+          },
+          "owningFamilyStory": { "type": "integer" },
+          "owningModelStory": { "type": "integer" }
+        }
+      }
+    },
+    "cells": {
+      "type": "array",
+      "minItems": 265,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "modelId",
+          "resolvedRoute",
+          "provider",
+          "backend",
+          "tier",
+          "mode",
+          "overlay",
+          "rung",
+          "geometryEnvelope",
+          "strategyParameters",
+          "state",
+          "evidenceRevision",
+          "calibrationFingerprint",
+          "owningFamilyStory",
+          "owningModelStory",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "modelId": { "type": "string" },
+          "resolvedRoute": { "type": "string" },
+          "provider": { "type": "string" },
+          "backend": { "enum": ["mlx", "candle"] },
+          "tier": { "type": "string" },
+          "mode": { "type": "string" },
+          "overlay": { "type": "string" },
+          "rung": {
+            "enum": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ]
+          },
+          "geometryEnvelope": { "type": "object" },
+          "strategyParameters": { "type": "object" },
+          "state": {
+            "enum": [
+              "Verified",
+              "Implemented/unverified",
+              "Structurally N/A",
+              "Missing",
+              "Route unavailable/broken"
+            ]
+          },
+          "evidenceRevision": {
+            "type": "object",
+            "required": ["sceneWorks", "inference"]
+          },
+          "calibrationFingerprint": { "type": ["string", "null"] },
+          "owningFamilyStory": { "type": "integer" },
+          "owningModelStory": { "type": "integer" },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "staticImplementation",
+              "declaredCalibration",
+              "historicalVerification",
+              "currentEnvironmentVerification",
+              "loadability",
+              "strategyParameterVerification",
+              "structural"
+            ],
+            "properties": {
+              "staticImplementation": { "type": "array" },
+              "declaredCalibration": { "type": "array" },
+              "historicalVerification": { "type": "array" },
+              "currentEnvironmentVerification": { "type": "array" },
+              "loadability": { "type": "array" },
+              "strategyParameterVerification": { "type": "array" },
+              "structural": { "type": "array" }
+            }
+          }
+        }
+      }
+    },
+    "modelSlices": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 5,
+        "items": { "type": "string" }
+      }
+    }
+  }
+}
