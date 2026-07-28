@@ -315,6 +315,10 @@ impl KreaTurboPhasePeaks {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum KreaTurboFit {
+    Resident {
+        peak_gb: f64,
+        needed_gb: f64,
+    },
     Fits {
         rung: KreaTurboRung,
         phases: KreaTurboPhasePeaks,
@@ -325,6 +329,9 @@ pub(crate) enum KreaTurboFit {
         needed_gb: f64,
     },
 }
+
+const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
+const KREA_TURBO_INFERENCE_REVISION: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
 
 /// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
 /// allocator residency separately from the geometry-dependent activation slope, fitted from real
@@ -369,6 +376,28 @@ fn krea_rung_phase_peaks(
     })
 }
 
+fn krea_rung_parameters(
+    turbo_fit: &Value,
+    rung: KreaTurboRung,
+) -> Option<gen_core::ImageMemoryStrategyParameters> {
+    let parameters = turbo_fit
+        .get("strategyParameters")?
+        .get(rung.manifest_key())?
+        .as_object()?;
+    let value = |name| {
+        parameters
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    Some(gen_core::ImageMemoryStrategyParameters {
+        decode_tile_edge: value("decodeTileEdge"),
+        decode_overlap: value("decodeOverlap"),
+        attention_chunk_size: value("attentionChunkSize"),
+        transformer_window_size: value("transformerWindowSize"),
+    })
+}
+
 /// Select the least-cost measured Krea Turbo fit rung for this tier, geometry, and live budget.
 /// `allow_streamed_blocks` is false when the job carries load-time adapters: the provider preserves
 /// those jobs on its existing resident/staged paths rather than silently omitting their residuals.
@@ -383,31 +412,180 @@ pub(crate) fn krea_turbo_fit(
     budget: Option<VramBudget>,
     allow_streamed_blocks: bool,
 ) -> Option<KreaTurboFit> {
+    use crate::image_memory::{
+        self, Backend, Budget, Candidate, ConformanceState, Envelope, Evidence, EvidenceDimensions,
+        ProviderCapabilities, RequestScope, Selection, Strategy,
+    };
+
     let budget = budget?;
-    let rungs = [
-        KreaTurboRung::ThreeStage,
-        KreaTurboRung::TiledVae,
-        KreaTurboRung::ChunkedAttention,
-        KreaTurboRung::StreamedBlocks,
+    let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
+    let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
+    let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
+    let scene_works_revision = turbo_fit.get("sceneWorksRevision")?.as_str()?;
+    let inference_revision = turbo_fit.get("inferenceRevision")?.as_str()?;
+    let max_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
+    let request = RequestScope {
+        backend: Backend::CandleCuda,
+        tier,
+        mode: "text_to_image",
+        overlay: if allow_streamed_blocks {
+            "none"
+        } else {
+            "adapter"
+        },
+        width,
+        height,
+    };
+    let provider_contract = crate::inference_runtime::media()
+        .image_memory_contract(
+            "krea_2_turbo",
+            &LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::new())),
+        )
+        .ok()
+        .flatten()?;
+    let mut capabilities = ProviderCapabilities::from_provider(&provider_contract)?;
+    // Provider defense in depth: its contract supports the hook, but this request's load-time
+    // adapters do not. The worker removes only that request-inapplicable candidate.
+    capabilities.bounded_transformer_hook &= allow_streamed_blocks;
+    let provider_calibration = provider_contract.calibration.as_ref()?;
+    let numeric_tier = gen_core::ImageMemoryNumericTier {
+        precision: gen_core::Precision::Bf16,
+        quant: match tier {
+            "q4" => Some(gen_core::Quant::Q4),
+            "q8" => Some(gen_core::Quant::Q8),
+            "bf16" => None,
+            _ => return None,
+        },
+    };
+    let evidence = Evidence {
+        state: if turbo_fit.get("measured").and_then(Value::as_bool) == Some(true) {
+            ConformanceState::Verified
+        } else {
+            ConformanceState::ImplementedUnverified
+        },
+        dimensions: EvidenceDimensions::VERIFIED,
+        provider_abi_fingerprint: &provider_calibration.fingerprint,
+        calibration_fingerprint,
+        provider_calibration_abi: provider_calibration.abi,
+        calibration_abi,
+        scene_works_revision,
+        expected_scene_works_revision: KREA_TURBO_SCENEWORKS_REVISION,
+        inference_revision,
+        expected_inference_revision: KREA_TURBO_INFERENCE_REVISION,
+        envelope: Envelope {
+            backend: Backend::CandleCuda,
+            tier,
+            mode: "text_to_image",
+            overlay: "none",
+            max_pixels,
+        },
+    };
+    let resident_peak_gb = manifest_entry
+        .get("candle")?
+        .get("vramGbByTier")?
+        .get(tier)
+        .and_then(json_f64)?;
+    if !resident_peak_gb.is_finite() || resident_peak_gb < 0.0 {
+        return None;
+    }
+    let resident_parameters = turbo_fit
+        .get("strategyParameters")?
+        .get("resident")?
+        .as_object()?;
+    if !resident_parameters.is_empty() {
+        return None;
+    }
+    provider_contract
+        .validate_selection(&gen_core::ImageMemorySelection {
+            strategy: Strategy::Resident,
+            parameters: gen_core::ImageMemoryStrategyParameters::default(),
+            tier: numeric_tier,
+        })
+        .ok()?;
+
+    let rung_pairs = [
+        (KreaTurboRung::ThreeStage, Strategy::StagedResidency),
+        (KreaTurboRung::TiledVae, Strategy::BoundedDecode),
+        (KreaTurboRung::ChunkedAttention, Strategy::BoundedAttention),
+        (
+            KreaTurboRung::StreamedBlocks,
+            Strategy::BoundedTransformerResidency,
+        ),
     ];
-    let mut deepest = None;
-    for rung in rungs {
+    let mut candidates = vec![Candidate {
+        strategy: Strategy::Resident,
+        cost: 0,
+        needed_gb: resident_peak_gb,
+        precision_tier: tier,
+        evidence,
+    }];
+    let mut measured = Vec::new();
+    for (cost, (rung, strategy)) in rung_pairs.into_iter().enumerate() {
         if rung == KreaTurboRung::StreamedBlocks && !allow_streamed_blocks {
             break;
         }
         let phases = krea_rung_phase_peaks(manifest_entry, tier, rung, width, height)?;
-        let needed_gb = phases.peak_gb() + HEADROOM_GB;
-        deepest = Some((phases, needed_gb));
-        if needed_gb <= budget.free_gb + f64::EPSILON {
-            return Some(KreaTurboFit::Fits {
+        let phase_peak_gb = phases.peak_gb();
+        let needed_gb = phase_peak_gb + HEADROOM_GB;
+        let parameters = krea_rung_parameters(turbo_fit, rung)?;
+        provider_contract
+            .validate_selection(&gen_core::ImageMemorySelection {
+                strategy,
+                parameters,
+                tier: numeric_tier,
+            })
+            .ok()?;
+        measured.push((rung, phases, needed_gb));
+        candidates.push(Candidate {
+            strategy,
+            cost: cost as u16 + 1,
+            needed_gb: phase_peak_gb,
+            precision_tier: tier,
+            evidence,
+        });
+    }
+    let selection = image_memory::select_strategy(
+        request,
+        capabilities,
+        Some(Budget {
+            available_gb: budget.free_gb,
+            // The CUDA caller already folds the cache high-water into `free_gb`.
+            reclaimable_gb: 0.0,
+            total_gb: budget.total_gb,
+            reserved_headroom_gb: HEADROOM_GB,
+        }),
+        &candidates,
+    );
+    match selection {
+        Selection::Selected {
+            strategy: Strategy::Resident,
+            ..
+        } => Some(KreaTurboFit::Resident {
+            peak_gb: resident_peak_gb,
+            needed_gb: resident_peak_gb + HEADROOM_GB,
+        }),
+        Selection::Selected { strategy, .. } => {
+            let (rung, phases, needed_gb) =
+                measured.into_iter().find(|(rung, _, _)| match rung {
+                    KreaTurboRung::ThreeStage => strategy == Strategy::StagedResidency,
+                    KreaTurboRung::TiledVae => strategy == Strategy::BoundedDecode,
+                    KreaTurboRung::ChunkedAttention => strategy == Strategy::BoundedAttention,
+                    KreaTurboRung::StreamedBlocks => {
+                        strategy == Strategy::BoundedTransformerResidency
+                    }
+                })?;
+            Some(KreaTurboFit::Fits {
                 rung,
                 phases,
                 needed_gb,
-            });
+            })
         }
+        Selection::Reject { .. } => {
+            let (_, phases, needed_gb) = measured.last().copied()?;
+            Some(KreaTurboFit::Reject { phases, needed_gb })
+        }
+        Selection::Unverified => None,
     }
-    let (phases, needed_gb) = deepest?;
-    Some(KreaTurboFit::Reject { phases, needed_gb })
 }
 
 /// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
@@ -437,7 +615,7 @@ pub(crate) fn krea_turbo_smaller_fit(
     candidates.into_iter().find(|(w, h)| {
         matches!(
             krea_turbo_fit(manifest_entry, tier, *w, *h, budget, allow_streamed_blocks),
-            Some(KreaTurboFit::Fits { .. })
+            Some(KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. })
         )
     })
 }
@@ -933,8 +1111,33 @@ mod tests {
                 "resolutions": ["768x768", "1024x1024", "1536x1536", "2048x2048"]
             },
             "candle": {
+                "vramGbByTier": { "q4": 30.0 },
                 "turboFit": {
+                    "calibrationAbi": 1,
+                    "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+                    "sceneWorksRevision": "sc-15449-contract-v1",
+                    "inferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+                    "measured": true,
                     "maxMeasuredPixels": 1048576,
+                    "strategyParameters": {
+                        "resident": {},
+                        "threeStage": {},
+                        "tiledVae": {
+                            "decodeTileEdge": 512,
+                            "decodeOverlap": 128
+                        },
+                        "chunkedAttention": {
+                            "decodeTileEdge": 512,
+                            "decodeOverlap": 128,
+                            "attentionChunkSize": 134217728
+                        },
+                        "streamedBlocks": {
+                            "decodeTileEdge": 512,
+                            "decodeOverlap": 128,
+                            "attentionChunkSize": 134217728,
+                            "transformerWindowSize": 1
+                        }
+                    },
                     "phaseCurvesByTier": {
                         "q4": {
                             "threeStage": {
@@ -1121,10 +1324,11 @@ mod tests {
             free_gb: 13.5,
             total_gb: 13.5,
         });
-        assert!(matches!(
+        assert_eq!(
             krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, false),
-            Some(KreaTurboFit::Reject { .. })
-        ));
+            None,
+            "ordinary T2I evidence cannot authorize an adapter-overlay optimization"
+        );
     }
 
     #[test]
@@ -1143,6 +1347,7 @@ mod tests {
                 true,
             )
         };
+        assert!(matches!(fit(96.0), Some(KreaTurboFit::Resident { .. })));
         assert!(matches!(
             fit(24.0),
             Some(KreaTurboFit::Fits {

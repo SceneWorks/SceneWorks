@@ -126,6 +126,7 @@ mod engines;
 mod gpu;
 use gpu::*;
 mod fit_gate;
+pub mod image_memory;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate

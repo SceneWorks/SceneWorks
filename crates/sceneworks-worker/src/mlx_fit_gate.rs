@@ -33,7 +33,9 @@ use std::sync::OnceLock;
 
 use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 
-pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
+#[cfg(test)]
+use crate::fit_gate::resolve_offload;
+pub(crate) use crate::fit_gate::FitDecision;
 use crate::{WorkerError, WorkerResult};
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
@@ -634,35 +636,103 @@ fn decide_residency_by_peak_with_headroom(
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
-    let resident = fit_decision(
-        predicted_peak_gb_with_headroom(total_bytes, headroom_gb),
-        budget,
-    );
-    match resolve_offload(resident, sequential_capable) {
-        FitDecision::Fits | FitDecision::Unknown => ResidencyOutcome::Resident,
-        FitDecision::Offload {
-            needed_gb,
+    use crate::image_memory::{
+        select_strategy, Backend, Budget, Candidate, ConformanceState, Envelope, Evidence,
+        EvidenceDimensions, ProviderCapabilities, RequestScope, Selection, Strategy,
+    };
+
+    const GENERIC_MLX_ABI: &str = "mlx-disk-sum-headroom-v1";
+    const SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
+    const INFERENCE_REVISION: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
+
+    let Some(resident_needed) = predicted_peak_gb_with_headroom(total_bytes, headroom_gb) else {
+        return ResidencyOutcome::Resident;
+    };
+    let resident_working_gb = total_bytes as f64 / BYTES_PER_GIB;
+    let Some(memory_budget) = budget else {
+        return ResidencyOutcome::Resident;
+    };
+    let request = RequestScope {
+        backend: Backend::MlxMetal,
+        // The generic cold-load seam receives a resolved LoadSpec, so tier/precision is already
+        // immutable. The selector's precision guard still ensures both candidates retain it.
+        tier: "resolved_load_spec",
+        mode: "image_generation",
+        overlay: "resolved_load_spec",
+        width: 1,
+        height: 1,
+    };
+    let evidence = Evidence {
+        state: ConformanceState::Verified,
+        dimensions: EvidenceDimensions::VERIFIED,
+        provider_abi_fingerprint: GENERIC_MLX_ABI,
+        calibration_fingerprint: GENERIC_MLX_ABI,
+        provider_calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        scene_works_revision: SCENEWORKS_REVISION,
+        expected_scene_works_revision: SCENEWORKS_REVISION,
+        inference_revision: INFERENCE_REVISION,
+        expected_inference_revision: INFERENCE_REVISION,
+        envelope: Envelope {
+            backend: Backend::MlxMetal,
+            tier: "resolved_load_spec",
+            mode: "image_generation",
+            overlay: "resolved_load_spec",
+            // Geometry is deliberately not part of this cold-load disk-sum formula. Request-aware
+            // providers such as Mage must submit their own geometry envelope before this seam.
+            max_pixels: 1,
+        },
+    };
+    let mut candidates = vec![Candidate {
+        strategy: Strategy::Resident,
+        cost: 0,
+        needed_gb: resident_working_gb,
+        precision_tier: "resolved_load_spec",
+        evidence,
+    }];
+    let staged_working_gb = sequential_capable.then(|| {
+        let rest_bytes = total_bytes.saturating_sub(te_bytes);
+        te_bytes.max(rest_bytes) as f64 / BYTES_PER_GIB
+    });
+    if let Some(staged_needed) = staged_working_gb {
+        candidates.push(Candidate {
+            strategy: Strategy::StagedResidency,
+            cost: 10,
+            needed_gb: staged_needed,
+            precision_tier: "resolved_load_spec",
+            evidence,
+        });
+    }
+    match select_strategy(
+        request,
+        ProviderCapabilities {
+            backend: Backend::MlxMetal,
+            resident: true,
+            staged_residency: sequential_capable,
+            bounded_decode_hook: false,
+            bounded_attention_hook: false,
+            bounded_transformer_hook: false,
+            warm_cache_reusable: true,
+            cancel_safe: true,
+            error_safe: true,
+        },
+        Some(Budget {
+            available_gb: memory_budget.total_gb,
+            reclaimable_gb: 0.0,
+            total_gb: memory_budget.total_gb,
+            reserved_headroom_gb: headroom_gb,
+        }),
+        &candidates,
+    ) {
+        Selection::Selected {
+            strategy: Strategy::StagedResidency,
+            ..
+        } => ResidencyOutcome::Sequential,
+        Selection::Selected { .. } | Selection::Unverified => ResidencyOutcome::Resident,
+        Selection::Reject { available_gb, .. } => ResidencyOutcome::Reject {
+            needed_gb: resident_needed,
             available_gb,
-        } => {
-            // Second stage: reject if even the staged max-single-component peak won't fit.
-            let staged =
-                predicted_sequential_peak_gb_with_headroom(total_bytes, te_bytes, headroom_gb);
-            match sequential_overflow_gb(staged, budget) {
-                Some(_) => ResidencyOutcome::Reject {
-                    needed_gb,
-                    available_gb,
-                    staged_gb: staged,
-                },
-                None => ResidencyOutcome::Sequential,
-            }
-        }
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } => ResidencyOutcome::Reject {
-            needed_gb,
-            available_gb,
-            staged_gb: None,
+            staged_gb: staged_working_gb.map(|needed| needed + headroom_gb),
         },
     }
 }

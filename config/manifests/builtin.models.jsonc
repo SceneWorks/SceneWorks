@@ -4455,6 +4455,41 @@
         // Tiled decode is a measured no-op for the denoise-owned Q8/BF16 peaks, so those curves
         // intentionally cannot displace the cheaper three-stage rung.
         "turboFit": {
+          // sc-15449 shared image-memory selector provenance. The worker accepts these measured curves
+          // only while both source revisions and the provider request ABI fingerprint match.
+          "calibrationAbi": 1,
+          "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+          "sceneWorksRevision": "sc-15449-contract-v1",
+          "inferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+          "measured": true,
+          "verification": {
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "stories": ["sc-15075", "sc-15205", "sc-15206"],
+            "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024",
+            "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB",
+            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes"
+          },
+          // Exact parameter cells exercised by the curves below. Later rungs are cumulative because
+          // Krea keeps each cheaper bound active while adding the next constraint.
+          "strategyParameters": {
+            "resident": {},
+            "threeStage": {},
+            "tiledVae": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            },
+            "chunkedAttention": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728
+            },
+            "streamedBlocks": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728,
+              "transformerWindowSize": 1
+            }
+          },
           // Do not extrapolate these curves into unvalidated attention shapes. In particular, 2048²
           // requires per-head query-row fallback whose CUDA byte identity has not been established.
           "maxMeasuredPixels": 1048576,

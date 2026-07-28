@@ -56,10 +56,77 @@ def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
     ]
 
 
-def test_static_inventory_never_claims_dynamic_verification_or_full():
+def test_only_explicit_revision_bound_calibration_claims_dynamic_verification():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    assert not any(cell["state"] == "Verified" for cell in matrix["cells"])
+    verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
+    assert verified
+    assert all(
+        cell["modelId"] == "krea_2_turbo"
+        and cell["backend"] == "candle"
+        and cell["mode"] == "text_to_image"
+        and cell["overlay"] == "none"
+        and cell["rung"]
+        in {
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        }
+        and cell["calibrationFingerprint"] == "krea-turbo-cuda-phase-curves-v1"
+        and cell["evidence"]["currentEnvironmentVerification"]
+        and cell["evidence"]["strategyParameterVerification"]
+        for cell in verified
+    )
+    assert all(
+        all(
+            int(resolution.split("x")[0]) * int(resolution.split("x")[1]) <= 1_048_576
+            for resolution in cell["geometryEnvelope"]["resolutions"]
+        )
+        for cell in verified
+    )
+    expected_parameters = {
+        "resident": {},
+        "staged_residency": {},
+        "bounded_decode": {"decodeTileEdge": 512, "decodeOverlap": 128},
+        "bounded_attention": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134_217_728,
+        },
+        "bounded_transformer_residency": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134_217_728,
+            "transformerWindowSize": 1,
+        },
+    }
+    for cell in verified:
+        parameters = cell["strategyParameters"]
+        assert {
+            key: value
+            for key, value in parameters.items()
+            if key not in {"manifestRung", "formula"}
+        } == expected_parameters[cell["rung"]]
+        assert (
+            cell["evidence"]["strategyParameterVerification"][0]["exactParameters"]
+            == expected_parameters[cell["rung"]]
+        )
+    adapter_streaming = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "krea_2_turbo"
+        and cell["backend"] == "candle"
+        and cell["mode"] == "text_to_image"
+        and cell["overlay"] == "lora"
+        and cell["rung"] == "bounded_transformer_residency"
+    ]
+    assert adapter_streaming
+    assert all(
+        cell["state"] == "Structurally N/A" and cell["evidence"]["structural"]
+        for cell in adapter_streaming
+    )
     for cell in matrix["cells"]:
         if cell["state"] != "Missing":
             assert cell["evidence"]["staticImplementation"]

@@ -5009,7 +5009,7 @@ mod krea_turbo_memory_route_tests {
         let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
             .expect("Q8 and Q4 have measured ladder curves")
         {
-            KreaTurboFit::Fits { .. } => TierFit::Fits,
+            KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
             KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
                 needed_gb,
                 available_gb,
@@ -5055,7 +5055,7 @@ mod krea_turbo_memory_route_tests {
         let fit = |tier| match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true)
             .expect("BF16, Q8, and Q4 have measured ladder curves")
         {
-            KreaTurboFit::Fits { .. } => TierFit::Fits,
+            KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
             KreaTurboFit::Reject { needed_gb, .. } => TierFit::TooBig {
                 needed_gb,
                 available_gb,
@@ -5600,7 +5600,10 @@ async fn generate_candle_stream(
                             budget,
                             krea_allow_streamed_blocks,
                         ) {
-                            Some(crate::vram_gate::KreaTurboFit::Fits { .. }) => TierFit::Fits,
+                            Some(
+                                crate::vram_gate::KreaTurboFit::Resident { .. }
+                                | crate::vram_gate::KreaTurboFit::Fits { .. },
+                            ) => TierFit::Fits,
                             Some(crate::vram_gate::KreaTurboFit::Reject { needed_gb, .. }) => {
                                 TierFit::TooBig {
                                     needed_gb,
@@ -5703,11 +5706,57 @@ async fn generate_candle_stream(
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut adapted_peak_gb: Option<f64> = None;
-    let use_sequential = {
-        match crate::vram_gate::resolve_offload(
+    // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
+    // decision whenever its revision-bound evidence is available. A `None` result is the explicit
+    // unverified path; only then may the established gate remain as provider-safe fallback.
+    let shared_krea_fit = krea_turbo_ladder
+        .then(|| {
+            crate::vram_gate::krea_turbo_fit(
+                &request.model_manifest_entry,
+                tier,
+                width,
+                height,
+                budget,
+                krea_allow_streamed_blocks,
+            )
+        })
+        .flatten();
+    let use_sequential =
+        if let Some(crate::vram_gate::KreaTurboFit::Resident { peak_gb, needed_gb }) =
+            shared_krea_fit
+        {
+            adapted_peak_gb = Some(peak_gb);
+            tracing::info!(
+                model = %request.model,
+                tier,
+                width,
+                height,
+                needed_gb,
+                available_gb = budget.map_or(0.0, |budget| budget.free_gb),
+                "shared image-memory selector retained Krea Turbo resident execution"
+            );
+            false
+        } else {
+            // A verified non-resident Krea result bypasses the legacy chooser and enters its
+            // established telemetry/advice handling. The legacy gate is consulted only for
+            // non-Krea providers or when shared evidence returned `Unverified` (`None` above).
+            let gate_decision = if shared_krea_fit.is_some() {
+                match (needed, budget) {
+                    (Some(needed_gb), Some(budget)) => {
+                        crate::vram_gate::FitDecision::Offload {
+                            needed_gb,
+                            available_gb: budget.free_gb,
+                        }
+                    }
+                    _ => crate::vram_gate::FitDecision::Unknown,
+                }
+            } else {
+                crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
             sequential_capable,
-        ) {
+                )
+            };
+            match gate_decision {
             crate::vram_gate::FitDecision::Offload {
                 needed_gb,
                 available_gb,
@@ -5721,14 +5770,8 @@ async fn generate_candle_stream(
                     tier,
                 );
                 let krea_selected = if krea_turbo_ladder {
-                    match crate::vram_gate::krea_turbo_fit(
-                        &request.model_manifest_entry,
-                        tier,
-                        width,
-                        height,
-                        budget,
-                        krea_allow_streamed_blocks,
-                    ) {
+                    match shared_krea_fit {
+                        Some(crate::vram_gate::KreaTurboFit::Resident { .. }) => false,
                         Some(crate::vram_gate::KreaTurboFit::Fits {
                             rung,
                             phases,
@@ -5892,7 +5935,7 @@ async fn generate_candle_stream(
             }
             _ => false,
         }
-    };
+        };
     // sc-11023: record this admitted load's incurred peak as the reclaimable high-water for the NEXT
     // gate. Sequential residency peaks at the largest single component; a resident load at the whole-
     // model peak. cudarc's pool never returns pages to the driver, so the max we have ever loaded is

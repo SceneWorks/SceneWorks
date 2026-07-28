@@ -17,6 +17,7 @@ pub(crate) enum FitDecision {
     Fits,
     /// The resident peak does not fit, but the provider supports sequential component residency.
     /// The caller must still run its backend-specific sequential-peak check before loading.
+    #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
     Offload {
         needed_gb: f64,
         available_gb: f64,
@@ -29,6 +30,7 @@ pub(crate) enum FitDecision {
 
 /// Select sequential residency when a resident load is too large and the provider advertises that
 /// capability. Every other decision is preserved unchanged.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
     match decision {
         FitDecision::TooBig {
