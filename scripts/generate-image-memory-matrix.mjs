@@ -214,7 +214,7 @@ function inferencePin(cargo) {
   return match[1];
 }
 
-function backendScopes(model, manifestById) {
+export function backendScopes(model, manifestById) {
   const inherited = model.id === "z_image_edit" ? manifestById.get("z_image_turbo") : model;
   const scopes = [];
   if (inherited?.mlx || ["instantid_realvisxl", "pulid_flux_dev"].includes(model.id)) scopes.push("mlx");
