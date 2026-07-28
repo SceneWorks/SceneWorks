@@ -144,10 +144,14 @@ gh workflow run macos-mlx.yml --ref main \
   -f qwen_revision=<exact-artifact-revision>
 ```
 
-The runner resolves only the fixed `SceneWorks/qwen-image-mlx` artifact. By default it derives
-`$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`;
-the optional `SCENEWORKS_QWEN_IMAGE_ROOT` repository secret can override that one path when the
-runner cache lives elsewhere. The override is canonicalized and must still end in the fixed
+The runner resolves only the fixed `SceneWorks/qwen-image-mlx` artifact. Without an override it
+checks exactly two canonical locations, in order:
+`$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`,
+then
+`$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`.
+It does not scan other directories. The optional `SCENEWORKS_QWEN_IMAGE_ROOT` repository secret can
+override those locations when the runner cache lives elsewhere. The override is canonicalized and
+must still end in the fixed
 repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`
 suffix. The dispatch validates but never prints the resolved path, checks out the exact inference
 revision, builds the release adapter, runs the authoritative provider through the harness,
