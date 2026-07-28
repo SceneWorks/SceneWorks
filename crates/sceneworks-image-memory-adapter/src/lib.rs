@@ -369,6 +369,12 @@ mod tests {
     }
 
     #[test]
+    fn comparison_rejects_a_non_finite_computed_accumulator() {
+        let error = max_mean_abs(&[0.0, 0.0], &[0.0, 0.0], Some(f64::MAX)).unwrap_err();
+        assert!(error.contains("mean accumulator became non-finite"));
+    }
+
+    #[test]
     fn comparison_shapes_must_match_exactly_before_flattening() {
         assert!(validate_comparison_shapes(&[1, 4, 4, 3], &[1, 4, 4, 3]).is_ok());
         let error = validate_comparison_shapes(&[1, 4, 4, 3], &[1, 8, 2, 3]).unwrap_err();
