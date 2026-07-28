@@ -27,7 +27,7 @@
       ]
     },
     {
-      "name": "candle-krea-production-ladder",
+      "name": "candle-krea-production-current-v1",
       "evidenceScope": "authoritative",
       "backend": "candle",
       "target": {
@@ -39,11 +39,29 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_transformer_residency",
-      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v2",
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "fixture": "krea-q4-1024-seed42",
       "cases": [
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 1 }, "expectedResult": "passed" }
+      ]
+    },
+    {
+      "name": "candle-krea-v2-candidates",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_transformer_residency",
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v2",
+      "fixture": "krea-q4-1024-seed42-v2-candidate",
+      "cases": [
         { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" },
-        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 1 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 2 }, "expectedResult": "passed" }
       ]
     }

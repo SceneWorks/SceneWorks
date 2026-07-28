@@ -46,6 +46,25 @@ on:
     branches: [main]
     paths: *mlx_paths
   workflow_dispatch:
+    inputs:
+      run_image_memory_calibration:
+        description: "Build and run the authoritative MLX image-memory adapter"
+        required: false
+        type: boolean
+        default: false
+      inference_revision:
+        description: "Exact 40-hex inference revision pinned by the adapter"
+        required: false
+        type: string
+      qwen_repository:
+        description: "Published Qwen MLX artifact repository identity"
+        required: false
+        type: string
+        default: "SceneWorks/qwen-image-mlx"
+      qwen_revision:
+        description: "Exact 40-hex Qwen artifact revision present on the runner"
+        required: false
+        type: string
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
 # windows-candle.yml (sc-12399). This lane is the only thing in CI that runs
@@ -96,3 +115,75 @@ jobs:
         run: cargo test -p sceneworks-worker
       - name: Clippy (MLX worker)
         run: cargo clippy -p sceneworks-worker --all-targets -- -D warnings
+      - name: Validate image-memory calibration inputs
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          QWEN_REPOSITORY: ${{ inputs.qwen_repository }}
+          QWEN_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_QWEN_IMAGE_ROOT }}
+        run: |
+          if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "inference_revision must be an exact lowercase 40-hex commit" >&2
+            exit 1
+          fi
+          if [[ ! "$QWEN_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "qwen_revision must be an exact lowercase 40-hex artifact revision" >&2
+            exit 1
+          fi
+          if [[ "$QWEN_REPOSITORY" != "SceneWorks/qwen-image-mlx" ]]; then
+            echo "qwen_repository must be the fixed SceneWorks/qwen-image-mlx calibration artifact" >&2
+            exit 1
+          fi
+          QWEN_ROOT="${QWEN_ROOT_OVERRIDE:-$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16}"
+          if [[ ! -d "$QWEN_ROOT" ]]; then
+            echo "the exact Qwen calibration snapshot is not available on this runner" >&2
+            exit 1
+          fi
+          QWEN_ROOT="$(cd "$QWEN_ROOT" && pwd -P)"
+          EXPECTED_SUFFIX="/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
+          if [[ "$QWEN_ROOT" != *"$EXPECTED_SUFFIX" ]]; then
+            echo "the Qwen calibration root does not match the fixed repository and exact revision" >&2
+            exit 1
+          fi
+          printf 'SCENEWORKS_QWEN_IMAGE_ROOT=%s\n' "$QWEN_ROOT" >> "$GITHUB_ENV"
+          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-image-memory-adapter/src/lib.rs)"
+          if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
+            echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
+            exit 1
+          fi
+      - name: Check out the exact inference calibration source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_revision }}
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
+          path: .calibration/inference
+          persist-credentials: false
+      - name: Build and run the authoritative MLX calibration adapter
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        env:
+          SCENEWORKS_QWEN_IMAGE_REPOSITORY: ${{ inputs.qwen_repository }}
+          SCENEWORKS_QWEN_IMAGE_REVISION: ${{ inputs.qwen_revision }}
+        run: |
+          printf '.calibration/\n' >> .git/info/exclude
+          cargo build --release --locked -p sceneworks-image-memory-adapter \
+            --features mlx --bin image-memory-mlx-adapter
+          node scripts/image-memory-calibration-harness.mjs run \
+            --config config/image-memory-calibration-plan.json \
+            --backend mlx \
+            --provider mlx-qwen-vae-decode \
+            --provider-command '["target/release/image-memory-mlx-adapter"]' \
+            --sceneworks-repo "$GITHUB_WORKSPACE" \
+            --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
+            --output "$RUNNER_TEMP/image-memory-mlx-evidence.json"
+          node scripts/image-memory-calibration-harness.mjs check \
+            --input "$RUNNER_TEMP/image-memory-mlx-evidence.json"
+      - name: Upload raw schema-checked MLX calibration evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-memory-mlx-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-memory-mlx-evidence.json
+          if-no-files-found: error

@@ -80,3 +80,41 @@ test("all three manifest scripts import the shared JSONC parser", async () => {
     assert.doesNotMatch(script, /function stripJsoncComments/);
   }
 });
+
+test("macOS image-memory calibration dispatch is opt-in and secret-scoped", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  assert.match(workflow, /run_image_memory_calibration:/);
+  assert.match(
+    workflow,
+    /QWEN_ROOT_OVERRIDE: \$\{\{ secrets\.SCENEWORKS_QWEN_IMAGE_ROOT \}\}/,
+  );
+  assert.doesNotMatch(workflow, /^\s+qwen_root:/m);
+  assert.match(
+    workflow,
+    /models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/bf16/,
+  );
+  assert.match(
+    workflow,
+    /QWEN_REPOSITORY" != "SceneWorks\/qwen-image-mlx"/,
+  );
+  assert.match(workflow, /QWEN_ROOT="\$\(cd "\$QWEN_ROOT" && pwd -P\)"/);
+  assert.match(
+    workflow,
+    /EXPECTED_SUFFIX="\/models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/bf16"/,
+  );
+  assert.match(workflow, /QWEN_ROOT" != \*"\$EXPECTED_SUFFIX"/);
+  assert.match(
+    workflow,
+    /cargo build --release --locked -p sceneworks-image-memory-adapter/,
+  );
+  assert.match(workflow, /--backend mlx/);
+  assert.match(workflow, /--provider mlx-qwen-vae-decode/);
+  assert.match(
+    workflow,
+    /image-memory-calibration-harness\.mjs check/,
+  );
+  assert.match(
+    workflow,
+    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+  );
+});

@@ -6069,6 +6069,7 @@ async fn generate_candle_stream(
                                         tile_vae_decode: true,
                                         chunk_attention: true,
                                         stream_transformer_blocks: true,
+                                        ..Default::default()
                                     }
                                 }
                             });

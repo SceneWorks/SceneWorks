@@ -189,6 +189,27 @@ test("range axes derive exactly from passed cases and contain exact strategy par
   assert.throws(() => validateRecord(absent), /exact strategy parameters/);
 });
 
+test("a singleton production parameter domain is valid complete evidence", () => {
+  const record = complete();
+  record.sweep = {
+    axes: [
+      { parameter: "decodeTileEdge", testedValues: [512] },
+      { parameter: "decodeOverlap", testedValues: [128] },
+    ],
+    cases: [{
+      parameters: { decodeTileEdge: 512, decodeOverlap: 128 },
+      result: "passed",
+    }],
+    rangeVerified: true,
+  };
+  record.id = recordId(record);
+  assert.equal(validateBundle({
+    schemaVersion: 2,
+    harnessVersion: HARNESS_VERSION,
+    records: [record],
+  }).records[0], record);
+});
+
 test("merge is commutative and rejects conflicting exact-identity captures", () => {
   const first = complete();
   const second = complete({
@@ -221,6 +242,16 @@ test("gated and fixture semantics can never become current", () => {
     sceneWorks: gated.repositories.sceneWorks.revision,
     inference: gated.repositories.inference.revision,
   }), "gated");
+});
+
+test("candidate evidence is permanently non-promotable", () => {
+  const candidate = complete({ status: "gated", evidenceScope: "candidate" });
+  candidate.logicalCaseId = logicalCaseId(candidate);
+  candidate.id = recordId(candidate);
+  assert.equal(evidenceSemantics(candidate, {
+    sceneWorks: candidate.repositories.sceneWorks.matrixSourceRevision,
+    inference: candidate.repositories.inference.revision,
+  }), "candidate");
 });
 
 test("clean exact matrix source identity and inference SHA are both required for current", () => {
@@ -268,6 +299,39 @@ test("plan separates the seven passing Qwen overlap-64 cells from 256/32 negativ
   assert.deepEqual(negative.strategy.parameters, { decodeTileEdge: 256, decodeOverlap: 32 });
 });
 
+test("Krea current v1 production truth is separate from non-promotable v2 candidates", async () => {
+  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  const current = config.providers.find((provider) => provider.name === "candle-krea-production-current-v1");
+  assert.equal(current.evidenceScope, "authoritative");
+  assert.equal(current.calibrationFingerprint, "krea-turbo-cuda-phase-curves-v1");
+  assert.deepEqual(current.cases, [{
+    parameters: {
+      decodeTileEdge: 512,
+      decodeOverlap: 128,
+      attentionChunkSize: 134217728,
+      transformerWindowSize: 1,
+    },
+    expectedResult: "passed",
+  }]);
+  const candidates = config.providers.find((provider) => provider.name === "candle-krea-v2-candidates");
+  assert.equal(candidates.evidenceScope, "candidate");
+  assert.equal(candidates.calibrationFingerprint, "krea-turbo-cuda-phase-curves-v2");
+  assert.equal(candidates.cases.length, 2);
+});
+
+test("provider execution requires one backend-specific hardware probe", async () => {
+  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  await assert.rejects(
+    runProviderPlan({
+      config,
+      providerCommand: [process.execPath, "must-not-start.mjs"],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    }),
+    /select exactly one backend/,
+  );
+});
+
 test("positive Qwen completion never suppresses the separate 256/32 negative plan", async () => {
   const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
@@ -292,6 +356,39 @@ test("runtime bundle validation matches schema closure for malformed gated and n
     const invalid = structuredClone(valid);
     mutate(invalid);
     assert.throws(() => validateBundle(invalid), /schema validation failed/);
+  }
+});
+
+test("gated real-adapter diagnostics are closed, typed, and never promote evidence", () => {
+  const record = complete({
+    status: "gated",
+    evidenceScope: "authoritative",
+    diagnostics: {
+      adapter: "image-memory-candle-adapter",
+      execution: "gated_before_execution",
+      blockers: ["plan/provider calibration fingerprint mismatch"],
+      measurements: [{ name: "contractFingerprintMismatch", unit: "count", value: 1 }],
+    },
+  });
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+  assert.equal(evidenceSemantics(record, {
+    sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+    inference: record.repositories.inference.revision,
+  }), "gated");
+
+  for (const mutate of [
+    (value) => (value.diagnostics.execution = "pretend"),
+    (value) => (value.diagnostics.measurements[0].value = -1),
+    (value) => (value.diagnostics.measurements[0].unexpected = true),
+  ]) {
+    const invalid = structuredClone(record);
+    mutate(invalid);
+    assert.throws(
+      () => validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+      /schema validation failed/,
+    );
   }
 });
 
