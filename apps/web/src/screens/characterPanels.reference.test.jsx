@@ -221,3 +221,163 @@ describe("CharacterGenerationPanel reference selection (sc-8851)", () => {
     expect(pickedId()).toBe("ref_x");
   });
 });
+
+describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
+  let container;
+  let root;
+
+  const guided = { ...MODEL, id: "guided-image" };
+  const cfgFree = {
+    ...MODEL,
+    id: "cfg-free-image",
+    image: { supportsGuidance: false, supportsNegativePrompt: false },
+  };
+  const noNegative = {
+    ...MODEL,
+    id: "no-negative-image",
+    image: { supportsGuidance: true, supportsNegativePrompt: false },
+  };
+  const noGuidance = {
+    ...MODEL,
+    id: "no-guidance-image",
+    image: { supportsGuidance: false, supportsNegativePrompt: true },
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  function labelStartingWith(text) {
+    return [...container.querySelectorAll("label")].find((label) =>
+      label.textContent.trim().startsWith(text),
+    );
+  }
+
+  async function mount(createImageJob, models = [guided, cfgFree]) {
+    await act(async () =>
+      root.render(
+        <CharacterGenerationPanel
+          mode={{ ...TEST_MODE, defaultNegativePrompt: "curated baseline" }}
+          selectedCharacter={character}
+          model={guided}
+          models={models}
+          catalog={[]}
+          approvedReferences={refs("ref_a")}
+          assets={[]}
+          createImageJob={createImageJob}
+          importAsset={vi.fn()}
+          addCharacterReference={vi.fn()}
+          latestAssets={[]}
+          imageLocalJobs={[]}
+          loras={[]}
+          rememberLocalGenerationJob={vi.fn()}
+        />,
+      ),
+    );
+    await act(async () =>
+      container.querySelector(".advanced-section-toggle").dispatchEvent(
+        new window.MouseEvent("click", { bubbles: true }),
+      ),
+    );
+  }
+
+  async function setControl(control, value) {
+    await act(async () => {
+      const prototype = control instanceof window.HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value").set.call(control, value);
+      control.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+  }
+
+  async function selectModel(id) {
+    const select = labelStartingWith("Backbone").querySelector("select");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(select, id);
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+  }
+
+  async function generate() {
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent.trim() === "Generate",
+    );
+    await act(async () => button.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+  }
+
+  it("sends both values for an undeclared image model", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "6.5");
+    await setControl(labelStartingWith("Negative prompt").querySelector("textarea"), "blurry");
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(guided.id);
+    expect(payload.negativePrompt).toBe("blurry");
+    expect(payload.advanced.guidanceScale).toBe(6.5);
+  });
+
+  it("suppresses non-empty retained values after switching to a CFG-free image model", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "7.5");
+    await setControl(
+      labelStartingWith("Negative prompt").querySelector("textarea"),
+      "blurry, low quality",
+    );
+    await selectModel(cfgFree.id);
+
+    expect(labelStartingWith("Guidance")).toBeUndefined();
+    expect(labelStartingWith("Negative prompt")).toBeUndefined();
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(cfgFree.id);
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+
+  it("keeps Guidance while suppressing only Negative prompt after a mixed-axis switch", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob, [guided, noNegative]);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "7.5");
+    await setControl(labelStartingWith("Negative prompt").querySelector("textarea"), "typed negative");
+    await selectModel(noNegative.id);
+
+    expect(labelStartingWith("Guidance")).toBeTruthy();
+    expect(labelStartingWith("Negative prompt")).toBeUndefined();
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(noNegative.id);
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced.guidanceScale).toBe(7.5);
+  });
+
+  it("keeps Negative prompt while suppressing only Guidance after a mixed-axis switch", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob, [guided, noGuidance]);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "7.5");
+    await setControl(labelStartingWith("Negative prompt").querySelector("textarea"), "typed negative");
+    await selectModel(noGuidance.id);
+
+    expect(labelStartingWith("Guidance")).toBeUndefined();
+    expect(labelStartingWith("Negative prompt")).toBeTruthy();
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(noGuidance.id);
+    expect(payload.negativePrompt).toBe("typed negative");
+    expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+});
