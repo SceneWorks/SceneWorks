@@ -279,6 +279,14 @@ mod tests {
         assert!(validate_huggingface_snapshot_root(
             root,
             QWEN_REPOSITORY,
+            "0123456789abcdef0123456789abcdef0123456g",
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            QWEN_REPOSITORY,
             "0123456789abcdef",
             "bf16",
             QWEN_REPOSITORY
