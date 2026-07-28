@@ -168,4 +168,57 @@ describe("CharacterAdvancedOptions PiD toggle (sc-8372)", () => {
     expect(container.querySelector('[data-testid="negative"]').textContent).toBe("");
     expect(container.textContent).not.toContain("Negative prompt");
   });
+
+  it("keeps Guidance while independently hiding and suppressing Negative prompt", async () => {
+    const guided = { id: "guided" };
+    const noNegative = {
+      id: "no-negative",
+      image: { supportsGuidance: true, supportsNegativePrompt: false },
+    };
+    await act(async () =>
+      root.render(<Harness model={guided} catalog={[]} defaultNegativePrompt="baseline" />),
+    );
+    const guidance = [...container.querySelectorAll("label")].find((label) =>
+      label.textContent.trim().startsWith("Guidance"),
+    )?.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(guidance, "6.5");
+      guidance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    await act(async () =>
+      root.render(<Harness model={noNegative} catalog={[]} defaultNegativePrompt="hidden baseline" />),
+    );
+    expect(container.textContent).toContain("Guidance");
+    expect(container.textContent).not.toContain("Negative prompt");
+    expect(advanced().guidanceScale).toBe(6.5);
+    expect(container.querySelector('[data-testid="negative"]').textContent).toBe("");
+    expect(container.querySelector('[data-testid="raw-negative"]').textContent).toBe("baseline");
+  });
+
+  it("keeps Negative prompt while independently hiding and suppressing Guidance", async () => {
+    const guided = { id: "guided" };
+    const noGuidance = {
+      id: "no-guidance",
+      image: { supportsGuidance: false, supportsNegativePrompt: true },
+    };
+    await act(async () =>
+      root.render(<Harness model={guided} catalog={[]} defaultNegativePrompt="baseline" />),
+    );
+    const guidance = [...container.querySelectorAll("label")].find((label) =>
+      label.textContent.trim().startsWith("Guidance"),
+    )?.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(guidance, "6.5");
+      guidance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    await act(async () =>
+      root.render(<Harness model={noGuidance} catalog={[]} defaultNegativePrompt="visible baseline" />),
+    );
+    expect(container.textContent).not.toContain("Guidance");
+    expect(container.textContent).toContain("Negative prompt");
+    expect(advanced()).not.toHaveProperty("guidanceScale");
+    expect(container.querySelector('[data-testid="raw-negative"]').textContent).toBe("visible baseline");
+  });
 });

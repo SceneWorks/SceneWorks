@@ -90,4 +90,16 @@ describe("GenerationRail catalog axes (sc-15441)", () => {
     expect(container.textContent).not.toContain("Guidance");
     expect(container.textContent).not.toContain("Negative prompt");
   });
+
+  it("keeps Guidance while hiding only Negative prompt", () => {
+    render(generationState({ supportsGuidance: true, supportsNegativePrompt: false }));
+    expect(container.textContent).toContain("Guidance");
+    expect(container.textContent).not.toContain("Negative prompt");
+  });
+
+  it("keeps Negative prompt while hiding only Guidance", () => {
+    render(generationState({ supportsGuidance: false, supportsNegativePrompt: true }));
+    expect(container.textContent).not.toContain("Guidance");
+    expect(container.textContent).toContain("Negative prompt");
+  });
 });

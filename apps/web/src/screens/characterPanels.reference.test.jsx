@@ -232,6 +232,16 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
     id: "cfg-free-image",
     image: { supportsGuidance: false, supportsNegativePrompt: false },
   };
+  const noNegative = {
+    ...MODEL,
+    id: "no-negative-image",
+    image: { supportsGuidance: true, supportsNegativePrompt: false },
+  };
+  const noGuidance = {
+    ...MODEL,
+    id: "no-guidance-image",
+    image: { supportsGuidance: false, supportsNegativePrompt: true },
+  };
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -251,14 +261,14 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
     );
   }
 
-  async function mount(createImageJob) {
+  async function mount(createImageJob, models = [guided, cfgFree]) {
     await act(async () =>
       root.render(
         <CharacterGenerationPanel
           mode={{ ...TEST_MODE, defaultNegativePrompt: "curated baseline" }}
           selectedCharacter={character}
           model={guided}
-          models={[guided, cfgFree]}
+          models={models}
           catalog={[]}
           approvedReferences={refs("ref_a")}
           assets={[]}
@@ -334,6 +344,40 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe(cfgFree.id);
     expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+
+  it("keeps Guidance while suppressing only Negative prompt after a mixed-axis switch", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob, [guided, noNegative]);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "7.5");
+    await setControl(labelStartingWith("Negative prompt").querySelector("textarea"), "typed negative");
+    await selectModel(noNegative.id);
+
+    expect(labelStartingWith("Guidance")).toBeTruthy();
+    expect(labelStartingWith("Negative prompt")).toBeUndefined();
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(noNegative.id);
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced.guidanceScale).toBe(7.5);
+  });
+
+  it("keeps Negative prompt while suppressing only Guidance after a mixed-axis switch", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await mount(createImageJob, [guided, noGuidance]);
+    await setControl(labelStartingWith("Guidance").querySelector("input"), "7.5");
+    await setControl(labelStartingWith("Negative prompt").querySelector("textarea"), "typed negative");
+    await selectModel(noGuidance.id);
+
+    expect(labelStartingWith("Guidance")).toBeUndefined();
+    expect(labelStartingWith("Negative prompt")).toBeTruthy();
+    await generate();
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(noGuidance.id);
+    expect(payload.negativePrompt).toBe("typed negative");
     expect(payload.advanced).not.toHaveProperty("guidanceScale");
   });
 });

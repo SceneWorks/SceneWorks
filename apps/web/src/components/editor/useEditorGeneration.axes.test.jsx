@@ -33,6 +33,14 @@ const CFG_FREE = {
   id: "cfg-free-video",
   video: { supportsGuidance: false, supportsNegativePrompt: false },
 };
+const NO_NEGATIVE = {
+  id: "no-negative-video",
+  video: { supportsGuidance: true, supportsNegativePrompt: false },
+};
+const NO_GUIDANCE = {
+  id: "no-guidance-video",
+  video: { supportsGuidance: false, supportsNegativePrompt: true },
+};
 
 describe("useEditorGeneration catalog axes (sc-15441)", () => {
   let container;
@@ -136,5 +144,69 @@ describe("useEditorGeneration catalog axes (sc-15441)", () => {
     expect(latest.model).toBe(CFG_FREE.id);
     expect(latest.buildBasePayload().negativePrompt).toBe("");
     expect(latest.buildBasePayload().advanced).not.toHaveProperty("guidanceScale");
+  });
+
+  it("suppresses only Negative prompt across switch, preset, settings, save, and payload paths", async () => {
+    const models = [GUIDED, NO_NEGATIVE];
+    render(models);
+    act(() => {
+      latest.setNegativePrompt("typed negative");
+      latest.setGuidanceOverride("6.5");
+    });
+    act(() => latest.setModel(NO_NEGATIVE.id));
+
+    mocks.studio.selectedPreset = {
+      id: "mixed-negative-preset",
+      defaults: { negativePrompt: "preset ghost", guidanceScale: 9 },
+    };
+    render(models);
+
+    expect(latest.supportsGuidance).toBe(true);
+    expect(latest.supportsNegativePrompt).toBe(false);
+    expect(latest.negativePrompt).toBe("typed negative");
+    expect(latest.guidanceOverride).toBe(9);
+    expect(latest.buildBasePayload().negativePrompt).toBe("");
+    expect(latest.buildBasePayload().advanced.guidanceScale).toBe(9);
+
+    const settings = mocks.writeStudioSettings.mock.calls.at(-1)[2];
+    expect(settings.negativePrompt).toBe("");
+    expect(settings.guidanceScale).toBe(9);
+
+    await act(async () => latest.savePreset("No negative"));
+    const defaults = context.createPreset.mock.calls[0][0].defaults;
+    expect(defaults).not.toHaveProperty("negativePrompt");
+    expect(defaults.guidanceScale).toBe(9);
+  });
+
+  it("suppresses only Guidance across switch, preset, settings, save, and payload paths", async () => {
+    const models = [GUIDED, NO_GUIDANCE];
+    render(models);
+    act(() => {
+      latest.setNegativePrompt("typed negative");
+      latest.setGuidanceOverride("6.5");
+    });
+    act(() => latest.setModel(NO_GUIDANCE.id));
+
+    mocks.studio.selectedPreset = {
+      id: "mixed-guidance-preset",
+      defaults: { negativePrompt: "preset negative", guidanceScale: 9 },
+    };
+    render(models);
+
+    expect(latest.supportsGuidance).toBe(false);
+    expect(latest.supportsNegativePrompt).toBe(true);
+    expect(latest.negativePrompt).toBe("preset negative");
+    expect(latest.guidanceOverride).toBe("6.5");
+    expect(latest.buildBasePayload().negativePrompt).toBe("preset negative");
+    expect(latest.buildBasePayload().advanced).not.toHaveProperty("guidanceScale");
+
+    const settings = mocks.writeStudioSettings.mock.calls.at(-1)[2];
+    expect(settings.negativePrompt).toBe("preset negative");
+    expect(settings.guidanceScale).toBe("");
+
+    await act(async () => latest.savePreset("No guidance"));
+    const defaults = context.createPreset.mock.calls[0][0].defaults;
+    expect(defaults.negativePrompt).toBe("preset negative");
+    expect(defaults).not.toHaveProperty("guidanceScale");
   });
 });
