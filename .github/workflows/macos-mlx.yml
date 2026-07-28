@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      provision_qwen_snapshot:
+        description: "Provision the exact public Qwen bf16 snapshot before calibration"
+        required: false
+        type: boolean
+        default: false
       inference_revision:
         description: "Exact 40-hex inference revision pinned by the adapter"
         required: false
@@ -62,7 +67,7 @@ on:
         type: string
         default: "SceneWorks/qwen-image-mlx"
       qwen_revision:
-        description: "Exact 40-hex Qwen artifact revision present on the runner"
+        description: "Exact 40-hex Qwen artifact revision"
         required: false
         type: string
 
@@ -92,8 +97,9 @@ jobs:
     # serializes main-push runs (github.sha concurrency), so a wedge here holds
     # that box and starves every queued PR/main run on it (sc-13603). Well above
     # the healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source
-    # rebuild still fits.
-    timeout-minutes: 45
+    # rebuild still fits. Only an explicit calibration+provisioning dispatch gets
+    # four hours for the approximately 57 GiB public snapshot.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot && 240 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -115,13 +121,22 @@ jobs:
         run: cargo test -p sceneworks-worker
       - name: Clippy (MLX worker)
         run: cargo clippy -p sceneworks-worker --all-targets -- -D warnings
-      - name: Validate image-memory calibration inputs
+      - name: Validate Qwen provisioning mode
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RUN_IMAGE_MEMORY_CALIBRATION: ${{ inputs.run_image_memory_calibration }}
+          PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
+        run: |
+          if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_IMAGE_MEMORY_CALIBRATION" != "true" ]]; then
+            echo "provision_qwen_snapshot requires run_image_memory_calibration=true" >&2
+            exit 1
+          fi
+      - name: Validate image-memory calibration identities
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
         env:
           INFERENCE_REVISION: ${{ inputs.inference_revision }}
           QWEN_REPOSITORY: ${{ inputs.qwen_repository }}
           QWEN_REVISION: ${{ inputs.qwen_revision }}
-          QWEN_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_QWEN_IMAGE_ROOT }}
         run: |
           if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
             echo "inference_revision must be an exact lowercase 40-hex commit" >&2
@@ -135,6 +150,61 @@ jobs:
             echo "qwen_repository must be the fixed SceneWorks/qwen-image-mlx calibration artifact" >&2
             exit 1
           fi
+          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-image-memory-adapter/src/lib.rs)"
+          if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
+            echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
+            exit 1
+          fi
+      - name: Set up pinned Python for Qwen provisioning
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: ".github/workflows/macos-mlx.yml"
+      - name: Install pinned Qwen provisioning client
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        run: python -m pip install --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+      - name: Provision exact public Qwen calibration snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        env:
+          QWEN_REVISION: ${{ inputs.qwen_revision }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
+
+          cache_dir = os.path.join(
+              os.environ["HOME"],
+              "Library",
+              "Application Support",
+              "SceneWorks",
+              "data",
+              "cache",
+              "huggingface",
+              "hub",
+          )
+          snapshot_download(
+              repo_id="SceneWorks/qwen-image-mlx",
+              repo_type="model",
+              revision=os.environ["QWEN_REVISION"],
+              allow_patterns=["bf16/**"],
+              cache_dir=cache_dir,
+              token=False,
+              max_workers=4,
+          )
+          print("Exact public Qwen calibration snapshot provisioned")
+          PY
+      - name: Resolve exact Qwen calibration snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        env:
+          QWEN_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_QWEN_IMAGE_ROOT }}
+        run: |
           if [[ -n "$QWEN_ROOT_OVERRIDE" ]]; then
             QWEN_ROOT="$QWEN_ROOT_OVERRIDE"
           else
@@ -160,11 +230,6 @@ jobs:
             exit 1
           fi
           printf 'SCENEWORKS_QWEN_IMAGE_ROOT=%s\n' "$QWEN_ROOT" >> "$GITHUB_ENV"
-          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-image-memory-adapter/src/lib.rs)"
-          if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
-            echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
-            exit 1
-          fi
       - name: Check out the exact inference calibration source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,7 +259,7 @@ jobs:
           node scripts/image-memory-calibration-harness.mjs check \
             --input "$RUNNER_TEMP/image-memory-mlx-evidence.json"
       - name: Upload raw schema-checked MLX calibration evidence
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-memory-mlx-evidence-${{ github.run_id }}

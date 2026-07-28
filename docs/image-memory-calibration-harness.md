@@ -139,6 +139,7 @@ NAX runner can execute the same adapter through a guarded manual dispatch:
 ```text
 gh workflow run macos-mlx.yml --ref main \
   -f run_image_memory_calibration=true \
+  -f provision_qwen_snapshot=false \
   -f inference_revision=<exact-adapter-inference-pin> \
   -f qwen_repository=SceneWorks/qwen-image-mlx \
   -f qwen_revision=<exact-artifact-revision>
@@ -160,6 +161,16 @@ cannot prove in advance that the private runner has the requested snapshot; an a
 directory fails before model load. GitHub only accepts `workflow_dispatch` input schemas from a
 workflow that exists on the default branch, so the first calibration run is intentionally
 post-merge.
+
+When both canonical roots are absent, explicitly set `provision_qwen_snapshot=true` on the same
+calibration dispatch. Provisioning is rejected unless `run_image_memory_calibration=true`. That
+opt-in lane uses pinned Python 3.12 tooling and `huggingface_hub==0.36.0` to resumably and
+idempotently download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository
+at the exact `qwen_revision`. It uses no token and writes only to the canonical SceneWorks
+application-data Hugging Face cache. Progress and paths are not logged. Because the snapshot is
+approximately 57 GiB, only a provisioning dispatch receives the extended four-hour job timeout;
+ordinary MLX CI and non-provisioning calibration retain the 45-minute ceiling. A provisioning or
+calibration failure cannot upload a schema-checked evidence artifact.
 
 It loads the real pinned `QwenVae`, deterministically encodes a 1024-square gradient fixture, runs
 untiled and requested tiled decode on the identical latent, and reports the actual MLX active/cache
