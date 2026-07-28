@@ -176,17 +176,33 @@ function backendScopes(model, manifestById) {
   return scopes;
 }
 
-function tiersFor(model, backend) {
+function tiersFor(model, backend, backendTierOverrides) {
+  const override = backendTierOverrides.get(`${model.id}:${backend}`);
+  if (override) return override;
   const backendTiers = Object.keys(model[backend]?.vramGbByTier ?? {});
   const downloadTiers = (model.downloads ?? [])
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
-  return sortedUnique([...backendTiers, ...downloadTiers, ...inferred]).filter(
+  const advertised =
+    backend === "candle" && backendTiers.length
+      ? backendTiers
+      : [...backendTiers, ...downloadTiers, ...inferred];
+  return sortedUnique(advertised).filter(
     (tier) => tier !== "int8-convrot",
   ).length
-    ? sortedUnique([...backendTiers, ...downloadTiers, ...inferred]).filter((tier) => tier !== "int8-convrot")
+    ? sortedUnique(advertised).filter((tier) => tier !== "int8-convrot")
     : ["default"];
+}
+
+function parseBackendTierOverrides(instantIdSource) {
+  const candleDense = instantIdSource.match(
+    /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?"([^"]+)"\s*\};/,
+  )?.[1];
+  if (!candleDense) {
+    throw new Error("could not derive InstantID's dense Candle tier from instantid.rs");
+  }
+  return new Map([["instantid_realvisxl:candle", [candleDense]]]);
 }
 
 function modesFor(model) {
@@ -287,7 +303,7 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model }) {
   return { state: "Missing", source: null, parameters: {} };
 }
 
-function validateMatrix(matrix, expectedIds) {
+function validateMatrix(matrix, expectedIds, backendTierOverrides) {
   const ids = matrix.models.map((model) => model.id);
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
     throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
@@ -307,6 +323,19 @@ function validateMatrix(matrix, expectedIds) {
     throw new Error(
       `expected MLX staged static coverage ${EXPECTED_MLX_STAGED_COUNT}/${EXPECTED_IMAGE_COUNT}, found ${matrix.summary.mlxStagedStaticCoverage}`,
     );
+  }
+  for (const [key, expectedTiers] of backendTierOverrides) {
+    const [modelId, backend] = key.split(":");
+    const actualTiers = sortedUnique(
+      matrix.cells
+        .filter((cell) => cell.modelId === modelId && cell.backend === backend)
+        .map((cell) => cell.tier),
+    );
+    if (JSON.stringify(actualTiers) !== JSON.stringify([...expectedTiers].sort())) {
+      throw new Error(
+        `${key}: backend tier contradiction (expected ${expectedTiers.join(",")}, found ${actualTiers.join(",")})`,
+      );
+    }
   }
   for (const cell of matrix.cells) {
     if (cell.state !== "Missing" && cell.evidence.staticImplementation.length === 0) {
@@ -329,19 +358,29 @@ export async function buildMatrix() {
     manifest: "config/manifests/builtin.models.jsonc",
     engines: "crates/sceneworks-worker/src/engines.rs",
     mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+    instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
     cargo: "Cargo.toml",
   };
-  const [manifestBody, enginesBody, mlxFitBody, cargoBody] = await Promise.all(
+  const sourceEntries = Object.entries(sourcePaths);
+  const sourceBodies = await Promise.all(
     Object.values(sourcePaths).map((relative) => readFile(path.join(ROOT, relative), "utf8")),
   );
+  const bodies = Object.fromEntries(
+    sourceEntries.map(([name], index) => [name, sourceBodies[index]]),
+  );
+  const manifestBody = bodies.manifest;
+  const enginesBody = bodies.engines;
+  const mlxFitBody = bodies.mlxFitGate;
+  const cargoBody = bodies.cargo;
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
   const routes = parseEngineRoutes(enginesBody);
   const sequentialEngines = parseMlxSequentialEngines(mlxFitBody);
+  const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   const pin = inferencePin(cargoBody);
-  const sceneWorksRevision = `source-tree:${sha256(manifestBody + enginesBody + mlxFitBody + cargoBody)}`;
+  const sceneWorksRevision = `source-tree:${sha256(sourceBodies.join(""))}`;
 
   const models = images
     .map((model) => {
@@ -366,7 +405,7 @@ export async function buildMatrix() {
     const model = manifestById.get(modelSummary.id);
     const route = routes.get(model.id);
     for (const backend of modelSummary.backends) {
-      for (const tier of tiersFor(model, backend)) {
+      for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend)) {
             for (const rung of RUNGS) {
@@ -448,9 +487,9 @@ export async function buildMatrix() {
       sceneWorksRevision,
       inferenceRevision: pin,
       sources: Object.fromEntries(
-        Object.entries(sourcePaths).map(([name, source], index) => [
+        sourceEntries.map(([name, source], index) => [
           name,
-          { path: source, sha256: sha256([manifestBody, enginesBody, mlxFitBody, cargoBody][index]) },
+          { path: source, sha256: sha256(sourceBodies[index]) },
         ]),
       ),
     },
@@ -480,7 +519,7 @@ export async function buildMatrix() {
     cells,
     modelSlices,
   };
-  validateMatrix(matrix, expectedIds);
+  validateMatrix(matrix, expectedIds, backendTierOverrides);
   return matrix;
 }
 

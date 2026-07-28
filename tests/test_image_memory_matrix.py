@@ -40,6 +40,12 @@ def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
     assert models["z_image_edit"]["resolvedRoute"] == "z_image_turbo"
     assert models["instantid_realvisxl"]["routeKind"] == "bespoke"
     assert models["pulid_flux_dev"]["routeKind"] == "bespoke"
+    instantid_candle_tiers = {
+        cell["tier"]
+        for cell in matrix["cells"]
+        if cell["modelId"] == "instantid_realvisxl" and cell["backend"] == "candle"
+    }
+    assert instantid_candle_tiers == {"bf16"}
     assert matrix["evidenceDimensions"] == [
         "staticImplementation",
         "declaredCalibration",
