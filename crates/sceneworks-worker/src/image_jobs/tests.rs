@@ -480,15 +480,21 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let shared_krea_selection = candle_stream
         .find("let shared_krea_fit =")
         .expect("shared Krea selection");
-    let shared_krea_resident = candle_stream
-        .find("KreaTurboFit::Resident { peak_gb, needed_gb }")
-        .expect("shared Krea resident result");
+    let shared_krea_resident = shared_krea_selection
+        + candle_stream[shared_krea_selection..]
+            .find("KreaTurboFit::Resident {")
+            .expect("shared Krea resident result");
     let legacy_gate = candle_stream
         .find("let gate_decision =")
         .expect("legacy defense gate");
     assert!(
         shared_krea_selection < shared_krea_resident && shared_krea_resident < legacy_gate,
         "the shared selector must make Krea's resident decision before the legacy defense gate"
+    );
+    assert!(
+        candle_stream.contains("image_memory_context.as_ref()")
+            && base.contains("crate::image_memory::generate_with_scope("),
+        "the selected Krea contract must reach provider safety and lifecycle hooks"
     );
     let probes: Vec<usize> = candle_stream
         .match_indices("installed_tier_keys(")

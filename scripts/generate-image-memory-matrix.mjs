@@ -331,9 +331,15 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, 
     const manifestRung = rungKeys[rung];
     if (manifestRung && overlay === "none") {
       const verification = model.candle.turboFit.verification;
+      const evidenceRecords = (model.candle.turboFit.evidenceRecords ?? []).filter(
+        (record) => record.tier === tier,
+      );
       const strategyParameters = model.candle.turboFit.strategyParameters?.[manifestRung];
       return {
-        state: verification && strategyParameters ? "Verified" : "Implemented/unverified",
+        // This catalog cell spans the manifest's full resolution envelope. Exact measured records
+        // are narrower, so the aggregate cell must remain unverified; runtime may promote only an
+        // exact tier+geometry record after provider fingerprint/loadability checks.
+        state: "Implemented/unverified",
         source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
         parameters: {
           manifestRung,
@@ -345,28 +351,26 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, 
         },
         calibrationFingerprint: model.candle.turboFit.calibrationFingerprint,
         maxPixels: model.candle.turboFit.maxMeasuredPixels,
-        historicalVerification: verification?.stories?.map((story) => ({
-          source: `Shortcut ${story}`,
-          hardware: verification.hardware,
+        historicalVerification: evidenceRecords.map((record) => ({
+          source: `Shortcut ${record.sourceStory} activity ${record.sourceActivity}`,
+          hardware: verification?.hardware,
+          tier: record.tier,
+          geometry: `${record.width}x${record.height}`,
+          capturedAt: record.capturedAt,
+          harnessVersion: record.harnessVersion,
+          observedPeakGb: record.observedPeaksGb?.[manifestRung],
+          parity: record.parity,
         })),
-        currentEnvironmentVerification: verification
-          ? [
-              {
-                source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/verification`,
-                method: verification.method,
-                outputParity: verification.outputParity,
-              },
-            ]
-          : [],
-        strategyParameterVerification: verification
-          ? [
-              {
-                source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/verification`,
-                numericPolicy: verification.numericPolicy,
-                exactParameters: strategyParameters,
-              },
-            ]
-          : [],
+        currentEnvironmentVerification: [],
+        strategyParameterVerification: evidenceRecords
+          .filter((record) => Number.isFinite(record.predictedPeaksGb?.[manifestRung]))
+          .map((record) => ({
+            source: `config/manifests/builtin.models.jsonc#models/${model.id}/candle/turboFit/evidenceRecords`,
+            tier: record.tier,
+            geometry: `${record.width}x${record.height}`,
+            predictedPeakGb: record.predictedPeaksGb[manifestRung],
+            exactParameters: strategyParameters,
+          })),
       };
     }
     if (rung === "bounded_transformer_residency" && overlay !== "none") {

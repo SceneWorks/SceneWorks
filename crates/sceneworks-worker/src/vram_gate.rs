@@ -318,15 +318,20 @@ pub(crate) enum KreaTurboFit {
     Resident {
         peak_gb: f64,
         needed_gb: f64,
+        selection: gen_core::ImageMemorySelection,
     },
     Fits {
         rung: KreaTurboRung,
         phases: KreaTurboPhasePeaks,
         needed_gb: f64,
+        selection: gen_core::ImageMemorySelection,
     },
     Reject {
         phases: KreaTurboPhasePeaks,
         needed_gb: f64,
+    },
+    Unverified {
+        reason: gen_core::ImageMemoryEvidenceVerdict,
     },
 }
 
@@ -412,9 +417,12 @@ pub(crate) fn krea_turbo_fit(
     budget: Option<VramBudget>,
     allow_streamed_blocks: bool,
 ) -> Option<KreaTurboFit> {
-    use crate::image_memory::{
-        self, Backend, Budget, Candidate, ConformanceState, Envelope, Evidence, EvidenceDimensions,
-        ProviderCapabilities, RequestScope, Selection, Strategy,
+    use crate::image_memory::{self, Budget, Candidate, RequestScope, Selection};
+    use gen_core::{
+        ImageMemoryConformanceState, ImageMemoryEvidence, ImageMemoryEvidenceDimensions,
+        ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict, ImageMemoryGeometry,
+        ImageMemoryParityContract, ImageMemoryParityResult, ImageMemorySelection,
+        ImageMemoryStrategy, ImageMemoryStrategyParameters,
     };
 
     let budget = budget?;
@@ -424,30 +432,25 @@ pub(crate) fn krea_turbo_fit(
     let scene_works_revision = turbo_fit.get("sceneWorksRevision")?.as_str()?;
     let inference_revision = turbo_fit.get("inferenceRevision")?.as_str()?;
     let max_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
-    let request = RequestScope {
-        backend: Backend::CandleCuda,
-        tier,
-        mode: "text_to_image",
-        overlay: if allow_streamed_blocks {
-            "none"
-        } else {
-            "adapter"
-        },
+    let geometry = ImageMemoryGeometry {
         width,
         height,
+        batch: 1,
+        frames: 1,
     };
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels > max_pixels {
+        return Some(KreaTurboFit::Unverified {
+            reason: ImageMemoryEvidenceVerdict::OutOfEnvelope,
+        });
+    }
     let provider_contract = crate::inference_runtime::media()
         .image_memory_contract(
             "krea_2_turbo",
-            &LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::new())),
+            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
         )
         .ok()
         .flatten()?;
-    let mut capabilities = ProviderCapabilities::from_provider(&provider_contract)?;
-    // Provider defense in depth: its contract supports the hook, but this request's load-time
-    // adapters do not. The worker removes only that request-inapplicable candidate.
-    capabilities.bounded_transformer_hook &= allow_streamed_blocks;
-    let provider_calibration = provider_contract.calibration.as_ref()?;
     let numeric_tier = gen_core::ImageMemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: match tier {
@@ -457,28 +460,14 @@ pub(crate) fn krea_turbo_fit(
             _ => return None,
         },
     };
-    let evidence = Evidence {
-        state: if turbo_fit.get("measured").and_then(Value::as_bool) == Some(true) {
-            ConformanceState::Verified
-        } else {
-            ConformanceState::ImplementedUnverified
-        },
-        dimensions: EvidenceDimensions::VERIFIED,
-        provider_abi_fingerprint: &provider_calibration.fingerprint,
-        calibration_fingerprint,
-        provider_calibration_abi: provider_calibration.abi,
-        calibration_abi,
-        scene_works_revision,
-        expected_scene_works_revision: KREA_TURBO_SCENEWORKS_REVISION,
-        inference_revision,
+    let request = RequestScope {
+        backend: "candle",
+        tier: numeric_tier,
+        mode: "text_to_image",
+        overlay: (!allow_streamed_blocks).then_some("adapter"),
+        geometry,
+        expected_sceneworks_revision: KREA_TURBO_SCENEWORKS_REVISION,
         expected_inference_revision: KREA_TURBO_INFERENCE_REVISION,
-        envelope: Envelope {
-            backend: Backend::CandleCuda,
-            tier,
-            mode: "text_to_image",
-            overlay: "none",
-            max_pixels,
-        },
     };
     let resident_peak_gb = manifest_entry
         .get("candle")?
@@ -495,61 +484,156 @@ pub(crate) fn krea_turbo_fit(
     if !resident_parameters.is_empty() {
         return None;
     }
-    provider_contract
-        .validate_selection(&gen_core::ImageMemorySelection {
-            strategy: Strategy::Resident,
-            parameters: gen_core::ImageMemoryStrategyParameters::default(),
-            tier: numeric_tier,
-        })
-        .ok()?;
+    let bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
+    let evidence_record = turbo_fit
+        .get("evidenceRecords")?
+        .as_array()?
+        .iter()
+        .find(|record| {
+            record.get("tier").and_then(Value::as_str) == Some(tier)
+                && record.get("width").and_then(Value::as_u64) == Some(u64::from(width))
+                && record.get("height").and_then(Value::as_u64) == Some(u64::from(height))
+        });
+    let make_evidence = |selection: ImageMemorySelection,
+                         manifest_rung: Option<&str>,
+                         fallback_predicted_peak_gb: f64| {
+        let record_peak = |field: &str| {
+            let rung = manifest_rung?;
+            evidence_record?.get(field)?.get(rung).and_then(json_f64)
+        };
+        let predicted_peak_gb =
+            record_peak("predictedPeaksGb").unwrap_or(fallback_predicted_peak_gb);
+        let observed_peak_gb = record_peak("observedPeaksGb");
+        let harness_version = evidence_record
+            .and_then(|record| record.get("harnessVersion"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let parity = evidence_record
+            .and_then(|record| record.get("parity"))
+            .and_then(Value::as_object);
+        let verified = manifest_rung.is_some()
+            && observed_peak_gb.is_some()
+            && !harness_version.is_empty()
+            && parity.is_some();
+        let evidence_dimensions = if verified {
+            ImageMemoryEvidenceDimensions::VERIFIED
+        } else {
+            ImageMemoryEvidenceDimensions {
+                static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
+                declared_calibration: ImageMemoryEvidenceVerdict::Satisfied,
+                historical_verification: ImageMemoryEvidenceVerdict::Unverified,
+                current_environment_verification: ImageMemoryEvidenceVerdict::Unverified,
+                canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
+                exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+            }
+        };
+        let parity_contract = parity.map_or(ImageMemoryParityContract::Exact, |parity| {
+            ImageMemoryParityContract::Golden {
+                fixture: parity
+                    .get("fixture")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                metric: parity
+                    .get("metric")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                maximum_error: parity
+                    .get("maximumError")
+                    .and_then(json_f64)
+                    .unwrap_or_default(),
+            }
+        });
+        ImageMemoryEvidence {
+            key: ImageMemoryEvidenceKey {
+                resolved_route: "krea_2_turbo".to_owned(),
+                backend: "candle".to_owned(),
+                tier: numeric_tier,
+                mode: "text_to_image".to_owned(),
+                // The existing measurements cover ordinary T2I only.
+                overlay: None,
+                geometry,
+                strategy: selection.strategy,
+                parameters: selection.parameters,
+            },
+            conformance: if verified {
+                ImageMemoryConformanceState::Verified
+            } else {
+                ImageMemoryConformanceState::ImplementedUnverified
+            },
+            dimensions: evidence_dimensions,
+            calibration_abi,
+            calibration_fingerprint: calibration_fingerprint.to_owned(),
+            sceneworks_revision: scene_works_revision.to_owned(),
+            inference_revision: inference_revision.to_owned(),
+            harness_version: harness_version.to_owned(),
+            predicted_peak_bytes: bytes(predicted_peak_gb),
+            observed_peak_bytes: observed_peak_gb.map(bytes),
+            parity: parity_contract,
+            parity_result: if verified {
+                ImageMemoryParityResult::Passed
+            } else {
+                ImageMemoryParityResult::NotRun
+            },
+        }
+    };
+    let resident_selection = ImageMemorySelection {
+        strategy: ImageMemoryStrategy::Resident,
+        parameters: ImageMemoryStrategyParameters::default(),
+        tier: numeric_tier,
+    };
 
     let rung_pairs = [
-        (KreaTurboRung::ThreeStage, Strategy::StagedResidency),
-        (KreaTurboRung::TiledVae, Strategy::BoundedDecode),
-        (KreaTurboRung::ChunkedAttention, Strategy::BoundedAttention),
+        (
+            KreaTurboRung::ThreeStage,
+            ImageMemoryStrategy::StagedResidency,
+        ),
+        (KreaTurboRung::TiledVae, ImageMemoryStrategy::BoundedDecode),
+        (
+            KreaTurboRung::ChunkedAttention,
+            ImageMemoryStrategy::BoundedAttention,
+        ),
         (
             KreaTurboRung::StreamedBlocks,
-            Strategy::BoundedTransformerResidency,
+            ImageMemoryStrategy::BoundedTransformerResidency,
         ),
     ];
-    let mut candidates = vec![Candidate {
-        strategy: Strategy::Resident,
-        cost: 0,
-        needed_gb: resident_peak_gb,
-        precision_tier: tier,
-        evidence,
-    }];
+    let mut evidence = vec![make_evidence(resident_selection, None, resident_peak_gb)];
+    let mut selections = vec![(resident_selection, resident_peak_gb)];
     let mut measured = Vec::new();
-    for (cost, (rung, strategy)) in rung_pairs.into_iter().enumerate() {
-        if rung == KreaTurboRung::StreamedBlocks && !allow_streamed_blocks {
-            break;
-        }
+    for (rung, strategy) in rung_pairs {
         let phases = krea_rung_phase_peaks(manifest_entry, tier, rung, width, height)?;
         let phase_peak_gb = phases.peak_gb();
         let needed_gb = phase_peak_gb + HEADROOM_GB;
         let parameters = krea_rung_parameters(turbo_fit, rung)?;
-        provider_contract
-            .validate_selection(&gen_core::ImageMemorySelection {
-                strategy,
-                parameters,
-                tier: numeric_tier,
-            })
-            .ok()?;
-        measured.push((rung, phases, needed_gb));
-        candidates.push(Candidate {
+        let selection = ImageMemorySelection {
             strategy,
-            cost: cost as u16 + 1,
-            needed_gb: phase_peak_gb,
-            precision_tier: tier,
-            evidence,
-        });
+            parameters,
+            tier: numeric_tier,
+        };
+        measured.push((rung, phases, needed_gb, selection));
+        evidence.push(make_evidence(
+            selection,
+            Some(rung.manifest_key()),
+            phase_peak_gb,
+        ));
+        selections.push((selection, phase_peak_gb));
     }
+    let candidates = selections
+        .iter()
+        .zip(&evidence)
+        .map(|((selection, needed_gb), evidence)| Candidate {
+            selection: *selection,
+            needed_gb: *needed_gb,
+            evidence,
+        })
+        .collect::<Vec<_>>();
     let selection = image_memory::select_strategy(
         request,
-        capabilities,
+        &provider_contract,
         Some(Budget {
             available_gb: budget.free_gb,
-            // The CUDA caller already folds the cache high-water into `free_gb`.
             reclaimable_gb: 0.0,
             total_gb: budget.total_gb,
             reserved_headroom_gb: HEADROOM_GB,
@@ -558,33 +642,36 @@ pub(crate) fn krea_turbo_fit(
     );
     match selection {
         Selection::Selected {
-            strategy: Strategy::Resident,
+            selection:
+                selected @ ImageMemorySelection {
+                    strategy: ImageMemoryStrategy::Resident,
+                    ..
+                },
             ..
         } => Some(KreaTurboFit::Resident {
             peak_gb: resident_peak_gb,
             needed_gb: resident_peak_gb + HEADROOM_GB,
+            selection: selected,
         }),
-        Selection::Selected { strategy, .. } => {
-            let (rung, phases, needed_gb) =
-                measured.into_iter().find(|(rung, _, _)| match rung {
-                    KreaTurboRung::ThreeStage => strategy == Strategy::StagedResidency,
-                    KreaTurboRung::TiledVae => strategy == Strategy::BoundedDecode,
-                    KreaTurboRung::ChunkedAttention => strategy == Strategy::BoundedAttention,
-                    KreaTurboRung::StreamedBlocks => {
-                        strategy == Strategy::BoundedTransformerResidency
-                    }
-                })?;
+        Selection::Selected {
+            selection: selected,
+            ..
+        } => {
+            let (rung, phases, needed_gb, _) = measured
+                .into_iter()
+                .find(|(_, _, _, selection)| selection.strategy == selected.strategy)?;
             Some(KreaTurboFit::Fits {
                 rung,
                 phases,
                 needed_gb,
+                selection: selected,
             })
         }
         Selection::Reject { .. } => {
-            let (_, phases, needed_gb) = measured.last().copied()?;
+            let (_, phases, needed_gb, _) = measured.last().copied()?;
             Some(KreaTurboFit::Reject { phases, needed_gb })
         }
-        Selection::Unverified => None,
+        Selection::Unverified { reason } => Some(KreaTurboFit::Unverified { reason }),
     }
 }
 
@@ -1119,6 +1206,29 @@ mod tests {
                     "inferenceRevision": "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
+                    "evidenceRecords": [{
+                        "tier": "q4",
+                        "width": 1024,
+                        "height": 1024,
+                        "harnessVersion": "unit-test",
+                        "predictedPeaksGb": {
+                            "threeStage": 17.291456,
+                            "tiledVae": 16.097152,
+                            "chunkedAttention": 14.097152,
+                            "streamedBlocks": 11.097152
+                        },
+                        "observedPeaksGb": {
+                            "threeStage": 17.0,
+                            "tiledVae": 16.0,
+                            "chunkedAttention": 14.0,
+                            "streamedBlocks": 11.0
+                        },
+                        "parity": {
+                            "fixture": "unit-test",
+                            "metric": "max_abs",
+                            "maximumError": 0.0
+                        }
+                    }],
                     "strategyParameters": {
                         "resident": {},
                         "threeStage": {},
@@ -1297,11 +1407,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
+        assert!(matches!(
             krea_turbo_fit(&manifest, "q4", 2048, 2048, budget, true),
-            None,
-            "unmeasured geometries retain the established gate"
-        );
+            Some(KreaTurboFit::Unverified { .. })
+        ));
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q4", 2048, 2048, budget, true),
             Some((1024, 1024))
@@ -1324,11 +1433,10 @@ mod tests {
             free_gb: 13.5,
             total_gb: 13.5,
         });
-        assert_eq!(
+        assert!(matches!(
             krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, false),
-            None,
-            "ordinary T2I evidence cannot authorize an adapter-overlay optimization"
-        );
+            Some(KreaTurboFit::Unverified { .. })
+        ));
     }
 
     #[test]
@@ -1369,7 +1477,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
+        assert!(matches!(
             krea_turbo_fit(
                 &manifest,
                 "q4",
@@ -1381,10 +1489,9 @@ mod tests {
                 }),
                 true,
             ),
-            None,
-            "never extrapolate a measured ladder beyond its validated geometry"
-        );
-        assert_eq!(
+            Some(KreaTurboFit::Unverified { .. })
+        ));
+        assert!(matches!(
             krea_turbo_fit(
                 &manifest,
                 "q4",
@@ -1396,9 +1503,8 @@ mod tests {
                 }),
                 true,
             ),
-            None,
-            "2048 attention chunking is not admitted without byte-identity evidence"
-        );
+            Some(KreaTurboFit::Unverified { .. })
+        ));
     }
 
     #[test]
@@ -1465,8 +1571,8 @@ mod tests {
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, budget, true),
-            Some((1152, 896)),
-            "the immediate-below rejection may suggest only a lower shape the measured Q8 curve fits"
+            None,
+            "lower-aspect curves without exact parity records must not be recommended"
         );
         let no_escape_budget = Some(VramBudget {
             free_gb: 8.5,
@@ -1514,6 +1620,29 @@ mod tests {
                      measured {measured_gb:.3} without an unrelated tier-derived margin"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn q8_and_bf16_768_measurements_remain_fail_closed_without_geometry_parity_records() {
+        let manifest = builtin_krea_turbo_manifest();
+        for tier in ["q8", "bf16"] {
+            assert!(matches!(
+                krea_turbo_fit(
+                    &manifest,
+                    tier,
+                    768,
+                    768,
+                    Some(VramBudget {
+                        free_gb: 12.0,
+                        total_gb: 12.0,
+                    }),
+                    true,
+                ),
+                Some(KreaTurboFit::Unverified {
+                    reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+                })
+            ));
         }
     }
 

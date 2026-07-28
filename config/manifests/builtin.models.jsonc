@@ -4464,11 +4464,138 @@
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
-            "stories": ["sc-15075", "sc-15205", "sc-15206"],
+            "stories": ["sc-15117", "sc-15205", "sc-15206"],
             "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024",
             "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB",
             "outputParity": "ordinary CUDA text-to-image retains tier and output bytes"
           },
+          // Machine-readable evidence cells. These are exact request envelopes, not permission to
+          // interpolate: a geometry absent here is Implemented/unverified even when a phase curve can
+          // predict it. Observed peaks and parity metrics come from the cited Shortcut activities;
+          // artifact revisions are the merged SceneWorks/provider revisions that carry the calibrated
+          // path. Runtime provider fingerprint/loadability checks remain mandatory.
+          "evidenceRecords": [
+            {
+              "tier": "q4",
+              "width": 768,
+              "height": 768,
+              "capturedAt": "2026-07-26T21:22:50Z",
+              "harnessVersion": "sc-15117-activity-15189",
+              "sourceStory": "sc-15117",
+              "sourceActivity": 15189,
+              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "predictedPeaksGb": {
+                "threeStage": 11.85679552,
+                "tiledVae": 11.85679552,
+                "chunkedAttention": 11.18799616,
+                "streamedBlocks": 4.8491392
+              },
+              "observedPeaksGb": {
+                "threeStage": 11.747,
+                "tiledVae": 11.747,
+                "chunkedAttention": 11.076,
+                "streamedBlocks": 4.736
+              },
+              "parity": {
+                "contract": "golden",
+                "result": "passed",
+                "metric": "mean_absolute_rgb_delta_255",
+                "maximumError": 0.213,
+                "fixture": "sc-15117-q4-768-seed42"
+              }
+            },
+            {
+              "tier": "q4",
+              "width": 1024,
+              "height": 1024,
+              "capturedAt": "2026-07-26T21:22:50Z",
+              "harnessVersion": "sc-15117-activity-15189",
+              "sourceStory": "sc-15117",
+              "sourceActivity": 15189,
+              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "predictedPeaksGb": {
+                "threeStage": 15.55721728,
+                "tiledVae": 15.51763648,
+                "chunkedAttention": 11.45865984,
+                "streamedBlocks": 5.7895808
+              },
+              "observedPeaksGb": {
+                "threeStage": 15.440,
+                "tiledVae": 15.405,
+                "chunkedAttention": 11.345,
+                "streamedBlocks": 5.676
+              },
+              "parity": {
+                "contract": "golden",
+                "result": "passed",
+                "metric": "mean_absolute_rgb_delta_255",
+                "maximumError": 0.0528,
+                "fixture": "sc-15117-q4-1024-seed42"
+              }
+            },
+            {
+              "tier": "q8",
+              "width": 1024,
+              "height": 1024,
+              "capturedAt": "2026-07-27T03:22:43Z",
+              "harnessVersion": "sc-15205-activity-15272",
+              "sourceStory": "sc-15205",
+              "sourceActivity": 15272,
+              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "predictedPeaksGb": {
+                "threeStage": 22.12763648,
+                "tiledVae": 22.12763648,
+                "chunkedAttention": 18.26731968,
+                "streamedBlocks": 6.9534336
+              },
+              "observedPeaksGb": {
+                "threeStage": 22.015,
+                "tiledVae": 22.015,
+                "chunkedAttention": 18.156,
+                "streamedBlocks": 6.847
+              },
+              "parity": {
+                "contract": "golden",
+                "result": "passed",
+                "metric": "mean_absolute_rgb_delta_255",
+                "maximumError": 0.045161,
+                "fixture": "sc-15205-q8-1024-seed42"
+              }
+            },
+            {
+              "tier": "bf16",
+              "width": 1024,
+              "height": 1024,
+              "capturedAt": "2026-07-27T11:24:32Z",
+              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+              "sourceStory": "sc-15206",
+              "sourceActivity": 15314,
+              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "predictedPeaksGb": {
+                "threeStage": 32.1137504,
+                "tiledVae": 32.1137504,
+                "chunkedAttention": 27.76068672,
+                "streamedBlocks": 8.64
+              },
+              "observedPeaksGb": {
+                "threeStage": 32.014,
+                "tiledVae": 32.014,
+                "chunkedAttention": 27.652,
+                "streamedBlocks": 8.526
+              },
+              "parity": {
+                "contract": "golden",
+                "result": "passed",
+                "metric": "mean_absolute_rgb_delta_255",
+                "maximumError": 0.046175,
+                "fixture": "sc-15206-bf16-1024-seed42"
+              }
+            }
+          ],
           // Exact parameter cells exercised by the curves below. Later rungs are cumulative because
           // Krea keeps each cheaper bound active while adding the next constraint.
           "strategyParameters": {
