@@ -4,10 +4,11 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, Generator, LoadSpec, MoeExpert, Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, Generator, ImageMemoryCacheState, LoadSpec, MoeExpert, OffloadPolicy,
+    Precision, Quant, WeightsSource,
 };
 
-use crate::cache_thread::{self, CacheJob, CacheThread, Fingerprint, SeamMessages};
+use crate::cache_thread::{self, CacheAccess, CacheJob, CacheThread, Fingerprint, SeamMessages};
 use crate::WorkerResult;
 
 /// The generator cache is a single-resident [`CacheThread`] keyed by [`GeneratorCacheKey`], holding a
@@ -18,8 +19,16 @@ use crate::WorkerResult;
 // production seam infers the `CacheThread` type from the job channel), so it reads as dead on the
 // base macOS lib build.
 #[allow(dead_code)]
-type GeneratorCache = CacheThread<GeneratorCacheKey, Box<dyn Generator>>;
-type GeneratorJob = CacheJob<GeneratorCacheKey, Box<dyn Generator>>;
+struct CachedGenerator {
+    generator: Box<dyn Generator>,
+    load_policy: OffloadPolicy,
+    /// Process-global MLX active bytes that predated this cached generator. Request admission must
+    /// never mistake these unrelated allocations for already-resident generator weights.
+    external_committed_bytes: u64,
+}
+
+type GeneratorCache = CacheThread<GeneratorCacheKey, CachedGenerator>;
+type GeneratorJob = CacheJob<GeneratorCacheKey, CachedGenerator>;
 
 const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
 const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
@@ -30,6 +39,17 @@ const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 /// closure rather than a pre-load backend trim. This divergence is deliberate and documented — see
 /// the [`crate::cache_thread`] module docs; do not silently unify it away.
 const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
+
+#[cfg(target_os = "macos")]
+fn capture_external_committed_bytes() -> u64 {
+    mlx_rs::memory::clear_cache();
+    mlx_rs::memory::get_active_memory() as u64
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_external_committed_bytes() -> u64 {
+    0
+}
 
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
 
@@ -341,7 +361,30 @@ pub(crate) async fn with_cached_generator<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_using(
+    with_cached_generator_for_request_using(
+        engine_id,
+        spec,
+        load_error_context,
+        crate::inference_runtime::load,
+        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+    )
+    .await
+}
+
+/// Run one request against a cached generator while exposing the independent request-policy inputs
+/// that do not belong in [`GeneratorCacheKey`].
+pub(crate) async fn with_cached_generator_for_request<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    run: impl FnOnce(&dyn Generator, ImageMemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_using(
         engine_id,
         spec,
         load_error_context,
@@ -372,6 +415,30 @@ pub(crate) async fn with_cached_generator_using<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using(
+        engine_id,
+        spec,
+        load_error_context,
+        load_generator,
+        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+    )
+    .await
+}
+
+pub(crate) async fn with_cached_generator_for_request_using<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator, ImageMemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     let key = GeneratorCacheKey::from_load_spec(engine_id, &spec);
     let load_error_context = load_error_context.into();
     // The loader owns the generator-specific cold-load policy. Pre-load unified-memory fit-gate +
@@ -383,15 +450,36 @@ where
     // miss (a warm cache hit never invokes the loader), so an already-resident model is never re-gated.
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
-        load_generator(engine_id, &spec)
-            .map_err(|error| crate::classify_engine_error(&load_error_context, error))
+        let load_policy = spec.offload_policy;
+        let external_committed_bytes = capture_external_committed_bytes();
+        let generator = load_generator(engine_id, &spec)
+            .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        Ok(CachedGenerator {
+            generator,
+            load_policy,
+            external_committed_bytes,
+        })
     };
-    // Adapt the user's `&dyn Generator` run closure to the generic cache's resident
-    // `Box<dyn Generator>`. The `&Box<_>` param is inherent to the seam (the cache stores the boxed
-    // trait object), so silence the borrowed-box lint here rather than boxing/unboxing again.
-    #[allow(clippy::borrowed_box)]
-    let run = move |generator: &Box<dyn Generator>| run(&**generator);
-    cache_thread::run_cached(generator_worker(), key, load, run, GENERATOR_SEAM_MESSAGES).await
+    let run = move |cached: &CachedGenerator, access| {
+        let cache_state = match access {
+            CacheAccess::Cold => ImageMemoryCacheState::Cold,
+            CacheAccess::Warm => ImageMemoryCacheState::Warm,
+        };
+        run(
+            cached.generator.as_ref(),
+            cache_state,
+            cached.load_policy,
+            cached.external_committed_bytes,
+        )
+    };
+    cache_thread::run_cached_with_access(
+        generator_worker(),
+        key,
+        load,
+        run,
+        GENERATOR_SEAM_MESSAGES,
+    )
+    .await
 }
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
@@ -828,9 +916,13 @@ mod tests {
     fn seed_stub_entry(cache: &mut GeneratorCache) {
         cache.install(
             stub_cache_key(),
-            Box::new(StubGenerator {
-                descriptor: stub_descriptor(),
-            }),
+            CachedGenerator {
+                generator: Box::new(StubGenerator {
+                    descriptor: stub_descriptor(),
+                }),
+                load_policy: OffloadPolicy::Resident,
+                external_committed_bytes: 0,
+            },
         );
     }
 
@@ -853,6 +945,43 @@ mod tests {
             generator_cache_idle_timeout(Some("42")),
             Some(Duration::from_secs(42))
         );
+    }
+
+    #[test]
+    fn warm_hit_keeps_cold_load_policy_but_gets_fresh_access_state() {
+        use std::cell::Cell;
+        let mut cache = GeneratorCache::new(false);
+        let loads = Cell::new(0);
+        let key = stub_cache_key();
+        let run = |cache: &mut GeneratorCache| {
+            cache
+                .with_model_access(
+                    key.clone(),
+                    || {
+                        loads.set(loads.get() + 1);
+                        Ok(CachedGenerator {
+                            generator: Box::new(StubGenerator {
+                                descriptor: stub_descriptor(),
+                            }),
+                            load_policy: OffloadPolicy::Sequential,
+                            external_committed_bytes: 0,
+                        })
+                    },
+                    |cached, access| Ok((access, cached.load_policy)),
+                    "missing",
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            run(&mut cache),
+            (CacheAccess::Cold, OffloadPolicy::Sequential)
+        );
+        assert_eq!(
+            run(&mut cache),
+            (CacheAccess::Warm, OffloadPolicy::Sequential)
+        );
+        assert_eq!(loads.get(), 1, "geometry-independent key loads only once");
     }
 
     #[test]

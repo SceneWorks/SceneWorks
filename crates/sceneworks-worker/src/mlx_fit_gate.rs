@@ -31,11 +31,444 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
+use gen_core::{
+    GenerationMemory, ImageMemoryBackendRealization, ImageMemoryBudget, ImageMemoryCacheState,
+    ImageMemoryConformanceState, ImageMemoryEvidence, ImageMemoryEvidenceDimensions,
+    ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict, ImageMemoryGeometry, ImageMemoryMode,
+    ImageMemoryNumericTier, ImageMemoryParityContract, ImageMemoryParityResult,
+    ImageMemoryProviderContract, ImageMemoryRunContext, ImageMemorySelection, ImageMemoryStrategy,
+    LoadSpec, OffloadPolicy, WeightsSource,
+};
 
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
 use crate::{WorkerError, WorkerResult};
+
+const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
+const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+
+/// Load-invariant inputs used to estimate each request without putting geometry or strategy in the
+/// generator cache key.
+#[derive(Clone, Debug)]
+pub(crate) struct MlxRequestPlan {
+    engine_id: &'static str,
+    tier: ImageMemoryNumericTier,
+    asset_bytes: u64,
+    activation_headroom_bytes: u64,
+}
+
+impl MlxRequestPlan {
+    pub(crate) fn for_spec(engine_id: &'static str, spec: &LoadSpec) -> Self {
+        let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
+        Self {
+            engine_id,
+            tier: ImageMemoryNumericTier {
+                precision: spec.precision,
+                quant: spec.quantize,
+            },
+            asset_bytes,
+            // The historical generic headroom includes the 2 GiB OS reserve. Request budgeting
+            // carries that reserve separately, so leave only the activation allowance here.
+            activation_headroom_bytes: gib_to_bytes((headroom_gb - OS_RESERVE_GB).max(0.0)),
+        }
+    }
+
+    fn generic_total_peak_bytes(&self, geometry: ImageMemoryGeometry) -> u64 {
+        let megapixel_scale =
+            (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
+        let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
+        self.asset_bytes.saturating_add(
+            (self.activation_headroom_bytes as f64 * request_scale)
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64,
+        )
+    }
+}
+
+/// Exact request axes that must be reconsidered for both cold and warm cache runs.
+#[derive(Clone, Debug)]
+pub(crate) struct MlxRequestInputs {
+    pub width: u32,
+    pub height: u32,
+    /// Original job count. The provider currently renders one image per invocation, but admitting
+    /// only a single item would hide the aggregate request from Mage's measured estimator.
+    pub count: u32,
+    pub mode: String,
+    pub overlay: Option<String>,
+    pub adapter_count: usize,
+    pub has_reference: bool,
+    pub use_pid: bool,
+    pub has_phases: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MlxRequestEvaluation {
+    pub memory: GenerationMemory,
+    pub context: ImageMemoryRunContext,
+}
+
+fn gib_to_bytes(gib: f64) -> u64 {
+    (gib * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+fn decimal_gb_to_bytes(gb: f64) -> u64 {
+    (gb * 1_000_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u64) -> u64 {
+    baseline.saturating_add(after.saturating_sub(before))
+}
+
+fn request_mode(mode: &str) -> (ImageMemoryMode, &'static str) {
+    match mode {
+        "image_generation" | "text_to_image" => (ImageMemoryMode::TextToImage, "text_to_image"),
+        "character_image" | "image_to_image" => (ImageMemoryMode::ImageToImage, "image_to_image"),
+        "edit_image" => (ImageMemoryMode::Edit, "edit"),
+        _ => (ImageMemoryMode::Other(mode.to_owned()), "other"),
+    }
+}
+
+fn memory_for_selection(selection: ImageMemorySelection) -> GenerationMemory {
+    GenerationMemory {
+        tile_vae_decode: selection.strategy >= ImageMemoryStrategy::BoundedDecode,
+        chunk_attention: selection.strategy >= ImageMemoryStrategy::BoundedAttention,
+        stream_transformer_blocks: selection.strategy
+            >= ImageMemoryStrategy::BoundedTransformerResidency,
+    }
+}
+
+fn resident_evidence(
+    route: &str,
+    tier: ImageMemoryNumericTier,
+    mode: &str,
+    overlay: Option<&str>,
+    geometry: ImageMemoryGeometry,
+    predicted_peak_bytes: u64,
+    calibration_fingerprint: Option<&str>,
+) -> (ImageMemorySelection, ImageMemoryEvidence) {
+    let selection = ImageMemorySelection {
+        strategy: ImageMemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier,
+    };
+    let evidence = ImageMemoryEvidence {
+        key: ImageMemoryEvidenceKey {
+            resolved_route: route.to_owned(),
+            backend: "mlx".to_owned(),
+            tier,
+            mode: mode.to_owned(),
+            overlay: overlay.map(str::to_owned),
+            geometry,
+            strategy: selection.strategy,
+            parameters: selection.parameters,
+        },
+        conformance: ImageMemoryConformanceState::ImplementedUnverified,
+        dimensions: ImageMemoryEvidenceDimensions {
+            static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
+            declared_calibration: ImageMemoryEvidenceVerdict::Missing,
+            historical_verification: ImageMemoryEvidenceVerdict::Missing,
+            current_environment_verification: ImageMemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+        },
+        calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
+        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
+        harness_version: String::new(),
+        predicted_peak_bytes,
+        observed_peak_bytes: None,
+        parity: ImageMemoryParityContract::Exact,
+        parity_result: ImageMemoryParityResult::NotRun,
+    };
+    (selection, evidence)
+}
+
+/// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
+/// accepted explicitly; absent exact verified cells, only the resident baseline can be admitted.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_request_with_budget(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: ImageMemoryCacheState,
+    load_policy: OffloadPolicy,
+    budget: ImageMemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[ImageMemoryEvidence],
+) -> WorkerResult<MlxRequestEvaluation> {
+    use crate::image_memory::{Budget, Candidate, RequestScope, Selection};
+
+    let geometry = ImageMemoryGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: inputs.count.max(1),
+        frames: 1,
+    };
+    let (mode, mode_key) = request_mode(&inputs.mode);
+    if plan.engine_id.starts_with("mage_flow") && inputs.adapter_count > 0 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} request includes {} adapter(s), but Mage's paired memory calibration does not \
+             include LoRA/LoKr tensors; refusing an unbounded MLX request",
+            plan.engine_id, inputs.adapter_count
+        )));
+    }
+    let mut fallback_contract;
+    let contract = if let Some(contract) = generator.image_memory_contract() {
+        contract
+    } else {
+        fallback_contract = ImageMemoryProviderContract::compatibility_default(
+            plan.engine_id,
+            ImageMemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: false,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: false,
+                cache_eviction: true,
+            },
+        );
+        fallback_contract.asset_facts.base_bytes = plan.asset_bytes;
+        &fallback_contract
+    };
+    let calibration_fingerprint = contract
+        .calibration
+        .as_ref()
+        .map(|identity| identity.fingerprint.as_str());
+    let calibration_abi = contract
+        .calibration
+        .as_ref()
+        .map_or(0, |identity| identity.abi);
+    if plan.engine_id.starts_with("mage_flow")
+        && !matches!(
+            contract.calibration.as_ref(),
+            Some(identity)
+                if identity.abi == gen_core::IMAGE_MEMORY_CALIBRATION_ABI
+                    && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
+        )
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
+             request admission against an unpaired estimator",
+            plan.engine_id,
+            gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+            MAGE_CALIBRATION_FINGERPRINT
+        )));
+    }
+    // The estimator is a complete-pipeline peak, while the live budget is incremental from the
+    // process's current state. Only bytes above the cache-recorded pre-load external baseline, and
+    // no more than the provider-declared resident envelope, may be credited as already present.
+    // Unrelated process allocations therefore remain charged on the available side.
+    let attributable_resident_bytes = budget
+        .committed_bytes
+        .saturating_sub(external_committed_bytes)
+        .min(contract.asset_facts.base_bytes);
+    if attributable_resident_bytes > total_peak_bytes {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} live resident attribution {} exceeds modeled total peak {}; refusing an \
+             inconsistent MLX budget",
+            plan.engine_id, attributable_resident_bytes, total_peak_bytes
+        )));
+    }
+    let predicted_peak_bytes = total_peak_bytes - attributable_resident_bytes;
+    let (resident_selection, resident) = resident_evidence(
+        plan.engine_id,
+        plan.tier,
+        mode_key,
+        inputs.overlay.as_deref(),
+        geometry,
+        predicted_peak_bytes,
+        calibration_fingerprint,
+    );
+    let mut selections = Vec::with_capacity(1 + additional_evidence.len());
+    selections.push(resident_selection);
+    selections.extend(
+        additional_evidence
+            .iter()
+            .map(|evidence| ImageMemorySelection {
+                strategy: evidence.key.strategy,
+                parameters: evidence.key.parameters,
+                tier: evidence.key.tier,
+            }),
+    );
+    let mut evidence = Vec::with_capacity(1 + additional_evidence.len());
+    evidence.push(&resident);
+    evidence.extend(additional_evidence);
+    let candidates = selections
+        .iter()
+        .zip(evidence)
+        .map(|(selection, evidence)| Candidate {
+            selection: *selection,
+            evidence,
+        })
+        .collect::<Vec<_>>();
+    let selection = crate::image_memory::select_strategy(
+        RequestScope {
+            resolved_route: plan.engine_id,
+            backend: "mlx",
+            tier: plan.tier,
+            mode: mode_key,
+            overlay: inputs.overlay.as_deref(),
+            geometry,
+            expected_sceneworks_revision: REQUEST_EVIDENCE_REVISION,
+            expected_inference_revision: INFERENCE_CONTRACT_REVISION,
+        },
+        contract,
+        Some(Budget {
+            available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
+                / BYTES_PER_GIB,
+            reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
+            total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
+            reserved_headroom_gb: budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB,
+        }),
+        &candidates,
+    );
+    let (selection, needed_gb, available_gb) = match selection {
+        Selection::Selected {
+            selection,
+            needed_gb,
+            available_gb,
+        } => (selection, needed_gb, available_gb),
+        Selection::Reject {
+            needed_gb,
+            available_gb,
+        } => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} request {}x{} count {} needs {:.2} GiB but only {:.2} GiB is safely available",
+                plan.engine_id,
+                inputs.width,
+                inputs.height,
+                inputs.count.max(1),
+                needed_gb,
+                available_gb
+            )))
+        }
+        Selection::Unverified { reason } => {
+            let message = format!(
+                "{} request {}x{} count {} has no safely verified MLX memory strategy ({reason:?}); \
+                 refusing to enter MLX's process-terminating allocation path",
+                plan.engine_id,
+                inputs.width,
+                inputs.height,
+                inputs.count.max(1),
+            );
+            return Err(WorkerError::InvalidPayload(message));
+        }
+    };
+    tracing::info!(
+        event = "image_memory_request_selected",
+        route = plan.engine_id,
+        backend = "mlx",
+        tier = ?plan.tier,
+        mode = mode_key,
+        overlay = inputs.overlay.as_deref().unwrap_or("none"),
+        width = inputs.width,
+        height = inputs.height,
+        count = inputs.count.max(1),
+        cache_state = ?cache_state,
+        load_policy = ?load_policy,
+        strategy = ?selection.strategy,
+        parameters = ?selection.parameters,
+        predicted_peak_bytes,
+        effective_budget_bytes = budget.effective_bytes(),
+        needed_gb,
+        available_gb,
+        "selected request-scoped MLX memory strategy"
+    );
+    Ok(MlxRequestEvaluation {
+        memory: memory_for_selection(selection),
+        context: ImageMemoryRunContext {
+            selection,
+            calibration_abi,
+            calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
+            mode,
+            has_reference: inputs.has_reference,
+            use_pid: inputs.use_pid,
+            has_phases: inputs.has_phases,
+            geometry,
+            overlay: inputs.overlay.clone(),
+            budget,
+            predicted_peak_bytes,
+            cache_state,
+            evidence_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+        },
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn live_request_budget(engine_id: &str) -> WorkerResult<ImageMemoryBudget> {
+    // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
+    // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
+    mlx_rs::memory::clear_cache();
+    let committed_bytes = mlx_rs::memory::get_active_memory() as u64;
+    let reclaimable_bytes = mlx_rs::memory::get_cache_memory() as u64;
+    let (total_bytes, reserved_headroom_bytes) = if engine_id.starts_with("mage_flow") {
+        let safe_gb = runtime_macos::providers::mage::memory::production_safe_budget_gb()
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        (decimal_gb_to_bytes(safe_gb), 0)
+    } else {
+        let total_gib = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "MLX unified-memory budget is unavailable; refusing an unbounded request"
+                        .to_owned(),
+                )
+            })?
+            .total_gb;
+        (gib_to_bytes(total_gib), gib_to_bytes(OS_RESERVE_GB))
+    };
+    Ok(ImageMemoryBudget {
+        total_bytes,
+        committed_bytes,
+        reclaimable_bytes,
+        reserved_headroom_bytes,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: ImageMemoryGeometry) -> u64 {
+    if plan.engine_id.starts_with("mage_flow") {
+        decimal_gb_to_bytes(runtime_macos::providers::mage::memory::generation_peak_gb(
+            plan.tier.quant,
+            geometry.width,
+            geometry.height,
+            geometry.batch,
+        ))
+    } else {
+        plan.generic_total_peak_bytes(geometry)
+    }
+}
+
+/// Evaluate one real MLX request after cache lookup and immediately before generation.
+#[cfg(target_os = "macos")]
+pub(crate) fn evaluate_request(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: ImageMemoryCacheState,
+    load_policy: OffloadPolicy,
+    external_committed_bytes: u64,
+) -> WorkerResult<MlxRequestEvaluation> {
+    let geometry = ImageMemoryGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: inputs.count.max(1),
+        frames: 1,
+    };
+    let budget = live_request_budget(plan.engine_id)?;
+    let total_peak_bytes = request_total_peak_bytes(plan, geometry);
+    evaluate_request_with_budget(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        &[],
+    )
+}
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`]
 /// — derived at query time from the engine's REGISTERED descriptor
@@ -736,7 +1169,7 @@ fn generic_mlx_shared_observation(
         calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: String::new(),
         sceneworks_revision: "sc-15449-contract-v1".into(),
-        inference_revision: "0c85bc9ff9fe161227efebf396a83db5e967d9ad".into(),
+        inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".into(),
         harness_version: String::new(),
         predicted_peak_bytes: total_bytes,
         observed_peak_bytes: None,
@@ -761,7 +1194,7 @@ fn generic_mlx_shared_observation(
             overlay: Some("resolved_load_spec"),
             geometry,
             expected_sceneworks_revision: "sc-15449-contract-v1",
-            expected_inference_revision: "0c85bc9ff9fe161227efebf396a83db5e967d9ad",
+            expected_inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
         },
         &contract,
         budget.map(|budget| Budget {
@@ -1192,6 +1625,417 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RequestGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        contract: Option<ImageMemoryProviderContract>,
+    }
+
+    impl gen_core::Generator for RequestGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _req: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            unreachable!("request selector tests do not execute tensors")
+        }
+
+        fn image_memory_contract(&self) -> Option<&ImageMemoryProviderContract> {
+            self.contract.as_ref()
+        }
+    }
+
+    fn request_generator(contract: Option<ImageMemoryProviderContract>) -> RequestGenerator {
+        RequestGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "mage_flow",
+                family: "test",
+                backend: "mlx",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                required_components: &[],
+            },
+            contract,
+        }
+    }
+
+    fn request_plan() -> MlxRequestPlan {
+        MlxRequestPlan {
+            engine_id: "mage_flow",
+            tier: ImageMemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            asset_bytes: gib_to_bytes(6.0),
+            activation_headroom_bytes: gib_to_bytes(2.0),
+        }
+    }
+
+    fn mage_request_contract() -> ImageMemoryProviderContract {
+        use gen_core::ImageMemoryCalibrationIdentity;
+
+        let mut contract = ImageMemoryProviderContract::compatibility_default(
+            "mage_flow",
+            ImageMemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.calibration = Some(ImageMemoryCalibrationIdentity::new(
+            MAGE_CALIBRATION_FINGERPRINT,
+        ));
+        contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+        contract
+    }
+
+    fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
+        MlxRequestInputs {
+            width,
+            height,
+            count,
+            mode: "edit_image".to_owned(),
+            overlay: Some("references:2+mask+adapters:1".to_owned()),
+            adapter_count: 0,
+            has_reference: true,
+            use_pid: false,
+            has_phases: false,
+        }
+    }
+
+    #[test]
+    fn request_scope_reselects_a_b_a_without_fragmenting_request_axes() {
+        let generator = request_generator(Some(mage_request_contract()));
+        let plan = request_plan();
+        let budget = ImageMemoryBudget {
+            total_bytes: gib_to_bytes(16.0),
+            committed_bytes: gib_to_bytes(4.0),
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: gib_to_bytes(2.0),
+        };
+        let a = request_inputs(512, 512, 3);
+        let b = request_inputs(1536, 1024, 3);
+        let first_a = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &a,
+            ImageMemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            budget,
+            gib_to_bytes(8.0),
+            0,
+            &[],
+        )
+        .unwrap();
+        let selected_b = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &b,
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Sequential,
+            budget,
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .unwrap();
+        let second_a = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &a,
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Sequential,
+            budget,
+            gib_to_bytes(8.0),
+            0,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(first_a.context.geometry.batch, 3);
+        assert_eq!(first_a.context.mode, ImageMemoryMode::Edit);
+        assert_eq!(
+            first_a.context.overlay.as_deref(),
+            Some("references:2+mask+adapters:1")
+        );
+        assert_eq!(first_a.context.cache_state, ImageMemoryCacheState::Cold);
+        assert_eq!(selected_b.context.geometry.width, 1536);
+        assert_eq!(selected_b.context.cache_state, ImageMemoryCacheState::Warm);
+        assert_eq!(first_a.context.selection, second_a.context.selection);
+        assert_eq!(
+            first_a.context.predicted_peak_bytes, second_a.context.predicted_peak_bytes,
+            "the intervening geometry cannot poison a warm follow-up"
+        );
+    }
+
+    #[test]
+    fn request_scope_charges_external_committed_memory_and_never_accepts_zero_zero() {
+        let generator = request_generator(Some(mage_request_contract()));
+        let plan = request_plan();
+        let inputs = request_inputs(512, 512, 1);
+        let external = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(10.0),
+                committed_bytes: gib_to_bytes(8.0),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(8.0),
+            gib_to_bytes(7.0),
+            &[],
+        );
+        assert!(
+            external.is_err(),
+            "seven GiB of unrelated active memory must remain charged"
+        );
+
+        let overcommitted = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(10.0),
+                committed_bytes: gib_to_bytes(12.0),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(8.0),
+            0,
+            &[],
+        );
+        assert!(
+            overcommitted.is_err(),
+            "an overcommitted process must not pass through a saturated 0 <= 0 comparison"
+        );
+    }
+
+    #[test]
+    fn legacy_provider_credits_only_the_known_generator_assets_on_a_warm_run() {
+        let plan = MlxRequestPlan {
+            engine_id: "flux_dev",
+            tier: request_plan().tier,
+            asset_bytes: gib_to_bytes(6.0),
+            activation_headroom_bytes: gib_to_bytes(2.0),
+        };
+        let selected = evaluate_request_with_budget(
+            &request_generator(None),
+            &plan,
+            &request_inputs(512, 512, 1),
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(10.0),
+                committed_bytes: gib_to_bytes(6.0),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(8.0),
+            gib_to_bytes(1.0),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected.context.predicted_peak_bytes,
+            gib_to_bytes(3.0),
+            "five attributable GiB are already resident; the unrelated GiB stays charged"
+        );
+    }
+
+    #[test]
+    fn post_load_external_delta_never_reclassifies_or_subtracts_resident_bytes() {
+        assert_eq!(add_post_load_external_delta(10, 100, 125), 35);
+        assert_eq!(
+            add_post_load_external_delta(10, 125, 100),
+            10,
+            "allocator cleanup cannot reduce the cache-recorded external baseline"
+        );
+        assert_eq!(add_post_load_external_delta(u64::MAX - 1, 0, 10), u64::MAX);
+    }
+
+    #[test]
+    fn mage_resident_path_requires_the_provider_calibration_handshake() {
+        let error = evaluate_request_with_budget(
+            &request_generator(None),
+            &request_plan(),
+            &request_inputs(512, 512, 1),
+            ImageMemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(16.0),
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(8.0),
+            0,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(MAGE_CALIBRATION_FINGERPRINT),
+            "the production Resident path must compare the loaded provider fingerprint: {error}"
+        );
+    }
+
+    #[test]
+    fn mage_adapter_requests_fail_closed_outside_the_paired_calibration() {
+        let mut inputs = request_inputs(512, 512, 1);
+        inputs.adapter_count = 1;
+        let error = evaluate_request_with_budget(
+            &request_generator(Some(mage_request_contract())),
+            &request_plan(),
+            &inputs,
+            ImageMemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(128.0),
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(8.0),
+            0,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not include LoRA/LoKr tensors"));
+    }
+
+    #[test]
+    fn optimized_fingerprint_mismatch_fails_closed() {
+        use gen_core::{
+            ImageMemoryCalibrationIdentity, ImageMemoryParameterRanges,
+            ImageMemoryStrategyCapability, ImageMemoryStrategyParameters,
+            ImageMemoryStrategySupport,
+        };
+
+        let plan = request_plan();
+        let inputs = request_inputs(1024, 1024, 1);
+        let mut contract = ImageMemoryProviderContract::compatibility_default(
+            "mage_flow",
+            ImageMemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.calibration = Some(ImageMemoryCalibrationIdentity::new(
+            MAGE_CALIBRATION_FINGERPRINT,
+        ));
+        contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+        contract.lifecycle.decode_tiling = true;
+        contract.strategies = ImageMemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| ImageMemoryStrategyCapability {
+                strategy,
+                support: match strategy {
+                    ImageMemoryStrategy::Resident => ImageMemoryStrategySupport::Implemented,
+                    ImageMemoryStrategy::StagedResidency => {
+                        ImageMemoryStrategySupport::StructurallyNotApplicable {
+                            reason: "single resident pipeline".to_owned(),
+                        }
+                    }
+                    ImageMemoryStrategy::BoundedDecode => ImageMemoryStrategySupport::Implemented,
+                    _ => ImageMemoryStrategySupport::Missing,
+                },
+                parameters: if strategy == ImageMemoryStrategy::BoundedDecode {
+                    ImageMemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![32],
+                        ..Default::default()
+                    }
+                } else {
+                    Default::default()
+                },
+            })
+            .collect();
+        let selection = ImageMemorySelection {
+            strategy: ImageMemoryStrategy::BoundedDecode,
+            parameters: ImageMemoryStrategyParameters {
+                decode_tile_edge: Some(512),
+                decode_overlap: Some(32),
+                ..Default::default()
+            },
+            tier: plan.tier,
+        };
+        let evidence = ImageMemoryEvidence {
+            key: ImageMemoryEvidenceKey {
+                resolved_route: "mage_flow".to_owned(),
+                backend: "mlx".to_owned(),
+                tier: plan.tier,
+                mode: "edit".to_owned(),
+                overlay: inputs.overlay.clone(),
+                geometry: ImageMemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                },
+                strategy: selection.strategy,
+                parameters: selection.parameters,
+            },
+            conformance: ImageMemoryConformanceState::Verified,
+            dimensions: ImageMemoryEvidenceDimensions {
+                static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
+                declared_calibration: ImageMemoryEvidenceVerdict::Satisfied,
+                historical_verification: ImageMemoryEvidenceVerdict::Satisfied,
+                current_environment_verification: ImageMemoryEvidenceVerdict::Satisfied,
+                canonical_route_loadability: ImageMemoryEvidenceVerdict::Satisfied,
+                exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+            },
+            calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: "wrong-provider-fingerprint".to_owned(),
+            sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+            inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
+            harness_version: "test".to_owned(),
+            predicted_peak_bytes: gib_to_bytes(5.0),
+            observed_peak_bytes: Some(gib_to_bytes(5.0)),
+            parity: ImageMemoryParityContract::Exact,
+            parity_result: ImageMemoryParityResult::Passed,
+        };
+        let error = evaluate_request_with_budget(
+            &request_generator(Some(contract)),
+            &plan,
+            &inputs,
+            ImageMemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            ImageMemoryBudget {
+                total_bytes: gib_to_bytes(10.0),
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(12.0),
+            0,
+            &[evidence],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("FingerprintMismatch"),
+            "mismatch must remain an unverified fail-closed result: {error}"
+        );
+    }
 
     /// The dense Mage-Flow-Base DiT (`transformer/diffusion_pytorch_model.safetensors`, bf16 on disk).
     const MAGE_DIT_BYTES: u64 = 8_231_536_784;

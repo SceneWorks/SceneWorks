@@ -92,6 +92,7 @@ where
     F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<GeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, &mut on_progress)? else {
             break;
@@ -105,7 +106,6 @@ where
         // ceiling — an OS memory-pressure SIGKILL (Jetsam) that the dense SenseNova-U1 8B
         // family hits first (sc-5567). Frees only freed/retained buffers; the cached
         // generator's live weight arrays are untouched.
-        release_gen_cache_between_items();
     }
     Ok(())
 }
@@ -137,6 +137,7 @@ where
     F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<ScoredGeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, &mut on_progress)? else {
             break;
@@ -144,7 +145,6 @@ where
         if !send_scored_generated_image(&tx, index, image) {
             break;
         }
-        release_gen_cache_between_items();
     }
     Ok(())
 }
@@ -162,6 +162,17 @@ fn release_gen_cache_between_items() {
 
 #[cfg(not(target_os = "macos"))]
 fn release_gen_cache_between_items() {}
+
+/// Always release allocator-cache buffers at the end of an item, including cancellation and error
+/// exits. Provider scopes synchronize/release active graphs and windows first; this guard then
+/// removes freed scratch so the next warm request observes an independent cache state.
+struct RequestCacheRelease;
+
+impl Drop for RequestCacheRelease {
+    fn drop(&mut self) {
+        release_gen_cache_between_items();
+    }
+}
 
 // Shared by the macOS MLX paths and the Windows/CUDA candle InstantID lane (sc-5491): both load a
 // `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model
@@ -227,6 +238,44 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        move |generator, _cache_state, _load_policy, _external_committed_bytes, tx, cancel| {
+            drive(generator, tx, cancel)
+        },
+    )
+}
+
+/// Cached stream seam that exposes cold/warm state and the actual cold-load residency policy to the
+/// request callback. Geometry and request strategy remain absent from the generator cache key.
+fn start_cached_gen_stream_with_request_state<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::ImageMemoryCacheState,
+            gen_core::OffloadPolicy,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
@@ -237,18 +286,25 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator(
+        crate::generator_cache::with_cached_generator_for_request(
             engine_id,
             spec,
             load_error_context,
-            move |generator| {
+            move |generator, cache_state, load_policy, external_committed_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
                     engine_id,
                     adapter_count,
                 );
-                drive(generator, tx, blocking_cancel)
+                drive(
+                    generator,
+                    cache_state,
+                    load_policy,
+                    external_committed_bytes,
+                    tx,
+                    blocking_cancel,
+                )
             },
         )
         .await
