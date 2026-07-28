@@ -1,0 +1,346 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/image-memory-calibration.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "harnessVersion", "records"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "harnessVersion": { "const": "sceneworks-image-memory-v2" },
+    "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
+  },
+  "$defs": {
+    "gitState": {
+      "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
+      "properties": {
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "dirty": { "type": "boolean" },
+        "matrixSourceRevision": { "type": "string", "pattern": "^source-tree:[0-9a-f]+$" }
+      }
+    },
+    "hardwareBase": {
+      "type": "object",
+      "required": ["probe", "memoryBytes"],
+      "properties": {
+        "probe": { "type": "string", "minLength": 1 },
+        "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    },
+    "phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"],
+      "properties": {
+        "activeBytes": { "type": "integer", "minimum": 0 },
+        "allocatorBytes": { "type": "integer", "minimum": 0 },
+        "deviceBytes": { "type": "integer", "minimum": 0 },
+        "wiredBytes": { "type": "integer", "minimum": 0 },
+        "reclaimableBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "phaseMetrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conditioning", "denoise", "decode", "overall"],
+      "properties": {
+        "conditioning": { "$ref": "#/$defs/phase" },
+        "denoise": { "$ref": "#/$defs/phase" },
+        "decode": { "$ref": "#/$defs/phase" },
+        "overall": { "$ref": "#/$defs/phase" }
+      }
+    },
+    "predicted": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conditioning", "denoise", "decode", "overall"],
+      "properties": {
+        "conditioning": { "type": "integer", "minimum": 0 },
+        "denoise": { "type": "integer", "minimum": 0 },
+        "decode": { "type": "integer", "minimum": 0 },
+        "overall": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "logicalCaseId", "status", "evidenceScope", "backend", "repositories",
+        "hardware", "artifact", "target", "fixture", "strategy", "sweep", "scenarios",
+        "predictedPeakBytes", "observedMemory", "quality", "negativeMutation",
+        "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^imc-[0-9a-f]{20}$" },
+        "logicalCaseId": { "type": "string", "pattern": "^implan-[0-9a-f]{20}$" },
+        "status": { "enum": ["complete", "gated", "negative_complete"] },
+        "evidenceScope": { "enum": ["authoritative", "fixture"] },
+        "backend": { "enum": ["mlx", "candle"] },
+        "repositories": {
+          "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
+          "properties": {
+            "sceneWorks": {
+              "allOf": [
+                { "$ref": "#/$defs/gitState" },
+                { "required": ["matrixSourceRevision"] }
+              ]
+            },
+            "inference": { "$ref": "#/$defs/gitState" }
+          }
+        },
+        "hardware": {
+          "oneOf": [
+            {
+              "allOf": [
+                { "$ref": "#/$defs/hardwareBase" },
+                {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["probe", "memoryBytes", "deviceId", "name", "computeCapability", "driverVersion", "runtimeVersion"],
+                  "properties": {
+                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                    "deviceId": { "type": "string", "minLength": 1 }, "name": { "type": "string", "minLength": 1 },
+                    "computeCapability": { "type": "string", "minLength": 1 }, "driverVersion": { "type": "string", "minLength": 1 },
+                    "runtimeVersion": { "type": "string", "minLength": 1 }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/hardwareBase" },
+                {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["probe", "memoryBytes", "model", "chip", "osVersion", "metalDevice", "mlxMemoryLimitBytes", "wiredLimitBytes"],
+                  "properties": {
+                    "probe": { "type": "string", "minLength": 1 }, "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                    "model": { "type": "string", "minLength": 1 }, "chip": { "type": "string", "minLength": 1 },
+                    "osVersion": { "type": "string", "minLength": 1 }, "metalDevice": { "type": "string", "minLength": 1 },
+                    "mlxMemoryLimitBytes": { "type": "integer", "exclusiveMinimum": 0 },
+                    "wiredLimitBytes": { "type": "integer", "exclusiveMinimum": 0 }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "artifact": {
+          "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
+            "variant": { "type": "string", "minLength": 1 }
+          }
+        },
+        "target": {
+          "type": "object", "additionalProperties": false,
+          "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
+          "properties": {
+            "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
+            "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
+            "overlay": { "type": "string", "minLength": 1 },
+            "geometry": {
+              "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
+              "properties": {
+                "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 },
+                "batch": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        },
+        "fixture": { "type": "string", "minLength": 1 },
+        "strategy": {
+          "type": "object", "additionalProperties": false, "required": ["rung", "parameters"],
+          "properties": {
+            "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] },
+            "parameters": { "type": "object" }
+          }
+        },
+        "sweep": {
+          "type": "object", "additionalProperties": false, "required": ["axes", "cases", "rangeVerified"],
+          "properties": {
+            "axes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["parameter", "testedValues"],
+                "properties": {
+                  "parameter": { "type": "string", "minLength": 1 },
+                  "testedValues": {
+                    "type": "array", "minItems": 2, "uniqueItems": true,
+                    "items": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            },
+            "cases": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["parameters", "result"],
+                "properties": { "parameters": { "type": "object" }, "result": { "enum": ["passed", "failed", "not_run"] } }
+              }
+            },
+            "rangeVerified": { "type": "boolean" }
+          }
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "result"],
+            "properties": {
+              "name": { "enum": ["exact_fit", "unknown_budget", "stale_evidence", "warm_repeat", "cancel", "error", "loadability", "overlay"] },
+              "result": { "enum": ["passed", "failed", "not_applicable", "not_run"] },
+              "reason": { "type": "string" }, "predictedBytes": { "type": "integer", "minimum": 0 },
+              "effectiveBudgetBytes": { "type": "integer", "minimum": 0 },
+              "cleanupVerified": { "type": "boolean" }, "warmFollowUpPassed": { "type": "boolean" }
+            }
+          }
+        },
+        "predictedPeakBytes": { "oneOf": [{ "$ref": "#/$defs/predicted" }, { "type": "null" }] },
+        "observedMemory": { "oneOf": [{ "$ref": "#/$defs/phaseMetrics" }, { "type": "null" }] },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "contract": { "type": "string", "minLength": 1 },
+            "identicalLatents": { "type": "boolean" },
+            "result": { "enum": ["passed", "failed", "not_run"] },
+            "maximumError": { "type": "number", "minimum": 0 },
+            "meanError": { "type": "number", "minimum": 0 },
+            "maximumErrorThreshold": { "type": "number", "minimum": 0 },
+            "meanErrorThreshold": { "type": "number", "minimum": 0 }
+          }
+        },
+        "negativeMutation": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "parameters": { "type": "object" },
+                "measured": { "type": "boolean" },
+                "result": { "enum": ["failed_as_expected", "not_run"] },
+                "maximumError": { "type": "number", "minimum": 0 },
+                "meanError": { "type": "number", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "loadability": {
+          "type": "object", "additionalProperties": false, "required": ["result", "resolvedPathFingerprint"],
+          "properties": {
+            "result": { "enum": ["passed", "failed", "not_run"] },
+            "resolvedPathFingerprint": { "type": ["string", "null"] }
+          }
+        },
+        "calibrationFingerprint": { "type": "string", "minLength": 1 },
+        "capturedAt": { "type": "string", "format": "date-time" },
+        "harnessVersion": { "const": "sceneworks-image-memory-v2" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "repositories": {
+                "required": ["sceneWorks", "inference"],
+                "properties": {
+                  "sceneWorks": {
+                    "required": ["revision", "dirty", "matrixSourceRevision"],
+                    "properties": { "dirty": { "const": false } }
+                  },
+                  "inference": { "properties": { "dirty": { "const": false } } }
+                }
+              },
+              "predictedPeakBytes": { "$ref": "#/$defs/predicted" },
+              "observedMemory": { "$ref": "#/$defs/phaseMetrics" },
+              "sweep": {
+                "properties": {
+                  "rangeVerified": { "const": true },
+                  "cases": { "minItems": 2 }
+                }
+              },
+              "scenarios": {
+                "minItems": 8,
+                "maxItems": 8,
+                "allOf": [
+                  { "contains": { "properties": { "name": { "const": "exact_fit" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "unknown_budget" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "stale_evidence" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  {
+                    "contains": {
+                      "properties": {
+                        "name": { "const": "cancel" }, "result": { "const": "passed" },
+                        "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true }
+                      },
+                      "required": ["name", "result", "cleanupVerified", "warmFollowUpPassed"]
+                    }
+                  },
+                  {
+                    "contains": {
+                      "properties": {
+                        "name": { "const": "error" }, "result": { "const": "passed" },
+                        "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true }
+                      },
+                      "required": ["name", "result", "cleanupVerified", "warmFollowUpPassed"]
+                    }
+                  },
+                  { "contains": { "properties": { "name": { "const": "loadability" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "overlay" }, "result": { "enum": ["passed", "not_applicable"] } }, "required": ["name", "result"] } }
+                ]
+              },
+              "quality": {
+                "required": [
+                  "contract", "identicalLatents", "result", "maximumError", "meanError",
+                  "maximumErrorThreshold", "meanErrorThreshold"
+                ],
+                "properties": {
+                  "identicalLatents": { "const": true },
+                  "result": { "const": "passed" },
+                  "maximumError": { "type": "number", "minimum": 0 },
+                  "meanError": { "type": "number", "minimum": 0 },
+                  "maximumErrorThreshold": { "type": "number", "minimum": 0 },
+                  "meanErrorThreshold": { "type": "number", "minimum": 0 }
+                }
+              },
+              "negativeMutation": {
+                "type": "object",
+                "required": ["parameters", "measured", "result", "maximumError", "meanError"],
+                "properties": {
+                  "parameters": { "type": "object" },
+                  "measured": { "const": true },
+                  "result": { "const": "failed_as_expected" },
+                  "maximumError": { "type": "number", "minimum": 0 },
+                  "meanError": { "type": "number", "minimum": 0 }
+                }
+              },
+              "loadability": {
+                "properties": {
+                  "result": { "const": "passed" },
+                  "resolvedPathFingerprint": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "negative_complete" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "quality": {
+                "required": ["contract", "maximumErrorThreshold", "meanErrorThreshold"]
+              },
+              "negativeMutation": {
+                "type": "object",
+                "required": ["parameters", "measured", "result", "maximumError", "meanError"],
+                "properties": {
+                  "measured": { "const": true },
+                  "result": { "const": "failed_as_expected" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -28,6 +28,10 @@
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
         "sha256": "81db3d4b7697c7db99173f77630c68ea8cd64207d3b50e955a2f51e13a8a2f07"
       },
+      "calibrationEvidence": {
+        "path": "docs/generated/image-memory-calibration-evidence.json",
+        "sha256": "7e7f710209846e3f3c55599032b497ef20795e723c006f3c4c682ef717eeb547"
+      },
       "cargo": {
         "path": "Cargo.toml",
         "sha256": "fcd898b2a5c0404dd4db5192562bf29952991251f8676d3671061f748162ee2f"
@@ -54,7 +58,9 @@
     "cells": 6595,
     "mlxStagedStaticCoverage": 39,
     "mlxStagedStaticCoverageDenominator": 53,
-    "fullModels": 0
+    "fullModels": 0,
+    "calibrationRuns": 0,
+    "currentCalibrationRuns": 0
   },
   "models": [
     {
@@ -410778,6 +410784,7 @@
       }
     }
   ],
+  "calibrationRuns": [],
   "modelSlices": {
     "anima_aesthetic": [
       "anima_aesthetic:anima_aesthetic:mlx:q4:text_to_image:lora:bounded_attention",
