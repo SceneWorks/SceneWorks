@@ -8,17 +8,16 @@ use gen_core::{
     Precision, Quant, WeightsSource,
 };
 
-use crate::cache_thread::{self, CacheAccess, CacheJob, CacheThread, Fingerprint, SeamMessages};
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+use crate::cache_thread::CacheThread;
+use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
 use crate::WorkerResult;
 
-/// The generator cache is a single-resident [`CacheThread`] keyed by [`GeneratorCacheKey`], holding a
-/// loaded `Box<dyn Generator>`. The generic scaffolding (dedicated worker thread, idle-timeout
-/// eviction, panic containment, `Fingerprint`, oneshot-reply seam) lives in [`crate::cache_thread`];
-/// this module supplies only the key derivation, the loader, and the message strings (sc-11191, F-019).
-// Referenced only from the candle `with_uncached_generator` and the tests' worker closures (the
-// production seam infers the `CacheThread` type from the job channel), so it reads as dead on the
-// base macOS lib build.
-#[allow(dead_code)]
+/// The generator cache is a single-resident [`crate::cache_thread::CacheThread`] keyed by
+/// [`GeneratorCacheKey`], holding a loaded `Box<dyn Generator>`. The generic scaffolding (dedicated
+/// worker thread, idle-timeout eviction, panic containment, `Fingerprint`, oneshot-reply seam) lives
+/// in [`crate::cache_thread`]; this module supplies only the key derivation, the loader, and the
+/// message strings (sc-11191, F-019).
 struct CachedGenerator {
     generator: Box<dyn Generator>,
     load_policy: OffloadPolicy,
@@ -27,6 +26,7 @@ struct CachedGenerator {
     external_committed_bytes: u64,
 }
 
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 type GeneratorCache = CacheThread<GeneratorCacheKey, CachedGenerator>;
 type GeneratorJob = CacheJob<GeneratorCacheKey, CachedGenerator>;
 

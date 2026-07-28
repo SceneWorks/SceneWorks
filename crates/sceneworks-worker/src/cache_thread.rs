@@ -136,6 +136,7 @@ where
     /// per-lane policy the load needs (fit-gate/residency selection for the generator, error-context
     /// wrapping for either). `entry_missing_msg` is the (should-be-impossible) error surfaced if the
     /// entry vanished after a successful load.
+    #[cfg(test)]
     pub(crate) fn with_model<R>(
         &mut self,
         key: K,
@@ -146,7 +147,8 @@ where
         self.with_model_access(key, load, |model, _access| run(model), entry_missing_msg)
     }
 
-    /// [`Self::with_model`] plus the request's true cold/warm cache access state.
+    /// Load or reuse the resident model while also reporting the request's true cold/warm cache
+    /// access state.
     pub(crate) fn with_model_access<R>(
         &mut self,
         key: K,
