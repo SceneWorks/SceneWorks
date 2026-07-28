@@ -230,3 +230,17 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_image_memory_calibration \}\}/,
   );
 });
+
+test("MLX calibration probe derives the production wired ceiling without guessing", async () => {
+  const adapter = await source(
+    "crates/sceneworks-image-memory-adapter/src/bin/mlx.rs",
+  );
+  assert.match(adapter, /let mlx_memory_limit = get_memory_limit\(\) as u64;/);
+  assert.match(adapter, /sysctl\("kern\.memorystatus_wired_mem_limit"\)/);
+  assert.match(
+    adapter,
+    /\.or_else\(\|\| Some\(mlx_memory_limit \/ 3 \* 2\)\)/,
+  );
+  assert.match(adapter, /\.filter\(\|value: &u64\| \*value > 0\)/);
+  assert.match(adapter, /"mlxMemoryLimitBytes": mlx_memory_limit/);
+});

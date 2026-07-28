@@ -126,12 +126,17 @@ The MLX adapter requires:
 SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-snapshot
 SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
 SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
-# Only when the host sysctl does not expose a nonzero current wired ceiling:
+# Optional explicit current-host policy override:
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<current host wired ceiling>
 ```
 
 The adapter canonicalizes the root and requires the fixed
 `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16` suffix before loading.
+It resolves the wired ceiling from the explicit override first, then the host
+`kern.memorystatus_wired_mem_limit` sysctl, and finally the untouched MLX default memory limit.
+MLX documents that default as 1.5 times Metal's recommended working-set size, so the final fallback
+uses `get_memory_limit() / 3 * 2`, matching the production worker's current-host derivation and
+rounding down to remain at or below the ceiling. The selected source must resolve to a nonzero value.
 
 After this workflow change is present on the repository default branch, the self-hosted macOS ARM64
 NAX runner can execute the same adapter through a guarded manual dispatch:

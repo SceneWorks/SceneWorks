@@ -67,6 +67,7 @@ fn metal_device() -> Result<String, String> {
 
 fn probe() -> Result<Value, String> {
     let memory_bytes = integer(&sysctl("hw.memsize")?, "hw.memsize")?;
+    let mlx_memory_limit = get_memory_limit() as u64;
     let wired_limit = std::env::var("SCENEWORKS_MLX_WIRED_LIMIT_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -75,9 +76,14 @@ fn probe() -> Result<Value, String> {
                 .ok()
                 .and_then(|value| value.parse().ok())
         })
+        // MLX's untouched default memory limit is 1.5x Metal's
+        // recommendedMaxWorkingSetSize. This is the same current-host policy
+        // derivation used by the production worker before it mutates the MLX
+        // limit. Divide before multiplying so rounding stays below the ceiling.
+        .or_else(|| Some(mlx_memory_limit / 3 * 2))
         .filter(|value: &u64| *value > 0)
         .ok_or_else(|| {
-            "cannot resolve a nonzero wired ceiling; set SCENEWORKS_MLX_WIRED_LIMIT_BYTES from the current host policy"
+            "cannot resolve a nonzero wired ceiling from the host sysctl or MLX default memory limit; set SCENEWORKS_MLX_WIRED_LIMIT_BYTES from the current host policy"
                 .to_owned()
         })?;
     Ok(json!({
@@ -88,7 +94,7 @@ fn probe() -> Result<Value, String> {
             "chip": sysctl("machdep.cpu.brand_string")?,
             "osVersion": command("/usr/bin/sw_vers", &["-productVersion"])?,
             "metalDevice": metal_device()?,
-            "mlxMemoryLimitBytes": get_memory_limit(),
+            "mlxMemoryLimitBytes": mlx_memory_limit,
             "wiredLimitBytes": wired_limit,
         }
     }))
