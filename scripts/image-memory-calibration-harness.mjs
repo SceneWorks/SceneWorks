@@ -233,13 +233,13 @@ function validateComplete(record) {
     text(axis.parameter, `${record.id}.sweep.axis.parameter`);
     if (
       !Array.isArray(axis.testedValues) ||
-      axis.testedValues.length < 2 ||
+      axis.testedValues.length < 1 ||
       new Set(axis.testedValues).size !== axis.testedValues.length
     ) fail(`${record.id}: ${axis.parameter} tested values must be nonempty and unique`);
   }
   if (record.sweep.rangeVerified !== true) fail(`${record.id}: complete evidence must verify its range`);
-  if (!Array.isArray(record.sweep.cases) || record.sweep.cases.length < 2) {
-    fail(`${record.id}: complete range evidence needs at least two executed cases`);
+  if (!Array.isArray(record.sweep.cases) || record.sweep.cases.length < 1) {
+    fail(`${record.id}: complete evidence needs at least one executed case`);
   }
   const passedCases = record.sweep.cases.filter((item) => item.result === "passed");
   const caseKeys = record.sweep.cases.map((item) => JSON.stringify(stable(item.parameters)));
@@ -250,7 +250,7 @@ function validateComplete(record) {
   for (const axis of record.sweep.axes) {
     const actual = [...new Set(passedCases.map((item) => item.parameters[axis.parameter]))].sort();
     const declared = [...axis.testedValues].sort();
-    if (!equal(actual, declared) || actual.length < 2) {
+    if (!equal(actual, declared) || actual.length < 1) {
       fail(`${record.id}: ${axis.parameter} range is not derived from passed executed cases`);
     }
   }
@@ -335,7 +335,9 @@ export function validateRecord(record) {
   text(record.id, "record.id");
   text(record.logicalCaseId, `${record.id}.logicalCaseId`);
   if (!["complete", "gated", "negative_complete"].includes(record.status)) fail(`${record.id}: invalid status`);
-  if (!["authoritative", "fixture"].includes(record.evidenceScope)) fail(`${record.id}: invalid evidenceScope`);
+  if (!["authoritative", "candidate", "fixture"].includes(record.evidenceScope)) {
+    fail(`${record.id}: invalid evidenceScope`);
+  }
   if (!["mlx", "candle"].includes(record.backend)) fail(`${record.id}: invalid backend`);
   validateRepositories(record);
   validateHardware(record);
@@ -380,6 +382,7 @@ export function validateBundle(bundle) {
 export function evidenceSemantics(record, revisions) {
   validateRecord(record);
   if (record.evidenceScope === "fixture") return "fixture";
+  if (record.evidenceScope === "candidate") return "candidate";
   if (record.status === "negative_complete") return "negative";
   if (record.status !== "complete") return "gated";
   return record.repositories.sceneWorks.matrixSourceRevision === revisions.sceneWorks &&
@@ -477,7 +480,9 @@ function execute(command, args, input) {
   });
 }
 
-export async function runProviderPlan({ config, providerCommand, sceneWorksRepo, inferenceRepo, resume }) {
+export async function runProviderPlan({
+  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName,
+}) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const gitState = async (repo, sceneWorks = false) => ({
     revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
@@ -500,7 +505,19 @@ export async function runProviderPlan({ config, providerCommand, sceneWorksRepo,
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
   const existing = resume ? validateBundle(resume) : { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [] };
-  const cases = expandPlan(config, existing.records);
+  const selectedConfig = providerName
+    ? { ...config, providers: config.providers.filter((provider) => provider.name === providerName) }
+    : config;
+  if (providerName && selectedConfig.providers.length === 0) {
+    fail(`provider run selected no plan provider named ${providerName}`);
+  }
+  const expanded = expandPlan(selectedConfig, existing.records);
+  const cases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
+  if (cases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
+  const backends = new Set(cases.map((planned) => planned.backend));
+  if (backends.size !== 1) {
+    fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
+  }
   const probe = JSON.parse(await execute(
     providerCommand[0],
     providerCommand.slice(1),
@@ -581,6 +598,8 @@ async function main() {
       sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
       inferenceRepo: path.resolve(value("--inference-repo")),
       resume: value("--resume") ? await readJson(value("--resume")) : undefined,
+      backend: value("--backend"),
+      providerName: value("--provider"),
     });
     return void await atomicWrite(value("--output"), output);
   }

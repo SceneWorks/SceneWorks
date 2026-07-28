@@ -81,12 +81,19 @@ Run an authoritative provider adapter:
 ```text
 node scripts/image-memory-calibration-harness.mjs run \
   --config config/image-memory-calibration-plan.json \
+  --backend mlx \
+  --provider mlx-qwen-vae-decode \
   --provider-command '["/absolute/path/to/image-memory-provider-adapter"]' \
   --sceneworks-repo /absolute/path/to/SceneWorks \
   --inference-repo /absolute/path/to/inference \
   --resume docs/generated/image-memory-calibration-evidence.json \
   --output .tmp/authoritative-image-memory-evidence.json
 ```
+
+One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
+required when the config contains both backends. Omitting it from a mixed plan fails before starting
+the adapter. `--provider <plan-provider-name>` optionally selects one named provider block; use it
+to run the current Krea v1 production point separately from non-promotable v2 candidates.
 
 Validate or merge captured output:
 
@@ -100,14 +107,102 @@ node scripts/image-memory-calibration-harness.mjs ingest \
   --output .tmp/merged-image-memory-evidence.json
 ```
 
-The provider adapter can wrap the existing real-weight inference seams:
+SceneWorks now contains two real provider-protocol executables. They compile against the same exact
+inference revision as the worker and never convert partial measurements into complete evidence:
 
 ```text
-# Apple hardware, from the exact final inference checkout
+# Apple hardware
+cargo build --release -p sceneworks-image-memory-adapter \
+  --features mlx --bin image-memory-mlx-adapter
+
+# Windows/Linux CUDA hardware (run in the supported CUDA + host-compiler environment)
+cargo build --release -p sceneworks-image-memory-adapter \
+  --features candle --bin image-memory-candle-adapter
+```
+
+The MLX adapter requires:
+
+```text
+SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-snapshot
+SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
+SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
+# Only when the host sysctl does not expose a nonzero current wired ceiling:
+SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<current host wired ceiling>
+```
+
+The adapter canonicalizes the root and requires the fixed
+`/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16` suffix before loading.
+
+After this workflow change is present on the repository default branch, the self-hosted macOS ARM64
+NAX runner can execute the same adapter through a guarded manual dispatch:
+
+```text
+gh workflow run macos-mlx.yml --ref main \
+  -f run_image_memory_calibration=true \
+  -f inference_revision=<exact-adapter-inference-pin> \
+  -f qwen_repository=SceneWorks/qwen-image-mlx \
+  -f qwen_revision=<exact-artifact-revision>
+```
+
+The runner resolves only the fixed `SceneWorks/qwen-image-mlx` artifact. By default it derives
+`$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`;
+the optional `SCENEWORKS_QWEN_IMAGE_ROOT` repository secret can override that one path when the
+runner cache lives elsewhere. The override is canonicalized and must still end in the fixed
+repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`
+suffix. The dispatch validates but never prints the resolved path, checks out the exact inference
+revision, builds the release adapter, runs the authoritative provider through the harness,
+schema-checks the raw bundle, and uploads it as a workflow artifact. The workflow
+cannot prove in advance that the private runner has the requested snapshot; an absent exact
+directory fails before model load. GitHub only accepts `workflow_dispatch` input schemas from a
+workflow that exists on the default branch, so the first calibration run is intentionally
+post-merge.
+
+It loads the real pinned `QwenVae`, deterministically encodes a 1024-square gradient fixture, runs
+untiled and requested tiled decode on the identical latent, and reports the actual MLX active/cache
+measurements plus maximum/mean error. The `256/32` case becomes `negative_complete` only when its
+measured error breaches the declared threshold. Positive records remain `gated` because the pinned
+Qwen VAE seam does not expose synchronized full-pipeline conditioning/denoise
+device/wired/reclaimable phase telemetry or all required lifecycle injections.
+
+The Candle adapter requires:
+
+```text
+SCENEWORKS_KREA_ROOT=/absolute/path/to/krea-2-turbo-q4-snapshot
+SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
+SCENEWORKS_KREA_REVISION=<resolved immutable artifact revision>
+```
+
+The adapter canonicalizes the root and requires the fixed
+`/models--SceneWorks--krea-2-turbo-mlx/snapshots/<exact-revision>/q4` suffix before loading.
+
+It first reads the actual `krea_2_turbo` image-memory contract from the pinned CUDA runtime catalog.
+A plan/provider calibration fingerprint or parameter mismatch returns a schema-valid
+`gated_before_execution` diagnostic without loading weights. A compatible tuple loads the real q4
+provider with sequential residency, opens its image-memory request scope, applies the exact requested
+decode/attention/window tuple, renders seed 42 through the public generator API, and samples the
+selected physical GPU through trusted-path `nvidia-smi` plus
+`candle_gen::testkit::VramProbe`. One loaded generator measures conditioning, denoise, decode, and
+overall device peaks; injects cancellation and error at each phase; verifies post-fault device
+growth against a fixed tolerance; and follows every fault with a successful warm request. It also
+runs Residentâ†’BoundedTransformerResidencyâ†’Resident, requires the resident repeat to be pixel exact,
+and reports the bounded output's maximum and mean pixel error without inventing a passing tolerance.
+The record remains `gated` until predicted phase curves, an approved bounded-output tolerance,
+exact-fit/stale/unknown worker selection, and a measured negative mutation execute.
+
+At the current SceneWorks pin (`d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20`), the authoritative plan
+matches the provider's `krea-turbo-cuda-phase-curves-v1` fingerprint and singleton production domain
+`512/128/134217728/window=1`. The unsupported `384/...` and `640/.../window=2` v2 experiments live in
+a separate `candidate` evidence scope. Candidate records can be measured or gated, but can never
+become current matrix evidence or impersonate the production v1 cell.
+
+The inference repository's raw real-weight tests remain useful mechanism checks:
+
+```text
+# Apple hardware, from the exact inference checkout
 cargo test -p mlx-gen-qwen-image --release \
   --test vae_tiling_real_weights -- --ignored --nocapture
 
-# CUDA hardware: use candle-gen::testkit::VramProbe and the Krea phase harness
+# CUDA hardware
 cargo test -p candle-gen-krea --release --features cuda \
   -- --ignored --nocapture
 ```

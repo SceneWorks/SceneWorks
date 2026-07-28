@@ -135,6 +135,7 @@ fn memory_for_selection(selection: ImageMemorySelection) -> GenerationMemory {
         chunk_attention: selection.strategy >= ImageMemoryStrategy::BoundedAttention,
         stream_transformer_blocks: selection.strategy
             >= ImageMemoryStrategy::BoundedTransformerResidency,
+        ..Default::default()
     }
 }
 

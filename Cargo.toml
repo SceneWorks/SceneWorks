@@ -5,6 +5,7 @@ members = [
     "apps/rust-api",
     "apps/rust-worker",
     "crates/sceneworks-core",
+    "crates/sceneworks-image-memory-adapter",
     "crates/sceneworks-image-quality",
     "crates/sceneworks-mcp",
     "crates/sceneworks-worker",
@@ -83,4 +84,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20" }

@@ -70,7 +70,7 @@
         "id": { "type": "string", "pattern": "^imc-[0-9a-f]{20}$" },
         "logicalCaseId": { "type": "string", "pattern": "^implan-[0-9a-f]{20}$" },
         "status": { "enum": ["complete", "gated", "negative_complete"] },
-        "evidenceScope": { "enum": ["authoritative", "fixture"] },
+        "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "backend": { "enum": ["mlx", "candle"] },
         "repositories": {
           "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
@@ -162,7 +162,7 @@
                 "properties": {
                   "parameter": { "type": "string", "minLength": 1 },
                   "testedValues": {
-                    "type": "array", "minItems": 2, "uniqueItems": true,
+                    "type": "array", "minItems": 1, "uniqueItems": true,
                     "items": { "type": "integer", "minimum": 0 }
                   }
                 }
@@ -170,7 +170,7 @@
             },
             "cases": {
               "type": "array",
-              "minItems": 2,
+              "minItems": 1,
               "uniqueItems": true,
               "items": {
                 "type": "object", "additionalProperties": false, "required": ["parameters", "result"],
@@ -231,6 +231,32 @@
             "resolvedPathFingerprint": { "type": ["string", "null"] }
           }
         },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "execution", "blockers", "measurements"],
+          "properties": {
+            "adapter": { "type": "string", "minLength": 1 },
+            "execution": { "enum": ["executed", "gated_before_execution"] },
+            "blockers": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "measurements": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "unit", "value"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "unit": { "type": "string", "minLength": 1 },
+                  "value": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "const": "sceneworks-image-memory-v2" }
@@ -255,7 +281,7 @@
               "sweep": {
                 "properties": {
                   "rangeVerified": { "const": true },
-                  "cases": { "minItems": 2 }
+                  "cases": { "minItems": 1 }
                 }
               },
               "scenarios": {
