@@ -145,11 +145,16 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(workflow, /if \[\[ -d "\$QWEN_HF_ROOT" \]\]; then/);
   assert.match(workflow, /elif \[\[ -d "\$QWEN_APP_ROOT" \]\]; then/);
   assert.doesNotMatch(workflow, /\bfind\b.*qwen|\bls\b.*qwen/i);
+  assert.match(workflow, /command -v python3\.12 >\/dev\/null/);
+  assert.match(workflow, /python3\.12 --version \| grep -E '\^Python 3\\\.12\\\.'/);
   assert.match(
     workflow,
-    /actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/,
+    /python3\.12 -m venv "\$RUNNER_TEMP\/qwen-provision-venv"/,
   );
-  assert.match(workflow, /python-version: "3\.12"/);
+  assert.match(
+    workflow,
+    /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
+  );
   assert.match(workflow, /huggingface_hub==0\.36\.0/);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
@@ -158,18 +163,25 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(workflow, /token=False/);
   assert.match(workflow, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
   assert.match(workflow, /HF_HUB_DISABLE_PROGRESS_BARS: "1"/);
+  assert.match(workflow, /repository_cache = os\.path\.join\(/);
+  assert.match(
+    workflow,
+    /huggingface_cache\s+if os\.path\.isdir\(repository_cache\)\s+else application_cache/,
+  );
+  assert.doesNotMatch(workflow, /raise SystemExit\(0\)/);
   assert.match(
     workflow,
     /"Library",\s+"Application Support",\s+"SceneWorks",\s+"data",\s+"cache",\s+"huggingface",\s+"hub"/,
   );
   const provisioning = workflow.slice(
-    workflow.indexOf("- name: Set up pinned Python for Qwen provisioning"),
+    workflow.indexOf("- name: Set up runner Python 3.12 for Qwen provisioning"),
     workflow.indexOf("- name: Resolve exact Qwen calibration snapshot"),
   );
   assert.doesNotMatch(
     provisioning,
     /secrets\.|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|QWEN_REPOSITORY|local_dir/,
   );
+  assert.doesNotMatch(provisioning, /actions\/setup-python/);
   assert.equal(
     provisioning.split('repo_id="SceneWorks/qwen-image-mlx"').length - 1,
     1,
@@ -188,6 +200,20 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(
     workflow,
     /cargo build --release --locked -p sceneworks-image-memory-adapter/,
+  );
+  const inferenceCheckout = workflow.slice(
+    workflow.indexOf("- name: Check out the exact inference calibration source"),
+    workflow.indexOf("- name: Build and run the authoritative MLX calibration adapter"),
+  );
+  assert.match(inferenceCheckout, /repository: SceneWorks\/inference/);
+  assert.match(inferenceCheckout, /ref: \$\{\{ inputs\.inference_revision \}\}/);
+  assert.match(
+    inferenceCheckout,
+    /token: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}/,
+  );
+  assert.match(
+    workflow,
+    /x-access-token:\$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}@github\.com\/SceneWorks\/inference\.insteadOf/,
   );
   assert.match(workflow, /--backend mlx/);
   assert.match(workflow, /--provider mlx-qwen-vae-decode/);
