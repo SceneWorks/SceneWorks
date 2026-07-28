@@ -69,6 +69,32 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   assert.match(script, /SCENEWORKS_UID/);
 });
 
+test("Rust Docker dependency layers include every image-memory adapter target", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  assert.equal(
+    (
+      dockerfile.match(
+        /COPY crates\/sceneworks-image-memory-adapter\/Cargo\.toml/g,
+      ) ?? []
+    ).length,
+    2,
+  );
+  for (const target of ["src/lib.rs", "src/bin/candle.rs", "src/bin/mlx.rs"]) {
+    assert.equal(
+      (
+        dockerfile.match(
+          new RegExp(
+            `crates/sceneworks-image-memory-adapter/${target.replace(".", "\\.")}`,
+            "g",
+          ),
+        ) ?? []
+      ).length,
+      2,
+      target,
+    );
+  }
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",
