@@ -487,17 +487,24 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // any missing manifests here so launching the API binary directly works too,
     // and fail loudly rather than serving an empty catalog if seeding can't finish.
     //
-    // Seed mode by config-dir origin (sc-10212): an EXPLICIT `SCENEWORKS_CONFIG_DIR`
-    // marks an operator-owned dir — a repo checkout or a Compose bind mount — that must
-    // stay authoritative, so keep `IfMissing` there (fill gaps, never clobber an edited
-    // copy or dirty a checked-out `config/`). When unset, `config_dir` is the platform
-    // default app-owned dir (the same one the desktop seeds `Overwrite`), so refresh it
-    // on launch — otherwise a directly-launched API binary keeps serving a STALE seeded
-    // catalog after an upgrade (the sc-10193 img2img flag stayed invisible because the
-    // months-old seed was never rewritten). Builtin manifests are app-managed; operator
+    // Seed mode by config-dir origin (sc-10212, sc-15504): an EXPLICIT `SCENEWORKS_CONFIG_DIR`
+    // marks an operator-owned dir — a repo checkout, a Compose bind mount, or a RunPod
+    // persistent volume — so seed `SyncFromEmbedded`: refresh each builtin manifest that
+    // is missing or has DRIFTED from the binary's embedded copy, while leaving a
+    // byte-identical file untouched so a matching checkout is never dirtied. That stops a
+    // directly-launched API binary from serving a STALE seeded catalog after an upgrade —
+    // the failure that hid the sc-10193 img2img flag and the Krea Turbo memory-ladder curves
+    // (a persisted `builtin.models.jsonc` without `turboFit` made a 24 GB card wrongly reject
+    // a q4/1024² render). A deployment that intentionally ships its OWN `builtin.*.jsonc` and
+    // wants it used verbatim opts out with a truthy `SCENEWORKS_OWN_MANIFESTS` (→ `IfMissing`:
+    // fill gaps only, never self-heal). When `SCENEWORKS_CONFIG_DIR` is unset, `config_dir`
+    // is the platform default app-owned dir (the same one the desktop seeds `Overwrite`), so
+    // refresh unconditionally on launch. Builtin manifests are app-managed; operator
     // customizations live in the separate `user.*.jsonc` files, which seeding never touches.
-    let seed_mode =
-        seed_mode_for_config_dir(std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref());
+    let seed_mode = seed_mode_for_config_dir(
+        std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref(),
+        std::env::var("SCENEWORKS_OWN_MANIFESTS").ok().as_deref(),
+    );
     {
         let _phase =
             StartupPhaseTimer::start("builtin_manifest_seed", StartupCriticality::BindCritical);

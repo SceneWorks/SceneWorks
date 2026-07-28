@@ -425,25 +425,51 @@ fn open_bind_override_enabled(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
-/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` value (sc-10212).
+/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` and
+/// `SCENEWORKS_OWN_MANIFESTS` env values (sc-10212, sc-15504).
 ///
-/// An explicit, non-empty override marks an operator-owned config dir — a repo checkout or a Compose
-/// bind mount — which must stay authoritative, so seed `IfMissing` (fill gaps, never clobber an edited
-/// copy or dirty a checked-out `config/`). Unset or blank means `config_dir` fell back to the
-/// platform-default app-owned dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there
-/// refreshes the builtin catalog on launch instead of serving a stale seed after an upgrade — the
-/// sc-10193 img2img flag was invisible on a directly-launched API because the months-old seed was
-/// never rewritten. Pure so the choice is unit-tested without touching process env or the filesystem.
+/// An explicit, non-empty `SCENEWORKS_CONFIG_DIR` marks an operator-owned config dir — a repo checkout
+/// or a Compose bind mount / RunPod persistent volume — so seed `SyncFromEmbedded`: refresh each builtin
+/// manifest when it is missing or has drifted from the binary's embedded copy, but leave a byte-identical
+/// file untouched so a matching checkout is never dirtied. The builtin manifests are app-owned (nothing
+/// edits them at runtime — customizations live in `user.*.jsonc`), so a persisted copy that no longer
+/// matches the running binary is normally stale and must be refreshed. The old always-`IfMissing`
+/// behavior — never rewriting an existing file — left an upgraded binary serving a months-old
+/// `builtin.models.jsonc` off a persisted volume: it hid the sc-10193 img2img flag once and the Krea
+/// Turbo memory-ladder curves again (the ladder was bypassed, so a 24 GB card wrongly rejected a
+/// q4/1024² render).
+///
+/// A deployment that intentionally SHIPS its own `builtin.*.jsonc` and wants it used verbatim (a
+/// customized bind mount, or the contract-snapshot test harness) opts out with a truthy
+/// `SCENEWORKS_OWN_MANIFESTS` — that forces `IfMissing`: fill only genuinely-missing manifests, never
+/// self-heal what the operator provided. The opt-out only applies with an explicit config dir; on the
+/// platform-default app-owned dir it is ignored.
+///
+/// Unset or blank `SCENEWORKS_CONFIG_DIR` means `config_dir` fell back to the platform-default app-owned
+/// dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there refreshes the builtin catalog
+/// unconditionally on launch. Pure so the choice is unit-tested without touching process env or the
+/// filesystem.
 ///
 /// The trim/non-empty rule mirrors [`env_path_or`] exactly, so the seed mode and the resolved
 /// `config_dir` always agree on whether the override was actually applied.
 fn seed_mode_for_config_dir(
     config_dir_env: Option<&str>,
+    own_manifests_env: Option<&str>,
 ) -> sceneworks_core::builtin_manifests::SeedMode {
     use sceneworks_core::builtin_manifests::SeedMode;
-    match config_dir_env.map(str::trim) {
-        Some(value) if !value.is_empty() => SeedMode::IfMissing,
-        _ => SeedMode::Overwrite,
+    let explicit_config_dir = config_dir_env
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !explicit_config_dir {
+        return SeedMode::Overwrite;
+    }
+    let own_manifests = own_manifests_env
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"));
+    if own_manifests {
+        SeedMode::IfMissing
+    } else {
+        SeedMode::SyncFromEmbedded
     }
 }
 
