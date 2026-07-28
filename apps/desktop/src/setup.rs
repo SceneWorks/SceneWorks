@@ -50,7 +50,25 @@ pub fn get_session_logs(
     })
 }
 
+/// How long to wait for the API process to answer at all. This is a *liveness*
+/// budget: a sidecar that never binds is broken, and 30 s is generous for that.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait, after the API has answered, for its readiness-critical
+/// startup to finish (sc-15591).
+///
+/// sc-14788 moved the TCP bind ahead of readiness-critical initialization, so
+/// "the port answers" and "the app can render" became different events. The work
+/// in between is proportional to library size — a jobs-DB retention pass, then an
+/// orphaned-asset sweep that opens every project's `project.db` and stats every
+/// asset row — so a large library on a slow disk legitimately needs minutes where
+/// `HEALTH_TIMEOUT` allows seconds. Gating on readiness under the liveness budget
+/// would just trade GH #1937's raw JSON for a spurious "did not start in time".
+const READINESS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How often the splash message is refreshed while readiness-critical startup
+/// runs, so a long pass reads as progress rather than a frozen window.
+const READINESS_NOTICE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Process handles + run guards shared across the app.
 #[derive(Default)]
@@ -641,15 +659,33 @@ fn parse_listening_port(line: &str) -> Option<u16> {
     None
 }
 
-/// Health check that also confirms the responder is genuinely the SceneWorks API
-/// (HTTP 200 with the expected service/runtime in the JSON body) before we
-/// navigate the privileged Tauri window to it — a foreign service that grabbed
-/// the port must not be trusted.
-fn health_is_sceneworks(port: u16) -> bool {
+/// What a health probe says about whatever is listening on the API port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthVerdict {
+    /// Nothing usable answered: a connect/read failure, a non-200 status, an
+    /// unparseable body, or a responder that isn't SceneWorks (a foreign service
+    /// that grabbed the port — never navigate the privileged window to that).
+    Unavailable,
+    /// Genuinely our API, but still running readiness-critical startup. Only the
+    /// bootstrap health/access surface exists; every other path — `/` included,
+    /// which is where the SPA lives — is answered by the pre-readiness fallback.
+    Starting,
+    /// Readiness-critical startup finished and the real application router is
+    /// installed. Only now is there an app to navigate to.
+    Ready,
+}
+
+/// Probe `/api/v1/health` and classify the responder.
+///
+/// Trust first: a 200 whose body carries the expected service/runtime is our API,
+/// and nothing else may receive the privileged window. Then readiness: since
+/// sc-14788 the API binds its port *before* readiness-critical startup, so a 200
+/// no longer implies there is an app to show (sc-15591, GH #1937).
+fn probe_health(port: u16) -> HealthVerdict {
     use std::io::Read;
     use std::net::TcpStream;
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
-        return false;
+        return HealthVerdict::Unavailable;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -657,17 +693,76 @@ fn health_is_sceneworks(port: u16) -> bool {
         "GET /api/v1/health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return HealthVerdict::Unavailable;
     }
     let mut response = String::new();
+    // A read timeout leaves a partial body behind; classification parses the body,
+    // so a truncated read lands on `Unavailable` and the caller simply polls again.
     let _ = stream.read_to_string(&mut response);
+    classify_health_response(&response)
+}
+
+/// Pure classification of a raw HTTP health response, split out so the gate's
+/// decision is testable without a socket.
+fn classify_health_response(response: &str) -> HealthVerdict {
     let ok_status = response
         .lines()
         .next()
         .is_some_and(|status_line| status_line.contains(" 200"));
-    ok_status
-        && response.contains("\"service\":\"sceneworks-api\"")
-        && response.contains("\"runtime\":\"rust\"")
+    if !ok_status {
+        return HealthVerdict::Unavailable;
+    }
+    // Body follows the header terminator. Tolerate a bare-LF terminator so a
+    // relay that rewrote line endings can't strand the window on the splash.
+    let Some(body) = response
+        .split_once("\r\n\r\n")
+        .or_else(|| response.split_once("\n\n"))
+        .map(|(_, body)| body)
+    else {
+        return HealthVerdict::Unavailable;
+    };
+    let Ok(health) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+        return HealthVerdict::Unavailable;
+    };
+    if health.get("service").and_then(serde_json::Value::as_str) != Some("sceneworks-api")
+        || health.get("runtime").and_then(serde_json::Value::as_str) != Some("rust")
+    {
+        return HealthVerdict::Unavailable;
+    }
+    if health_is_ready(&health) {
+        HealthVerdict::Ready
+    } else {
+        HealthVerdict::Starting
+    }
+}
+
+/// The bootstrap surface reports `status:"starting"` with
+/// `readiness.status:"initializing"`; the ready router reports `status:"ok"` with
+/// `readiness.status:"ready"`. Prefer the explicit readiness field, and fall back
+/// to the top-level status so an API that never grew (or later drops) the nested
+/// field is still judged correctly rather than wedging the window on the splash —
+/// only the ready router ever reports `ok`.
+fn health_is_ready(health: &serde_json::Value) -> bool {
+    match health
+        .get("readiness")
+        .and_then(|readiness| readiness.get("status"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(status) => status == "ready",
+        None => health.get("status").and_then(serde_json::Value::as_str) == Some("ok"),
+    }
+}
+
+/// Splash text while readiness-critical startup runs. The elapsed count only
+/// appears once the wait is long enough to look stuck, so a normal launch shows a
+/// plain message (or nothing at all — it is usually over within one poll).
+fn readiness_message(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < READINESS_NOTICE_INTERVAL.as_secs() {
+        "Preparing your library…".to_owned()
+    } else {
+        format!("Preparing your library… ({seconds}s)")
+    }
 }
 
 /// Resolve the ffmpeg binary the Rust worker shells out to (frame sampling,
@@ -1317,22 +1412,57 @@ fn handle_api_exit(app: &AppHandle) {
     );
 }
 
-/// Health-gate the window on a background thread: wait for the API's
-/// OS-assigned port, confirm the responder is genuinely SceneWorks, then
-/// navigate and start the platform inference worker(s) — the MLX GPU worker on
-/// macOS (MLX-only, sc-3492), the Python torch worker elsewhere; show an error
-/// after the timeout.
+/// Health-gate the window on a background thread: wait for the API's OS-assigned
+/// port, confirm the responder is genuinely SceneWorks, wait for its
+/// readiness-critical startup to finish, then navigate and start the platform
+/// inference worker(s) — the MLX GPU worker on macOS (MLX-only, sc-3492), the
+/// candle worker off-Mac; show an error after the timeout.
+///
+/// The readiness wait is the sc-15591 fix for GH #1937. sc-14788 moved the TCP
+/// bind ahead of readiness-critical startup, and this gate navigated on the first
+/// 200 — which the bootstrap surface answers within milliseconds of the bind,
+/// while `/` still resolves to the pre-readiness fallback. The window therefore
+/// rendered `{"code":"api_initializing"}` as text and stayed there, because
+/// nothing re-navigates a webview. Deterministic for anyone whose readiness pass
+/// outlasts one poll — i.e. anyone with a real library.
 fn gate_window(app: AppHandle) {
     std::thread::spawn(move || {
-        let deadline = Instant::now() + HEALTH_TIMEOUT;
+        let started = Instant::now();
+        let liveness_deadline = started + HEALTH_TIMEOUT;
+        let readiness_deadline = started + READINESS_TIMEOUT;
+        // Sticky: once the API has genuinely answered, we are no longer waiting on
+        // a process to come up, so the wait moves to the readiness budget.
+        let mut answered = false;
+        let mut next_notice = Instant::now();
         loop {
             let port = *app
                 .state::<Managed>()
                 .api_port
                 .lock()
                 .expect("api port lock");
+            if answered && port.is_none() {
+                // `handle_api_exit` cleared the port: the sidecar died and has
+                // already put its recoverable error screen up, and its Retry runs a
+                // fresh `gate_window`. Leave now rather than lingering for the rest
+                // of the readiness budget and then clobbering that UI — or a
+                // successful retry's — with a stale timeout error.
+                return;
+            }
             if let Some(port) = port {
-                if health_is_sceneworks(port) {
+                let verdict = probe_health(port);
+                if verdict != HealthVerdict::Unavailable {
+                    answered = true;
+                }
+                if verdict == HealthVerdict::Starting && Instant::now() >= next_notice {
+                    next_notice = Instant::now() + READINESS_NOTICE_INTERVAL;
+                    emit(
+                        &app,
+                        "starting",
+                        readiness_message(started.elapsed()),
+                        false,
+                    );
+                }
+                if verdict == HealthVerdict::Ready {
                     if let Ok(url) = format!("http://127.0.0.1:{port}").parse() {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.navigate(url);
@@ -1392,8 +1522,25 @@ fn gate_window(app: AppHandle) {
                     return;
                 }
             }
+            let deadline = if answered {
+                readiness_deadline
+            } else {
+                liveness_deadline
+            };
             if Instant::now() >= deadline {
-                emit(&app, "error", "The local API did not start in time.", true);
+                let message = if answered {
+                    // The API is alive and still initializing. Retry can't help
+                    // here (`run_startup` spawns the API once), so point at the
+                    // action that can.
+                    format!(
+                        "The local API is still preparing your library after {} minutes. Restart \
+                         SceneWorks, and check the API log if it happens again.",
+                        READINESS_TIMEOUT.as_secs() / 60
+                    )
+                } else {
+                    "The local API did not start in time.".to_owned()
+                };
+                emit(&app, "error", message, true);
                 return;
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -3625,6 +3772,146 @@ mod bind_tests {
                 r#"{"event":"utility_worker_inprocess","apiUrl":"http://127.0.0.1:60294"}"#
             ),
             None
+        );
+    }
+}
+
+/// sc-15591 (GH #1937): what the window gate is allowed to navigate to.
+///
+/// sc-14788 moved the API's TCP bind ahead of its readiness-critical startup, so
+/// a 200 from `/api/v1/health` stopped meaning "there is an app at `/`". The gate
+/// still navigated on the first 200, landing the window on the bootstrap
+/// fallback's `{"code":"api_initializing"}` — permanently, since nothing
+/// re-navigates a webview. These tests pin the classification as pure logic, with
+/// no socket and no thread.
+#[cfg(test)]
+mod health_gate_tests {
+    use super::{
+        classify_health_response, readiness_message, HealthVerdict, READINESS_NOTICE_INTERVAL,
+    };
+    use std::time::Duration;
+
+    /// Verbatim shape of the pre-readiness bootstrap body (`bootstrap_dispatch`).
+    const BOOTSTRAP_HEALTH: &str = concat!(
+        r#"{"status":"starting","service":"sceneworks-api","runtime":"rust","version":"0.8.1","#,
+        r#""authRequired":false,"interruptedJobsOnStartup":0,"#,
+        r#""readiness":{"status":"initializing","criticality":"readiness-critical"},"#,
+        r#""startupMaintenance":{"phase":"stale_upload_sweeps","criticality":"background-safe","#,
+        r#""status":"pending","removedUploads":0,"failureCount":0}}"#,
+    );
+
+    /// …and of the ready router's (`health`).
+    const READY_HEALTH: &str = concat!(
+        r#"{"status":"ok","service":"sceneworks-api","runtime":"rust","version":"0.8.1","#,
+        r#""authRequired":false,"interruptedJobsOnStartup":0,"#,
+        r#""readiness":{"status":"ready","criticality":"readiness-critical"},"#,
+        r#""startupMaintenance":{"phase":"stale_upload_sweeps","criticality":"background-safe","#,
+        r#""status":"complete","removedUploads":0,"failureCount":0}}"#,
+    );
+
+    fn response(body: &str) -> String {
+        format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{body}")
+    }
+
+    /// The discriminating test. Both bodies pass the old gate's whole check —
+    /// 200 + `sceneworks-api` + `rust` — so the old code navigated on the
+    /// bootstrap one and produced GH #1937. Only `Ready` may navigate.
+    #[test]
+    fn bootstrap_health_is_starting_and_only_ready_health_is_ready() {
+        assert_eq!(
+            classify_health_response(&response(BOOTSTRAP_HEALTH)),
+            HealthVerdict::Starting,
+            "an API that is still initializing must hold the window on the splash"
+        );
+        assert_eq!(
+            classify_health_response(&response(READY_HEALTH)),
+            HealthVerdict::Ready
+        );
+    }
+
+    /// Trust is unchanged by the readiness split: a foreign service that grabbed
+    /// the port, a non-200, and an unreadable body all stay `Unavailable`, so the
+    /// privileged window is never navigated to them.
+    #[test]
+    fn only_a_genuine_sceneworks_api_is_trusted() {
+        for (label, raw) in [
+            (
+                "a foreign service on our port",
+                response(r#"{"status":"ok","service":"some-other-app","runtime":"rust"}"#),
+            ),
+            (
+                "our fields but a foreign runtime",
+                response(r#"{"status":"ok","service":"sceneworks-api","runtime":"python"}"#),
+            ),
+            (
+                "a non-200 status",
+                format!("HTTP/1.1 503 Service Unavailable\r\n\r\n{BOOTSTRAP_HEALTH}"),
+            ),
+            (
+                "a body that isn't JSON",
+                response("<html>gateway error</html>"),
+            ),
+            (
+                // A read timeout leaves a partial body behind.
+                "a truncated read",
+                response(&BOOTSTRAP_HEALTH[..40]),
+            ),
+            ("no response at all", String::new()),
+        ] {
+            assert_eq!(
+                classify_health_response(&raw),
+                HealthVerdict::Unavailable,
+                "{label} must not be trusted with the window"
+            );
+        }
+    }
+
+    /// The nested `readiness` field is authoritative when present, but a body
+    /// without one is judged by the top-level `status` — only the ready router
+    /// ever reports `ok`. Without this fallback, dropping the field later would
+    /// wedge every launch on the splash until the readiness timeout fired.
+    #[test]
+    fn readiness_falls_back_to_the_top_level_status() {
+        assert_eq!(
+            classify_health_response(&response(
+                r#"{"status":"ok","service":"sceneworks-api","runtime":"rust"}"#
+            )),
+            HealthVerdict::Ready
+        );
+        assert_eq!(
+            classify_health_response(&response(
+                r#"{"status":"starting","service":"sceneworks-api","runtime":"rust"}"#
+            )),
+            HealthVerdict::Starting
+        );
+    }
+
+    /// Header parsing must not be the thing that strands the window: a bare-LF
+    /// terminator classifies exactly like the CRLF form.
+    #[test]
+    fn bare_lf_header_terminator_still_classifies() {
+        assert_eq!(
+            classify_health_response(&format!("HTTP/1.1 200 OK\n\n{READY_HEALTH}")),
+            HealthVerdict::Ready
+        );
+    }
+
+    /// The splash stays quiet for a normal launch and only starts counting once
+    /// the wait is long enough that a static message would read as a hang.
+    #[test]
+    fn readiness_message_shows_elapsed_only_once_the_wait_looks_stuck() {
+        assert_eq!(readiness_message(Duration::ZERO), "Preparing your library…");
+        assert_eq!(
+            readiness_message(READINESS_NOTICE_INTERVAL - Duration::from_secs(1)),
+            "Preparing your library…"
+        );
+        assert_eq!(
+            readiness_message(READINESS_NOTICE_INTERVAL),
+            "Preparing your library… (15s)"
+        );
+        assert_eq!(
+            readiness_message(Duration::from_secs(90)),
+            "Preparing your library… (90s)"
         );
     }
 }
