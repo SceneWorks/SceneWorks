@@ -43,6 +43,67 @@ fn integer(value: &str, label: &str) -> Result<u64, String> {
         .map_err(|error| format!("parse {label}={value:?}: {error}"))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct WiredLimit {
+    bytes: u64,
+    source: &'static str,
+}
+
+fn positive_integer(value: Option<&str>, label: &str) -> Result<Option<u64>, String> {
+    value
+        .map(|value| integer(value, label))
+        .transpose()
+        .map(|value| value.filter(|value| *value > 0))
+}
+
+fn resolve_wired_limit(
+    override_bytes: Option<&str>,
+    iogpu_limit_mb: Option<&str>,
+    kernel_limit_bytes: Option<&str>,
+    mlx_default_memory_limit: usize,
+) -> Result<WiredLimit, String> {
+    if let Some(bytes) = positive_integer(override_bytes, "SCENEWORKS_MLX_WIRED_LIMIT_BYTES")? {
+        return Ok(WiredLimit {
+            bytes,
+            source: "SCENEWORKS_MLX_WIRED_LIMIT_BYTES",
+        });
+    }
+    if let Some(megabytes) = positive_integer(iogpu_limit_mb, "iogpu.wired_limit_mb")? {
+        let bytes = megabytes
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "iogpu.wired_limit_mb overflows bytes".to_owned())?;
+        return Ok(WiredLimit {
+            bytes,
+            source: "iogpu.wired_limit_mb",
+        });
+    }
+    if let Some(bytes) = positive_integer(kernel_limit_bytes, "kern.memorystatus_wired_mem_limit")?
+    {
+        return Ok(WiredLimit {
+            bytes,
+            source: "kern.memorystatus_wired_mem_limit",
+        });
+    }
+
+    // MLX documents its untouched default memory limit as 1.5x the device's
+    // recommendedMaxWorkingSetSize. This is the same real-hardware-validated derivation used by
+    // the worker when the host has no explicit wired policy (sc-12178).
+    let bytes = u64::try_from(mlx_default_memory_limit)
+        .map_err(|_| "MLX default memory limit does not fit u64".to_owned())?
+        / 3
+        * 2;
+    if bytes == 0 {
+        return Err(
+            "cannot resolve a nonzero wired ceiling from host policy or the MLX default memory limit"
+                .to_owned(),
+        );
+    }
+    Ok(WiredLimit {
+        bytes,
+        source: "mlx_default_memory_limit/1.5",
+    })
+}
+
 fn metal_device() -> Result<String, String> {
     let raw = command(
         "/usr/sbin/system_profiler",
@@ -67,37 +128,101 @@ fn metal_device() -> Result<String, String> {
 
 fn probe() -> Result<Value, String> {
     let memory_bytes = integer(&sysctl("hw.memsize")?, "hw.memsize")?;
-    let mlx_memory_limit = get_memory_limit() as u64;
-    let wired_limit = std::env::var("SCENEWORKS_MLX_WIRED_LIMIT_BYTES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .or_else(|| {
-            sysctl("kern.memorystatus_wired_mem_limit")
-                .ok()
-                .and_then(|value| value.parse().ok())
-        })
-        // MLX's untouched default memory limit is 1.5x Metal's
-        // recommendedMaxWorkingSetSize. This is the same current-host policy
-        // derivation used by the production worker before it mutates the MLX
-        // limit. Divide before multiplying so rounding stays below the ceiling.
-        .or_else(|| Some(mlx_memory_limit / 3 * 2))
-        .filter(|value: &u64| *value > 0)
-        .ok_or_else(|| {
-            "cannot resolve a nonzero wired ceiling from the host sysctl or MLX default memory limit; set SCENEWORKS_MLX_WIRED_LIMIT_BYTES from the current host policy"
-                .to_owned()
-        })?;
+    let override_bytes = std::env::var("SCENEWORKS_MLX_WIRED_LIMIT_BYTES").ok();
+    let iogpu_limit_mb = sysctl("iogpu.wired_limit_mb").ok();
+    let kernel_limit_bytes = sysctl("kern.memorystatus_wired_mem_limit").ok();
+    let wired_limit = resolve_wired_limit(
+        override_bytes.as_deref(),
+        iogpu_limit_mb.as_deref(),
+        kernel_limit_bytes.as_deref(),
+        get_memory_limit(),
+    )?;
     Ok(json!({
         "hardware": {
-            "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit",
+            "probe": format!(
+                "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired={}",
+                wired_limit.source
+            ),
             "memoryBytes": memory_bytes,
             "model": sysctl("hw.model")?,
             "chip": sysctl("machdep.cpu.brand_string")?,
             "osVersion": command("/usr/bin/sw_vers", &["-productVersion"])?,
             "metalDevice": metal_device()?,
-            "mlxMemoryLimitBytes": mlx_memory_limit,
-            "wiredLimitBytes": wired_limit,
+            "mlxMemoryLimitBytes": get_memory_limit(),
+            "wiredLimitBytes": wired_limit.bytes,
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wired_limit_prefers_explicit_bytes() {
+        assert_eq!(
+            resolve_wired_limit(Some("123"), Some("456"), Some("789"), 999).unwrap(),
+            WiredLimit {
+                bytes: 123,
+                source: "SCENEWORKS_MLX_WIRED_LIMIT_BYTES",
+            }
+        );
+    }
+
+    #[test]
+    fn wired_limit_converts_iogpu_megabytes() {
+        assert_eq!(
+            resolve_wired_limit(None, Some("57344"), Some("789"), 999).unwrap(),
+            WiredLimit {
+                bytes: 57344 * 1024 * 1024,
+                source: "iogpu.wired_limit_mb",
+            }
+        );
+    }
+
+    #[test]
+    fn wired_limit_rejects_iogpu_byte_overflow() {
+        let megabytes = u64::MAX.to_string();
+        assert!(resolve_wired_limit(None, Some(&megabytes), None, 1_000)
+            .unwrap_err()
+            .contains("iogpu.wired_limit_mb overflows bytes"));
+    }
+
+    #[test]
+    fn wired_limit_uses_kernel_bytes_when_iogpu_is_unset() {
+        assert_eq!(
+            resolve_wired_limit(None, Some("0"), Some("789"), 999).unwrap(),
+            WiredLimit {
+                bytes: 789,
+                source: "kern.memorystatus_wired_mem_limit",
+            }
+        );
+    }
+
+    #[test]
+    fn wired_limit_derives_default_mlx_ceiling_without_host_override() {
+        assert_eq!(
+            resolve_wired_limit(None, Some("0"), None, 1_000).unwrap(),
+            WiredLimit {
+                bytes: 666,
+                source: "mlx_default_memory_limit/1.5",
+            }
+        );
+    }
+
+    #[test]
+    fn wired_limit_rejects_invalid_explicit_override() {
+        assert!(resolve_wired_limit(Some("not-a-number"), None, None, 1_000)
+            .unwrap_err()
+            .contains("SCENEWORKS_MLX_WIRED_LIMIT_BYTES"));
+    }
+
+    #[test]
+    fn wired_limit_rejects_zero_everywhere() {
+        assert!(resolve_wired_limit(None, Some("0"), Some("0"), 0)
+            .unwrap_err()
+            .contains("cannot resolve a nonzero wired ceiling"));
+    }
 }
 
 fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, String> {
