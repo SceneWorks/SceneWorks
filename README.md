@@ -12,7 +12,17 @@ shared-GPU, or RunPod deployments (see
 [Server deployment](#server-deployment-docker)), but the primary target is a
 single-installer desktop app.
 
-![SceneWorks](screenshot.png)
+<p align="center">
+  <img src="screenshot-desktop-advanced.png" alt="SceneWorks Advanced workspace on the desktop app" width="760">
+</p>
+
+<p align="center">
+  <img src="screenshot-desktop-simple.png" alt="SceneWorks Simple shell on the desktop app" height="330">
+  &nbsp;&nbsp;
+  <img src="screenshot-phone-simple.png" alt="SceneWorks Simple shell at phone width" height="330">
+</p>
+
+<p align="center"><em>The Advanced workspace (top), and the Simple shell on desktop and at phone width.</em></p>
 
 ## Two ways to run it
 
