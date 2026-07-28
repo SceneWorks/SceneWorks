@@ -217,6 +217,15 @@ pub enum SeedMode {
     /// Operator customizations belong in `user.*.jsonc`, which this never writes.
     /// (sc-10212; see `seed_mode_for_config_dir` in rust-api.)
     SyncFromEmbedded,
+    /// Fill only genuinely-missing manifests; never touch a file that already exists.
+    /// This is the OPT-IN escape hatch for a fully operator-provisioned config dir — a
+    /// deployment that intentionally ships its OWN `builtin.*.jsonc` (e.g. a Compose bind
+    /// mount of a customized catalog, or the contract-snapshot test harness) and wants it
+    /// used verbatim. Unlike [`SyncFromEmbedded`] it does NOT self-heal drift: the operator
+    /// owns these files and is responsible for keeping them current, so a stale copy is
+    /// preserved rather than refreshed. Never selected by default — the API reaches it only
+    /// when the operator sets the explicit opt-in env (see `seed_mode_for_config_dir`).
+    IfMissing,
 }
 
 /// Whether the seed must (re)write `target` for this `embedded` copy under `mode`.
@@ -224,12 +233,14 @@ pub enum SeedMode {
 /// `Overwrite` always writes. `SyncFromEmbedded` writes only when the on-disk copy is
 /// absent or has drifted from the embedded bytes, so an up-to-date file (a matching repo
 /// checkout, or an already-current seed) is left untouched while a stale seed left by an
-/// older binary is refreshed in place. An unreadable file counts as drifted → rewrite.
+/// older binary is refreshed in place; an unreadable file counts as drifted → rewrite.
+/// `IfMissing` writes only when the file is absent, preserving any operator-provided copy.
 /// Pure so the decision is unit-tested without touching the filesystem.
 fn manifest_needs_write(existing: Option<&[u8]>, embedded: &[u8], mode: SeedMode) -> bool {
     match mode {
         SeedMode::Overwrite => true,
         SeedMode::SyncFromEmbedded => existing != Some(embedded),
+        SeedMode::IfMissing => existing.is_none(),
     }
 }
 
@@ -920,6 +931,46 @@ mod tests {
             embedded,
             SeedMode::SyncFromEmbedded
         ));
+        // IfMissing: fill only a genuinely-absent file; preserve any provided copy (even if it
+        // drifts from the embedded bytes — the operator owns it).
+        assert!(manifest_needs_write(None, embedded, SeedMode::IfMissing));
+        assert!(!manifest_needs_write(
+            Some(b"operator-provided"),
+            embedded,
+            SeedMode::IfMissing
+        ));
+        assert!(!manifest_needs_write(
+            Some(embedded),
+            embedded,
+            SeedMode::IfMissing
+        ));
+    }
+
+    #[test]
+    fn if_missing_preserves_a_provided_manifest_and_fills_only_the_gaps() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = temp.path().join("manifests");
+        std::fs::create_dir_all(&dir).expect("create manifests dir");
+        // A fully operator-provisioned config dir intentionally ships its OWN builtin.models.jsonc
+        // (the sc-15504 opt-out via SCENEWORKS_OWN_MANIFESTS; also how the contract-snapshot harness
+        // injects a synthetic catalog). IfMissing must use it verbatim, drift from the embedded copy
+        // and all.
+        let provided = dir.join("builtin.models.jsonc");
+        let provided_body = "{ \"models\": [ { \"id\": \"operator-model\" } ] }";
+        std::fs::write(&provided, provided_body).expect("seed provided");
+
+        seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&provided).expect("read provided"),
+            provided_body,
+            "IfMissing never overwrites an operator-provided manifest"
+        );
+        // ...while genuinely-missing manifests are still filled from the embedded copy.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("builtin.styles.jsonc")).expect("styles written"),
+            embedded("builtin.styles.jsonc")
+        );
     }
 
     #[test]

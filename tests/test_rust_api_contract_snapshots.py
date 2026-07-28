@@ -195,6 +195,11 @@ class ServerApiHarness:
                 "SCENEWORKS_API_PORT": "0",
                 "SCENEWORKS_DATA_DIR": str(root / "data"),
                 "SCENEWORKS_CONFIG_DIR": str(root / "config"),
+                # sc-15504: this harness ships its OWN builtin.*.jsonc fixtures (a synthetic catalog
+                # whose ids and comments are the contract under test). Opt out of the default
+                # SyncFromEmbedded self-heal so the seed preserves them verbatim (IfMissing) instead of
+                # overwriting them with the binary's embedded manifest.
+                "SCENEWORKS_OWN_MANIFESTS": "1",
                 "SCENEWORKS_JOBS_DB_PATH": str(root / "data" / "cache" / "jobs.db"),
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
