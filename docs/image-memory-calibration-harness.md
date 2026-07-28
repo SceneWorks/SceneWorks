@@ -124,11 +124,14 @@ The MLX adapter requires:
 
 ```text
 SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-snapshot
-SCENEWORKS_QWEN_IMAGE_REPOSITORY=Qwen/Qwen-Image
+SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
 SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
 # Only when the host sysctl does not expose a nonzero current wired ceiling:
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<current host wired ceiling>
 ```
+
+The adapter canonicalizes the root and requires the fixed
+`/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16` suffix before loading.
 
 After this workflow change is present on the repository default branch, the self-hosted macOS ARM64
 NAX runner can execute the same adapter through a guarded manual dispatch:
@@ -165,9 +168,12 @@ The Candle adapter requires:
 
 ```text
 SCENEWORKS_KREA_ROOT=/absolute/path/to/krea-2-turbo-q4-snapshot
-SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-candle
+SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<resolved immutable artifact revision>
 ```
+
+The adapter canonicalizes the root and requires the fixed
+`/models--SceneWorks--krea-2-turbo-mlx/snapshots/<exact-revision>/q4` suffix before loading.
 
 It first reads the actual `krea_2_turbo` image-memory contract from the pinned CUDA runtime catalog.
 A plan/provider calibration fingerprint or parameter mismatch returns a schema-valid

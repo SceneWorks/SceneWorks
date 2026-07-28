@@ -204,20 +204,30 @@ fn run(request: &Value) -> Result<Value, String> {
     let overlap_i32 = i32::try_from(overlap)
         .map_err(|_| format!("decodeOverlap={overlap} exceeds the MLX tiling API range"))?;
     let (width, height) = protocol::target_geometry(request)?;
+    let repository = protocol::required_env("SCENEWORKS_QWEN_IMAGE_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_QWEN_IMAGE_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::QWEN_REPOSITORY)?;
     let root = PathBuf::from(protocol::required_env("SCENEWORKS_QWEN_IMAGE_ROOT")?);
     if !root.is_dir() {
-        return Err(format!(
-            "SCENEWORKS_QWEN_IMAGE_ROOT is not a directory: {}",
-            root.display()
-        ));
+        return Err("SCENEWORKS_QWEN_IMAGE_ROOT is not a directory".to_owned());
     }
-    let artifact = protocol::artifact(
-        "SCENEWORKS_QWEN_IMAGE_REPOSITORY",
-        "SCENEWORKS_QWEN_IMAGE_REVISION",
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
         "bf16",
+        protocol::QWEN_REPOSITORY,
     )?;
+    let loadability_fingerprint = format!("{repository}@{revision}:bf16");
+    let artifact = json!({
+        "repository": &repository,
+        "resolvedRevision": &revision,
+        "variant": "bf16",
+    });
     let vae = load_vae(&root)
-        .map_err(|error| format!("load Qwen VAE from {}: {error}", root.display()))?;
+        .map_err(|error| format!("load Qwen VAE from validated snapshot: {error}"))?;
     let latent = encoded_latent(&vae, width, height)?;
 
     clear_cache();
@@ -284,11 +294,7 @@ fn run(request: &Value) -> Result<Value, String> {
             }),
             json!({
                 "result": "passed",
-                "resolvedPathFingerprint": format!(
-                    "{}@{}:bf16",
-                    protocol::required_env("SCENEWORKS_QWEN_IMAGE_REPOSITORY")?,
-                    protocol::required_env("SCENEWORKS_QWEN_IMAGE_REVISION")?
-                )
+                "resolvedPathFingerprint": loadability_fingerprint,
             }),
             protocol::diagnostics(
                 "image-memory-mlx-adapter",
@@ -327,11 +333,7 @@ fn run(request: &Value) -> Result<Value, String> {
         Value::Null,
         json!({
             "result": "passed",
-            "resolvedPathFingerprint": format!(
-                "{}@{}:bf16",
-                protocol::required_env("SCENEWORKS_QWEN_IMAGE_REPOSITORY")?,
-                protocol::required_env("SCENEWORKS_QWEN_IMAGE_REVISION")?
-            )
+            "resolvedPathFingerprint": loadability_fingerprint,
         }),
         protocol::diagnostics(
             "image-memory-mlx-adapter",

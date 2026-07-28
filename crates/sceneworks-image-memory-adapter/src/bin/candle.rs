@@ -204,20 +204,16 @@ fn sweep(request: &Value, parameters: &Map<String, Value>, result: &str) -> Resu
     }))
 }
 
-fn artifact() -> Result<Value, String> {
-    protocol::artifact(
-        "SCENEWORKS_KREA_REPOSITORY",
-        "SCENEWORKS_KREA_REVISION",
-        "q4",
-    )
+fn artifact(repository: &str, revision: &str) -> Value {
+    json!({
+        "repository": repository,
+        "resolvedRevision": revision,
+        "variant": "q4",
+    })
 }
 
-fn loadability_fingerprint() -> Result<String, String> {
-    Ok(format!(
-        "{}@{}:q4",
-        protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?,
-        protocol::required_env("SCENEWORKS_KREA_REVISION")?
-    ))
+fn loadability_fingerprint(repository: &str, revision: &str) -> String {
+    format!("{repository}@{revision}:q4")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,9 +465,11 @@ fn preflight_fragment(
     request: &Value,
     blocker: String,
     measurement_name: &'static str,
+    repository: &str,
+    revision: &str,
 ) -> Result<Value, String> {
     Ok(protocol::gated_fragment(
-        artifact()?,
+        artifact(repository, revision),
         sweep(request, protocol::strategy_parameters(request)?, "failed")?,
         &blocker,
         json!({ "result": "not_run" }),
@@ -498,9 +496,26 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let parameters = protocol::strategy_parameters(request)?;
+    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
     let root = std::env::var("SCENEWORKS_KREA_ROOT")
         .map(PathBuf::from)
         .unwrap_or_default();
+    let root = if root.is_dir() {
+        let canonical = std::fs::canonicalize(root)
+            .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+        protocol::validate_huggingface_snapshot_root(
+            &canonical,
+            &repository,
+            &revision,
+            "q4",
+            protocol::KREA_REPOSITORY,
+        )?;
+        canonical
+    } else {
+        root
+    };
     let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
         .with_quant(Quant::Q4)
         .with_offload_policy(OffloadPolicy::Sequential);
@@ -535,6 +550,8 @@ fn run(request: &Value) -> Result<Value, String> {
                 protocol::INFERENCE_PIN
             ),
             "contractFingerprintMismatch",
+            &repository,
+            &revision,
         );
     }
 
@@ -561,16 +578,17 @@ fn run(request: &Value) -> Result<Value, String> {
             request,
             format!("pinned provider rejected planned parameters before load: {reason}"),
             "contractParameterRejection",
+            &repository,
+            &revision,
         );
     }
     if !root.is_dir() {
         return preflight_fragment(
             request,
-            format!(
-                "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the q4 snapshot (current value is {})",
-                root.display()
-            ),
+            "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the validated q4 snapshot".to_owned(),
             "missingWeights",
+            &repository,
+            &revision,
         );
     }
 
@@ -824,14 +842,14 @@ fn run(request: &Value) -> Result<Value, String> {
         "a measured negative mutation"
     );
     let mut fragment = protocol::gated_fragment(
-        artifact()?,
+        artifact(&repository, &revision),
         sweep(request, parameters, "passed")?,
         blocker,
         json!({ "result": "not_run" }),
         Value::Null,
         json!({
             "result": "passed",
-            "resolvedPathFingerprint": loadability_fingerprint()?,
+            "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
         }),
         protocol::diagnostics(
             "image-memory-candle-adapter",

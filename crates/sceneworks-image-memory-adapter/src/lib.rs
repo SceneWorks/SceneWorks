@@ -6,9 +6,12 @@
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const INFERENCE_PIN: &str = "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20";
+pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
+pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 
 pub fn request_from_stdin() -> Result<Value, String> {
     let mut input = String::new();
@@ -80,12 +83,51 @@ pub fn required_env(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("required environment variable {name} is not set"))
 }
 
-pub fn artifact(repository_env: &str, revision_env: &str, variant: &str) -> Result<Value, String> {
-    Ok(json!({
-        "repository": required_env(repository_env)?,
-        "resolvedRevision": required_env(revision_env)?,
-        "variant": variant,
-    }))
+pub fn validate_artifact_identity(
+    repository: &str,
+    revision: &str,
+    expected_repository: &str,
+) -> Result<(), String> {
+    if repository != expected_repository {
+        return Err(format!(
+            "artifact repository must be the fixed {expected_repository} calibration artifact"
+        ));
+    }
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("artifact revision must be an exact lowercase 40-hex commit".to_owned());
+    }
+    Ok(())
+}
+
+pub fn validate_huggingface_snapshot_root(
+    canonical_root: &Path,
+    repository: &str,
+    revision: &str,
+    variant: &str,
+    expected_repository: &str,
+) -> Result<(), String> {
+    validate_artifact_identity(repository, revision, expected_repository)?;
+    let repository_component = format!("models--{}", expected_repository.replace('/', "--"));
+    let expected = [
+        repository_component.as_str(),
+        "snapshots",
+        revision,
+        variant,
+    ];
+    let components = canonical_root
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if !components.ends_with(&expected) {
+        return Err(format!(
+            "artifact root must end with /{repository_component}/snapshots/{revision}/{variant}"
+        ));
+    }
+    Ok(())
 }
 
 pub fn not_run_scenarios(blocker: &str) -> Value {
@@ -202,5 +244,113 @@ mod tests {
         });
         assert_eq!(parameter(&request, "decodeTileEdge").unwrap(), 512);
         assert!(parameter(&request, "decodeOverlap").is_err());
+    }
+
+    #[test]
+    fn qwen_identity_rejects_wrong_repository_revision_and_root() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let root = Path::new(
+            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/bf16",
+        );
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            QWEN_REPOSITORY,
+            revision,
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_ok());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            "Qwen/Qwen-Image",
+            revision,
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            QWEN_REPOSITORY,
+            "0123456789ABCDEF0123456789abcdef01234567",
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            QWEN_REPOSITORY,
+            "0123456789abcdef",
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            Path::new(
+                "/cache/models--SceneWorks--qwen-image-mlx/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bf16",
+            ),
+            QWEN_REPOSITORY,
+            revision,
+            "bf16",
+            QWEN_REPOSITORY
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn krea_identity_rejects_wrong_repository_revision_and_root() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let root = Path::new(
+            "/cache/models--SceneWorks--krea-2-turbo-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/q4",
+        );
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            KREA_REPOSITORY,
+            revision,
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_ok());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            "SceneWorks/krea-2-turbo-candle",
+            revision,
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            KREA_REPOSITORY,
+            "0123456789abcdef0123456789abcdef0123456g",
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            KREA_REPOSITORY,
+            "0123456789ABCDEF0123456789abcdef01234567",
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            KREA_REPOSITORY,
+            "0123456789abcdef",
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            Path::new(
+                "/cache/models--SceneWorks--krea-2-turbo-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/bf16",
+            ),
+            KREA_REPOSITORY,
+            revision,
+            "q4",
+            KREA_REPOSITORY
+        )
+        .is_err());
     }
 }
