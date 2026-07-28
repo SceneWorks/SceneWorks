@@ -38,6 +38,10 @@ export function useCharacterAdvancedOptions(
   model,
   { defaultNegativePrompt = "", identityStructureMode = "single", catalog = [] } = {},
 ) {
+  // Character generation is an image lane. Its catalog axes are opt-out so
+  // legacy entries with no `image` block retain both controls.
+  const supportsGuidance = model?.image?.supportsGuidance !== false;
+  const supportsNegativePrompt = model?.image?.supportsNegativePrompt !== false;
   const ui = model?.ui ?? {};
   const referenceStrengthDefault =
     typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.8;
@@ -68,7 +72,9 @@ export function useCharacterAdvancedOptions(
   const [scheduler, setScheduler] = React.useState(schedulerDefaultFromModel(model));
   const [schedulerShift, setSchedulerShift] = React.useState(schedulerShiftDefaultFromModel(model));
   const [seed, setSeed] = React.useState("");
-  const [negativePrompt, setNegativePrompt] = React.useState(defaultNegativePrompt);
+  const [negativePrompt, setNegativePrompt] = React.useState(
+    supportsNegativePrompt ? defaultNegativePrompt : "",
+  );
   // PiD decoder toggle (epic 7840, sc-8372): off = the model's native VAE decode; on emits
   // `advanced.usePid: true`, routing Angles/Poses decode through the optional PiD pixel-diffusion
   // decoder (2K/4K super-resolve). Mirrors the Image Studio toggle. The toggle only renders + emits
@@ -97,15 +103,17 @@ export function useCharacterAdvancedOptions(
   // Re-seed the editable negative prompt with the curated baseline when it changes
   // (e.g. switching character/panel). The user edits from that starting point.
   React.useEffect(() => {
-    setNegativePrompt(defaultNegativePrompt);
-  }, [defaultNegativePrompt]);
+    if (supportsNegativePrompt) {
+      setNegativePrompt(defaultNegativePrompt);
+    }
+  }, [defaultNegativePrompt, supportsNegativePrompt]);
 
   function buildAdvanced(base = {}) {
     const advanced = { ...base, ipAdapterScale };
     if (identityStructure) {
       advanced.controlnetConditioningScale = controlnetScale;
     }
-    if (guidance !== "" && Number.isFinite(Number(guidance))) {
+    if (supportsGuidance && guidance !== "" && Number.isFinite(Number(guidance))) {
       advanced.guidanceScale = Number(guidance);
     }
     if (steps !== "" && Number.isFinite(Number(steps))) {
@@ -160,6 +168,8 @@ export function useCharacterAdvancedOptions(
     pidTarget,
     setPidTarget,
     showPidToggle,
+    supportsGuidance,
+    supportsNegativePrompt,
     model,
     identityStructure,
     // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps
@@ -202,6 +212,8 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     pidTarget,
     setPidTarget,
     showPidToggle,
+    supportsGuidance,
+    supportsNegativePrompt,
     model,
     identityStructure,
     referenceStrength: referenceStrengthCfg,
@@ -257,18 +269,20 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
               <span>{controlnetScale.toFixed(2)}</span>
             </label>
           ) : null}
-          <label>
-            Guidance
-            <input
-              max="30"
-              min="0"
-              onChange={(event) => setGuidance(event.target.value)}
-              placeholder={guidancePlaceholder}
-              step="0.1"
-              type="number"
-              value={guidance}
-            />
-          </label>
+          {supportsGuidance ? (
+            <label>
+              Guidance
+              <input
+                max="30"
+                min="0"
+                onChange={(event) => setGuidance(event.target.value)}
+                placeholder={guidancePlaceholder}
+                step="0.1"
+                type="number"
+                value={guidance}
+              />
+            </label>
+          ) : null}
           <label>
             Steps
             <input
@@ -326,10 +340,12 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
               value={seed}
             />
           </label>
-          <label className="prompt-field">
-            Negative prompt
-            <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
-          </label>
+          {supportsNegativePrompt ? (
+            <label className="prompt-field">
+              Negative prompt
+              <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
+            </label>
+          ) : null}
           {showPidToggle ? (
             <>
               <label

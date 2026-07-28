@@ -82,6 +82,10 @@ export function useEditorGeneration({ context }) {
     () => videoModels.find((item) => item.id === model) ?? videoModels[0] ?? null,
     [videoModels, model],
   );
+  // Video generation axes are opt-out: existing catalog entries predate these
+  // flags and keep both controls unless they explicitly declare an axis absent.
+  const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
+  const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
 
   const studio = useGenerationStudio({
     mode: PRESET_FILTER_MODE,
@@ -207,13 +211,13 @@ export function useEditorGeneration({ context }) {
     if (defaults.duration != null) setDuration(defaults.duration);
     if (defaults.fps != null) setFps(defaults.fps);
     if (defaults.quality) setQuality(defaults.quality);
-    if (defaults.negativePrompt != null) setNegativePrompt(defaults.negativePrompt);
+    if (supportsNegativePrompt && defaults.negativePrompt != null) setNegativePrompt(defaults.negativePrompt);
     if (defaults.motion && MOTIONS.includes(defaults.motion)) setMotion(defaults.motion);
     if (defaults.sampler) setSampler(defaults.sampler);
     if (defaults.scheduler) setScheduler(defaults.scheduler);
     if (defaults.schedulerShift != null) setSchedulerShift(defaults.schedulerShift);
     if (defaults.steps != null) setStepsOverride(defaults.steps);
-    if (defaults.guidanceScale != null) setGuidanceOverride(defaults.guidanceScale);
+    if (supportsGuidance && defaults.guidanceScale != null) setGuidanceOverride(defaults.guidanceScale);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPresetId]);
 
@@ -238,13 +242,13 @@ export function useEditorGeneration({ context }) {
         duration: Number(duration),
         fps: Number(fps),
         quality,
-        negativePrompt,
+        negativePrompt: supportsNegativePrompt ? negativePrompt : "",
         motion,
         sampler,
         scheduler,
         schedulerShift: Number(schedulerShift),
         ...(stepsOverride !== "" ? { steps: Number(stepsOverride) } : {}),
-        ...(guidanceOverride !== "" ? { guidanceScale: Number(guidanceOverride) } : {}),
+        ...(supportsGuidance && guidanceOverride !== "" ? { guidanceScale: Number(guidanceOverride) } : {}),
       },
     });
     return createPreset(payload);
@@ -264,12 +268,12 @@ export function useEditorGeneration({ context }) {
       motion,
       seed,
       prompt,
-      negativePrompt,
+      negativePrompt: supportsNegativePrompt ? negativePrompt : "",
       sampler,
       scheduler,
       schedulerShift,
       steps: stepsOverride,
-      guidanceScale: guidanceOverride,
+      guidanceScale: supportsGuidance ? guidanceOverride : "",
       quantTier,
       lightning,
       advancedOpen,
@@ -306,7 +310,10 @@ export function useEditorGeneration({ context }) {
       ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
         ? { steps: Number(stepsOverride) }
         : {}),
-      ...(!lightningActive && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+      ...(supportsGuidance &&
+      !lightningActive &&
+      guidanceOverride !== "" &&
+      Number.isFinite(Number(guidanceOverride))
         ? { guidanceScale: Number(guidanceOverride) }
         : {}),
     };
@@ -319,7 +326,7 @@ export function useEditorGeneration({ context }) {
       width: width || undefined,
       height: height || undefined,
       seed: seed === "" ? null : Number(seed),
-      negativePrompt,
+      negativePrompt: supportsNegativePrompt ? negativePrompt : "",
       recipePresetId: studio.selectedPreset?.id ?? null,
       presetLorasResolvedClientSide: studio.selectedPreset ? true : undefined,
       loras: studio.selectedLoras.map((lora) => serializeLora(lora, { weight: studio.effectiveLoraWeight(lora) })),
@@ -330,6 +337,8 @@ export function useEditorGeneration({ context }) {
   return {
     studio,
     selectedModel,
+    supportsGuidance,
+    supportsNegativePrompt,
     videoModels,
     createModelDownloadJob,
     createLoraDownloadJob,
