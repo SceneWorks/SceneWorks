@@ -215,14 +215,16 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
               </button>
             </div>
           </label>
-          <label className="ve-field">
-            <span className="ve-field-label">Negative prompt</span>
-            <textarea
-              className="ve-textarea"
-              onChange={(e) => gen.setNegativePrompt(e.target.value)}
-              value={gen.negativePrompt}
-            />
-          </label>
+          {gen.supportsNegativePrompt ? (
+            <label className="ve-field">
+              <span className="ve-field-label">Negative prompt</span>
+              <textarea
+                className="ve-textarea"
+                onChange={(e) => gen.setNegativePrompt(e.target.value)}
+                value={gen.negativePrompt}
+              />
+            </label>
+          ) : null}
         </div>
 
         {/* Advanced */}
@@ -285,16 +287,18 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
                     value={gen.lightningActive ? "" : gen.stepsOverride}
                   />
                 </label>
-                <label className="ve-field">
-                  <span className="ve-field-label">Guidance</span>
-                  <input
-                    className="ve-input"
-                    disabled={gen.lightningActive}
-                    onChange={(e) => gen.setGuidanceOverride(e.target.value)}
-                    placeholder={gen.lightningActive ? "off (Lightning)" : "auto"}
-                    value={gen.lightningActive ? "" : gen.guidanceOverride}
-                  />
-                </label>
+                {gen.supportsGuidance ? (
+                  <label className="ve-field">
+                    <span className="ve-field-label">Guidance</span>
+                    <input
+                      className="ve-input"
+                      disabled={gen.lightningActive}
+                      onChange={(e) => gen.setGuidanceOverride(e.target.value)}
+                      placeholder={gen.lightningActive ? "off (Lightning)" : "auto"}
+                      value={gen.lightningActive ? "" : gen.guidanceOverride}
+                    />
+                  </label>
+                ) : null}
               </div>
 
               {gen.showTierPicker ? (
