@@ -279,4 +279,14 @@ test("MLX parity control preserves the real comparison and applies only a planne
   assert.match(adapter, /"maximumError": mutated_maximum,\s*"meanError": mutated_mean/);
   assert.doesNotMatch(adapter, /MAX_THRESHOLD\s*=\s*[^;]*5e-2/);
   assert.doesNotMatch(adapter, /MEAN_THRESHOLD\s*=\s*[^;]*5e-2/);
+  const comparison = adapter.slice(
+    adapter.indexOf("fn decoded_max_mean_abs("),
+    adapter.indexOf("fn sweep("),
+  );
+  const shapeGuard = comparison.indexOf(
+    "protocol::validate_comparison_shapes(left.shape(), right.shape())?",
+  );
+  const flatten = comparison.indexOf(".reshape(&[-1])");
+  assert.ok(shapeGuard >= 0, "MLX comparison must guard exact output shapes");
+  assert.ok(flatten > shapeGuard, "shape equality must be checked before either output is flattened");
 });

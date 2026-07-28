@@ -101,7 +101,12 @@ pub fn max_mean_abs(
     }
     let mut maximum = 0.0_f64;
     let mut sum = 0.0_f64;
-    for (left, right) in left.iter().zip(right) {
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if !left.is_finite() || !right.is_finite() {
+            return Err(format!(
+                "decode output contains a non-finite sample at index {index}"
+            ));
+        }
         let baseline = f64::from(*left);
         let tiled = f64::from(*right);
         let compared = comparison_output_bias.map_or(tiled, |bias| {
@@ -112,10 +117,31 @@ pub fn max_mean_abs(
             }
         });
         let difference = (baseline - compared).abs();
+        if !compared.is_finite() || !difference.is_finite() {
+            return Err(format!(
+                "decode comparison produced a non-finite result at index {index}"
+            ));
+        }
         maximum = maximum.max(difference);
         sum += difference;
+        if !sum.is_finite() {
+            return Err("decode comparison mean accumulator became non-finite".to_owned());
+        }
     }
-    Ok((maximum, sum / left.len() as f64))
+    let mean = sum / left.len() as f64;
+    if !maximum.is_finite() || !mean.is_finite() {
+        return Err("decode comparison metrics must be finite".to_owned());
+    }
+    Ok((maximum, mean))
+}
+
+pub fn validate_comparison_shapes(left: &[i32], right: &[i32]) -> Result<(), String> {
+    if left != right {
+        return Err(format!(
+            "decode output shape mismatch: baseline={left:?} tiled={right:?}"
+        ));
+    }
+    Ok(())
 }
 
 pub fn expected_failure(request: &Value) -> bool {
@@ -328,6 +354,25 @@ mod tests {
         assert!(mean > 0.003);
         assert!((maximum - 0.07).abs() < 1e-6);
         assert!((mean - 0.06).abs() < 1e-6);
+    }
+
+    #[test]
+    fn comparison_rejects_non_finite_samples() {
+        for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(max_mean_abs(&[non_finite], &[0.0], None)
+                .unwrap_err()
+                .contains("non-finite sample"));
+            assert!(max_mean_abs(&[0.0], &[non_finite], Some(0.05))
+                .unwrap_err()
+                .contains("non-finite sample"));
+        }
+    }
+
+    #[test]
+    fn comparison_shapes_must_match_exactly_before_flattening() {
+        assert!(validate_comparison_shapes(&[1, 4, 4, 3], &[1, 4, 4, 3]).is_ok());
+        let error = validate_comparison_shapes(&[1, 4, 4, 3], &[1, 8, 2, 3]).unwrap_err();
+        assert!(error.contains("shape mismatch"));
     }
 
     #[test]

@@ -269,6 +269,7 @@ fn decoded_max_mean_abs(
     right: &Array,
     comparison_output_bias: Option<f64>,
 ) -> Result<(f64, f64), String> {
+    protocol::validate_comparison_shapes(left.shape(), right.shape())?;
     let left = left
         .reshape(&[-1])
         .map_err(|error| format!("flatten baseline decode: {error}"))?;
