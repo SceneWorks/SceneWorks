@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const INFERENCE_PIN: &str = "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 
 pub fn request_from_stdin() -> Result<Value, String> {
     let mut input = String::new();
@@ -52,6 +53,69 @@ pub fn parameter(request: &Value, name: &str) -> Result<u32, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("planned.strategy.parameters.{name} must be an integer"))?;
     u32::try_from(value).map_err(|_| format!("planned.strategy.parameters.{name} exceeds u32"))
+}
+
+pub fn comparison_output_bias(
+    parameters: &Map<String, Value>,
+    expected_failure: bool,
+) -> Result<Option<f64>, String> {
+    let bias = parameters
+        .get(COMPARISON_OUTPUT_BIAS_PARAMETER)
+        .map(|value| {
+            value.as_f64().ok_or_else(|| {
+                format!(
+                    "planned.strategy.parameters.{COMPARISON_OUTPUT_BIAS_PARAMETER} must be a number"
+                )
+            })
+        })
+        .transpose()?;
+    match (expected_failure, bias) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => Err(format!(
+            "{COMPARISON_OUTPUT_BIAS_PARAMETER} is reserved for an expected-failure case"
+        )),
+        (true, None) => Err(format!(
+            "expected-failure case must declare {COMPARISON_OUTPUT_BIAS_PARAMETER}"
+        )),
+        (true, Some(value)) if value.is_finite() && value > 0.0 => Ok(Some(value)),
+        (true, Some(_)) => Err(format!(
+            "planned.strategy.parameters.{COMPARISON_OUTPUT_BIAS_PARAMETER} must be finite and greater than zero"
+        )),
+    }
+}
+
+pub fn max_mean_abs(
+    left: &[f32],
+    right: &[f32],
+    comparison_output_bias: Option<f64>,
+) -> Result<(f64, f64), String> {
+    if left.len() != right.len() || left.is_empty() {
+        return Err(format!(
+            "decode output length mismatch: baseline={} tiled={}",
+            left.len(),
+            right.len()
+        ));
+    }
+    if comparison_output_bias.is_some_and(|bias| !bias.is_finite() || bias <= 0.0) {
+        return Err("comparison output bias must be finite and greater than zero".to_owned());
+    }
+    let mut maximum = 0.0_f64;
+    let mut sum = 0.0_f64;
+    for (left, right) in left.iter().zip(right) {
+        let baseline = f64::from(*left);
+        let tiled = f64::from(*right);
+        let compared = comparison_output_bias.map_or(tiled, |bias| {
+            if tiled >= baseline {
+                tiled + bias
+            } else {
+                tiled - bias
+            }
+        });
+        let difference = (baseline - compared).abs();
+        maximum = maximum.max(difference);
+        sum += difference;
+    }
+    Ok((maximum, sum / left.len() as f64))
 }
 
 pub fn expected_failure(request: &Value) -> bool {
@@ -244,6 +308,47 @@ mod tests {
         });
         assert_eq!(parameter(&request, "decodeTileEdge").unwrap(), 512);
         assert!(parameter(&request, "decodeOverlap").is_err());
+    }
+
+    #[test]
+    fn identical_output_comparison_is_unmodified_without_a_negative_bias() {
+        let left = [0.25_f32, -0.5, 1.0];
+        let right = [0.25_f32, -0.49, 0.98];
+        let (maximum, mean) = max_mean_abs(&left, &right, None).unwrap();
+        assert!((maximum - 0.02).abs() < 1e-6);
+        assert!((mean - 0.01).abs() < 1e-6);
+    }
+
+    #[test]
+    fn deterministic_output_bias_forces_a_measured_parity_breach() {
+        let left = [0.25_f32, -0.5, 1.0];
+        let right = [0.25_f32, -0.49, 0.98];
+        let (maximum, mean) = max_mean_abs(&left, &right, Some(0.05)).unwrap();
+        assert!(maximum > 0.03);
+        assert!(mean > 0.003);
+        assert!((maximum - 0.07).abs() < 1e-6);
+        assert!((mean - 0.06).abs() < 1e-6);
+    }
+
+    #[test]
+    fn comparison_bias_is_required_only_for_expected_failures() {
+        let positive = json!({ "decodeTileEdge": 256, "decodeOverlap": 32 })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(comparison_output_bias(&positive, false).unwrap(), None);
+        assert!(comparison_output_bias(&positive, true).is_err());
+
+        let negative = json!({
+            "decodeTileEdge": 256,
+            "decodeOverlap": 32,
+            "comparisonOutputBias": 0.05
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(comparison_output_bias(&negative, true).unwrap(), Some(0.05));
+        assert!(comparison_output_bias(&negative, false).is_err());
     }
 
     #[test]

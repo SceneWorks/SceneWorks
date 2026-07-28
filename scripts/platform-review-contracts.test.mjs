@@ -262,3 +262,21 @@ test("MLX calibration probe derives the production wired ceiling without guessin
   );
   assert.match(adapter, /"wiredLimitBytes": wired_limit\.bytes/);
 });
+
+test("MLX parity control preserves the real comparison and applies only a planned output bias", async () => {
+  const adapter = await source(
+    "crates/sceneworks-image-memory-adapter/src/bin/mlx.rs",
+  );
+  assert.match(
+    adapter,
+    /let \(actual_maximum, actual_mean\) = decoded_max_mean_abs\(&baseline, &tiled, None\)\?/,
+  );
+  assert.match(
+    adapter,
+    /decoded_max_mean_abs\(&baseline, &tiled, comparison_output_bias\)\?/,
+  );
+  assert.match(adapter, /"result": "passed",\s*"maximumError": actual_maximum,\s*"meanError": actual_mean/);
+  assert.match(adapter, /"maximumError": mutated_maximum,\s*"meanError": mutated_mean/);
+  assert.doesNotMatch(adapter, /MAX_THRESHOLD\s*=\s*[^;]*5e-2/);
+  assert.doesNotMatch(adapter, /MEAN_THRESHOLD\s*=\s*[^;]*5e-2/);
+});

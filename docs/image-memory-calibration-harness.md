@@ -188,8 +188,12 @@ cannot upload a schema-checked evidence artifact.
 
 It loads the real pinned `QwenVae`, deterministically encodes a 1024-square gradient fixture, runs
 untiled and requested tiled decode on the identical latent, and reports the actual MLX active/cache
-measurements plus maximum/mean error. The `256/32` case becomes `negative_complete` only when its
-measured error breaches the declared threshold. Positive records remain `gated` because the pinned
+measurements plus maximum/mean error. Production cases never alter either comparison output. The
+expected-failure `256/32` case first requires that same unmodified identical-latent comparison to
+pass, retains those real measurements in `quality`, then applies the planned
+`comparisonOutputBias=0.05` away from the baseline at every comparison element. Only the resulting
+measured perturbed metrics enter `negativeMutation`, and the case becomes `negative_complete` only
+when they breach the unchanged production thresholds. Positive records remain `gated` because the pinned
 Qwen VAE seam does not expose synchronized full-pipeline conditioning/denoise
 device/wired/reclaimable phase telemetry or all required lifecycle injections.
 
