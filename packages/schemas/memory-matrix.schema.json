@@ -101,7 +101,10 @@
     "modelSlices"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": {
+      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version.",
+      "const": 2
+    },
     "generatedFrom": { "type": "object" },
     "conformanceStates": {
       "type": "array",

@@ -181,11 +181,14 @@ export function modelStory(modelId, backend) {
 }
 
 /**
- * Index every ownership story to the single backend it is scoped to.
+ * Index every ownership story to the single owner and backend it is scoped to.
  *
- * The per-cell assertion below is only meaningful if no story claims both backends: a story present
- * under `mlx` and `candle` would satisfy any cell and make the guard vacuous. So the table is checked
- * first, and a story reused across backends or across the model/family roles is a mapping defect.
+ * The per-cell assertion below resolves a story id through this map and compares BOTH halves of what
+ * it finds — the backend and the owner — so the map has to answer unambiguously. It is a plain `Map`,
+ * so a repeated id is last-write-wins: the guard would then check every cell naming that id against
+ * whichever claimant happened to be indexed last, quietly passing that one's cells and rejecting the
+ * other's. Not vacuous, but no longer proof of anything. So one id means one owner and one backend,
+ * enforced here rather than assumed downstream.
  */
 export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
   const scope = new Map();
@@ -215,16 +218,33 @@ export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStori
 }
 
 /**
- * SC-15812's un-regressable guard: every cell must name ownership stories scoped to its own backend.
+ * What each cell ownership field must resolve to, expressed in `buildStoryBackendScope`'s own
+ * `role`/`owner` vocabulary so the two cannot drift apart.
+ */
+const CELL_OWNERSHIP_FIELDS = {
+  owningModelStory: { role: "model story", owner: (cell) => cell.modelId },
+  owningFamilyStory: { role: "family story", owner: (cell) => `family SC-${familyGroup(cell.modelId)}` },
+};
+
+/**
+ * SC-15812's un-regressable guard: every cell must name the ownership stories that actually cover it —
+ * its own entry's (or family's) story, scoped to its own backend.
  *
  * Before this existed the generator copied one model-level story pair onto every cell, so all 2,260
  * candle cells in the shipped matrix named MLX-scoped stories and the epic's authoritative inventory
  * read as covering Candle work that no story would ever cover. Without an assertion the next drift is
  * silent again, so this throws rather than warns.
+ *
+ * The backend check alone is not enough, and shipping it alone was a real hole: it accepted ANY story
+ * scoped to the right backend, so pointing a model's cells at a SIBLING model's same-backend twin
+ * (e.g. `boogu_image_turbo`'s candle cells at `boogu_image`'s SC-15907) generated 30 mis-attributed
+ * cells and exited 0. That is the same failure class as the original defect — a cell credited to a
+ * story that cannot close it — reached by assignment rather than by backend. So the owner identity is
+ * asserted too.
  */
 export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBackendScope()) {
   for (const cell of cells) {
-    for (const field of ["owningModelStory", "owningFamilyStory"]) {
+    for (const [field, expected] of Object.entries(CELL_OWNERSHIP_FIELDS)) {
       const storyId = cell[field];
       if (!Number.isInteger(storyId)) {
         throw new Error(`${cell.id}: ${field} is ${JSON.stringify(storyId)}, not an ownership story id`);
@@ -236,6 +256,12 @@ export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBack
       if (owner.backend !== cell.backend) {
         throw new Error(
           `${cell.id}: ${field} SC-${storyId} is scoped to ${owner.backend}, but the cell is ${cell.backend} — a ${cell.backend} cell cannot be covered by a ${owner.backend} story`,
+        );
+      }
+      const expectedOwner = expected.owner(cell);
+      if (owner.role !== expected.role || owner.owner !== expectedOwner) {
+        throw new Error(
+          `${cell.id}: ${field} SC-${storyId} is the ${owner.backend} ${owner.role} of ${owner.owner}, but this cell needs the ${cell.backend} ${expected.role} of ${expectedOwner} — a cell credited to another entry's story names a story that cannot close it`,
         );
       }
     }
@@ -900,7 +926,10 @@ export async function buildMatrix() {
       .map((cell) => cell.modelId),
   );
   const matrix = {
-    schemaVersion: 1,
+    // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
+    // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
+    // both, so the two shapes cannot share a version number — that is the whole job of this field.
+    schemaVersion: 2,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,

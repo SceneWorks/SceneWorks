@@ -103,8 +103,11 @@ test("the ownership tables scope every story to exactly one backend", () => {
     owner: "family SC-15516",
   });
 
-  // The per-cell guard below is only meaningful while this holds: a story present under BOTH backends
-  // would satisfy any cell and make the guard vacuous, so the table itself must fail closed.
+  // The per-cell guard below resolves a story id through this map and compares both the backend AND
+  // the owner it finds, so the map must answer unambiguously. `scope` is a plain Map, so a repeated id
+  // is last-write-wins: the guard would compare every cell naming it against whichever claimant landed
+  // last, passing that one's cells and rejecting the other's. Not vacuous — ambiguous, which is worse,
+  // because it still looks green. So the table itself fails closed on any repeat.
   assert.throws(
     () => buildStoryBackendScope({ alpha: { mlx: 1, candle: 1 } }, {}),
     /exactly one owner and one backend/,
@@ -123,8 +126,20 @@ test("the ownership tables scope every story to exactly one backend", () => {
 
 test("a cell may never name a story scoped to the other backend", () => {
   assertCellOwnershipIsBackendScoped([
-    { id: "boogu_image_turbo:mlx", backend: "mlx", owningModelStory: 15475, owningFamilyStory: 15516 },
-    { id: "boogu_image_turbo:candle", backend: "candle", owningModelStory: 15910, owningFamilyStory: 15827 },
+    {
+      id: "boogu_image_turbo:mlx",
+      modelId: "boogu_image_turbo",
+      backend: "mlx",
+      owningModelStory: 15475,
+      owningFamilyStory: 15516,
+    },
+    {
+      id: "boogu_image_turbo:candle",
+      modelId: "boogu_image_turbo",
+      backend: "candle",
+      owningModelStory: 15910,
+      owningFamilyStory: 15827,
+    },
   ]);
 
   // The exact defect this story fixes: the candle cell carrying the model's MLX story.
@@ -133,6 +148,7 @@ test("a cell may never name a story scoped to the other backend", () => {
       assertCellOwnershipIsBackendScoped([
         {
           id: "boogu_image_turbo:candle",
+          modelId: "boogu_image_turbo",
           backend: "candle",
           owningModelStory: 15475,
           owningFamilyStory: 15827,
@@ -146,6 +162,7 @@ test("a cell may never name a story scoped to the other backend", () => {
       assertCellOwnershipIsBackendScoped([
         {
           id: "boogu_image_turbo:mlx",
+          modelId: "boogu_image_turbo",
           backend: "mlx",
           owningModelStory: 15475,
           owningFamilyStory: 15827,
@@ -167,6 +184,72 @@ test("a cell may never name a story scoped to the other backend", () => {
         { id: "x:candle", backend: "candle", owningModelStory: null, owningFamilyStory: 15827 },
       ]),
     /not an ownership story id/,
+  );
+});
+
+// The backend check alone shipped first and was NOT sufficient. Review of sc-15812 mutated the
+// generator's own table lookup so `boogu_image_turbo`'s candle cells named SC-15907 — `boogu_image`'s
+// Candle twin, correctly scoped to candle, belonging to a different model — and the generator exited 0
+// after writing 30 mis-attributed cells. Same failure class as the original defect (a cell credited to
+// a story that cannot close it), reached by assignment instead of by backend. The original defect was
+// itself an assignment bug, so this is the mutation the guard has to survive.
+test("a cell may never name another entry's story, even on the right backend", () => {
+  // The reviewer's exact mutation: turbo's candle cells pointed at the base model's Candle twin.
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped([
+        {
+          id: "boogu_image_turbo:candle",
+          modelId: "boogu_image_turbo",
+          backend: "candle",
+          owningModelStory: 15907,
+          owningFamilyStory: 15827,
+        },
+      ]),
+    /owningModelStory SC-15907 is the candle model story of boogu_image, but this cell needs the candle model story of boogu_image_turbo/,
+  );
+  // The same hole on the MLX side, and across families rather than within one: a sibling's story is
+  // still a story that cannot close this cell.
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped([
+        {
+          id: "boogu_image_turbo:mlx",
+          modelId: "boogu_image_turbo",
+          backend: "mlx",
+          owningModelStory: 15474,
+          owningFamilyStory: 15516,
+        },
+      ]),
+    /owningModelStory SC-15474 is the mlx model story of boogu_image, but this cell needs the mlx model story of boogu_image_turbo/,
+  );
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped([
+        {
+          id: "boogu_image_turbo:candle",
+          modelId: "boogu_image_turbo",
+          backend: "candle",
+          owningModelStory: 15910,
+          owningFamilyStory: 15813,
+        },
+      ]),
+    /owningFamilyStory SC-15813 is the candle family story of family SC-15509, but this cell needs the candle family story of family SC-15516/,
+  );
+  // A family story in the model slot is same-backend and same-family, and still wrong: it is the
+  // family's story, so closing it would not close this model's Candle work.
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped([
+        {
+          id: "boogu_image_turbo:candle",
+          modelId: "boogu_image_turbo",
+          backend: "candle",
+          owningModelStory: 15827,
+          owningFamilyStory: 15827,
+        },
+      ]),
+    /owningModelStory SC-15827 is the candle family story of family SC-15516, but this cell needs the candle model story of boogu_image_turbo/,
   );
 });
 
