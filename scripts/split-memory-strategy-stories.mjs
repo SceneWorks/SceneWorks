@@ -41,6 +41,12 @@ const FAMILY_GATES = [15507, 15508, 15750, 15804, 15799, 15812];
 const MLX = "mlx";
 const CANDLE = "candle";
 
+// A new Candle twin ALWAYS starts in To Do. It must never inherit its MLX twin's workflow state:
+// the twin's state reflects work done on a Mac, and copying it would mark Candle work complete that
+// nobody has done — the exact false green this epic exists to prevent. (This bit: SC-15510 is Done,
+// so its twin SC-15815 was created Done, which in turn made its two children read as unblocked.)
+const TODO_STATE = 500000007;
+
 // ── invariants the matrix must satisfy before we touch anything ────────────────────────────────
 const EXPECT = {
   totalModels: 53,
@@ -203,7 +209,7 @@ async function apply(plan) {
         story_type: twin.story_type,
         epic_id: EPIC_ID,
         group_id: twin.group_id ?? undefined,
-        workflow_state_id: twin.workflow_state_id,
+        workflow_state_id: TODO_STATE,
         description: `## ${SCOPE_CANDLE(mlxId)}\n\n---\n\n${twin.description}`,
       },
       tok,
@@ -287,6 +293,14 @@ async function verify(plan) {
     const mlx = byId.get(m.mlxStory);
     if (mlx && !mlx.name.endsWith("— MLX/Metal")) problems.push(`SC-${m.mlxStory}: not rescoped to MLX`);
   }
+  // No Candle work has been done yet, so a Candle twin in a completed state is a bug, not progress.
+  // RELAX THIS the day genuine Candle evidence starts landing — but not before, because the state
+  // was silently inherited from the MLX twin once already (SC-15815) and read as finished work.
+  for (const twin of [...Object.values(state.candleFamilies), ...Object.values(state.candleModels)]) {
+    const s = byId.get(twin);
+    if (s?.completed) problems.push(`SC-${twin}: Candle twin is marked complete but no Candle work has landed`);
+  }
+
   // The mlx-only set must be untouched: a Candle twin there could never be closed.
   for (const m of plan.mlxOnly) {
     if (state.candleModels[m.mlxStory]) problems.push(`SC-${m.mlxStory} (${m.model}): mlx-only but has a Candle twin`);
