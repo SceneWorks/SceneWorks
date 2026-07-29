@@ -130,6 +130,19 @@ const SPECIAL_AREAS = new Map([
   // `cephes-source` area (component `cephes`) so the notice is attributed, not folded into the
   // `mlx-gen-mage` architecture prefix.
   ["crates/media/mlx-gen/mlx-gen-mage/src/latent.rs", "cephes-source"],
+  // The Candle JoyCaption prompt module reproduces upstream's CAPTION_TYPE_MAP / NAME_OPTION
+  // near-verbatim under Apache-2.0 — reproduced CONTENT, not an architecture port. sc-15443 added the
+  // Apache Sec. 4(b) modification notices, which is what made the file marker-bearing and surfaced it
+  // here for the first time. Route it to `joycaption-source` (the About component that already
+  // discloses exactly this path) rather than letting it fold into the crate-prefix architecture area,
+  // for the same reason cephes is split out above: the notice must be attributed, not absorbed.
+  //
+  // Its MLX twin, `crates/media/mlx-gen/src/caption/joycaption.rs`, reproduces the SAME upstream text
+  // and the About entry names it too, but it currently resolves to the `crates/media/mlx-gen` prefix
+  // area. That is imprecise rather than false — the prefix disposition's evidence clause ("upstream
+  // terms already mapped in the About manifest") does hold for it — so it is left alone here and
+  // raised on sc-15443 rather than reclassified inside a pin bump.
+  ["crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs", "joycaption-source"],
 ]);
 
 function sha256(text) {
