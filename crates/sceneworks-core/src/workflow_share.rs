@@ -164,6 +164,12 @@ pub struct WorkflowUpscale {
 /// older reader; here that would defeat the whole point — an envelope arriving from outside
 /// must be reduced to the fields we classify, on parse as well as on build. Unknown keys are
 /// dropped in both directions.
+///
+/// Dropping unknown KEYS is only half of it: the strings under the keys we *do* declare are
+/// still attacker-chosen in a file that came from a stranger. `reduce_workflow_share` runs the
+/// same value-level guards on parse as on build — the path check on every label, `owner/name`
+/// validation on `loras[].repo`, the closed [`INPUT_KINDS`] vocabulary on `inputs[].kind`, and
+/// a bounded producer block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowShare {
@@ -223,7 +229,9 @@ pub enum WorkflowShareError {
     /// The marker is present but names a workflow kind this reader does not handle
     /// (the image reader handed a video envelope, sc-15956).
     UnsupportedKind { found: String, supported: String },
-    /// `schemaVersion` is missing or not a non-negative integer.
+    /// `schemaVersion` is absent (or explicitly `null`). A key that IS present but is not a
+    /// whole number is [`Self::Malformed`] instead — telling someone a field they can see in
+    /// the file is missing sends them looking in the wrong place.
     MissingSchemaVersion,
     /// The file's contract version is newer than this build's. Names both versions so the
     /// user is told to update rather than shown a parse failure.
@@ -305,7 +313,9 @@ pub enum AdvancedShape {
     /// fields. The free-form `caption` object is dropped — its serialized form already rides
     /// in `runtimePrompt` and in the top-level `prompt`.
     StructuredPrompt,
-    /// The pose-library selection, reduced to keypoints. Pose library ids do not travel.
+    /// The pose-library selection, reduced to its numeric coordinate arrays ([`POSE_FIELDS`]:
+    /// `keypoints`, `hands`, `face` — all three drive the rendered skeleton). Pose-library ids,
+    /// and anything else the picker attached, do not travel.
     Poses,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
@@ -446,7 +456,8 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
     allow(
         "poses",
         AdvancedShape::Poses,
-        "Authored pose selection. Keypoints travel; the pose-library ids that named them do not.",
+        "Authored pose selection. The numeric coordinate arrays the worker renders travel \
+         (keypoints, hands, face); the pose-library ids that named them do not.",
     ),
     allow(
         "faceRestore",
@@ -529,60 +540,188 @@ pub fn advanced_key_rule(key: &str) -> Option<&'static AdvancedKeyRule> {
 // Path shapes
 // ---------------------------------------------------------------------------
 
-/// True when `value` looks like a filesystem location.
+/// True when `value` looks like a filesystem location — absolute OR relative.
 ///
-/// Belt to the allow-list's braces: no allow-listed `advanced` key legitimately holds a path,
-/// so any value that looks like one is dropped even from a key that is otherwise in. Covers
-/// POSIX absolutes, Windows drive letters (anywhere in the string, which catches
-/// `"loaded from C:\\Users\\…"`), UNC shares, `file://` URLs and `~` expansions.
+/// Belt to the allow-list's braces: no allow-listed `advanced` key and no classified top-level
+/// label legitimately holds a path, so any value that looks like one is dropped even from a key
+/// that is otherwise in. The story's line is "every filesystem path without exception", so this
+/// deliberately errs toward dropping: a false positive costs one label, a false negative ships
+/// the user's home directory — and therefore their name — inside every copy of the image.
+///
+/// Recognized:
+///
+/// * a backslash **anywhere** — every Windows location has one, absolute (`C:\Users\…`),
+///   relative (`models\weights\x`), traversing (`..\..\Users\…`), UNC (`\\server\share`),
+///   drive-relative (`c:secret\file`) or environment-expanded (`%USERPROFILE%\x`);
+/// * a POSIX absolute (`/etc/passwd`) and `~` / `~user` home expansions;
+/// * a bare drive prefix `X:` at a token boundary, with or without a following separator, so
+///   `C:foo` is caught and the URL scheme in `https://…` is not;
+/// * a `..` traversal segment and a leading `./`;
+/// * a multi-segment relative POSIX path (`assets/images/x.png`) — three or more segments and
+///   no URL scheme. Two segments is a Hugging Face repo id (`acme/mira`) and stays;
+/// * `file://`, including percent-encoded (`file%3A%2F%2FD%3A%2Fx`).
 ///
 /// Deliberately NOT applied to the authored prose fields (`prompt`, `negativePrompt`,
 /// `stylePrompt`, the structured prompt's `intent` / `runtimePrompt`): those are what the user
 /// typed, and silently mangling a prompt because it mentions a directory would be worse than
-/// the leak it prevents — the user authored it and can see it.
+/// the leak it prevents — the user authored it and can see it. That exemption is pinned by
+/// `authored_prose_travels_verbatim_even_when_it_names_a_path` in the integration tests.
 #[must_use]
 pub fn is_path_shaped(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.to_ascii_lowercase().contains("file://") {
+    if looks_like_a_location(trimmed) {
         return true;
     }
-    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
-        return true;
-    }
-    if trimmed.starts_with("~/") || trimmed.starts_with("~\\") {
-        return true;
-    }
-    // A drive-letter prefix anywhere: `C:\`, `d:/`.
-    let bytes = trimmed.as_bytes();
-    for index in 0..bytes.len().saturating_sub(2) {
-        let letter = bytes[index];
-        if !letter.is_ascii_alphabetic() {
-            continue;
+    // Percent-encoding is not a disguise: `file%3A%2F%2FD%3A%2Fx` is `file://D:/x`. Decoded
+    // repeatedly, bounded, so a double-encoded `%252F` cannot hide one round deeper.
+    let mut decoded = trimmed.to_owned();
+    for _ in 0..PERCENT_DECODE_ROUNDS {
+        let next = percent_decode_separators(&decoded);
+        if next == decoded {
+            break;
         }
-        // Only when the letter starts a token, so `https://x` is not read as a drive.
-        if index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b':') {
-            continue;
-        }
-        if bytes[index + 1] == b':' && (bytes[index + 2] == b'\\' || bytes[index + 2] == b'/') {
+        decoded = next;
+        if looks_like_a_location(decoded.trim()) {
             return true;
         }
     }
     false
 }
 
+/// How many times [`is_path_shaped`] re-decodes percent escapes before giving up. Two is enough
+/// for `%252F`; the bound is what keeps a pathological value from spinning.
+const PERCENT_DECODE_ROUNDS: usize = 3;
+
+/// The path-shape rules themselves, run once on the raw value and once on its
+/// separator-decoded form (see [`is_path_shaped`]).
+fn looks_like_a_location(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("file://") {
+        return true;
+    }
+    // A backslash anywhere. Nothing this guard protects legitimately contains one.
+    if value.contains('\\') {
+        return true;
+    }
+    if value.starts_with('/') {
+        return true;
+    }
+    // `~/models/x` and `~michael/x` alike.
+    if value.starts_with('~') && value.contains('/') {
+        return true;
+    }
+    // A drive prefix at a token boundary. A SINGLE letter before the colon is what separates a
+    // drive (`c:`) from a URL scheme (`https:`), and no trailing separator is required — the
+    // drive-relative `C:foo` resolves against the process's per-drive cwd and is still a path.
+    let is_drive_token = |token: &str| {
+        let bytes = token.as_bytes();
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    };
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != ':')
+        .any(is_drive_token)
+    {
+        return true;
+    }
+    let segments: Vec<&str> = value.split('/').collect();
+    if segments.contains(&"..") {
+        return true;
+    }
+    if segments.len() > 1 && segments[0] == "." {
+        return true;
+    }
+    // A relative POSIX tree. Two segments is an HF repo id and stays; a URL is not a location on
+    // THIS machine, so `https://host/a/b/c` is left alone.
+    !lower.contains("://")
+        && segments
+            .iter()
+            .filter(|segment| !segment.is_empty())
+            .count()
+            >= 3
+}
+
+/// Decode only the percent escapes that matter to [`looks_like_a_location`], so an encoded
+/// separator cannot walk a path past the guard. Not a general URL decoder and not meant to be.
+fn percent_decode_separators(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '%' && index + 2 < chars.len() {
+            let decoded = match (
+                chars[index + 1].to_ascii_lowercase(),
+                chars[index + 2].to_ascii_lowercase(),
+            ) {
+                ('3', 'a') => Some(':'),
+                ('2', 'f') => Some('/'),
+                ('5', 'c') => Some('\\'),
+                ('7', 'e') => Some('~'),
+                ('2', 'e') => Some('.'),
+                // `%25` is the escape for `%` itself — the one that makes `%252F` a
+                // double-encoded separator. Without it the second decode round has nothing left
+                // to do and `%252F` walks straight through.
+                ('2', '5') => Some('%'),
+                _ => None,
+            };
+            if let Some(character) = decoded {
+                out.push(character);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// The longest a classified label may be. A bound on every free string an outside envelope can
+/// put under a key we declare — a model slug, a style id, a LoRA display name, the producer
+/// block. Generous for anything legitimate and finite for anything else.
+const LABEL_MAX_CHARS: usize = 200;
+
+/// One non-prose label, reduced: trimmed, bounded, and dropped when it is empty, holds a
+/// control character, or is path-shaped.
+///
+/// The single guard [`build_workflow_share`] and [`parse_workflow_share`] both run, so the two
+/// directions cannot drift apart: an envelope that arrives from outside is reduced by exactly
+/// the rules that built ours.
+fn shareable_label(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > LABEL_MAX_CHARS
+        || trimmed.chars().any(char::is_control)
+        || is_path_shaped(trimmed)
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
 /// A Hugging Face repo id (`owner/name`) and nothing else — never a path, never a URL.
+///
+/// Load-bearing beyond tidiness: a repo id is joined into a cache directory name
+/// (`models--owner--name`), and sc-15952's "install the missing LoRA" action acts on whatever
+/// this returns. `.` and `-` and `_` are legal INSIDE a segment, so a segment must additionally
+/// start with an alphanumeric — otherwise `../x` reads as the perfectly-shaped repo id `..`/`x`.
 fn hf_repo_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
+    if trimmed.chars().count() > LABEL_MAX_CHARS {
+        return None;
+    }
     let mut segments = trimmed.split('/');
     let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
     else {
         return None;
     };
     let segment_ok = |segment: &str| {
-        !segment.is_empty()
+        segment
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
             && segment.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
             })
@@ -638,7 +777,10 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
             .unwrap_or(&Map::new()),
     );
 
-    WorkflowShare {
+    // Every value goes out through the SAME reducer an incoming envelope comes in through
+    // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
+    // guard — which is exactly how the top-level labels below escaped the path check before.
+    reduce_workflow_share(WorkflowShare {
         kind: WORKFLOW_KIND_IMAGE.to_owned(),
         schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
         producer: WorkflowProducer::default(),
@@ -650,14 +792,14 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
         width: u32_field("width").or(asset.file.width),
         height: u32_field("height").or(asset.file.height),
         count: u32_field("count"),
-        style_preset: string_field("stylePreset").filter(|value| !value.is_empty()),
-        style_id: string_field("styleId").filter(|value| !value.is_empty()),
-        fit_mode: string_field("fitMode").filter(|value| !value.is_empty()),
+        style_preset: string_field("stylePreset"),
+        style_id: string_field("styleId"),
+        fit_mode: string_field("fitMode"),
         upscale: sanitize_upscale(job_payload.get("upscale")),
         loras: sanitize_loras(job_payload.get("loras")),
         inputs: describe_inputs(job_payload),
         advanced,
-    }
+    })
 }
 
 /// Input images by shape. Reads the ids only to count them; no id ever reaches the envelope.
@@ -713,9 +855,7 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
         let control_mode = advanced
             .and_then(|advanced| advanced.get("controlMode"))
             .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .filter(|value| !is_path_shaped(value))
-            .map(str::to_owned);
+            .and_then(shareable_label);
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_CONTROL.to_owned(),
             count: 1,
@@ -743,8 +883,7 @@ fn sanitize_upscale(value: Option<&Value>) -> Option<WorkflowUpscale> {
         engine: upscale
             .get("engine")
             .and_then(Value::as_str)
-            .filter(|engine| !engine.is_empty() && !is_path_shaped(engine))
-            .map(str::to_owned),
+            .and_then(shareable_label),
         softness: upscale.get("softness").and_then(Value::as_f64),
     })
 }
@@ -756,7 +895,7 @@ fn sanitize_loras(value: Option<&Value>) -> Vec<WorkflowLora> {
     entries
         .iter()
         .filter_map(Value::as_object)
-        .map(|entry| {
+        .filter_map(|entry| {
             // The catalog entry's `source` is `{ provider, repo, file }` for a Hugging Face
             // LoRA and `{ provider: "local", path }` for an imported one. Only the repo id
             // travels — never `path`, never `file`, never `installedPath`/`sourcePath`.
@@ -768,20 +907,152 @@ fn sanitize_loras(value: Option<&Value>) -> Vec<WorkflowLora> {
                 })
                 .and_then(|source| source.get("repo"))
                 .and_then(Value::as_str)
-                .and_then(hf_repo_id);
-            WorkflowLora {
-                name: entry
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty() && !is_path_shaped(name))
-                    .map(str::to_owned),
+                .map(str::to_owned);
+            // `reduce_lora` is the shared guard — `hf_repo_id` on the repo, the path check on
+            // the name — so a repo id that arrives in an envelope is validated exactly as one
+            // read out of a job payload is.
+            reduce_lora(WorkflowLora {
+                name: entry.get("name").and_then(Value::as_str).map(str::to_owned),
                 weight: entry.get("weight").and_then(Value::as_f64),
                 repo,
-            }
+            })
         })
-        .filter(|lora| lora.name.is_some() || lora.weight.is_some() || lora.repo.is_some())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Value-level reduction (shared by build and parse)
+// ---------------------------------------------------------------------------
+
+/// The four input kinds, in the order [`describe_inputs`] emits them. An `inputs[].kind`
+/// outside this set is not something a reader can act on, so it does not survive a parse.
+pub const INPUT_KINDS: &[&str] = &[
+    INPUT_KIND_SOURCE,
+    INPUT_KIND_REFERENCE,
+    INPUT_KIND_MASK,
+    INPUT_KIND_CONTROL,
+];
+
+/// Reduce every VALUE in an envelope to what the contract allows.
+///
+/// The typed struct reduces at KEY granularity only — it drops fields we do not declare, which
+/// is not the same as trusting the ones we do. An envelope that arrived from outside carries
+/// attacker-chosen strings under keys we *do* declare, and `loras[].repo` is the sharpest edge:
+/// a Hugging Face repo id is joined into a cache path (`models--owner--name`), so sc-15952's
+/// "install the missing LoRA" action would otherwise inherit whatever traversal string the file
+/// contained. Both directions run this one function so the guards cannot drift apart.
+fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
+    let WorkflowShare {
+        kind,
+        schema_version,
+        producer,
+        mode,
+        model,
+        prompt,
+        negative_prompt,
+        seed,
+        width,
+        height,
+        count,
+        style_preset,
+        style_id,
+        fit_mode,
+        upscale,
+        loras,
+        inputs,
+        advanced,
+    } = share;
+    WorkflowShare {
+        kind,
+        schema_version,
+        producer: reduce_producer(producer),
+        mode: shareable_label(&mode).unwrap_or_default(),
+        model: shareable_label(&model).unwrap_or_default(),
+        // Authored prose, exempt on purpose — see `is_path_shaped`.
+        prompt,
+        negative_prompt,
+        seed,
+        width,
+        height,
+        count,
+        style_preset: style_preset.as_deref().and_then(shareable_label),
+        style_id: style_id.as_deref().and_then(shareable_label),
+        fit_mode: fit_mode.as_deref().and_then(shareable_label),
+        upscale: upscale.map(|upscale| WorkflowUpscale {
+            enabled: upscale.enabled,
+            factor: upscale.factor,
+            engine: upscale.engine.as_deref().and_then(shareable_label),
+            softness: upscale.softness.filter(|value| value.is_finite()),
+        }),
+        loras: loras.into_iter().filter_map(reduce_lora).collect(),
+        inputs: inputs.into_iter().filter_map(reduce_input).collect(),
+        advanced: sanitize_advanced(&advanced),
+    }
+}
+
+/// One LoRA reference, reduced. An entry left with nothing to say is dropped entirely.
+fn reduce_lora(lora: WorkflowLora) -> Option<WorkflowLora> {
+    let reduced = WorkflowLora {
+        name: lora.name.as_deref().and_then(shareable_label),
+        weight: lora.weight.filter(|weight| weight.is_finite()),
+        // `owner/name` and nothing else. This is the value sc-15952 turns into a cache path.
+        repo: lora.repo.as_deref().and_then(hf_repo_id),
+    };
+    (reduced.name.is_some() || reduced.weight.is_some() || reduced.repo.is_some())
+        .then_some(reduced)
+}
+
+/// One input descriptor, reduced. A kind outside [`INPUT_KINDS`] is dropped — the shape list is
+/// a closed vocabulary, not free text.
+fn reduce_input(input: WorkflowInput) -> Option<WorkflowInput> {
+    if !INPUT_KINDS.contains(&input.kind.as_str()) {
+        return None;
+    }
+    Some(WorkflowInput {
+        control_mode: input.control_mode.as_deref().and_then(shareable_label),
+        kind: input.kind,
+        count: input.count,
+    })
+}
+
+/// The producer block, bounded. In an envelope from outside these are three free strings, so a
+/// name that is not a plain label, a URL that is not `http(s)`, or a version that is not strict
+/// `MAJOR.MINOR.PATCH` is reduced to empty rather than echoed to the user as provenance.
+fn reduce_producer(producer: WorkflowProducer) -> WorkflowProducer {
+    WorkflowProducer {
+        name: shareable_label(&producer.name).unwrap_or_default(),
+        url: shareable_label(&producer.url)
+            .filter(|url| is_web_url(url))
+            .unwrap_or_default(),
+        version: shareable_label(&producer.version)
+            .filter(|version| is_strict_semver(version))
+            .unwrap_or_default(),
+    }
+}
+
+/// An `http`/`https` URL with no whitespace in it. Deliberately narrow: the producer URL is the
+/// one URL the envelope carries, and anything else there is provenance nobody vouched for.
+fn is_web_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !value.chars().any(char::is_whitespace)
+}
+
+/// Strict `MAJOR.MINOR.PATCH` — the same shape `PRODUCER_VERSION` is asserted to have, applied
+/// to a version that arrived from somewhere else.
+fn is_strict_semver(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    [major, minor, patch].iter().all(|part| {
+        !part.is_empty()
+            && part.len() <= 6
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (*part == "0" || !part.starts_with('0'))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -857,25 +1128,30 @@ fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// The pose fields the worker's `parse_poses` actually reads
+/// (`crates/sceneworks-worker/src/image_jobs/base.rs`). All three are pure coordinate arrays
+/// with nothing identifying in them, and `hands` / `face` change the rendered skeleton — and so
+/// the image — exactly as `keypoints` does. Dropping them would cost reproduction fidelity for
+/// zero privacy gain. What does NOT travel is the pose-library `id` that named the entry, and
+/// anything else the picker attached to it.
+const POSE_FIELDS: &[&str] = &["keypoints", "hands", "face"];
+
 fn sanitize_poses(value: &Value) -> Option<Value> {
     let poses = value.as_array()?;
     // The entry count is load-bearing (poses replace `count` variations), so an entry whose
-    // keypoints are missing or malformed still occupies its slot as an empty object.
+    // coordinates are missing or malformed still occupies its slot as an empty object.
     let sanitized: Vec<Value> = poses
         .iter()
         .map(|pose| {
-            let keypoints = pose
-                .as_object()
-                .and_then(|pose| pose.get("keypoints"))
-                .filter(|keypoints| is_numeric_tree(keypoints));
-            match keypoints {
-                Some(keypoints) => {
-                    let mut out = JsonObject::new();
-                    out.insert("keypoints".to_owned(), keypoints.clone());
-                    Value::Object(out)
+            let mut out = JsonObject::new();
+            if let Some(pose) = pose.as_object() {
+                for field in POSE_FIELDS {
+                    if let Some(numbers) = pose.get(*field).filter(|value| is_numeric_tree(value)) {
+                        out.insert((*field).to_owned(), numbers.clone());
+                    }
                 }
-                None => Value::Object(JsonObject::new()),
             }
+            Value::Object(out)
         })
         .collect();
     (!sanitized.is_empty()).then_some(Value::Array(sanitized))
@@ -971,12 +1247,21 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
         });
     }
 
-    let schema_version = object
-        .get("schemaVersion")
-        .ok_or(WorkflowShareError::MissingSchemaVersion)?
-        .as_u64()
-        .and_then(|version| u32::try_from(version).ok())
-        .ok_or(WorkflowShareError::MissingSchemaVersion)?;
+    // Present-but-wrong and absent are different problems with different fixes, so they get
+    // different sentences: telling someone a field they can see in the file is "missing" sends
+    // them looking in the wrong place. An explicit `null` counts as absent, which is what a
+    // writer that omitted the field usually means.
+    let schema_version = match object.get("schemaVersion") {
+        None | Some(Value::Null) => return Err(WorkflowShareError::MissingSchemaVersion),
+        Some(present) => present
+            .as_u64()
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| WorkflowShareError::Malformed {
+                field: "schemaVersion".to_owned(),
+                detail: "must be a whole number (the contract version the file was written with)"
+                    .to_owned(),
+            })?,
+    };
     if schema_version > WORKFLOW_SHARE_SCHEMA_VERSION {
         return Err(WorkflowShareError::UnsupportedSchemaVersion {
             file: schema_version,
@@ -989,12 +1274,10 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
             field: field_from_serde_error(&error),
             detail: error.to_string(),
         })?;
-    // An envelope that arrived from outside is sanitized on the way IN as well: a hostile or
-    // simply older writer's `advanced` is reduced by the same allow-list the builder uses.
-    Ok(WorkflowShare {
-        advanced: sanitize_advanced(&share.advanced),
-        ..share
-    })
+    // An envelope that arrived from outside is reduced on the way IN by the same function that
+    // reduced ours on the way OUT — at VALUE granularity, not only key granularity. Dropping
+    // the keys we do not declare says nothing about the strings under the keys we do.
+    Ok(reduce_workflow_share(share))
 }
 
 /// Best-effort field name out of a serde error, so the message names something the user can
@@ -1282,6 +1565,173 @@ mod tests {
         }
     }
 
+    /// The guard used to test only the FIRST character for `\` and only recognized a drive
+    /// letter when a separator followed it, so every one of these travelled verbatim out of an
+    /// allow-listed key — and the relative-Windows ones carry the OS username. The story's line
+    /// is "every filesystem path without exception", so each of these is pinned here.
+    #[test]
+    fn is_path_shaped_catches_relative_traversing_and_drive_relative_locations() {
+        for path in [
+            // Relative Windows, no leading separator.
+            "Users\\Michael\\Desktop\\secret.png",
+            "models\\weights\\x.safetensors",
+            // Traversal, both separators.
+            "..\\..\\Users\\Michael",
+            "../../etc/passwd",
+            "./local/thing",
+            // Drive-relative: a drive prefix with NO separator after it.
+            "C:foo",
+            "c:secret\\file",
+            // Environment expansion.
+            "%USERPROFILE%\\x",
+            // A relative POSIX tree.
+            "assets/images/x.png",
+            // `~user` as well as `~/`.
+            "~michael/x",
+            // Percent-encoded `file://D:/x`, single- and double-encoded.
+            "file%3A%2F%2FD%3A%2Fx",
+            "FILE%3a%2F%2FD%3A%2fx",
+            "file%253A%252F%252FD%253A%252Fx",
+            "Users%5CMichael%5CDesktop%5Cx.png",
+        ] {
+            assert!(is_path_shaped(path), "{path:?} should read as a path");
+        }
+    }
+
+    /// The other half of the guard: a check this aggressive must not eat legitimate labels.
+    /// Everything here is a real value the envelope carries.
+    #[test]
+    fn is_path_shaped_keeps_legitimate_labels() {
+        for safe in [
+            "euler",
+            "dpmpp_2m",
+            "beta",
+            "cfg_pp",
+            "1024x1024",
+            "2k",
+            // Hugging Face repo ids are `owner/name` — two segments, and they stay.
+            "acme/mira",
+            "acme/foggy-coast",
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            "https://github.com/SceneWorks/SceneWorks",
+            "https://huggingface.co/acme/mira/tree/main",
+            "text_to_image",
+            "krea_2_turbo",
+            "z_image_turbo",
+            "seedvr2",
+            "noir_bloom",
+            "cinematic",
+            "crop",
+            "canny",
+            "three_quarter_left",
+            "",
+        ] {
+            assert!(!is_path_shaped(safe), "{safe:?} should not read as a path");
+        }
+    }
+
+    #[test]
+    fn prose_keys_carry_what_the_user_typed_even_when_it_names_a_path() {
+        // The deliberate exemption, pinned. `stylePrompt` and the structured prompt's `intent` /
+        // `runtimePrompt` are the same class as the top-level `prompt`, which the story puts IN:
+        // silently mangling authored text because it mentions a directory would be worse than the
+        // leak it prevents, and the user can see what they typed.
+        let advanced = json!({
+            "stylePrompt": "C:\\Users\\Michael\\Desktop\\secret_project\\brief.txt",
+            "structuredPrompt": {
+                "intent": "/home/michael/clients/acme/nda.md",
+                "runtimePrompt": "see ..\\..\\briefs\\acme.json"
+            },
+            "sampler": "C:\\Users\\Michael\\samplers\\euler.json"
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        assert_eq!(
+            sanitized["stylePrompt"],
+            json!("C:\\Users\\Michael\\Desktop\\secret_project\\brief.txt")
+        );
+        let recipe = sanitized["structuredPrompt"].as_object().expect("object");
+        assert_eq!(recipe["intent"], json!("/home/michael/clients/acme/nda.md"));
+        assert_eq!(
+            recipe["runtimePrompt"],
+            json!("see ..\\..\\briefs\\acme.json")
+        );
+        // A NON-prose key next to them is still guarded — the exemption is per key, not global.
+        assert!(!sanitized.contains_key("sampler"));
+        assert_eq!(PROSE_KEYS, ["stylePrompt", "intent", "runtimePrompt"]);
+    }
+
+    #[test]
+    fn top_level_labels_are_path_guarded_like_advanced_ones() {
+        let mut payload = payload_fixture();
+        for (key, value) in [
+            ("mode", "C:\\modes\\evil"),
+            ("model", "C:\\models\\evil"),
+            ("stylePreset", "\\\\server\\styles\\x"),
+            ("styleId", "../../etc/passwd"),
+            ("fitMode", "/etc/passwd"),
+        ] {
+            payload.insert(key.to_owned(), json!(value));
+        }
+        payload.insert(
+            "upscale".to_owned(),
+            json!({ "enabled": true, "engine": "E:\\engines\\seedvr2" }),
+        );
+        let share = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(share.mode, "");
+        assert_eq!(share.model, "");
+        assert_eq!(share.style_preset, None);
+        assert_eq!(share.style_id, None);
+        assert_eq!(share.fit_mode, None);
+        assert_eq!(share.upscale.as_ref().expect("upscale").engine, None);
+        let encoded = serde_json::to_string(&share).expect("serializes");
+        for leak in ["evil", "server", "etc/passwd", "engines"] {
+            assert!(!encoded.contains(leak), "{leak} leaked into the envelope");
+        }
+    }
+
+    #[test]
+    fn poses_keep_every_numeric_coordinate_array_the_worker_renders() {
+        // `hands` and `face` change the rendered skeleton exactly as `keypoints` does and hold
+        // nothing but coordinates, so dropping them would cost fidelity for no privacy gain.
+        let advanced = json!({
+            "poses": [{
+                "id": "pose_local_uuid",
+                "label": "Standing, arms out",
+                "keypoints": [[0.1, 0.2], [0.3, 0.4]],
+                "hands": [[[0.5, 0.6]], [[0.7, 0.8]]],
+                "face": [[0.9, 1.0]],
+                "sourcePath": "C:\\poses\\a.json"
+            }]
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        let pose = sanitized["poses"][0].as_object().expect("object");
+        assert_eq!(
+            pose.keys().collect::<Vec<_>>(),
+            vec!["face", "hands", "keypoints"]
+        );
+        let encoded = serde_json::to_string(&sanitized).expect("serializes");
+        for leak in ["pose_local_uuid", "Standing", "sourcePath", "C:\\\\poses"] {
+            assert!(!encoded.contains(leak), "{leak} leaked into the envelope");
+        }
+
+        // A non-numeric `hands`/`face` is not coordinates and does not travel.
+        let smuggled = json!({
+            "poses": [{ "keypoints": [[0.1, 0.2]], "hands": "C:\\hands\\a.json", "face": { "path": "/x" } }]
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        let sanitized = sanitize_advanced(&smuggled);
+        let pose = sanitized["poses"][0].as_object().expect("object");
+        assert_eq!(pose.keys().collect::<Vec<_>>(), vec!["keypoints"]);
+    }
+
     #[test]
     fn parse_rejects_a_missing_marker() {
         let error = parse_workflow_share(&json!({ "schemaVersion": 1 }))
@@ -1374,5 +1824,183 @@ mod tests {
         assert_eq!(share.advanced.keys().collect::<Vec<_>>(), vec!["steps"]);
         let encoded = serde_json::to_string(&share).expect("serializes");
         assert!(!encoded.contains("somethingNew"));
+    }
+
+    /// Dropping unknown KEYS is only half the job: every string under a key we DO declare is
+    /// attacker-chosen in a file that came from a stranger. `loras[].repo` is the sharpest edge
+    /// — sc-15952 joins a repo id into a Hugging Face cache path — so a traversal string there
+    /// must not survive the parse. Nothing here is echoed back out.
+    #[test]
+    fn parse_reduces_a_hostile_envelope_instead_of_echoing_it() {
+        let hostile = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": {
+                "name": "SceneWorks (build C:\\Users\\Michael\\src)",
+                "url": "file:///D:/exfil.html",
+                "version": "0.8.1-dirty-MICHAELS-PC"
+            },
+            "mode": "..\\..\\Users\\Michael",
+            "model": "C:\\models\\evil",
+            "prompt": "a lighthouse",
+            "stylePreset": "\\\\server\\styles\\x",
+            "styleId": "../../etc/passwd",
+            "fitMode": "/etc/passwd",
+            "upscale": { "enabled": true, "factor": 2, "engine": "E:\\engines\\seedvr2" },
+            "loras": [
+                { "name": "Foggy Coast", "weight": 0.65, "repo": "../../../etc/passwd" },
+                { "name": "C:\\Users\\Michael\\loras\\x", "repo": "acme/mira" },
+                { "name": "..\\..\\Users\\Michael\\loras", "weight": 0.4, "repo": "acme/../../etc" },
+                { "name": "/etc/passwd", "repo": "../x" }
+            ],
+            "inputs": [
+                { "kind": "source", "count": 1 },
+                { "kind": "C:\\Users\\Michael", "count": 1 },
+                { "kind": "control", "count": 1, "controlMode": "/etc/passwd" }
+            ],
+            "advanced": { "steps": 8, "sampler": "C:\\Users\\Michael\\euler.json" }
+        });
+        let share = parse_workflow_share(&hostile).expect("a hostile envelope still parses");
+
+        assert_eq!(share.mode, "");
+        assert_eq!(share.model, "");
+        assert_eq!(share.style_preset, None);
+        assert_eq!(share.style_id, None);
+        assert_eq!(share.fit_mode, None);
+        assert_eq!(share.upscale.as_ref().expect("upscale").engine, None);
+
+        // `repo` is validated as `owner/name`, exactly as it is on build. The fourth entry had
+        // nothing left to say once its name and repo were dropped, so it does not travel at all.
+        assert_eq!(share.loras.len(), 3);
+        assert_eq!(share.loras[0].repo, None);
+        assert_eq!(share.loras[0].name.as_deref(), Some("Foggy Coast"));
+        assert_eq!(share.loras[1].repo.as_deref(), Some("acme/mira"));
+        assert_eq!(share.loras[1].name, None);
+        assert_eq!(share.loras[2].repo, None);
+        assert_eq!(share.loras[2].name, None);
+        assert_eq!(share.loras[2].weight, Some(0.4));
+
+        // `.` and `-` are legal inside an HF segment, so `../x` is the shape a naive
+        // `owner/name` check waves through. A segment must start with an alphanumeric.
+        for rejected in [
+            "../x",
+            "acme/..",
+            "./x",
+            "../../../etc/passwd",
+            "acme/../../etc",
+            "/acme/mira",
+            "acme",
+            "",
+        ] {
+            assert_eq!(hf_repo_id(rejected), None, "{rejected:?} is not a repo id");
+        }
+        for accepted in [
+            "acme/mira",
+            "acme/foggy-coast",
+            "stabilityai/stable-diffusion-xl-base-1.0",
+        ] {
+            assert_eq!(hf_repo_id(accepted).as_deref(), Some(accepted));
+        }
+
+        // An `inputs[].kind` outside the closed vocabulary is not something a reader can act on.
+        let kinds: Vec<&str> = share
+            .inputs
+            .iter()
+            .map(|input| input.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec![INPUT_KIND_SOURCE, INPUT_KIND_CONTROL]);
+        assert_eq!(share.inputs[1].control_mode, None);
+
+        // The producer block is provenance nobody vouched for; a name, URL or version that is
+        // not the shape we publish is reduced to empty rather than shown to the user as fact.
+        assert_eq!(share.producer.name, "");
+        assert_eq!(share.producer.url, "");
+        assert_eq!(share.producer.version, "");
+
+        assert_eq!(share.advanced.keys().collect::<Vec<_>>(), vec!["steps"]);
+
+        let encoded = serde_json::to_string(&share).expect("serializes");
+        for leak in [
+            "Michael", "C:\\\\", "E:\\\\", "etc", "file://", "server", "evil", "exfil", "dirty",
+        ] {
+            assert!(
+                !encoded.contains(leak),
+                "{leak} survived the parse: {encoded}"
+            );
+        }
+    }
+
+    /// A well-formed producer block from another build travels intact — the reduction bounds the
+    /// block, it does not erase it (the whole point of recording the producer is a bug report
+    /// that says which build wrote the file).
+    #[test]
+    fn parse_keeps_a_well_formed_producer_block_from_another_build() {
+        let other = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "99.12.0" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "p"
+        });
+        let share = parse_workflow_share(&other).expect("parses");
+        assert_eq!(share.producer.name, PRODUCER_NAME);
+        assert_eq!(share.producer.url, PRODUCER_URL);
+        assert_eq!(share.producer.version, "99.12.0");
+    }
+
+    #[test]
+    fn parse_distinguishes_a_malformed_schema_version_from_a_missing_one() {
+        let envelope = |version: Value| {
+            let mut object = JsonObject::new();
+            object.insert(
+                WORKFLOW_SHARE_MARKER_KEY.to_owned(),
+                json!(WORKFLOW_KIND_IMAGE),
+            );
+            if !version.is_null() {
+                object.insert("schemaVersion".to_owned(), version);
+            }
+            Value::Object(object)
+        };
+
+        // Absent (and an explicit null, which a writer that omitted the field usually means).
+        for missing in [Value::Null, json!(null)] {
+            assert_eq!(
+                parse_workflow_share(&envelope(missing)).expect_err("no schemaVersion"),
+                WorkflowShareError::MissingSchemaVersion
+            );
+        }
+        assert_eq!(
+            parse_workflow_share(&json!({
+                "sceneworksWorkflow": "image",
+                "schemaVersion": null
+            }))
+            .expect_err("null schemaVersion"),
+            WorkflowShareError::MissingSchemaVersion
+        );
+
+        // Present but the wrong shape — a different problem with a different fix, so a
+        // different sentence. Telling someone a field they can SEE is missing sends them
+        // looking in the wrong place.
+        for malformed in [json!("1"), json!(-1), json!(1.5), json!([1]), json!({})] {
+            let error = parse_workflow_share(&envelope(malformed.clone()))
+                .expect_err("malformed schemaVersion");
+            assert_eq!(
+                error,
+                WorkflowShareError::Malformed {
+                    field: "schemaVersion".to_owned(),
+                    detail:
+                        "must be a whole number (the contract version the file was written with)"
+                            .to_owned(),
+                },
+                "{malformed} should read as malformed, not missing"
+            );
+            let message = error.to_string();
+            assert!(message.contains("schemaVersion"), "{message}");
+            assert!(
+                !message.contains("missing"),
+                "a present-but-wrong version must not be reported as missing: {message}"
+            );
+        }
     }
 }

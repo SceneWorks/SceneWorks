@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::workflow_share::{
-    build_workflow_share, parse_workflow_share, AdvancedKeySource, WorkflowShare,
+    build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedKeySource, WorkflowShare,
     ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
@@ -403,13 +403,84 @@ export function buildImageJobAdvanced(state) {
     assert_eq!(keys, expected);
 }
 
+/// A builder shaped the way the scanner cannot read, so the tests below can hand it one.
+fn builder_with_return_body(body: &str) -> String {
+    format!("export function buildImageJobAdvanced(state) {{\n  return {{\n{body}\n  }};\n}}\n")
+}
+
+#[test]
+#[should_panic(expected = "cannot read")]
+fn the_key_extractor_refuses_a_spread_of_a_call_expression() {
+    // Verified against the real lint: adding this line plus a helper returning
+    // `{ secretLocalPathKnob: state.weightsPath }` made the whole coverage lint PASS SILENTLY —
+    // the `>= 25` floor and all five anchors still resolved while the new knob became invisible.
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...buildFutureKnobs(state),",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "cannot read")]
+fn the_key_extractor_refuses_a_spread_of_a_bare_identifier() {
+    // A parenthesis-less spread also used to leave a spread open forever, so the next nested
+    // object VALUE would have been read as an emit scope — quiet corruption, not just a miss.
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...defaults,\n    ...(a ? { controlWeights: { overlayId } } : {}),",
+    ));
+}
+
+#[test]
+#[should_panic(expected = "contains no object literal")]
+fn the_key_extractor_refuses_a_spread_with_no_object_literal_in_it() {
+    emitted_advanced_keys(&builder_with_return_body(
+        "    resolution,\n    ...(buildFutureKnobs(state)),",
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Leak tests
 // ---------------------------------------------------------------------------
 
+/// Every value in a built envelope, checked against an INDEPENDENTLY written path sniffer.
+///
+/// The seeds are the point: the guard only ever gets as strong as what this test throws at it,
+/// and the first cut seeded only absolute paths — which is exactly the subset the first cut of
+/// `is_path_shaped` already caught, so the two could agree while both being wrong. The relative,
+/// traversing and drive-relative seeds below are the ones that used to travel verbatim, and the
+/// top-level ones (`model`, `stylePreset`, `styleId`, `fitMode`, `mode`) cover the fields that
+/// were copied with no check at all while `advanced.styleId` — literally the same value — was
+/// guarded.
+///
+/// The deliberate PROSE exemption is not seeded here; it is pinned by
+/// [`authored_prose_travels_verbatim_even_when_it_names_a_path`] so that each test asserts one
+/// thing.
 #[test]
 fn no_value_in_a_built_envelope_is_path_shaped() {
     let mut payload = golden_payload();
+    // Top-level request fields, copied straight onto the envelope. `mode` and `model` are
+    // required strings, so a path-shaped one reduces to empty rather than vanishing.
+    for (key, value) in [
+        ("mode", "..\\..\\Users\\Michael"),
+        ("model", "C:\\models\\evil"),
+        ("stylePreset", "\\\\fileserver\\styles\\x"),
+        ("styleId", "../../etc/passwd"),
+        ("fitMode", "/etc/passwd"),
+    ] {
+        payload.insert(key.to_owned(), json!(value));
+    }
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "factor": 2, "engine": "E:\\engines\\seedvr2" }),
+    );
+    payload.insert(
+        "loras".to_owned(),
+        json!([{
+            "name": "Users\\Michael\\Desktop\\coast.safetensors",
+            "weight": 0.65,
+            "source": { "provider": "huggingface", "repo": "../../../etc/passwd" }
+        }]),
+    );
+
     let advanced = payload
         .get_mut("advanced")
         .and_then(Value::as_object_mut)
@@ -434,6 +505,18 @@ fn no_value_in_a_built_envelope_is_path_shaped() {
             "poses",
             json!([{ "id": "pose_1", "keypoints": "C:\\poses\\a.json" }]),
         ),
+        // The escapes the first cut of the guard let through, one per family.
+        ("guidanceMethod", json!("Users\\Michael\\Desktop\\cfg.json")),
+        ("viewAngle", json!("..\\..\\Users\\Michael")),
+        ("schedulerShift", json!("../../etc/passwd")),
+        // A drive-RELATIVE path: a drive prefix with no separator after it.
+        ("controlMode", json!("C:foo")),
+        ("styleId", json!("c:secret\\noir")),
+        ("faceRestore", json!("%USERPROFILE%\\restore.json")),
+        ("textStyleGain", json!("~michael/gain.json")),
+        // Percent-encoded `file://D:/x`.
+        ("trueCfgScale", json!("file%3A%2F%2FD%3A%2Fx")),
+        ("ipAdapterScale", json!("assets/images/michael/x.png")),
     ] {
         advanced.insert(key.to_owned(), value);
     }
@@ -460,17 +543,155 @@ fn no_value_in_a_built_envelope_is_path_shaped() {
     for fragment in [
         "Michael",
         "C:\\\\",
+        "c:secret",
+        "C:foo",
         "/home/",
         "file://",
+        "file%3A",
         "fileserver",
         "E:\\\\",
         "/opt/",
         "safetensors",
+        "USERPROFILE",
+        "etc/passwd",
+        "..",
+        "~",
     ] {
         assert!(
             !text.contains(fragment),
             "{fragment:?} leaked into the envelope: {text}"
         );
+    }
+}
+
+/// The one deliberate exception to "every filesystem path without exception", made explicit.
+///
+/// `stylePrompt` and the structured prompt's `intent` / `runtimePrompt` are the same class as
+/// the top-level `prompt`, which the story puts IN: they are what the user typed. Silently
+/// mangling authored text because it mentions a directory would be worse than the leak it
+/// prevents — the user wrote it and can see it before sharing. That decision was previously
+/// implicit in a `PROSE_KEYS` constant no test seeded; this pins it in both directions.
+#[test]
+fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
+    const STYLE_PROMPT: &str = "C:\\Users\\Michael\\Desktop\\secret_project\\brief.txt";
+    const INTENT: &str = "/home/michael/clients/acme/nda.md";
+    const RUNTIME_PROMPT: &str = "rendered from ..\\..\\briefs\\acme.json";
+    const PROMPT: &str = "a lighthouse, per D:\\briefs\\fog.md";
+    const NEGATIVE_PROMPT: &str = "no text, nothing like \\\\fileserver\\rejects\\list.txt";
+
+    let mut payload = golden_payload();
+    payload.insert("prompt".to_owned(), json!(PROMPT));
+    payload.insert("negativePrompt".to_owned(), json!(NEGATIVE_PROMPT));
+    let advanced = payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    advanced.insert("stylePrompt".to_owned(), json!(STYLE_PROMPT));
+    advanced.insert(
+        "structuredPrompt".to_owned(),
+        json!({ "intent": INTENT, "runtimePrompt": RUNTIME_PROMPT }),
+    );
+
+    let share = build_workflow_share(&golden_asset(), &payload);
+    assert_eq!(share.prompt, PROMPT);
+    assert_eq!(share.negative_prompt, NEGATIVE_PROMPT);
+    assert_eq!(share.advanced["stylePrompt"], json!(STYLE_PROMPT));
+    let recipe = share.advanced["structuredPrompt"]
+        .as_object()
+        .expect("structuredPrompt object");
+    assert_eq!(recipe["intent"], json!(INTENT));
+    assert_eq!(recipe["runtimePrompt"], json!(RUNTIME_PROMPT));
+
+    // The exemption is per key, not a hole in the guard: a NON-prose neighbour with the same
+    // text is still dropped, and the exempt pointers are exactly these five.
+    let mut offenders = Vec::new();
+    collect_strings(
+        &serde_json::to_value(&share).expect("serializes"),
+        String::from("$"),
+        &mut offenders,
+    );
+    let path_shaped: BTreeSet<&str> = offenders
+        .iter()
+        .filter(|(_, value)| looks_like_a_path(value))
+        .map(|(pointer, _)| pointer.as_str())
+        .collect();
+    assert_eq!(
+        path_shaped,
+        [
+            "$.prompt",
+            "$.negativePrompt",
+            "$.advanced.stylePrompt",
+            "$.advanced.structuredPrompt.intent",
+            "$.advanced.structuredPrompt.runtimePrompt",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<&str>>(),
+        "only the authored prose fields may carry a path"
+    );
+}
+
+/// The shipped guard must never be WEAKER than the sniffer this file asserts with.
+///
+/// That inversion is exactly how the first cut shipped: [`looks_like_a_path`] already treated
+/// any backslash as a path while `is_path_shaped` tested only the FIRST character, so the two
+/// disagreed on every relative Windows path — and the property test passed anyway, because its
+/// seeds happened to be precisely the subset both agreed on. A seed corpus can only ever fail to
+/// notice that; the relationship itself has to be asserted, so it is asserted here.
+///
+/// The other direction is deliberately NOT asserted: the shipped guard is allowed to be
+/// stricter (it also catches relative POSIX trees and percent-encoded `file://`), because the
+/// cost of a false positive is one dropped label and the cost of a false negative is a username
+/// inside every copy of a shared image.
+#[test]
+fn the_shipped_path_guard_is_never_weaker_than_the_independent_sniffer() {
+    for value in [
+        // Paths, one per family.
+        "/home/michael/x.png",
+        "C:\\Users\\Michael\\x.png",
+        "Users\\Michael\\Desktop\\secret.png",
+        "models\\weights\\x.safetensors",
+        "..\\..\\Users\\Michael",
+        "../../etc/passwd",
+        "./local/thing",
+        "C:foo",
+        "c:secret\\file",
+        "%USERPROFILE%\\x",
+        "assets/images/x.png",
+        "~/models/x.png",
+        "~michael/x",
+        "\\\\fileserver\\share\\x.png",
+        "file:///D:/x.png",
+        "file%3A%2F%2FD%3A%2Fx",
+        "engine loaded from D:/models/x",
+        // Legitimate values, which neither may flag.
+        "euler",
+        "dpmpp_2m",
+        "beta",
+        "cfg_pp",
+        "1024x1024",
+        "2k",
+        "acme/mira",
+        "acme/foggy-coast",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "https://github.com/SceneWorks/SceneWorks",
+        "text_to_image",
+        "krea_2_turbo",
+        "seedvr2",
+        "noir_bloom",
+        "cinematic",
+        "crop",
+        "canny",
+        "",
+    ] {
+        if looks_like_a_path(value) {
+            assert!(
+                is_path_shaped(value),
+                "the shipped `is_path_shaped` misses {value:?}, which this file's independent \
+                 sniffer flags — so the leak tests here are checking a guard weaker than their \
+                 own assertion and a bug in it can hide behind itself. Strengthen \
+                 `workflow_share::is_path_shaped`; do NOT weaken `looks_like_a_path`."
+            );
+        }
     }
 }
 
@@ -630,15 +851,26 @@ fn looks_like_a_path(value: &str) -> bool {
 /// object literal at the top level of a spread expression (`...( … )`) written inside another
 /// emit scope — which covers BOTH branches of the `cond ? { a } : { b }` the builder uses.
 /// Only identifiers in key position inside an emit scope count.
+///
+/// # Fails loud, never quiet
+///
+/// The scanner understands ONE shape, and a lint that silently understands nothing is worse
+/// than no lint: `...buildFutureKnobs(state)` in the return object would contribute no keys, the
+/// `>= 25` floor and every anchor would still resolve, and a brand-new knob would stop
+/// travelling with zero signal. So a spread this scanner cannot follow — a bare identifier
+/// (`...defaults,`), a call expression, or a parenthesized expression with no object literal in
+/// it — PANICS with instructions instead of scanning past it. Fail-safe on the privacy axis
+/// (the key is dropped, not leaked) is only half of what this lint is for; the other half is
+/// noticing that a knob went missing.
 fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
     let body = builder_return_body(source);
     let chars: Vec<char> = body.chars().collect();
     let mut keys = BTreeSet::new();
     // (is_emit_scope, expecting_a_key)
     let mut scopes: Vec<(bool, bool)> = vec![(true, true)];
-    // Open spread expressions, as (open scope count, paren depth at the `...`). Nested,
-    // because `...(a ? { k, ...(b ? { j } : {}) } : {})` happens.
-    let mut spreads: Vec<(usize, usize)> = Vec::new();
+    // Open spread expressions, as (open scope count, paren depth at the `...`, produced an
+    // object literal). Nested, because `...(a ? { k, ...(b ? { j } : {}) } : {})` happens.
+    let mut spreads: Vec<(usize, usize, bool)> = Vec::new();
     let mut paren_depth = 0_usize;
     let mut index = 0;
 
@@ -652,8 +884,11 @@ fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
             '{' => {
                 let in_spread = spreads
                     .last()
-                    .is_some_and(|(scope_count, _)| *scope_count == scopes.len());
+                    .is_some_and(|(scope_count, _, _)| *scope_count == scopes.len());
                 let is_emit = in_spread && scopes.last().is_some_and(|(emit, _)| *emit);
+                if let (true, Some(spread)) = (is_emit, spreads.last_mut()) {
+                    spread.2 = true;
+                }
                 if let Some(scope) = scopes.last_mut() {
                     scope.1 = false;
                 }
@@ -676,10 +911,18 @@ fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
             }
             ')' => {
                 paren_depth = paren_depth.saturating_sub(1);
-                while spreads
-                    .last()
-                    .is_some_and(|(_, spread_paren)| *spread_paren >= paren_depth)
-                {
+                while let Some((_, spread_paren, produced)) = spreads.last().copied() {
+                    if spread_paren < paren_depth {
+                        break;
+                    }
+                    assert!(
+                        produced,
+                        "a spread in buildImageJobAdvanced's return object contains no object \
+                         literal, so `emitted_advanced_keys` in this test scanned past it and \
+                         contributed nothing. Every key inside it is invisible to this lint. \
+                         Write the spread as `...(cond ? {{ key }} : {{}})`, or teach the \
+                         scanner the new shape."
+                    );
                     spreads.pop();
                 }
                 if let Some(scope) = scopes.last_mut() {
@@ -696,7 +939,27 @@ fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
             '.' => {
                 if index + 2 < chars.len() && chars[index + 1] == '.' && chars[index + 2] == '.' {
                     if scopes.last().is_some_and(|(emit, _)| *emit) {
-                        spreads.push((scopes.len(), paren_depth));
+                        // The scanner follows `...( … )` and nothing else. A bare identifier or
+                        // a call would leave a spread open forever — the next nested object
+                        // VALUE would then read as an emit scope — so refuse rather than guess.
+                        let mut lookahead = index + 3;
+                        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                            lookahead += 1;
+                        }
+                        assert!(
+                            chars.get(lookahead) == Some(&'('),
+                            "buildImageJobAdvanced spreads something `emitted_advanced_keys` in \
+                             this test cannot read: a bare identifier or a call expression \
+                             (`...{}`). Every key it contributes is invisible to this lint, so a \
+                             new knob would silently stop travelling. Write it as \
+                             `...(cond ? {{ key }} : {{}})`, or teach the scanner the new shape.",
+                            chars[lookahead..]
+                                .iter()
+                                .take(24)
+                                .collect::<String>()
+                                .trim_end()
+                        );
+                        spreads.push((scopes.len(), paren_depth, false));
                     }
                     index += 3;
                 } else {
@@ -739,6 +1002,12 @@ fn emitted_advanced_keys(source: &str) -> BTreeSet<String> {
             }
         }
     }
+    assert!(
+        spreads.is_empty(),
+        "a spread in buildImageJobAdvanced's return object never closed, so \
+         `emitted_advanced_keys` in this test lost track of the builder's shape. Fix the \
+         scanner rather than letting it scan a shape it does not understand."
+    );
     keys
 }
 
