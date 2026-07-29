@@ -76,7 +76,14 @@ Each rung declares exactly four things, each in exactly one place, each derived 
 
 ### The invariant that makes it checkable
 
-> **A rung that cannot deliver its bound is never selected, and never recorded.**
+> **A rung — or a parameter of one — that cannot move the REQUEST peak is never selected by
+> default, and never recorded as a saving.**
+
+The unit is the **request** peak, not a phase peak. A strategy that halves one phase while a
+different phase still binds the request has saved the user nothing, and a calibration row claiming
+otherwise is a false green. SC-15794 is the worked example: rung 4's text-encoder scope cuts the
+z-image conditioning phase 2.718 → 1.455 GiB (−46.5%) and moves the request peak by **0.0%**, because
+decode binds every tier at ~4.365 GiB. The capability is real and published; the default is not it.
 
 Availability is the mechanism that enforces this. A typed `Error::Unsupported` at the provider is a
 **backstop for a selector bug**, not a control-flow path — if it fires in production, the selector
@@ -96,7 +103,13 @@ an error.
 | 1 | Staged residency | residency | weights across phases | model has a separable phase-A component | `stage_residency` | — |
 | 2 | Bounded decode | scratch | decoder scratch | decoder is tileable | `tile_vae_decode` | `decode_tile_edge`, `decode_overlap` |
 | 3 | Bounded attention | scratch | attention scratch | attention is chunkable | `chunk_attention` | `attention_chunk_size` |
-| 4 | Bounded transformer residency | residency | trunk weights | weights are **re-openable** from a snapshot | `stream_transformer_blocks` | `transformer_window_size` |
+| 4 | Bounded transformer residency | residency | trunk weights | weights are **re-openable** from a snapshot | `stream_transformer_blocks` | `transformer_window_size`, `transformer_window_component` |
+
+Rung 4's `transformer_window_component` (`Dit` / `TextEncoder` / `Both`, SC-15794) is a **parameter
+with a published candidate domain**, exactly like `decode_tile_edges` and `attention_chunk_sizes` —
+not a new axis. Availability stays one verdict per rung; which transformer the window applies to is
+chosen within it. This is the shape any future component scope should take, including Wan's MoE
+expert residency (§13).
 
 ### The prerequisite graph — explicit, and small
 
@@ -248,6 +261,38 @@ This keeps one authority per fact. The field is *not* retained for image provide
 hint" — that would re-create exactly the two-place ambiguity this design removes. Deferring the load
 entirely is also strictly better: nothing loads until a request has been selected, so model
 switching gets faster.
+
+### Amendment (SC-15794 / PR #323): the loader must take residency as an argument
+
+PR #323 makes the loader choose the **form** of a component from the load policy:
+
+```rust
+// z-image loader.rs
+let streamable = matches!(spec_text.offload_policy, OffloadPolicy::Sequential);
+load_text_encoder_only(root, spec_text.quantize, streamable)
+```
+
+A streamable encoder holds no resident layers, so it is ~2× slower under `Resident` (measured
+250/148/165 ms resident vs 445/428/419 ms streamed) — a real regression the PR pins a test against.
+The gate is correct **given a load-time policy**. Under request-scoped residency it cannot stand: the
+loader runs before the request exists.
+
+**The fix is already precedented in the same type.** `Residency::sequential` takes
+`load_heavy: impl Fn(bool) -> Result<Heavy>` — the `bool` is `use_pid`, a *per-request* flag threaded
+into a loader closure. `streamable` becomes a second such argument:
+
+```rust
+load_text:  impl Fn(bool /* streamable */) -> Result<Text>
+load_heavy: impl Fn(bool /* use_pid */, bool /* streamable */) -> Result<Heavy>
+```
+
+The request's selected strategy decides the form; the loader builds it. No form is chosen before a
+request exists, and the 2× resident regression is structurally unreachable because a request that
+did not select a streaming scope never asks for a streamable component.
+
+**The warm-cache consequence is the one already declared.** A warm *non*-streamable encoder cannot
+serve a request that selects the text-encoder scope, so that request evicts and rebuilds — the same
+eviction rung 1 already declares, for the same reason. No new cost category.
 
 ### What this unlocks for rung 4
 
@@ -460,7 +505,7 @@ everywhere else.** Current scores:
 
 | fact | encodings today | where | target |
 |---|---|---|---|
-| rung 4 needs a non-materialized trunk | **3** | `streamable`, numeric-order walk, `resolve_block_window` | **1** — prerequisite edge |
+| rung 4 needs a non-materialized trunk | **4** *(was 3)* | `streamable`, numeric-order walk, `resolve_block_window`, **+ the loader's `streamable` flag (PR #323)** | **1** — prerequisite edge |
 | rung 1 is inert under `Resident` | **0** | prose in a module doc; declared nowhere | **0 needed** — the condition ceases to exist |
 | the escalation order | **2** | `ImageMemoryStrategy::ALL`, `mempolicy::Lever` | **1** |
 | the control branch's tier | **2** | installed artifact, `BranchQuant` lever | **1** |
