@@ -495,7 +495,7 @@ impl KreaRealtimeLoraCoverage {
 
     /// Emit the `warn` event for each genuinely partially-applied file, after the engine returns its
     /// report.
-    fn warn(&self) {
+    pub(super) fn warn(&self) {
         for (file, unapplied, total) in &self.partial {
             tracing::warn!(
                 event = "krea_realtime_lora_partially_applied",

@@ -398,9 +398,11 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // descriptor-derived `true` is behavior-equivalent — the CFG-off recipe is
         // engine-enforced, not a model capability the worker has to suppress.
         ("qwen_image_edit_2511_lightning", true, true),
-        ("flux2_klein_9b", true, false),
-        ("flux2_klein_9b_kv", true, false),
-        ("flux2_klein_9b_true_v2", true, false),
+        // sc-15440: current Klein txt2img consumes the user negative branch. This is standard
+        // guidance, not the `supports_true_cfg` capability; FLUX.2-dev below remains embedded-only.
+        ("flux2_klein_9b", true, true),
+        ("flux2_klein_9b_kv", true, true),
+        ("flux2_klein_9b_true_v2", true, true),
         // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id, embedded distilled
         // guidance (supports_guidance=true) with no negative prompt / true-CFG.
         ("flux2_dev", true, false),
@@ -453,16 +455,15 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // supports_negative_prompt=true (unlike the CFG-free distilled Turbo). The Boogu-base pattern,
         // but Raw ALSO accepts a user negative prompt (the reference `sample()` takes `negative_prompts`).
         ("krea_2_raw", true, true),
-        // SD3.5 Large (epic 7841 / sc-7871): true-CFG MMDiT flagship — supports_guidance=true +
-        // supports_negative_prompt=true (the `sd3_5_large` descriptor advertises supports_true_cfg).
+        // SD3.5 Large (epic 7841 / sc-7871, corrected sc-15440): standard CFG MMDiT flagship —
+        // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_large", true, true),
         // SD3.5 Large Turbo (epic 7841 / sc-7871): the ADD-distilled few-step, CFG-off sibling — the
         // `sd3_5_large_turbo` descriptor drops guidance + negative prompt (supports_guidance=false,
         // supports_negative_prompt=false), the distilled-turbo pattern.
         ("sd3_5_large_turbo", false, false),
-        // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871): the MMDiT-X true-CFG variant —
-        // supports_guidance=true + supports_negative_prompt=true (the `sd3_5_medium` descriptor advertises
-        // supports_true_cfg, same as Large; only the transformer + step/guidance recipe differ).
+        // SD3.5 Medium (epic 7841 / sc-7869 M3, wired sc-7871, corrected sc-15440): standard CFG —
+        // supports_guidance=true + supports_negative_prompt=true, but supports_true_cfg=false.
         ("sd3_5_medium", true, true),
         // SANA 1600M (epic 8485 / sc-8489): true-CFG Linear-DiT — supports_guidance=true +
         // supports_negative_prompt=true (the `sana_1600m` descriptor advertises supports_true_cfg).
