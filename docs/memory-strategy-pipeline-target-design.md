@@ -369,7 +369,15 @@ Replace the order-derived walk with the declared graph from §3.
   so no provider may opt out of it. Providers still control the graph's **effect** — declaring rung 1
   `Missing` makes rung 4 unselectable, which is the honest outcome.
 - The engagement-vs-availability distinction is a **type**: `MemoryPrerequisiteScope::EngagedInSameRequest`.
-  The refusal message says so, and states that availability does not satisfy it.
+  The refusal message names it, and is **scoped to the case that actually produced it**. Because every
+  edge in the current graph points *down* the cost ladder, `support(rung) == Implemented` implies
+  `engages(…)`, so the "implemented but not engaged" branch cannot be reached: the only reachable
+  refusals are `Missing` / undeclared, where implementing the rung *is* the fix. The message therefore
+  tells that reader to declare the rung (`Implemented`, or `StructurallyNotApplicable` if the
+  architecture has no such component) and warns only about what is genuinely insufficient — the rung
+  running on some *other* request, or engaged earlier on a warm generator. The unreachable branch is
+  retained with its original wording and a comment marking it dead for the current graph; it becomes
+  live the moment an edge points sideways or up the ladder.
 - `validate_selection` walks that graph, not `< selection.strategy`.
   `StructurallyNotApplicable` on a prerequisite rung satisfies it **vacuously** — it asserts the
   architecture has no such component, which is not evidence the trunk is eagerly materialized. The
@@ -380,10 +388,26 @@ Replace the order-derived walk with the declared graph from §3.
   The intersection is where defeasibility lives — a rung the provider does not implement is not
   engaged, so its parameters stop being *required* rather than the selection being refused.
 - `validate_selected_parameters` and `select_strategy` needed no behavioural change, as predicted.
-  Three *other* sites that derived engagement from the enum's order were routed through the new seam:
-  `mlx-gen-z-image`'s route-aware decode check, `sceneworks_worker::mlx_fit_gate::memory_for_selection`,
-  and `validate_selected_parameters`' own `requires_*` flags. After this, **no ordering comparison on
-  `MemoryStrategy` remains anywhere in either repo.**
+  *Other* sites that derived engagement from the enum's cost order were routed through the new seam.
+  Two spellings of the same hazard had to be swept, not one:
+  - **Ordering comparisons** (`selection.strategy >= MemoryStrategy::…`) —
+    `sceneworks_worker::mlx_fit_gate::memory_for_selection`, `mlx-gen-z-image`'s route-aware decode
+    check, and `validate_selected_parameters`' own `requires_*` flags.
+  - **`match` arms that hardcode the cumulative default** (`tile_vae_decode: true` on the rung-3 and
+    rung-4 arms via a shared `..decode` base). These carry no comparison operator, so the first sweep
+    missed them: `mlx_gen_z_image::memory_strategy::z_image_generation_memory` and
+    `candle_gen_krea::krea_generation_memory`. Both now read `contract.engages`. Every shipping
+    contract declares rungs 1–3 `Implemented`, so both produce identical output today — this is a
+    consistency fix, not a behavior change.
+
+  After this, **no code in either repo derives rung engagement from `MemoryStrategy`'s numeric order.**
+  The single surviving ordering comparison is `(rung as u8) <= (self as u8)` *inside*
+  `MemoryStrategy::engages` — which is the one named seam the policy is supposed to live in, and the
+  only place it may.
+
+  The `match strategy` expressions that remain (contract construction in z-image and Krea,
+  `validate_owned_parameter_domain` in gen-core) map each rung to **what that rung itself owns**, with
+  no "…and everything below it" semantics. They are per-rung declarations, not order derivations.
 
 **Correction to the problem statement above.** `select_strategy` already funnels every candidate
 through `contract.validate_selection` (`candidate_exclusion`), so the two layers could never return
