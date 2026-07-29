@@ -401,7 +401,8 @@ fn read_workflow_chunk_from<R: BufRead + Seek>(
 /// as it appears on disk, including its 4-byte length, 4-byte type, keyword, separators and CRC.
 ///
 /// Exists so the per-image cost of sc-15948 is a measured number rather than an estimate; it is
-/// what `chunk_size_for_the_representative_recipe` in `tests/workflow_png.rs` reports.
+/// what `the_chunk_stays_a_text_chunk_and_not_a_payload` in `tests/workflow_png.rs` reports and
+/// bounds.
 ///
 /// # Errors
 /// [`WorkflowChunkError::Encode`] if the envelope cannot be serialized or compressed.
