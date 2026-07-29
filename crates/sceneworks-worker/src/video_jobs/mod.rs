@@ -152,6 +152,10 @@ struct DecodedVideo {
     frames: Vec<RgbFrame>,
     fps: u32,
     audio: Option<AudioTrack>,
+    /// Actual provider-owned adapter install outcomes from this generation. Empty for providers that
+    /// do not expose partial-install reports.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    adapter_apply_reports: Vec<gen_core::AdapterApplyReport>,
 }
 
 /// One RGB8 frame, row-major, `pixels.len() == width * height * 3` (the engine's
@@ -1005,7 +1009,12 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
         })
         .collect();
     let audio = is_ltx_model(&request.model).then(|| stub_audio_track(frame_count, fps));
-    DecodedVideo { frames, fps, audio }
+    DecodedVideo {
+        frames,
+        fps,
+        audio,
+        adapter_apply_reports: Vec::new(),
+    }
 }
 
 /// Deterministic per-frame pixels: a vertical gradient from a per-seed base colour to

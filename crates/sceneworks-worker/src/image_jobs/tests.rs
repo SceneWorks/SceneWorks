@@ -953,7 +953,8 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(qwen.adapter_label(), "mlx_qwen");
     assert_eq!(qwen.default_steps(), 20);
     assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
-    // All three FLUX.2-klein variants share the engine's single txt2img model.
+    // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440: that
+    // current path consumes a user negative prompt; FLUX.2-dev below remains embedded-only.
     for id in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -962,7 +963,7 @@ fn mlx_model_table_maps_known_families() {
         let m = mlx_model(id).unwrap();
         assert_eq!(m.engine_id(), "flux2_klein_9b");
         assert_eq!(m.adapter_label(), "mlx_flux2");
-        assert!(m.supports_guidance() && !m.supports_negative_prompt());
+        assert!(m.supports_guidance() && m.supports_negative_prompt());
     }
     // Distilled variants are 4-step; the undistilled true_v2 is 24-step.
     assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps(), 4);
@@ -983,9 +984,9 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_kv").unwrap().default_repo(),
         "SceneWorks/flux2-klein-9b-kv-mlx"
     );
-    // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
-    // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
-    // guidance 4.0). Shares the `mlx_flux2` adapter.
+    // FLUX.2-dev (epic 5914): its OWN engine model (not a Klein weight variant), embedded
+    // distilled guidance (guidance scalar, no negative prompt — unlike the current Klein path;
+    // ~28 steps / guidance 4.0). Shares the `mlx_flux2` adapter.
     let dev = mlx_model("flux2_dev").unwrap();
     assert_eq!(dev.engine_id(), "flux2_dev");
     assert_eq!(dev.adapter_label(), "mlx_flux2");

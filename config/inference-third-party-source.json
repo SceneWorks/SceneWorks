@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20",
-  "auditDigest": "1cab66960415bf839399a40a0bb71d1d3bbf175022c2ca347b07b6d97b533fba",
+  "inferenceRevision": "b739a1835178f27301d008c88f63c45e0869ae1e",
+  "auditDigest": "d682c67531c36033512a1b3d6e76edc559a3cfd35cd3e880ee4a7a99790c4b1c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20",
+    "revision": "b739a1835178f27301d008c88f63c45e0869ae1e",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 611,
-    "populationSha256": "7ad288bc55616462bd42a2523020a47e000f2d5e2d4cce88ea1f6dd56d5c2e09"
+    "matchedFiles": 613,
+    "populationSha256": "da015cadff795b631106b7429a31706b6d7fc6f6785b830f9a776fd4de2bed45"
   },
   "portedSourceAreas": [
     {
@@ -596,6 +596,15 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/media/candle-gen/candle-gen-joycaption",
+      "paths": [
+        "crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs"
+      ],
+      "provenance": "The JoyCaption caption taxonomy, prompt templates, and name option reproduce fpgaminer/joycaption's Apache-2.0 CAPTION_TYPE_MAP and NAME_OPTION with documented SceneWorks modifications.",
+      "disposition": "about-license",
+      "component": "joycaption-source"
+    },
+    {
       "id": "candle-transformers-source",
       "paths": [
         "crates/media/candle-gen/candle-gen-flux/src/packed_te.rs",
@@ -794,7 +803,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20",
+    "revision": "b739a1835178f27301d008c88f63c45e0869ae1e",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"
