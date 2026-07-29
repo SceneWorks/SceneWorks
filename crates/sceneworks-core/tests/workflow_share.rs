@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
 use sceneworks_core::contracts::{Asset, JsonObject};
+use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedKeySource, WorkflowShare,
     ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_SCHEMA_VERSION,
@@ -184,6 +186,43 @@ fn the_builder_reproduces_the_golden_envelope() {
         golden,
         "builder output drifted from the golden fixture.\nActual:\n{}",
         serde_json::to_string_pretty(&encoded).expect("pretty")
+    );
+}
+
+/// The sanitizer runs in exactly ONE place, and it is the reducer both directions share.
+///
+/// `build_workflow_share` used to sanitize `advanced` and then hand the result to
+/// `reduce_workflow_share`, which sanitizes it again. Every rule is idempotent today, so that
+/// cost nothing but a second pass — and that is precisely why no assertion could see it. It is
+/// pinned here as source structure because the failure it invites is a future shape rule that is
+/// NOT idempotent (a truncation, a normalization, a de-duplication) quietly applying twice on
+/// the build side and once on the parse side, which would put the two directions out of sync in
+/// the one function written to keep them in step.
+#[test]
+fn the_builder_leaves_advanced_sanitizing_to_the_single_reducer() {
+    let source = read_repo_file("crates/sceneworks-core/src/workflow_share.rs").replace('\r', "");
+    // Comments stripped, so this reads CALLS and not the prose explaining them.
+    let body = |name: &str| {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("workflow_share.rs no longer defines {name}"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("could not find the end of {name}"));
+        strip_comments(&rest[..end])
+    };
+
+    assert!(
+        !body("build_workflow_share").contains("sanitize_advanced("),
+        "`build_workflow_share` sanitizes `advanced` before handing it to \
+         `reduce_workflow_share`, which sanitizes it again. Pass the raw map through and let the \
+         reducer's single call do it."
+    );
+    assert!(
+        body("reduce_workflow_share").contains("sanitize_advanced("),
+        "the reducer stopped sanitizing `advanced`, so nothing does — this test's other half \
+         would then pass while the allow-list was bypassed entirely"
     );
 }
 
@@ -628,6 +667,54 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
         .collect::<BTreeSet<&str>>(),
         "only the authored prose fields may carry a path"
     );
+}
+
+/// The false-positive half, pinned against REAL data rather than a hand-picked corpus.
+///
+/// The relative-tree tally read `"PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)"` — a
+/// display name shipped in `config/manifests/builtin.models.jsonc` — as a four-deep path,
+/// because it counted a ` / ` list separator as a path separator. Those display names do not
+/// themselves travel (the envelope carries the model SLUG), but `loras[].name` is exactly this
+/// class of free human label and DOES travel, and a dropped LoRA name is silent: the user chose
+/// those words and nothing tells them the name went missing. So the manifest's own labels stand
+/// in as the corpus of what people actually type.
+#[test]
+fn shipped_display_labels_that_list_with_slashes_are_not_path_shaped() {
+    let source = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("the builtin model manifest is embedded");
+    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(source))
+        .expect("builtin.models.jsonc parses as JSON");
+
+    let mut strings = Vec::new();
+    collect_strings(&manifest, String::from("$"), &mut strings);
+    let listed: Vec<&String> = strings
+        .iter()
+        .filter(|(pointer, _)| {
+            [".name", ".label", ".displayName"]
+                .iter()
+                .any(|suffix| pointer.ends_with(suffix))
+        })
+        .map(|(_, value)| value)
+        .filter(|value| value.contains(" / "))
+        .collect();
+
+    assert!(
+        listed.len() >= 5,
+        "the manifest no longer carries the ` / ` display labels this test pins ({} found). If \
+         they were renamed, retarget this test at the labels that replaced them — do not delete \
+         it: it is the only place the guard meets real human labels.",
+        listed.len()
+    );
+    for label in listed {
+        assert!(
+            !is_path_shaped(label),
+            "the shipped display label {label:?} reads as a filesystem path, so the same shape in \
+             a `loras[].name` would be dropped from the user's own share with no signal"
+        );
+    }
 }
 
 /// The shipped guard must never be WEAKER than the sniffer this file asserts with.

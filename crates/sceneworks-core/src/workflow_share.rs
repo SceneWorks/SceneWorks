@@ -558,7 +558,9 @@ pub fn advanced_key_rule(key: &str) -> Option<&'static AdvancedKeyRule> {
 ///   `C:foo` is caught and the URL scheme in `https://…` is not;
 /// * a `..` traversal segment and a leading `./`;
 /// * a multi-segment relative POSIX path (`assets/images/x.png`) — three or more segments and
-///   no URL scheme. Two segments is a Hugging Face repo id (`acme/mira`) and stays;
+///   no URL scheme. Two segments is a Hugging Face repo id (`acme/mira`) and stays, and a slash
+///   written with a space beside it is a human list separator, not a path separator (see
+///   [`relative_tree_segments`]);
 /// * `file://`, including percent-encoded (`file%3A%2F%2FD%3A%2Fx`).
 ///
 /// Deliberately NOT applied to the authored prose fields (`prompt`, `negativePrompt`,
@@ -635,12 +637,44 @@ fn looks_like_a_location(value: &str) -> bool {
     }
     // A relative POSIX tree. Two segments is an HF repo id and stays; a URL is not a location on
     // THIS machine, so `https://host/a/b/c` is left alone.
-    !lower.contains("://")
-        && segments
-            .iter()
-            .filter(|segment| !segment.is_empty())
-            .count()
-            >= 3
+    !lower.contains("://") && relative_tree_segments(value) >= 3
+}
+
+/// How many PATH segments `value` has, counting only slashes that could be path separators.
+///
+/// A filesystem separator is never written with a space beside it; a human list separator almost
+/// always is. `"PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)"` — a real
+/// `config/manifests/builtin.models.jsonc` display name — is one label, not a four-deep tree, and
+/// the same free-label class travels for real in `loras[].name`: without this a LoRA the user
+/// named `"Ghibli watercolor / soft light / pastel"` would be dropped from their own share with
+/// no signal to anyone.
+///
+/// Narrowed at the SLASH, deliberately not at the segment: ignoring any segment that contains
+/// whitespace would also stop catching `Documents/Secret Project/render 1.png`, which is a real
+/// relative path and does leak a name. Only a slash with whitespace on one side or the other
+/// stops separating.
+fn relative_tree_segments(value: &str) -> usize {
+    let characters: Vec<char> = value.chars().collect();
+    let is_space = |index: usize| {
+        characters
+            .get(index)
+            .is_some_and(|next: &char| next.is_whitespace())
+    };
+    let mut segments = 0;
+    let mut segment_len = 0_usize;
+    for (index, character) in characters.iter().enumerate() {
+        let separates =
+            *character == '/' && !(index > 0 && is_space(index - 1)) && !is_space(index + 1);
+        if separates {
+            // Empty segments do not count, so `a//b` is two and a leading `/` opens none —
+            // exactly what the `split('/').filter(non-empty)` this replaced did.
+            segments += usize::from(segment_len > 0);
+            segment_len = 0;
+        } else {
+            segment_len += 1;
+        }
+    }
+    segments + usize::from(segment_len > 0)
 }
 
 /// Decode only the percent escapes that matter to [`looks_like_a_location`], so an encoded
@@ -699,6 +733,36 @@ fn shareable_label(value: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_owned())
+}
+
+/// The longest an authored prose field may be — `prompt`, `negativePrompt`, `stylePrompt` and
+/// the structured prompt's `intent` / `runtimePrompt`.
+///
+/// Distinct from and 100× [`LABEL_MAX_CHARS`] on purpose: a label is a slug and prose is
+/// paragraphs. 20,000 characters is roughly 3,000 words. The longest thing this field class
+/// legitimately holds is `runtimePrompt`, the serialized structured-prompt recipe, which runs to
+/// a few kilobytes at its most verbose; a hand-typed prompt is two orders of magnitude shorter.
+/// So the cap cannot truncate anything real, while still bounding what an envelope from a
+/// stranger can hand sc-15952 to render: five prose fields × 20 k is ~100 kB worst case, which
+/// keeps a PNG text chunk a text chunk rather than a payload.
+const PROSE_MAX_CHARS: usize = 20_000;
+
+/// Authored prose, reduced. Unlike [`shareable_label`] this keeps what the user typed —
+/// including a path, which is the deliberate exemption [`is_path_shaped`] documents — and only
+/// bounds it.
+///
+/// On the BUILD side these strings are the user's own and this is a no-op. On the PARSE side
+/// they are attacker-chosen, which is the epic's trust boundary: the reader (sc-15952) renders
+/// them, so a value carrying ANSI escapes or several megabytes of text must not arrive intact.
+/// Newlines and tabs survive — a multi-line prompt is normal and mangling it would be the very
+/// harm the prose exemption exists to prevent — but every other control character is dropped.
+fn shareable_prose(value: &str) -> String {
+    let stripped: String = value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(PROSE_MAX_CHARS)
+        .collect();
+    stripped.trim().to_owned()
 }
 
 /// A Hugging Face repo id (`owner/name`) and nothing else — never a path, never a URL.
@@ -770,12 +834,14 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
     // business. (`Recipe::seed` is a required field, so there is nothing to fall back to.)
     let seed = Some(asset.recipe.seed);
 
-    let advanced = sanitize_advanced(
-        job_payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .unwrap_or(&Map::new()),
-    );
+    // Raw on purpose: `reduce_workflow_share` runs `sanitize_advanced`, and sanitizing here as
+    // well would be the same pass twice — harmless only for as long as every rule stays
+    // idempotent, which is not a property worth depending on.
+    let advanced = job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
 
     // Every value goes out through the SAME reducer an incoming envelope comes in through
     // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
@@ -968,9 +1034,11 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         producer: reduce_producer(producer),
         mode: shareable_label(&mode).unwrap_or_default(),
         model: shareable_label(&model).unwrap_or_default(),
-        // Authored prose, exempt on purpose — see `is_path_shaped`.
-        prompt,
-        negative_prompt,
+        // Authored prose: exempt from the PATH check on purpose (see `is_path_shaped`), but not
+        // from the other two bounds — on the way IN this is a stranger's text, and sc-15952
+        // renders it.
+        prompt: shareable_prose(&prompt),
+        negative_prompt: shareable_prose(&negative_prompt),
         seed,
         width,
         height,
@@ -1088,15 +1156,20 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
 
 /// The prose keys inside a sanitized value that are what the user typed, and so are exempt
 /// from the path-shape guard (see [`is_path_shaped`]).
+///
+/// Exempt from the PATH check only. They are still bounded and control-stripped by
+/// [`shareable_prose`], because on the parse side they are a stranger's strings.
 const PROSE_KEYS: &[&str] = &["stylePrompt", "intent", "runtimePrompt"];
 
 fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
     match value {
         Value::String(text) => {
-            if !PROSE_KEYS.contains(&key) && is_path_shaped(text) {
-                return None;
+            if PROSE_KEYS.contains(&key) {
+                return Some(Value::String(shareable_prose(text)));
             }
-            Some(Value::String(text.clone()))
+            // Everything else under a scalar key is a slug — the same class as a top-level
+            // label, so it gets the same bound rather than only the path check.
+            shareable_label(text).map(Value::String)
         }
         Value::Number(_) | Value::Bool(_) => Some(value.clone()),
         // An object or array under a scalar key is the smuggling channel this guard exists to
@@ -1630,6 +1703,69 @@ mod tests {
         }
     }
 
+    /// A slash with a space beside it is how a person separates a LIST, and the tally read three
+    /// of those as a three-deep tree. `config/manifests/builtin.models.jsonc` is the proof it
+    /// happens for real — the PiD decoder display names below are shipped values. Those three do
+    /// not travel (the envelope carries the model SLUG), but `loras[].name` is exactly the same
+    /// class of free display label and DOES travel, so this was silent data loss waiting for a
+    /// user who names a LoRA the way people name things.
+    #[test]
+    fn a_slash_written_with_a_space_beside_it_is_a_list_separator() {
+        for label in [
+            // Shipped display names, verbatim from the builtin model manifest.
+            "PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
+            "PiD 1.5 Decoder (FLUX.2 / Lens / Ideogram 4)",
+            "PiD Decoder (SDXL / RealVisXL / Kolors)",
+            // The class that actually travels: a LoRA the user named themselves.
+            "Ghibli watercolor / soft light / pastel",
+            "Realism / Photoreal",
+            "A/B test",
+            "acme/mira",
+            "https://huggingface.co/acme/mira/tree/main",
+        ] {
+            assert!(!is_path_shaped(label), "{label:?} is a label, not a path");
+        }
+        // Narrowed at the SLASH and not at the segment, so a real relative path keeps tripping
+        // it even when its directories have spaces in their names.
+        for path in [
+            "assets/images/x.png",
+            "models/weights/x.safetensors",
+            "../../etc/passwd",
+            "Documents/Secret Project/render 1.png",
+            "a/b/c",
+        ] {
+            assert!(is_path_shaped(path), "{path:?} should still read as a path");
+        }
+        // The tally itself: empty segments never counted and still do not.
+        assert_eq!(relative_tree_segments("a//b"), 2);
+        assert_eq!(relative_tree_segments("/a/b/"), 2);
+        assert_eq!(relative_tree_segments("A / B / C"), 1);
+    }
+
+    /// The field the narrowing is FOR. A dropped `loras[].name` is invisible to everyone: the
+    /// user picked those words and no signal says they went missing.
+    #[test]
+    fn a_lora_named_with_a_spaced_slash_list_still_travels() {
+        const NAME: &str = "Ghibli watercolor / soft light / pastel";
+        let mut payload = payload_fixture();
+        payload.insert(
+            "loras".to_owned(),
+            json!([
+                { "name": NAME, "weight": 0.7, "source": { "provider": "huggingface", "repo": "acme/mira" } },
+                { "name": "loras/local/x.safetensors", "weight": 0.4 }
+            ]),
+        );
+        let share = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(share.loras[0].name.as_deref(), Some(NAME));
+        // The other direction is untouched: a real relative tree in the same field still goes.
+        assert_eq!(share.loras[1].name, None);
+
+        // And it survives the trust boundary, so a shared image reloads with the name intact.
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        let parsed = parse_workflow_share(&envelope).expect("parses");
+        assert_eq!(parsed.loras[0].name.as_deref(), Some(NAME));
+    }
+
     #[test]
     fn prose_keys_carry_what_the_user_typed_even_when_it_names_a_path() {
         // The deliberate exemption, pinned. `stylePrompt` and the structured prompt's `intent` /
@@ -1661,6 +1797,114 @@ mod tests {
         // A NON-prose key next to them is still guarded — the exemption is per key, not global.
         assert!(!sanitized.contains_key("sampler"));
         assert_eq!(PROSE_KEYS, ["stylePrompt", "intent", "runtimePrompt"]);
+    }
+
+    /// The prose exemption is from the PATH check and from nothing else. A prompt is
+    /// user-authored on the way out and attacker-chosen on the way in — the epic's trust
+    /// boundary — and sc-15952 renders it, so a value carrying terminal escapes or megabytes of
+    /// text must not arrive intact.
+    #[test]
+    fn prose_from_outside_is_control_stripped_and_bounded() {
+        let hostile = |prose: &str| {
+            json!({
+                "sceneworksWorkflow": "image",
+                "schemaVersion": 1,
+                "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "prompt": prose,
+                "negativePrompt": prose,
+                "advanced": {
+                    "stylePrompt": prose,
+                    "structuredPrompt": { "intent": prose, "runtimePrompt": prose }
+                }
+            })
+        };
+        let prose_fields = |share: &WorkflowShare| {
+            let recipe = share.advanced["structuredPrompt"]
+                .as_object()
+                .expect("structuredPrompt object");
+            vec![
+                share.prompt.clone(),
+                share.negative_prompt.clone(),
+                share.advanced["stylePrompt"]
+                    .as_str()
+                    .expect("stylePrompt string")
+                    .to_owned(),
+                recipe["intent"].as_str().expect("intent").to_owned(),
+                recipe["runtimePrompt"]
+                    .as_str()
+                    .expect("runtimePrompt")
+                    .to_owned(),
+            ]
+        };
+
+        // Control characters: the ESC that starts an ANSI sequence, a NUL and a BEL all go.
+        // Newlines and tabs stay — a multi-line prompt is normal, and mangling one would be the
+        // very harm the prose exemption exists to prevent.
+        let share = parse_workflow_share(&hostile(
+            "  a lighthouse\u{1b}[31m in fog\u{0}\u{7}\r\n\tsecond line  ",
+        ))
+        .expect("parses");
+        for value in prose_fields(&share) {
+            assert_eq!(value, "a lighthouse[31m in fog\n\tsecond line");
+            assert!(
+                !value
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t'),
+                "a control character survived: {value:?}"
+            );
+        }
+
+        // Several megabytes of prose is not a prompt, it is a payload.
+        let absurd = "x".repeat(4 * 1024 * 1024);
+        let share = parse_workflow_share(&hostile(&absurd)).expect("parses");
+        for value in prose_fields(&share) {
+            assert_eq!(value.chars().count(), PROSE_MAX_CHARS);
+        }
+
+        // The bound is prose-sized, not label-sized: the two must never be conflated.
+        assert_eq!(PROSE_MAX_CHARS, 20_000);
+        assert_eq!(PROSE_MAX_CHARS, LABEL_MAX_CHARS * 100);
+    }
+
+    /// The other half: a bound this blunt must not touch anything real. A prompt far longer than
+    /// anyone types, with the newlines and tabs a structured recipe carries, comes back byte for
+    /// byte — on the way out AND on the way back in.
+    #[test]
+    fn a_realistic_long_prompt_survives_byte_for_byte() {
+        let prompt = format!(
+            "{}\n\tshot on 35mm, volumetric light",
+            "a lighthouse in heavy fog, cinematic, rain on the lens, ".repeat(30)
+        );
+        assert!(prompt.chars().count() > 1_500, "the fixture must be long");
+        assert!(prompt.chars().count() < PROSE_MAX_CHARS);
+
+        let mut payload = payload_fixture();
+        payload.insert("prompt".to_owned(), json!(prompt));
+        payload.insert("negativePrompt".to_owned(), json!(prompt));
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "stylePrompt": prompt,
+                "structuredPrompt": { "intent": prompt, "runtimePrompt": prompt }
+            }),
+        );
+        let share = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(share.prompt, prompt);
+        assert_eq!(share.negative_prompt, prompt);
+        assert_eq!(share.advanced["stylePrompt"], json!(prompt));
+
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        let parsed = parse_workflow_share(&envelope).expect("parses");
+        assert_eq!(parsed.prompt, prompt);
+        assert_eq!(parsed.negative_prompt, prompt);
+        assert_eq!(parsed.advanced["stylePrompt"], json!(prompt));
+        let recipe = parsed.advanced["structuredPrompt"]
+            .as_object()
+            .expect("structuredPrompt object");
+        assert_eq!(recipe["intent"], json!(prompt));
+        assert_eq!(recipe["runtimePrompt"], json!(prompt));
     }
 
     #[test]
