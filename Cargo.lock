@@ -6329,6 +6329,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "parking_lot",
+ "png 0.18.1",
  "rusqlite",
  "serde",
  "serde_json",
