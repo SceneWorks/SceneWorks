@@ -154,6 +154,7 @@ struct DecodedVideo {
     audio: Option<AudioTrack>,
     /// Actual provider-owned adapter install outcomes from this generation. Empty for providers that
     /// do not expose partial-install reports.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     adapter_apply_reports: Vec<gen_core::AdapterApplyReport>,
 }
 
