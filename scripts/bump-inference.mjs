@@ -21,7 +21,7 @@
 //   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite on canned input
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +32,11 @@ const LOCKFILE = join(repoRoot, "Cargo.lock");
 // Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
+// Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
+// their lock entries. `mlx-gen` / `candle-gen` come in through
+// `crates/sceneworks-image-memory-adapter` -- omitting them left that crate's four deps stranded on
+// the previous revision in `Cargo.lock` even after its manifest was rewritten, which is the same
+// two-revisions-in-one-lockfile skew `inferenceManifests()` exists to prevent one step earlier.
 const INFERENCE_CRATES = [
   "sceneworks-gen-core",
   "runtime-macos",
@@ -47,6 +52,33 @@ const PATCHED_CRATES = ["candle-kernels"];
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
 // red test (sc-14958 had to fix exactly that up after the previous bump). Moving it deliberately
 // marks prior analyses stale so they re-run under the new runtime.
+// Every workspace manifest that pins the inference repo is DISCOVERED, not listed. This script used
+// to name the worker + root manifests explicitly, and silently missed
+// `crates/sceneworks-image-memory-adapter/Cargo.toml` -- which carries four of its own inference deps
+// (mlx-gen / runtime-macos / candle-gen / runtime-cuda) and was added long after this script. The
+// result was a lockfile with TWO `sceneworks-gen-core` entries at different revisions, caught only
+// downstream by `candle_kernels_patch_guard`. A hardcoded list rots every time a crate takes an
+// inference dependency; discovery does not.
+function inferenceManifests() {
+  const found = [join(repoRoot, "Cargo.toml")].filter((path) =>
+    readFileSync(path, "utf8").includes(INFERENCE_GIT),
+  );
+  const cratesDir = join(repoRoot, "crates");
+  for (const entry of readdirSync(cratesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(cratesDir, entry.name, "Cargo.toml");
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    if (text.includes(INFERENCE_GIT)) found.push(path);
+  }
+  if (!found.length) throw new Error(`no manifest pins ${INFERENCE_GIT}`);
+  return found;
+}
+
 const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
 const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
 const IMAGE_MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-image-memory-adapter/src/lib.rs");
@@ -325,12 +357,14 @@ function main() {
   // exists because a whole new crate once slipped the marker vocabulary and shipped unclassified
   // (sc-15138 -> sc-15191).
   const manifests = [
-    { path: MANIFEST, rewrite: (text) => repin(text, sha, MANIFEST) },
-    {
-      path: IMAGE_MEMORY_MANIFEST,
-      rewrite: (text) => repin(text, sha, IMAGE_MEMORY_MANIFEST),
-    },
-    { path: ROOT_MANIFEST, rewrite: (text) => repin(text, sha, ROOT_MANIFEST) },
+    // DISCOVERED, not enumerated. A hand-written list is exactly how
+    // `crates/sceneworks-image-memory-adapter` got stranded on the previous revision: the crate was
+    // added later and nobody remembered to add its manifest here, so the bump rewrote two of the
+    // three and left one behind. Discovery makes the next such crate correct by default.
+    ...inferenceManifests().map((path) => ({
+      path,
+      rewrite: (text) => repin(text, sha, path),
+    })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
     {
       path: IMAGE_MEMORY_PROVENANCE,
@@ -340,9 +374,22 @@ function main() {
     const current = readFileSync(path, "utf8");
     return { path, current, bumped: rewrite(current) };
   });
-  if (manifests.every((m) => m.bumped === m.current) && !lockHasStaleInferenceRevision(sha)) {
-    console.log(`bump-inference: already pinned at ${sha}`);
-    return;
+  // NOTE: "manifests already say `sha`" is NOT the same as "the lockfile agrees". This used to
+  // early-return on the manifests alone, so a tree whose manifests were correct but whose
+  // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
+  // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
+  // leaves behind. Fall through to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and
+  // running them unconditionally makes the script idempotent AND verifying rather than idempotent
+  // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
+  // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
+  // pmetal-mlx-rs) that no revision-string comparison can see.
+  const manifestsAlreadyPinned = manifests.every((m) => m.bumped === m.current);
+  if (manifestsAlreadyPinned) {
+    console.log(
+      lockHasStaleInferenceRevision(sha)
+        ? `bump-inference: manifests already pinned at ${sha}, but the lockfile is STALE; repairing`
+        : `bump-inference: manifests already pinned at ${sha}; verifying the lockfile agrees`,
+    );
   }
   console.log(
     `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,

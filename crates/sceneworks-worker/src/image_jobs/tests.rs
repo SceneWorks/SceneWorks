@@ -953,8 +953,10 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(qwen.adapter_label(), "mlx_qwen");
     assert_eq!(qwen.default_steps(), 20);
     assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
-    // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440: that
-    // current path consumes a user negative prompt; FLUX.2-dev below remains embedded-only.
+    // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440 aligned the
+    // descriptor with what the engine renders: klein is not the embedded-guidance variant, so that
+    // path consumes a real user negative prompt. That is standard guidance, NOT the
+    // `supports_true_cfg` capability. FLUX.2-dev below remains embedded-only.
     for id in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",

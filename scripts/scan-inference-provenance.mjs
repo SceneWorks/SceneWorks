@@ -130,6 +130,22 @@ const SPECIAL_AREAS = new Map([
   // `cephes-source` area (component `cephes`) so the notice is attributed, not folded into the
   // `mlx-gen-mage` architecture prefix.
   ["crates/media/mlx-gen/mlx-gen-mage/src/latent.rs", "cephes-source"],
+  // BOTH JoyCaption prompt modules reproduce upstream's CAPTION_TYPE_MAP / NAME_OPTION near-verbatim
+  // under Apache-2.0 — reproduced CONTENT, not an architecture port. sc-15443 added byte-identical
+  // Apache Sec. 4(b) modification notices to both, which is what made them marker-bearing and
+  // surfaced them here for the first time. Route both to `joycaption-source` (the About component
+  // that discloses exactly these paths) rather than letting either fold into a crate-prefix
+  // architecture area, for the same reason cephes is split out above: a distinct third-party notice
+  // must be attributed, not absorbed by the surrounding architecture disposition.
+  //
+  // The MLX twin is listed here even though `crates/media/mlx-gen` already has a prefix area, because
+  // sc-15191 justified leaving it to that prefix on the ground that it "carries no marker sentence,
+  // so it never enters the candidate inventory and cannot get a `paths` area of its own". sc-15443
+  // retired that premise. Both twins now normalize to the SAME marker sha256, so routing them to
+  // different areas would make the inventory assert that identical notices carry different
+  // obligations.
+  ["crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs", "joycaption-source"],
+  ["crates/media/mlx-gen/src/caption/joycaption.rs", "joycaption-source"],
 ]);
 
 function sha256(text) {
