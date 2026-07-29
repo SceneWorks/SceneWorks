@@ -5,7 +5,7 @@
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
 // The pins live in crates/sceneworks-worker/Cargo.toml and
-// crates/sceneworks-image-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
+// crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
 // candle-kernels to the multi-arch vendored copy inside the same inference revision (sc-7544 /
 // sc-13510) — that rev must move in lockstep or the patched kernels skew against candle-core. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
@@ -27,14 +27,14 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
-const IMAGE_MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-image-memory-adapter/Cargo.toml");
+const MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-memory-adapter/Cargo.toml");
 const LOCKFILE = join(repoRoot, "Cargo.lock");
 // Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
 // their lock entries. `mlx-gen` / `candle-gen` come in through
-// `crates/sceneworks-image-memory-adapter` -- omitting them left that crate's four deps stranded on
+// `crates/sceneworks-memory-adapter` -- omitting them left that crate's four deps stranded on
 // the previous revision in `Cargo.lock` even after its manifest was rewritten, which is the same
 // two-revisions-in-one-lockfile skew `inferenceManifests()` exists to prevent one step earlier.
 const INFERENCE_CRATES = [
@@ -54,7 +54,7 @@ const PATCHED_CRATES = ["candle-kernels"];
 // marks prior analyses stale so they re-run under the new runtime.
 // Every workspace manifest that pins the inference repo is DISCOVERED, not listed. This script used
 // to name the worker + root manifests explicitly, and silently missed
-// `crates/sceneworks-image-memory-adapter/Cargo.toml` -- which carries four of its own inference deps
+// `crates/sceneworks-memory-adapter/Cargo.toml` -- which carries four of its own inference deps
 // (mlx-gen / runtime-macos / candle-gen / runtime-cuda) and was added long after this script. The
 // result was a lockfile with TWO `sceneworks-gen-core` entries at different revisions, caught only
 // downstream by `candle_kernels_patch_guard`. A hardcoded list rots every time a crate takes an
@@ -81,8 +81,8 @@ function inferenceManifests() {
 
 const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
 const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
-const IMAGE_MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-image-memory-adapter/src/lib.rs");
-const IMAGE_MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
+const MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-memory-adapter/src/lib.rs");
+const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 // --- pure: rewrite the inference pins to rev=<sha> (self-tested; no fs/network) ---------------
@@ -119,14 +119,14 @@ function repinSemanticProvenance(source, sha) {
   return source.replace(SEMANTIC_PROVENANCE_RE, `$1${sha}$2`);
 }
 
-function repinImageMemoryProvenance(source, sha) {
-  if (!IMAGE_MEMORY_PROVENANCE_RE.test(source)) {
+function repinMemoryProvenance(source, sha) {
+  if (!MEMORY_PROVENANCE_RE.test(source)) {
     throw new Error(
-      `no INFERENCE_PIN constant found in ${IMAGE_MEMORY_PROVENANCE} -- the calibration adapter ` +
+      `no INFERENCE_PIN constant found in ${MEMORY_PROVENANCE} -- the calibration adapter ` +
         "provenance stamp must move with the pin",
     );
   }
-  return source.replace(IMAGE_MEMORY_PROVENANCE_RE, `$1${sha}$2`);
+  return source.replace(MEMORY_PROVENANCE_RE, `$1${sha}$2`);
 }
 
 // --- git / cargo orchestration ----------------------------------------------------------------
@@ -275,8 +275,8 @@ function selfTest() {
     stampBumped.includes(CLIP_DECOY) && !stampBumped.includes(`CLIP_MODEL_REVISION: &str = "${SHA}"`),
   );
   check(
-    "image-memory adapter provenance stamp bumps with the pin",
-    repinImageMemoryProvenance(
+    "memory-strategy adapter provenance stamp bumps with the pin",
+    repinMemoryProvenance(
       `pub const INFERENCE_PIN: &str = "${"b".repeat(40)}";`,
       SHA,
     ) === `pub const INFERENCE_PIN: &str = "${SHA}";`,
@@ -358,7 +358,7 @@ function main() {
   // (sc-15138 -> sc-15191).
   const manifests = [
     // DISCOVERED, not enumerated. A hand-written list is exactly how
-    // `crates/sceneworks-image-memory-adapter` got stranded on the previous revision: the crate was
+    // `crates/sceneworks-memory-adapter` got stranded on the previous revision: the crate was
     // added later and nobody remembered to add its manifest here, so the bump rewrote two of the
     // three and left one behind. Discovery makes the next such crate correct by default.
     ...inferenceManifests().map((path) => ({
@@ -367,8 +367,8 @@ function main() {
     })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
     {
-      path: IMAGE_MEMORY_PROVENANCE,
-      rewrite: (text) => repinImageMemoryProvenance(text, sha),
+      path: MEMORY_PROVENANCE,
+      rewrite: (text) => repinMemoryProvenance(text, sha),
     },
   ].map(({ path, rewrite }) => {
     const current = readFileSync(path, "utf8");

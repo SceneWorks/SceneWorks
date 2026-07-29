@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "macos"))]
-compile_error!("image-memory-mlx-adapter is supported only on macOS");
+compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
 use mlx_rs::memory::{
@@ -8,7 +8,7 @@ use mlx_rs::memory::{
 };
 use mlx_rs::Array;
 use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
-use sceneworks_image_memory_adapter as protocol;
+use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
@@ -445,7 +445,7 @@ fn run(request: &Value) -> Result<Value, String> {
                 "resolvedPathFingerprint": loadability_fingerprint,
             }),
             protocol::diagnostics(
-                "image-memory-mlx-adapter",
+                "memory-mlx-adapter",
                 "executed",
                 [blocker.to_owned()],
                 [
@@ -484,7 +484,7 @@ fn run(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": loadability_fingerprint,
         }),
         protocol::diagnostics(
-            "image-memory-mlx-adapter",
+            "memory-mlx-adapter",
             "executed",
             [blocker.to_owned()],
             [

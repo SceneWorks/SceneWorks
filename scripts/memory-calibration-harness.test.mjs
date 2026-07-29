@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import {
   HARNESS_VERSION, canonicalJson, evidenceSemantics, expandPlan, logicalCaseId,
   mergeBundles, recordId, runProviderPlan, validateBundle, validateRecord,
-} from "./image-memory-calibration-harness.mjs";
-import { calibrationBinding } from "./generate-image-memory-matrix.mjs";
+} from "./memory-calibration-harness.mjs";
+import { calibrationBinding } from "./generate-memory-matrix.mjs";
 
 const phase = (value) => ({
   activeBytes: value,
@@ -303,7 +303,7 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
 });
 
 test("plan separates seven identical-latent positives from a deterministic output-bias negative", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
   const qwen = cases.filter((item) => item.backend === "mlx");
   assert.equal(qwen.filter((item) => item.expectedResult === "passed").length, 7);
@@ -316,7 +316,7 @@ test("plan separates seven identical-latent positives from a deterministic outpu
 });
 
 test("Krea current v1 production truth is separate from non-promotable v2 candidates", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const current = config.providers.find((provider) => provider.name === "candle-krea-production-current-v1");
   assert.equal(current.evidenceScope, "authoritative");
   assert.equal(current.calibrationFingerprint, "krea-turbo-cuda-phase-curves-v1");
@@ -336,7 +336,7 @@ test("Krea current v1 production truth is separate from non-promotable v2 candid
 });
 
 test("provider execution requires one backend-specific hardware probe", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   await assert.rejects(
     runProviderPlan({
       config,
@@ -349,7 +349,7 @@ test("provider execution requires one backend-specific hardware probe", async ()
 });
 
 test("positive Qwen completion never suppresses the separate 256/32 negative plan", async () => {
-  const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
   validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [record] });
   const qwenRemaining = expandPlan(config, [record]).filter((item) => item.backend === "mlx");
@@ -384,7 +384,7 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
     status: "gated",
     evidenceScope: "authoritative",
     diagnostics: {
-      adapter: "image-memory-candle-adapter",
+      adapter: "memory-candle-adapter",
       execution: "gated_before_execution",
       blockers: ["plan/provider calibration fingerprint mismatch"],
       measurements: [{ name: "contractFingerprintMismatch", unit: "count", value: 1 }],
@@ -431,7 +431,7 @@ test("executable runner handles fragmented responses across probe and multiple c
     config,
     providerCommand: [
       process.execPath,
-      fileURLToPath(new URL("./fixtures/image-memory-provider-fragmented-fixture.mjs", import.meta.url)),
+      fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
     ],
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
     inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -458,7 +458,7 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
       config,
       providerCommand: [
         process.execPath,
-        fileURLToPath(new URL("./fixtures/image-memory-provider-early-exit-fixture.mjs", import.meta.url)),
+        fileURLToPath(new URL("./fixtures/memory-provider-early-exit-fixture.mjs", import.meta.url)),
       ],
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
       inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -487,11 +487,63 @@ test("expected-failure plan case produces a resumable negative record, never a c
     config,
     providerCommand: [
       process.execPath,
-      fileURLToPath(new URL("./fixtures/image-memory-provider-fragmented-fixture.mjs", import.meta.url)),
+      fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
     ],
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
     inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
   });
   assert.equal(result.records[0].status, "negative_complete");
   assert.equal(expandPlan(config, result.records).length, 0);
+});
+
+// SC-15804. The `harnessVersion` const is this epic's stale-evidence gate: it is asserted twice in
+// `packages/schemas/memory-calibration.schema.json` and embedded in every emitted record. Renaming
+// the contract to the lane-neutral vocabulary bumped it, and that bump MUST invalidate everything
+// captured under the prior `sceneworks-image-memory-v2` vocabulary. Asserted here rather than
+// assumed: the stale record below is well-formed and self-consistent in every other respect, and
+// the control case proves the same record passes once only its version is current.
+const PRIOR_HARNESS_VERSION = "sceneworks-image-memory-v2";
+
+test("prior-vocabulary evidence is rejected as stale by the harnessVersion gate", () => {
+  assert.equal(HARNESS_VERSION, "sceneworks-memory-v3");
+  assert.notEqual(HARNESS_VERSION, PRIOR_HARNESS_VERSION);
+
+  // A genuine prior-vintage record: every field populated, and its deterministic id recomputed over
+  // the old version exactly as the v2 harness would have emitted it, so identity is NOT what fails.
+  const stale = complete();
+  stale.harnessVersion = PRIOR_HARNESS_VERSION;
+  stale.id = recordId(stale);
+  assert.equal(stale.id, recordId(stale));
+
+  // 1. the runtime record gate rejects it, and names the version rather than an incidental field.
+  assert.throws(() => validateRecord(stale), /invalid harnessVersion/);
+
+  // 2. the schema const rejects both the envelope and the record it carries.
+  assert.throws(
+    () => validateBundle({ schemaVersion: 2, harnessVersion: PRIOR_HARNESS_VERSION, records: [stale] }),
+    (error) =>
+      /schema validation failed/.test(error.message) &&
+      error.message.includes("$.harnessVersion: value does not equal const") &&
+      error.message.includes("$.records[0].harnessVersion: value does not equal const"),
+  );
+
+  // 3. a stale record cannot be smuggled in under a current envelope either.
+  assert.throws(
+    () => validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [stale] }),
+    /schema validation failed/,
+  );
+
+  // 4. control: the identical record at the current version passes both gates, so the rejections
+  //    above are caused by the version bump and by nothing else.
+  const current = complete();
+  assert.equal(validateRecord(current), current);
+  validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [current] });
+});
+
+test("the promoted evidence bundle carries the current harnessVersion", async () => {
+  const bundle = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url)),
+  );
+  assert.equal(bundle.harnessVersion, HARNESS_VERSION);
+  validateBundle(bundle);
 });

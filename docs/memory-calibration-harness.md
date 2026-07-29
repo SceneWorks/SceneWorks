@@ -1,6 +1,6 @@
-# Cross-backend image-memory calibration harness
+# Cross-backend memory-strategy calibration harness
 
-`scripts/image-memory-calibration-harness.mjs` is the executable, versioned evidence runner for
+`scripts/memory-calibration-harness.mjs` is the executable, versioned evidence runner for
 MLX/Metal and Candle/CUDA. It owns plan expansion, repository resolution, provider execution,
 validation, resume, atomic writes, and generated-matrix ingestion. It does not change runtime memory
 selection policy. Runtime ingestion evaluates the bundled JSON Schema recursively before semantic
@@ -70,24 +70,24 @@ warm request.
 Plan without hardware placeholders:
 
 ```text
-node scripts/image-memory-calibration-harness.mjs plan \
-  --config config/image-memory-calibration-plan.json \
-  --output .tmp/image-memory-plan.json \
-  --resume docs/generated/image-memory-calibration-evidence.json
+node scripts/memory-calibration-harness.mjs plan \
+  --config config/memory-calibration-plan.json \
+  --output .tmp/memory-plan.json \
+  --resume docs/generated/memory-calibration-evidence.json
 ```
 
 Run an authoritative provider adapter:
 
 ```text
-node scripts/image-memory-calibration-harness.mjs run \
-  --config config/image-memory-calibration-plan.json \
+node scripts/memory-calibration-harness.mjs run \
+  --config config/memory-calibration-plan.json \
   --backend mlx \
   --provider mlx-qwen-vae-decode \
-  --provider-command '["/absolute/path/to/image-memory-provider-adapter"]' \
+  --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
   --sceneworks-repo /absolute/path/to/SceneWorks \
   --inference-repo /absolute/path/to/inference \
-  --resume docs/generated/image-memory-calibration-evidence.json \
-  --output .tmp/authoritative-image-memory-evidence.json
+  --resume docs/generated/memory-calibration-evidence.json \
+  --output .tmp/authoritative-memory-evidence.json
 ```
 
 One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
@@ -98,13 +98,13 @@ to run the current Krea v1 production point separately from non-promotable v2 ca
 Validate or merge captured output:
 
 ```text
-node scripts/image-memory-calibration-harness.mjs check \
-  --input .tmp/authoritative-image-memory-evidence.json
+node scripts/memory-calibration-harness.mjs check \
+  --input .tmp/authoritative-memory-evidence.json
 
-node scripts/image-memory-calibration-harness.mjs ingest \
-  --input .tmp/authoritative-image-memory-evidence.json \
-  --resume docs/generated/image-memory-calibration-evidence.json \
-  --output .tmp/merged-image-memory-evidence.json
+node scripts/memory-calibration-harness.mjs ingest \
+  --input .tmp/authoritative-memory-evidence.json \
+  --resume docs/generated/memory-calibration-evidence.json \
+  --output .tmp/merged-memory-evidence.json
 ```
 
 SceneWorks now contains two real provider-protocol executables. They compile against the same exact
@@ -112,12 +112,12 @@ inference revision as the worker and never convert partial measurements into com
 
 ```text
 # Apple hardware
-cargo build --release -p sceneworks-image-memory-adapter \
-  --features mlx --bin image-memory-mlx-adapter
+cargo build --release -p sceneworks-memory-adapter \
+  --features mlx --bin memory-mlx-adapter
 
 # Windows/Linux CUDA hardware (run in the supported CUDA + host-compiler environment)
-cargo build --release -p sceneworks-image-memory-adapter \
-  --features candle --bin image-memory-candle-adapter
+cargo build --release -p sceneworks-memory-adapter \
+  --features candle --bin memory-candle-adapter
 ```
 
 The MLX adapter requires:
@@ -147,7 +147,7 @@ NAX runner can execute the same adapter through a guarded manual dispatch:
 
 ```text
 gh workflow run macos-mlx.yml --ref main \
-  -f run_image_memory_calibration=true \
+  -f run_memory_calibration=true \
   -f provision_qwen_snapshot=false \
   -f inference_revision=<exact-adapter-inference-pin> \
   -f qwen_repository=SceneWorks/qwen-image-mlx \
@@ -173,7 +173,7 @@ workflow that exists on the default branch, so the first calibration run is inte
 post-merge.
 
 When both canonical roots are absent, explicitly set `provision_qwen_snapshot=true` on the same
-calibration dispatch. Provisioning is rejected unless `run_image_memory_calibration=true`. That
+calibration dispatch. Provisioning is rejected unless `run_memory_calibration=true`. That
 opt-in lane validates the self-hosted runner's Python 3.12 prerequisite, creates an isolated
 job-local virtual environment, and pins `huggingface_hub==0.36.0` to resumably and idempotently
 download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository at the exact
@@ -208,10 +208,10 @@ SCENEWORKS_KREA_REVISION=<resolved immutable artifact revision>
 The adapter canonicalizes the root and requires the fixed
 `/models--SceneWorks--krea-2-turbo-mlx/snapshots/<exact-revision>/q4` suffix before loading.
 
-It first reads the actual `krea_2_turbo` image-memory contract from the pinned CUDA runtime catalog.
+It first reads the actual `krea_2_turbo` memory-strategy contract from the pinned CUDA runtime catalog.
 A plan/provider calibration fingerprint or parameter mismatch returns a schema-valid
 `gated_before_execution` diagnostic without loading weights. A compatible tuple loads the real q4
-provider with sequential residency, opens its image-memory request scope, applies the exact requested
+provider with sequential residency, opens its memory-strategy request scope, applies the exact requested
 decode/attention/window tuple, renders seed 42 through the public generator API, and samples the
 selected physical GPU through trusted-path `nvidia-smi` plus
 `candle_gen::testkit::VramProbe`. One loaded generator measures conditioning, denoise, decode, and

@@ -47,8 +47,8 @@ on:
     paths: *mlx_paths
   workflow_dispatch:
     inputs:
-      run_image_memory_calibration:
-        description: "Build and run the authoritative MLX image-memory adapter"
+      run_memory_calibration:
+        description: "Build and run the authoritative MLX memory-strategy adapter"
         required: false
         type: boolean
         default: false
@@ -99,7 +99,7 @@ jobs:
     # the healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source
     # rebuild still fits. Only an explicit calibration+provisioning dispatch gets
     # four hours for the approximately 57 GiB public snapshot.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot && 240 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot && 240 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -124,15 +124,15 @@ jobs:
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
-          RUN_IMAGE_MEMORY_CALIBRATION: ${{ inputs.run_image_memory_calibration }}
+          RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
           PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
         run: |
-          if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_IMAGE_MEMORY_CALIBRATION" != "true" ]]; then
-            echo "provision_qwen_snapshot requires run_image_memory_calibration=true" >&2
+          if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_MEMORY_CALIBRATION" != "true" ]]; then
+            echo "provision_qwen_snapshot requires run_memory_calibration=true" >&2
             exit 1
           fi
-      - name: Validate image-memory calibration identities
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+      - name: Validate memory-strategy calibration identities
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
           INFERENCE_REVISION: ${{ inputs.inference_revision }}
           QWEN_REPOSITORY: ${{ inputs.qwen_repository }}
@@ -150,24 +150,24 @@ jobs:
             echo "qwen_repository must be the fixed SceneWorks/qwen-image-mlx calibration artifact" >&2
             exit 1
           fi
-          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-image-memory-adapter/src/lib.rs)"
+          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-memory-adapter/src/lib.rs)"
           if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
             echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
             exit 1
           fi
       - name: Set up runner Python 3.12 for Qwen provisioning
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
           command -v python3.12 >/dev/null
           python3.12 --version | grep -E '^Python 3\.12\.'
           python3.12 -m venv "$RUNNER_TEMP/qwen-provision-venv"
       - name: Install pinned Qwen provisioning client
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
           "$RUNNER_TEMP/qwen-provision-venv/bin/python" -m pip install \
             --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
       - name: Provision exact public Qwen calibration snapshot
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration && inputs.provision_qwen_snapshot }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         env:
           QWEN_REVISION: ${{ inputs.qwen_revision }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
@@ -216,7 +216,7 @@ jobs:
           print("Exact public Qwen calibration snapshot provisioned")
           PY
       - name: Resolve exact Qwen calibration snapshot
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
           QWEN_REVISION: ${{ inputs.qwen_revision }}
           QWEN_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_QWEN_IMAGE_ROOT }}
@@ -247,7 +247,7 @@ jobs:
           fi
           printf 'SCENEWORKS_QWEN_IMAGE_ROOT=%s\n' "$QWEN_ROOT" >> "$GITHUB_ENV"
       - name: Check out the exact inference calibration source
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -256,28 +256,28 @@ jobs:
           path: .calibration/inference
           persist-credentials: false
       - name: Build and run the authoritative MLX calibration adapter
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
           SCENEWORKS_QWEN_IMAGE_REPOSITORY: ${{ inputs.qwen_repository }}
           SCENEWORKS_QWEN_IMAGE_REVISION: ${{ inputs.qwen_revision }}
         run: |
           printf '.calibration/\n' >> .git/info/exclude
-          cargo build --release --locked -p sceneworks-image-memory-adapter \
-            --features mlx --bin image-memory-mlx-adapter
-          node scripts/image-memory-calibration-harness.mjs run \
-            --config config/image-memory-calibration-plan.json \
+          cargo build --release --locked -p sceneworks-memory-adapter \
+            --features mlx --bin memory-mlx-adapter
+          node scripts/memory-calibration-harness.mjs run \
+            --config config/memory-calibration-plan.json \
             --backend mlx \
             --provider mlx-qwen-vae-decode \
-            --provider-command '["target/release/image-memory-mlx-adapter"]' \
+            --provider-command '["target/release/memory-mlx-adapter"]' \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
-            --output "$RUNNER_TEMP/image-memory-mlx-evidence.json"
-          node scripts/image-memory-calibration-harness.mjs check \
-            --input "$RUNNER_TEMP/image-memory-mlx-evidence.json"
+            --output "$RUNNER_TEMP/memory-mlx-evidence.json"
+          node scripts/memory-calibration-harness.mjs check \
+            --input "$RUNNER_TEMP/memory-mlx-evidence.json"
       - name: Upload raw schema-checked MLX calibration evidence
-        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_image_memory_calibration }}
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: image-memory-mlx-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/image-memory-mlx-evidence.json
+          name: memory-mlx-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/memory-mlx-evidence.json
           if-no-files-found: error

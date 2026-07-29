@@ -10,9 +10,9 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
-  readFileSync(path.join(ROOT, "packages/schemas/image-memory-calibration.schema.json"), "utf8"),
+  readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
-export const HARNESS_VERSION = "sceneworks-image-memory-v2";
+export const HARNESS_VERSION = "sceneworks-memory-v3";
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -36,7 +36,7 @@ function digest(value) {
   return createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
 }
 function fail(message) {
-  throw new Error(`image-memory calibration: ${message}`);
+  throw new Error(`memory-strategy calibration: ${message}`);
 }
 function object(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object`);
@@ -490,7 +490,7 @@ export async function runProviderPlan({
     ...(sceneWorks
       ? {
           matrixSourceRevision: JSON.parse(
-            await readFile(path.join(repo, "docs/generated/image-memory-matrix.json"), "utf8"),
+            await readFile(path.join(repo, "docs/generated/memory-matrix.json"), "utf8"),
           ).generatedFrom.sceneWorksRevision,
         }
       : {}),
@@ -603,7 +603,7 @@ async function main() {
     });
     return void await atomicWrite(value("--output"), output);
   }
-  fail("usage: check|plan|ingest|run (see docs/image-memory-calibration-harness.md)");
+  fail("usage: check|plan|ingest|run (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

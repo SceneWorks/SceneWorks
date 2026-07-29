@@ -32,12 +32,11 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use gen_core::{
-    GenerationMemory, ImageMemoryBackendRealization, ImageMemoryBudget, ImageMemoryCacheState,
-    ImageMemoryConformanceState, ImageMemoryEvidence, ImageMemoryEvidenceDimensions,
-    ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict, ImageMemoryGeometry, ImageMemoryMode,
-    ImageMemoryNumericTier, ImageMemoryParityContract, ImageMemoryParityResult,
-    ImageMemoryProviderContract, ImageMemoryRunContext, ImageMemorySelection, ImageMemoryStrategy,
-    LoadSpec, OffloadPolicy, WeightsSource,
+    GenerationMemory, LoadSpec, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
+    MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
+    MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
+    MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
+    OffloadPolicy, WeightsSource,
 };
 
 use crate::fit_gate::resolve_offload;
@@ -53,7 +52,7 @@ const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
 #[derive(Clone, Debug)]
 pub(crate) struct MlxRequestPlan {
     engine_id: &'static str,
-    tier: ImageMemoryNumericTier,
+    tier: MemoryNumericTier,
     asset_bytes: u64,
     activation_headroom_bytes: u64,
 }
@@ -63,7 +62,7 @@ impl MlxRequestPlan {
         let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
         Self {
             engine_id,
-            tier: ImageMemoryNumericTier {
+            tier: MemoryNumericTier {
                 precision: spec.precision,
                 quant: spec.quantize,
             },
@@ -74,7 +73,7 @@ impl MlxRequestPlan {
         }
     }
 
-    fn generic_total_peak_bytes(&self, geometry: ImageMemoryGeometry) -> u64 {
+    fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
@@ -105,7 +104,7 @@ pub(crate) struct MlxRequestInputs {
 #[derive(Clone, Debug)]
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
-    pub context: ImageMemoryRunContext,
+    pub context: MemoryRunContext,
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -120,41 +119,41 @@ pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u6
     baseline.saturating_add(after.saturating_sub(before))
 }
 
-fn request_mode(mode: &str) -> (ImageMemoryMode, &'static str) {
+fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
-        "image_generation" | "text_to_image" => (ImageMemoryMode::TextToImage, "text_to_image"),
-        "character_image" | "image_to_image" => (ImageMemoryMode::ImageToImage, "image_to_image"),
-        "edit_image" => (ImageMemoryMode::Edit, "edit"),
-        _ => (ImageMemoryMode::Other(mode.to_owned()), "other"),
+        "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
+        "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
+        "edit_image" => (MemoryMode::Edit, "edit"),
+        _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
 }
 
-fn memory_for_selection(selection: ImageMemorySelection) -> GenerationMemory {
+fn memory_for_selection(selection: MemorySelection) -> GenerationMemory {
     GenerationMemory {
-        tile_vae_decode: selection.strategy >= ImageMemoryStrategy::BoundedDecode,
-        chunk_attention: selection.strategy >= ImageMemoryStrategy::BoundedAttention,
+        tile_vae_decode: selection.strategy >= MemoryStrategy::BoundedDecode,
+        chunk_attention: selection.strategy >= MemoryStrategy::BoundedAttention,
         stream_transformer_blocks: selection.strategy
-            >= ImageMemoryStrategy::BoundedTransformerResidency,
+            >= MemoryStrategy::BoundedTransformerResidency,
         ..Default::default()
     }
 }
 
 fn resident_evidence(
     route: &str,
-    tier: ImageMemoryNumericTier,
+    tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
-    geometry: ImageMemoryGeometry,
+    geometry: MemoryGeometry,
     predicted_peak_bytes: u64,
     calibration_fingerprint: Option<&str>,
-) -> (ImageMemorySelection, ImageMemoryEvidence) {
-    let selection = ImageMemorySelection {
-        strategy: ImageMemoryStrategy::Resident,
+) -> (MemorySelection, MemoryEvidence) {
+    let selection = MemorySelection {
+        strategy: MemoryStrategy::Resident,
         parameters: Default::default(),
         tier,
     };
-    let evidence = ImageMemoryEvidence {
-        key: ImageMemoryEvidenceKey {
+    let evidence = MemoryEvidence {
+        key: MemoryEvidenceKey {
             resolved_route: route.to_owned(),
             backend: "mlx".to_owned(),
             tier,
@@ -164,24 +163,24 @@ fn resident_evidence(
             strategy: selection.strategy,
             parameters: selection.parameters,
         },
-        conformance: ImageMemoryConformanceState::ImplementedUnverified,
-        dimensions: ImageMemoryEvidenceDimensions {
-            static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
-            declared_calibration: ImageMemoryEvidenceVerdict::Missing,
-            historical_verification: ImageMemoryEvidenceVerdict::Missing,
-            current_environment_verification: ImageMemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+        conformance: MemoryConformanceState::ImplementedUnverified,
+        dimensions: MemoryEvidenceDimensions {
+            static_implementation: MemoryEvidenceVerdict::Satisfied,
+            declared_calibration: MemoryEvidenceVerdict::Missing,
+            historical_verification: MemoryEvidenceVerdict::Missing,
+            current_environment_verification: MemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
         },
-        calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
         sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
         inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
         harness_version: String::new(),
         predicted_peak_bytes,
         observed_peak_bytes: None,
-        parity: ImageMemoryParityContract::Exact,
-        parity_result: ImageMemoryParityResult::NotRun,
+        parity: MemoryParityContract::Exact,
+        parity_result: MemoryParityResult::NotRun,
     };
     (selection, evidence)
 }
@@ -193,16 +192,16 @@ fn evaluate_request_with_budget(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
-    cache_state: ImageMemoryCacheState,
+    cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
-    budget: ImageMemoryBudget,
+    budget: MemoryBudget,
     total_peak_bytes: u64,
     external_committed_bytes: u64,
-    additional_evidence: &[ImageMemoryEvidence],
+    additional_evidence: &[MemoryEvidence],
 ) -> WorkerResult<MlxRequestEvaluation> {
-    use crate::image_memory::{Budget, Candidate, RequestScope, Selection};
+    use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
-    let geometry = ImageMemoryGeometry {
+    let geometry = MemoryGeometry {
         width: inputs.width,
         height: inputs.height,
         batch: inputs.count.max(1),
@@ -217,12 +216,12 @@ fn evaluate_request_with_budget(
         )));
     }
     let mut fallback_contract;
-    let contract = if let Some(contract) = generator.image_memory_contract() {
+    let contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
     } else {
-        fallback_contract = ImageMemoryProviderContract::compatibility_default(
+        fallback_contract = MemoryProviderContract::compatibility_default(
             plan.engine_id,
-            ImageMemoryBackendRealization::MlxMetal {
+            MemoryBackendRealization::MlxMetal {
                 bounded_wired_residency: false,
                 lazy_or_mmap_materialization: true,
                 explicit_evaluation_and_synchronization: false,
@@ -244,7 +243,7 @@ fn evaluate_request_with_budget(
         && !matches!(
             contract.calibration.as_ref(),
             Some(identity)
-                if identity.abi == gen_core::IMAGE_MEMORY_CALIBRATION_ABI
+                if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
                     && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
         )
     {
@@ -252,7 +251,7 @@ fn evaluate_request_with_budget(
             "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
              request admission against an unpaired estimator",
             plan.engine_id,
-            gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+            gen_core::MEMORY_CALIBRATION_ABI,
             MAGE_CALIBRATION_FINGERPRINT
         )));
     }
@@ -283,15 +282,11 @@ fn evaluate_request_with_budget(
     );
     let mut selections = Vec::with_capacity(1 + additional_evidence.len());
     selections.push(resident_selection);
-    selections.extend(
-        additional_evidence
-            .iter()
-            .map(|evidence| ImageMemorySelection {
-                strategy: evidence.key.strategy,
-                parameters: evidence.key.parameters,
-                tier: evidence.key.tier,
-            }),
-    );
+    selections.extend(additional_evidence.iter().map(|evidence| MemorySelection {
+        strategy: evidence.key.strategy,
+        parameters: evidence.key.parameters,
+        tier: evidence.key.tier,
+    }));
     let mut evidence = Vec::with_capacity(1 + additional_evidence.len());
     evidence.push(&resident);
     evidence.extend(additional_evidence);
@@ -303,7 +298,7 @@ fn evaluate_request_with_budget(
             evidence,
         })
         .collect::<Vec<_>>();
-    let selection = crate::image_memory::select_strategy(
+    let selection = crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: plan.engine_id,
             backend: "mlx",
@@ -357,7 +352,7 @@ fn evaluate_request_with_budget(
         }
     };
     tracing::info!(
-        event = "image_memory_request_selected",
+        event = "memory_strategy_request_selected",
         route = plan.engine_id,
         backend = "mlx",
         tier = ?plan.tier,
@@ -378,7 +373,7 @@ fn evaluate_request_with_budget(
     );
     Ok(MlxRequestEvaluation {
         memory: memory_for_selection(selection),
-        context: ImageMemoryRunContext {
+        context: MemoryRunContext {
             selection,
             calibration_abi,
             calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
@@ -397,7 +392,7 @@ fn evaluate_request_with_budget(
 }
 
 #[cfg(target_os = "macos")]
-fn live_request_budget(engine_id: &str) -> WorkerResult<ImageMemoryBudget> {
+fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
     // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
     mlx_rs::memory::clear_cache();
@@ -418,7 +413,7 @@ fn live_request_budget(engine_id: &str) -> WorkerResult<ImageMemoryBudget> {
             .total_gb;
         (gib_to_bytes(total_gib), gib_to_bytes(OS_RESERVE_GB))
     };
-    Ok(ImageMemoryBudget {
+    Ok(MemoryBudget {
         total_bytes,
         committed_bytes,
         reclaimable_bytes,
@@ -427,7 +422,7 @@ fn live_request_budget(engine_id: &str) -> WorkerResult<ImageMemoryBudget> {
 }
 
 #[cfg(target_os = "macos")]
-fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: ImageMemoryGeometry) -> u64 {
+fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: MemoryGeometry) -> u64 {
     if plan.engine_id.starts_with("mage_flow") {
         decimal_gb_to_bytes(runtime_macos::providers::mage::memory::generation_peak_gb(
             plan.tier.quant,
@@ -446,11 +441,11 @@ pub(crate) fn evaluate_request(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
-    cache_state: ImageMemoryCacheState,
+    cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
     external_committed_bytes: u64,
 ) -> WorkerResult<MlxRequestEvaluation> {
-    let geometry = ImageMemoryGeometry {
+    let geometry = MemoryGeometry {
         width: inputs.width,
         height: inputs.height,
         batch: inputs.count.max(1),
@@ -589,8 +584,14 @@ use crate::fit_gate::BYTES_PER_GIB;
 /// A usable unified-memory budget for the machine, in GB. Single field (no free/total split): on
 /// unified memory the whole pool is the budget, and current pressure is absorbed by [`HEADROOM_GB`]
 /// rather than a live "free" reading that fluctuates with the OS.
+///
+/// Named `Mlx*` since sc-15804: this module also imports [`gen_core::MemoryBudget`], the shared
+/// memory-strategy contract's request-scoped byte budget, which was `ImageMemoryBudget` until the
+/// contract dropped its lane prefix. They are different things — this one is the static
+/// whole-machine GB admission floor, that one is the live per-request byte envelope — and the
+/// contract type owns the bare name.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct MemoryBudget {
+pub(crate) struct MlxMemoryBudget {
     pub total_gb: f64,
 }
 
@@ -607,9 +608,12 @@ pub(crate) fn parse_memory_cap(raw: Option<&str>) -> Option<f64> {
 
 /// Resolve the budget: the emulation cap overrides the real probed total (emulating a smaller Mac);
 /// otherwise the real total. `None` from both ⇒ no budget ⇒ the gate no-ops (`Unknown`).
-pub(crate) fn resolve_budget(real_total_gb: Option<f64>, cap: Option<f64>) -> Option<MemoryBudget> {
+pub(crate) fn resolve_budget(
+    real_total_gb: Option<f64>,
+    cap: Option<f64>,
+) -> Option<MlxMemoryBudget> {
     cap.or(real_total_gb)
-        .map(|total_gb| MemoryBudget { total_gb })
+        .map(|total_gb| MlxMemoryBudget { total_gb })
 }
 
 /// Predicted whole-model peak (GiB) = summed component weight bytes + [`HEADROOM_GB`]. `None` when
@@ -625,7 +629,7 @@ fn predicted_peak_gb_with_headroom(weight_bytes: u64, headroom_gb: f64) -> Optio
 
 /// Decide whether the predicted peak fits the budget. Missing either input ⇒ `Unknown` (never
 /// block), exactly like the flux2 guard and the candle gate.
-pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MemoryBudget>) -> FitDecision {
+pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MlxMemoryBudget>) -> FitDecision {
     let (Some(needed_gb), Some(budget)) = (needed_gb, budget) else {
         return FitDecision::Unknown;
     };
@@ -673,7 +677,7 @@ fn predicted_sequential_peak_gb_with_headroom(
 /// always derivable from the on-disk component split, so this check always applies.
 pub(crate) fn sequential_overflow_gb(
     sequential_needed_gb: Option<f64>,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
 ) -> Option<f64> {
     let (needed_gb, budget) = (sequential_needed_gb?, budget?);
     (budget.total_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
@@ -877,7 +881,7 @@ pub(crate) fn mochi_fit_error(
     frames: u32,
     width: u32,
     height: u32,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
 ) -> Option<WorkerError> {
     let (needed_gb, budget) = (
         mochi_needed_gb(weight_bytes, frames, width, height)?,
@@ -1011,7 +1015,7 @@ pub(crate) enum ResidencyOutcome {
 pub(crate) fn decide_residency(
     total_bytes: u64,
     te_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
 ) -> ResidencyOutcome {
     decide_residency_with_headroom(
@@ -1026,7 +1030,7 @@ pub(crate) fn decide_residency(
 fn decide_residency_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
@@ -1058,7 +1062,7 @@ fn decide_residency_with_headroom(
 fn decide_residency_by_peak(
     total_bytes: u64,
     te_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
 ) -> ResidencyOutcome {
     decide_residency_by_peak_with_headroom(
@@ -1073,11 +1077,11 @@ fn decide_residency_by_peak(
 fn decide_residency_by_peak_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
-    // Generic MLX has no provider-supplied image-memory contract or request-scoped evidence yet.
+    // Generic MLX has no provider-supplied memory-strategy contract or request-scoped evidence yet.
     // Enter the shared selector explicitly as ImplementedUnverified, then keep the established
     // cold-load gate. This adopts one selector API without manufacturing VERIFIED evidence or
     // copying optimized selection logic; request-aware providers can promote only after exposing
@@ -1085,14 +1089,14 @@ fn decide_residency_by_peak_with_headroom(
     let shared_observation = generic_mlx_shared_observation(total_bytes, budget, headroom_gb);
     debug_assert!(matches!(
         shared_observation,
-        crate::image_memory::Selection::Selected {
-            selection: gen_core::ImageMemorySelection {
-                strategy: gen_core::ImageMemoryStrategy::Resident,
+        crate::memory_strategy::Selection::Selected {
+            selection: gen_core::MemorySelection {
+                strategy: gen_core::MemoryStrategy::Resident,
                 ..
             },
             ..
-        } | crate::image_memory::Selection::Reject { .. }
-            | crate::image_memory::Selection::Unverified { .. }
+        } | crate::memory_strategy::Selection::Reject { .. }
+            | crate::memory_strategy::Selection::Unverified { .. }
     ));
     let resident = fit_decision(
         predicted_peak_gb_with_headroom(total_bytes, headroom_gb),
@@ -1128,73 +1132,72 @@ fn decide_residency_by_peak_with_headroom(
 
 fn generic_mlx_shared_observation(
     total_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     headroom_gb: f64,
-) -> crate::image_memory::Selection {
-    use crate::image_memory::{Budget, Candidate, RequestScope};
+) -> crate::memory_strategy::Selection {
+    use crate::memory_strategy::{Budget, Candidate, RequestScope};
     use gen_core::{
-        ImageMemoryBackendRealization, ImageMemoryConformanceState, ImageMemoryEvidence,
-        ImageMemoryEvidenceDimensions, ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict,
-        ImageMemoryGeometry, ImageMemoryNumericTier, ImageMemoryParityContract,
-        ImageMemoryParityResult, ImageMemoryProviderContract, ImageMemorySelection,
-        ImageMemoryStrategy,
+        MemoryBackendRealization, MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions,
+        MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryNumericTier,
+        MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemorySelection,
+        MemoryStrategy,
     };
 
-    let tier = ImageMemoryNumericTier {
+    let tier = MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: None,
     };
-    let geometry = ImageMemoryGeometry {
+    let geometry = MemoryGeometry {
         width: 1,
         height: 1,
         batch: 1,
         frames: 1,
     };
-    let selection = ImageMemorySelection {
-        strategy: ImageMemoryStrategy::Resident,
+    let selection = MemorySelection {
+        strategy: MemoryStrategy::Resident,
         parameters: Default::default(),
         tier,
     };
-    let evidence = ImageMemoryEvidence {
-        key: ImageMemoryEvidenceKey {
+    let evidence = MemoryEvidence {
+        key: MemoryEvidenceKey {
             resolved_route: "generic_mlx_cold_load".into(),
             backend: "mlx".into(),
             tier,
             mode: "image_generation".into(),
             overlay: Some("resolved_load_spec".into()),
             geometry,
-            strategy: ImageMemoryStrategy::Resident,
+            strategy: MemoryStrategy::Resident,
             parameters: Default::default(),
         },
-        conformance: ImageMemoryConformanceState::ImplementedUnverified,
-        dimensions: ImageMemoryEvidenceDimensions {
-            static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
-            declared_calibration: ImageMemoryEvidenceVerdict::Missing,
-            historical_verification: ImageMemoryEvidenceVerdict::Missing,
-            current_environment_verification: ImageMemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: ImageMemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+        conformance: MemoryConformanceState::ImplementedUnverified,
+        dimensions: MemoryEvidenceDimensions {
+            static_implementation: MemoryEvidenceVerdict::Satisfied,
+            declared_calibration: MemoryEvidenceVerdict::Missing,
+            historical_verification: MemoryEvidenceVerdict::Missing,
+            current_environment_verification: MemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
         },
-        calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: String::new(),
         sceneworks_revision: "sc-15449-contract-v1".into(),
         inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".into(),
         harness_version: String::new(),
         predicted_peak_bytes: total_bytes,
         observed_peak_bytes: None,
-        parity: ImageMemoryParityContract::Exact,
-        parity_result: ImageMemoryParityResult::NotRun,
+        parity: MemoryParityContract::Exact,
+        parity_result: MemoryParityResult::NotRun,
     };
-    let contract = ImageMemoryProviderContract::compatibility_default(
+    let contract = MemoryProviderContract::compatibility_default(
         "generic_mlx_cold_load",
-        ImageMemoryBackendRealization::MlxMetal {
+        MemoryBackendRealization::MlxMetal {
             bounded_wired_residency: false,
             lazy_or_mmap_materialization: true,
             explicit_evaluation_and_synchronization: false,
             cache_eviction: true,
         },
     );
-    crate::image_memory::select_strategy(
+    crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: "generic_mlx_cold_load",
             backend: "mlx",
@@ -1239,7 +1242,7 @@ fn generic_mlx_shared_observation(
 fn weights_fit_floor(
     total_bytes: u64,
     te_bytes: u64,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
 ) -> Option<ResidencyOutcome> {
     let ceiling_gb = budget?.total_gb - OS_RESERVE_GB;
@@ -1547,7 +1550,7 @@ fn full_finetune_fit_message(
     dit_bytes: u64,
     resolution: u32,
     gradient_accumulation: u32,
-    budget: Option<MemoryBudget>,
+    budget: Option<MlxMemoryBudget>,
 ) -> Option<String> {
     let (needed_gb, budget) = (
         full_finetune_peak_gb(dit_bytes, resolution, gradient_accumulation)?,
@@ -1637,7 +1640,7 @@ mod tests {
 
     struct RequestGenerator {
         descriptor: gen_core::ModelDescriptor,
-        contract: Option<ImageMemoryProviderContract>,
+        contract: Option<MemoryProviderContract>,
     }
 
     impl gen_core::Generator for RequestGenerator {
@@ -1657,12 +1660,12 @@ mod tests {
             unreachable!("request selector tests do not execute tensors")
         }
 
-        fn image_memory_contract(&self) -> Option<&ImageMemoryProviderContract> {
+        fn memory_strategy_contract(&self) -> Option<&MemoryProviderContract> {
             self.contract.as_ref()
         }
     }
 
-    fn request_generator(contract: Option<ImageMemoryProviderContract>) -> RequestGenerator {
+    fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
                 id: "mage_flow",
@@ -1679,7 +1682,7 @@ mod tests {
     fn request_plan() -> MlxRequestPlan {
         MlxRequestPlan {
             engine_id: "mage_flow",
-            tier: ImageMemoryNumericTier {
+            tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
             },
@@ -1688,21 +1691,19 @@ mod tests {
         }
     }
 
-    fn mage_request_contract() -> ImageMemoryProviderContract {
-        use gen_core::ImageMemoryCalibrationIdentity;
+    fn mage_request_contract() -> MemoryProviderContract {
+        use gen_core::MemoryCalibrationIdentity;
 
-        let mut contract = ImageMemoryProviderContract::compatibility_default(
+        let mut contract = MemoryProviderContract::compatibility_default(
             "mage_flow",
-            ImageMemoryBackendRealization::MlxMetal {
+            MemoryBackendRealization::MlxMetal {
                 bounded_wired_residency: true,
                 lazy_or_mmap_materialization: true,
                 explicit_evaluation_and_synchronization: true,
                 cache_eviction: true,
             },
         );
-        contract.calibration = Some(ImageMemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
-        ));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(MAGE_CALIBRATION_FINGERPRINT));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract
     }
@@ -1725,7 +1726,7 @@ mod tests {
     fn request_scope_reselects_a_b_a_without_fragmenting_request_axes() {
         let generator = request_generator(Some(mage_request_contract()));
         let plan = request_plan();
-        let budget = ImageMemoryBudget {
+        let budget = MemoryBudget {
             total_bytes: gib_to_bytes(16.0),
             committed_bytes: gib_to_bytes(4.0),
             reclaimable_bytes: 0,
@@ -1737,7 +1738,7 @@ mod tests {
             &generator,
             &plan,
             &a,
-            ImageMemoryCacheState::Cold,
+            MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
             budget,
             gib_to_bytes(8.0),
@@ -1749,7 +1750,7 @@ mod tests {
             &generator,
             &plan,
             &b,
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Sequential,
             budget,
             gib_to_bytes(9.0),
@@ -1761,7 +1762,7 @@ mod tests {
             &generator,
             &plan,
             &a,
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Sequential,
             budget,
             gib_to_bytes(8.0),
@@ -1771,14 +1772,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(first_a.context.geometry.batch, 3);
-        assert_eq!(first_a.context.mode, ImageMemoryMode::Edit);
+        assert_eq!(first_a.context.mode, MemoryMode::Edit);
         assert_eq!(
             first_a.context.overlay.as_deref(),
             Some("references:2+mask+adapters:1")
         );
-        assert_eq!(first_a.context.cache_state, ImageMemoryCacheState::Cold);
+        assert_eq!(first_a.context.cache_state, MemoryCacheState::Cold);
         assert_eq!(selected_b.context.geometry.width, 1536);
-        assert_eq!(selected_b.context.cache_state, ImageMemoryCacheState::Warm);
+        assert_eq!(selected_b.context.cache_state, MemoryCacheState::Warm);
         assert_eq!(first_a.context.selection, second_a.context.selection);
         assert_eq!(
             first_a.context.predicted_peak_bytes, second_a.context.predicted_peak_bytes,
@@ -1795,9 +1796,9 @@ mod tests {
             &generator,
             &plan,
             &inputs,
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(10.0),
                 committed_bytes: gib_to_bytes(8.0),
                 reclaimable_bytes: 0,
@@ -1816,9 +1817,9 @@ mod tests {
             &generator,
             &plan,
             &inputs,
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(10.0),
                 committed_bytes: gib_to_bytes(12.0),
                 reclaimable_bytes: 0,
@@ -1846,9 +1847,9 @@ mod tests {
             &request_generator(None),
             &plan,
             &request_inputs(512, 512, 1),
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(10.0),
                 committed_bytes: gib_to_bytes(6.0),
                 reclaimable_bytes: 0,
@@ -1884,9 +1885,9 @@ mod tests {
             &request_generator(None),
             &request_plan(),
             &request_inputs(512, 512, 1),
-            ImageMemoryCacheState::Cold,
+            MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(16.0),
                 committed_bytes: 0,
                 reclaimable_bytes: 0,
@@ -1912,9 +1913,9 @@ mod tests {
             &request_generator(Some(mage_request_contract())),
             &request_plan(),
             &inputs,
-            ImageMemoryCacheState::Cold,
+            MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(128.0),
                 committed_bytes: 0,
                 reclaimable_bytes: 0,
@@ -1932,43 +1933,40 @@ mod tests {
     #[test]
     fn optimized_fingerprint_mismatch_fails_closed() {
         use gen_core::{
-            ImageMemoryCalibrationIdentity, ImageMemoryParameterRanges,
-            ImageMemoryStrategyCapability, ImageMemoryStrategyParameters,
-            ImageMemoryStrategySupport,
+            MemoryCalibrationIdentity, MemoryParameterRanges, MemoryStrategyCapability,
+            MemoryStrategyParameters, MemoryStrategySupport,
         };
 
         let plan = request_plan();
         let inputs = request_inputs(1024, 1024, 1);
-        let mut contract = ImageMemoryProviderContract::compatibility_default(
+        let mut contract = MemoryProviderContract::compatibility_default(
             "mage_flow",
-            ImageMemoryBackendRealization::MlxMetal {
+            MemoryBackendRealization::MlxMetal {
                 bounded_wired_residency: true,
                 lazy_or_mmap_materialization: true,
                 explicit_evaluation_and_synchronization: true,
                 cache_eviction: true,
             },
         );
-        contract.calibration = Some(ImageMemoryCalibrationIdentity::new(
-            MAGE_CALIBRATION_FINGERPRINT,
-        ));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(MAGE_CALIBRATION_FINGERPRINT));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract.lifecycle.decode_tiling = true;
-        contract.strategies = ImageMemoryStrategy::ALL
+        contract.strategies = MemoryStrategy::ALL
             .into_iter()
-            .map(|strategy| ImageMemoryStrategyCapability {
+            .map(|strategy| MemoryStrategyCapability {
                 strategy,
                 support: match strategy {
-                    ImageMemoryStrategy::Resident => ImageMemoryStrategySupport::Implemented,
-                    ImageMemoryStrategy::StagedResidency => {
-                        ImageMemoryStrategySupport::StructurallyNotApplicable {
+                    MemoryStrategy::Resident => MemoryStrategySupport::Implemented,
+                    MemoryStrategy::StagedResidency => {
+                        MemoryStrategySupport::StructurallyNotApplicable {
                             reason: "single resident pipeline".to_owned(),
                         }
                     }
-                    ImageMemoryStrategy::BoundedDecode => ImageMemoryStrategySupport::Implemented,
-                    _ => ImageMemoryStrategySupport::Missing,
+                    MemoryStrategy::BoundedDecode => MemoryStrategySupport::Implemented,
+                    _ => MemoryStrategySupport::Missing,
                 },
-                parameters: if strategy == ImageMemoryStrategy::BoundedDecode {
-                    ImageMemoryParameterRanges {
+                parameters: if strategy == MemoryStrategy::BoundedDecode {
+                    MemoryParameterRanges {
                         decode_tile_edges: vec![512],
                         decode_overlaps: vec![32],
                         ..Default::default()
@@ -1978,23 +1976,23 @@ mod tests {
                 },
             })
             .collect();
-        let selection = ImageMemorySelection {
-            strategy: ImageMemoryStrategy::BoundedDecode,
-            parameters: ImageMemoryStrategyParameters {
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: MemoryStrategyParameters {
                 decode_tile_edge: Some(512),
                 decode_overlap: Some(32),
                 ..Default::default()
             },
             tier: plan.tier,
         };
-        let evidence = ImageMemoryEvidence {
-            key: ImageMemoryEvidenceKey {
+        let evidence = MemoryEvidence {
+            key: MemoryEvidenceKey {
                 resolved_route: "mage_flow".to_owned(),
                 backend: "mlx".to_owned(),
                 tier: plan.tier,
                 mode: "edit".to_owned(),
                 overlay: inputs.overlay.clone(),
-                geometry: ImageMemoryGeometry {
+                geometry: MemoryGeometry {
                     width: 1024,
                     height: 1024,
                     batch: 1,
@@ -2003,32 +2001,32 @@ mod tests {
                 strategy: selection.strategy,
                 parameters: selection.parameters,
             },
-            conformance: ImageMemoryConformanceState::Verified,
-            dimensions: ImageMemoryEvidenceDimensions {
-                static_implementation: ImageMemoryEvidenceVerdict::Satisfied,
-                declared_calibration: ImageMemoryEvidenceVerdict::Satisfied,
-                historical_verification: ImageMemoryEvidenceVerdict::Satisfied,
-                current_environment_verification: ImageMemoryEvidenceVerdict::Satisfied,
-                canonical_route_loadability: ImageMemoryEvidenceVerdict::Satisfied,
-                exact_strategy_parameters: ImageMemoryEvidenceVerdict::Satisfied,
+            conformance: MemoryConformanceState::Verified,
+            dimensions: MemoryEvidenceDimensions {
+                static_implementation: MemoryEvidenceVerdict::Satisfied,
+                declared_calibration: MemoryEvidenceVerdict::Satisfied,
+                historical_verification: MemoryEvidenceVerdict::Satisfied,
+                current_environment_verification: MemoryEvidenceVerdict::Satisfied,
+                canonical_route_loadability: MemoryEvidenceVerdict::Satisfied,
+                exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
             },
-            calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: "wrong-provider-fingerprint".to_owned(),
             sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
             inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
             harness_version: "test".to_owned(),
             predicted_peak_bytes: gib_to_bytes(5.0),
             observed_peak_bytes: Some(gib_to_bytes(5.0)),
-            parity: ImageMemoryParityContract::Exact,
-            parity_result: ImageMemoryParityResult::Passed,
+            parity: MemoryParityContract::Exact,
+            parity_result: MemoryParityResult::Passed,
         };
         let error = evaluate_request_with_budget(
             &request_generator(Some(contract)),
             &plan,
             &inputs,
-            ImageMemoryCacheState::Warm,
+            MemoryCacheState::Warm,
             OffloadPolicy::Resident,
-            ImageMemoryBudget {
+            MemoryBudget {
                 total_bytes: gib_to_bytes(10.0),
                 committed_bytes: 0,
                 reclaimable_bytes: 0,
@@ -2075,7 +2073,7 @@ mod tests {
             MAGE_DIT_BYTES,
             1024,
             1,
-            Some(MemoryBudget { total_gb: 128.0 }),
+            Some(MlxMemoryBudget { total_gb: 128.0 }),
         )
         .expect("1024² full-tune must be rejected on 128 GB");
         assert!(
@@ -2105,7 +2103,7 @@ mod tests {
                 MAGE_DIT_BYTES,
                 64,
                 1,
-                Some(MemoryBudget { total_gb: 128.0 }),
+                Some(MlxMemoryBudget { total_gb: 128.0 }),
             ),
             None
         );
@@ -2120,7 +2118,7 @@ mod tests {
             MAGE_DIT_BYTES,
             64,
             1,
-            Some(MemoryBudget { total_gb: 32.0 }),
+            Some(MlxMemoryBudget { total_gb: 32.0 }),
         )
         .is_some());
     }
@@ -2141,7 +2139,7 @@ mod tests {
         // 8× the 7.665 GiB bf16 DiT ≈ 61.3 GiB of state; 10× ≈ 76.7 GiB. At a tiny resolution the
         // activation terms are negligible, so a 72 GB budget sits squarely between them — the band a
         // 64–80 GB Mac lands in, and the band the old formula got wrong.
-        const BUDGET: Option<MemoryBudget> = Some(MemoryBudget { total_gb: 72.0 });
+        const BUDGET: Option<MlxMemoryBudget> = Some(MlxMemoryBudget { total_gb: 72.0 });
 
         let single = full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 1).expect("weights present");
         let windowed = full_finetune_peak_gb(MAGE_DIT_BYTES, 64, 4).expect("weights present");
@@ -2171,7 +2169,7 @@ mod tests {
             MAGE_DIT_BYTES,
             64,
             1,
-            Some(MemoryBudget { total_gb: 32.0 }),
+            Some(MlxMemoryBudget { total_gb: 32.0 }),
         )
         .expect("32 GB cannot hold the optimizer state at any resolution");
         assert!(
@@ -2238,17 +2236,17 @@ mod tests {
         // Cap overrides the real total (emulate a smaller Mac on big hardware).
         assert_eq!(
             resolve_budget(Some(128.0), Some(16.0)),
-            Some(MemoryBudget { total_gb: 16.0 })
+            Some(MlxMemoryBudget { total_gb: 16.0 })
         );
         // No cap ⇒ the real total.
         assert_eq!(
             resolve_budget(Some(128.0), None),
-            Some(MemoryBudget { total_gb: 128.0 })
+            Some(MlxMemoryBudget { total_gb: 128.0 })
         );
         // A cap with no real reading still yields a budget (exercisable in a no-probe unit test).
         assert_eq!(
             resolve_budget(None, Some(16.0)),
-            Some(MemoryBudget { total_gb: 16.0 })
+            Some(MlxMemoryBudget { total_gb: 16.0 })
         );
         // No signal at all ⇒ no budget ⇒ gate no-ops.
         assert_eq!(resolve_budget(None, None), None);
@@ -2310,7 +2308,7 @@ mod tests {
 
     #[test]
     fn fit_decision_rejects_only_a_genuine_overflow() {
-        let budget = MemoryBudget { total_gb: 16.0 };
+        let budget = MlxMemoryBudget { total_gb: 16.0 };
         // qwen-image q8: ~36 GiB weights + 18 headroom (sc-10863) = 54 ⇒ too big for a 16 GB Mac.
         assert_eq!(
             fit_decision(predicted_peak_gb(36 * 1024 * 1024 * 1024_u64), Some(budget)),
@@ -2323,13 +2321,13 @@ mod tests {
         assert_eq!(
             fit_decision(
                 predicted_peak_gb(3 * 1024 * 1024 * 1024_u64),
-                Some(MemoryBudget { total_gb: 32.0 })
+                Some(MlxMemoryBudget { total_gb: 32.0 })
             ),
             FitDecision::Fits
         );
         // Exactly-fits is not a rejection: budget 46, need 46.
         assert_eq!(
-            fit_decision(Some(46.0), Some(MemoryBudget { total_gb: 46.0 })),
+            fit_decision(Some(46.0), Some(MlxMemoryBudget { total_gb: 46.0 })),
             FitDecision::Fits
         );
         // Missing either input ⇒ never block.
@@ -2452,7 +2450,7 @@ mod tests {
         const TE: u64 = 4_331_077_508;
         const VAE: u64 = 345_053_168;
         let total = DIT + TE + VAE;
-        let budget = |gb: f64| Some(MemoryBudget { total_gb: gb });
+        let budget = |gb: f64| Some(MlxMemoryBudget { total_gb: gb });
         for gb in [6.0, 7.0] {
             println!(
                 "q4 @ {gb} GB cap: fixed={:?}  pre-fix(DiT-only)={:?}",
@@ -2681,7 +2679,7 @@ mod tests {
 
     #[test]
     fn sequential_overflow_rejects_only_a_genuine_staged_overflow() {
-        let budget = Some(MemoryBudget { total_gb: 16.0 });
+        let budget = Some(MlxMemoryBudget { total_gb: 16.0 });
         // Staged still needs 20 > 16 ⇒ reject even sequentially.
         assert_eq!(sequential_overflow_gb(Some(20.0), budget), Some(20.0));
         // Staged fits (14 <= 16) ⇒ run sequentially, no reject.
@@ -2739,18 +2737,18 @@ mod tests {
 
         // Roomy budget (128 GB Mac) ⇒ Resident (keep the warm path).
         assert_eq!(
-            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
+            decide_residency_by_peak(total, te, Some(MlxMemoryBudget { total_gb: 128.0 }), true),
             ResidencyOutcome::Resident
         );
         // Budget between staged (22) and resident (23): resident won't fit, staged will, provider
         // stages ⇒ Sequential. This is the fit-gate SELECTING sequential residency.
         assert_eq!(
-            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 22.5 }), true),
+            decide_residency_by_peak(total, te, Some(MlxMemoryBudget { total_gb: 22.5 }), true),
             ResidencyOutcome::Sequential
         );
         // Same budget but a provider that can't stage ⇒ reject (never a silent Resident that OOMs).
         assert!(matches!(
-            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 22.5 }), false),
+            decide_residency_by_peak(total, te, Some(MlxMemoryBudget { total_gb: 22.5 }), false),
             ResidencyOutcome::Reject {
                 staged_gb: None,
                 ..
@@ -2758,7 +2756,7 @@ mod tests {
         ));
         // Budget below even the staged peak (22) ⇒ reject, naming the staged requirement.
         assert!(matches!(
-            decide_residency_by_peak(total, te, Some(MemoryBudget { total_gb: 20.0 }), true),
+            decide_residency_by_peak(total, te, Some(MlxMemoryBudget { total_gb: 20.0 }), true),
             ResidencyOutcome::Reject {
                 staged_gb: Some(_),
                 ..
@@ -2771,7 +2769,7 @@ mod tests {
         );
         // Unmeasured weights ⇒ Resident (no signal).
         assert_eq!(
-            decide_residency_by_peak(0, 0, Some(MemoryBudget { total_gb: 8.0 }), true),
+            decide_residency_by_peak(0, 0, Some(MlxMemoryBudget { total_gb: 8.0 }), true),
             ResidencyOutcome::Resident
         );
     }
@@ -2780,14 +2778,14 @@ mod tests {
     fn generic_mlx_adopts_shared_selector_without_an_optimized_claim() {
         let observation = generic_mlx_shared_observation(
             4 * 1024 * 1024 * 1024,
-            Some(MemoryBudget { total_gb: 32.0 }),
+            Some(MlxMemoryBudget { total_gb: 32.0 }),
             HEADROOM_GB,
         );
         assert!(matches!(
             observation,
-            crate::image_memory::Selection::Selected {
-                selection: gen_core::ImageMemorySelection {
-                    strategy: gen_core::ImageMemoryStrategy::Resident,
+            crate::memory_strategy::Selection::Selected {
+                selection: gen_core::MemorySelection {
+                    strategy: gen_core::MemoryStrategy::Resident,
                     ..
                 },
                 ..
@@ -2805,7 +2803,7 @@ mod tests {
         // SANA-class small model on an 8 GB Mac: total 2 GiB (TE 1, rest 1). Peak = 2+18 = 20 ≫ 8 and
         // staged peak = 1+18 = 19 ≫ 8, so the PEAK layer rejects outright...
         let (total, te) = (2 * gib, gib);
-        let budget = Some(MemoryBudget { total_gb: 8.0 });
+        let budget = Some(MlxMemoryBudget { total_gb: 8.0 });
         assert!(matches!(
             decide_residency_by_peak(total, te, budget, true),
             ResidencyOutcome::Reject { .. }
@@ -2849,7 +2847,7 @@ mod tests {
         let mib = 1024 * 1024_u64;
         let total = 5624 * mib; // ~5.49 GiB whole model
         let te = 2161 * mib; //    ~2.11 GiB Qwen text encoder (dropped first under Sequential)
-        let budget = Some(MemoryBudget { total_gb: 8.0 });
+        let budget = Some(MlxMemoryBudget { total_gb: 8.0 });
 
         // The flat-headroom peak layer would reject it (5.49 + 18 = 23.49 ≫ 8)...
         assert!(matches!(
@@ -3032,7 +3030,7 @@ mod tests {
         let total = 22 * gib;
         // Budget where the staged WEIGHTS decide it: floor ceiling = 22 − 2 = 20 GiB. te=0 ⇒ staged
         // weights = 22 > 20 (reject); te=13 ⇒ staged weights = max(13, 9) = 13 ≤ 20 (Sequential).
-        let budget = Some(MemoryBudget { total_gb: 22.0 });
+        let budget = Some(MlxMemoryBudget { total_gb: 22.0 });
 
         // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged weights ==
         // whole model (22 GiB) > 20 → Reject even under the floor: one component IS the whole model.
@@ -3073,7 +3071,7 @@ mod tests {
     fn mochi_gate_admits_a_short_clip_and_rejects_a_long_one_on_the_same_mac() {
         // A 64 GB Mac — the machine B1's `mlx.minMemoryGb: 96` says is under-provisioned, and the one
         // the epic's crash report names.
-        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+        let mac_64 = Some(MlxMemoryBudget { total_gb: 64.0 });
 
         // 19 frames (the engine's own DEFAULT_FRAMES, ~0.6 s): 18.73 weights + 9.32 decode + 2 OS
         // ≈ 30.1 GiB ⇒ admitted. (All GiB — see `mochi_decode_peak_gb`.)
@@ -3092,7 +3090,7 @@ mod tests {
 
         // The same 151-frame clip is admitted on a 128 GB Mac — the gate rejects by BUDGET, it does
         // not blanket-ban the default duration.
-        let mac_128 = Some(MemoryBudget { total_gb: 128.0 });
+        let mac_128 = Some(MlxMemoryBudget { total_gb: 128.0 });
         assert!(
             mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_128).is_none(),
             "a 151-frame clip fits a 128 GB Mac"
@@ -3104,7 +3102,7 @@ mod tests {
     /// naming Mochi's one real lever: clip length.
     #[test]
     fn mochi_too_big_error_names_model_budget_and_the_clip_length_lever() {
-        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+        let mac_64 = Some(MlxMemoryBudget { total_gb: 64.0 });
         let Some(WorkerError::InvalidPayload(message)) =
             mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, mac_64)
         else {
@@ -3135,7 +3133,7 @@ mod tests {
     /// dir or a machine with no probe must not wall off generation.
     #[test]
     fn mochi_gate_never_blocks_without_a_signal() {
-        let mac_64 = Some(MemoryBudget { total_gb: 64.0 });
+        let mac_64 = Some(MlxMemoryBudget { total_gb: 64.0 });
         // Weights unmeasurable (empty/missing dir ⇒ 0 bytes) ⇒ admit.
         assert!(mochi_fit_error("mochi_1", 0, 151, 848, 480, mac_64).is_none());
         assert!(mochi_needed_gb(0, 151, 848, 480).is_none());

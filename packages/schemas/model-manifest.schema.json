@@ -254,7 +254,7 @@
       "properties": {
         "calibrationAbi": {
           "const": 1,
-          "description": "Image-memory calibration ABI consumed by the worker and supplied by the provider contract. A new ABI requires an explicit schema and worker migration."
+          "description": "Memory-strategy calibration ABI consumed by the worker and supplied by the provider contract. A new ABI requires an explicit schema and worker migration."
         },
         "calibrationFingerprint": {
           "type": "string",

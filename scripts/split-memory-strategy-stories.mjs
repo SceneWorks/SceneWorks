@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
-const MATRIX = resolve(REPO, "docs/generated/image-memory-matrix.json");
+const MATRIX = resolve(REPO, "docs/generated/memory-matrix.json");
 const STATE = resolve(REPO, ".shortcut-split-state.json");
 const PLAN = resolve(REPO, ".shortcut-split-plan.json");
 

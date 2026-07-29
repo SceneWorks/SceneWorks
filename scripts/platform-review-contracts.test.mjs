@@ -69,12 +69,12 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   assert.match(script, /SCENEWORKS_UID/);
 });
 
-test("Rust Docker dependency layers include every image-memory adapter target", async () => {
+test("Rust Docker dependency layers include every memory-strategy adapter target", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
   assert.equal(
     (
       dockerfile.match(
-        /COPY crates\/sceneworks-image-memory-adapter\/Cargo\.toml/g,
+        /COPY crates\/sceneworks-memory-adapter\/Cargo\.toml/g,
       ) ?? []
     ).length,
     2,
@@ -84,7 +84,7 @@ test("Rust Docker dependency layers include every image-memory adapter target", 
       (
         dockerfile.match(
           new RegExp(
-            `crates/sceneworks-image-memory-adapter/${target.replace(".", "\\.")}`,
+            `crates/sceneworks-memory-adapter/${target.replace(".", "\\.")}`,
             "g",
           ),
         ) ?? []
@@ -107,20 +107,20 @@ test("all three manifest scripts import the shared JSONC parser", async () => {
   }
 });
 
-test("macOS image-memory calibration dispatch is opt-in and secret-scoped", async () => {
+test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", async () => {
   const workflow = await source(".github/workflows/macos-mlx.yml");
-  assert.match(workflow, /run_image_memory_calibration:/);
+  assert.match(workflow, /run_memory_calibration:/);
   assert.match(
     workflow,
     /provision_qwen_snapshot:\s+description:[^\n]+\s+required: false\s+type: boolean\s+default: false/,
   );
   assert.match(
     workflow,
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_image_memory_calibration && inputs\.provision_qwen_snapshot && 240 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot && 240 \|\| 45 \}\}/,
   );
   assert.match(
     workflow,
-    /provision_qwen_snapshot requires run_image_memory_calibration=true/,
+    /provision_qwen_snapshot requires run_memory_calibration=true/,
   );
   assert.match(
     workflow,
@@ -199,7 +199,7 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(workflow, /QWEN_ROOT" != \*"\$EXPECTED_SUFFIX"/);
   assert.match(
     workflow,
-    /cargo build --release --locked -p sceneworks-image-memory-adapter/,
+    /cargo build --release --locked -p sceneworks-memory-adapter/,
   );
   const inferenceCheckout = workflow.slice(
     workflow.indexOf("- name: Check out the exact inference calibration source"),
@@ -219,7 +219,7 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   assert.match(workflow, /--provider mlx-qwen-vae-decode/);
   assert.match(
     workflow,
-    /image-memory-calibration-harness\.mjs check/,
+    /memory-calibration-harness\.mjs check/,
   );
   assert.match(
     workflow,
@@ -227,13 +227,13 @@ test("macOS image-memory calibration dispatch is opt-in and secret-scoped", asyn
   );
   assert.match(
     workflow,
-    /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_image_memory_calibration \}\}/,
+    /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration \}\}/,
   );
 });
 
 test("MLX calibration probe derives the production wired ceiling without guessing", async () => {
   const adapter = await source(
-    "crates/sceneworks-image-memory-adapter/src/bin/mlx.rs",
+    "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
   );
   assert.match(adapter, /sysctl\("iogpu\.wired_limit_mb"\)/);
   assert.match(adapter, /sysctl\("kern\.memorystatus_wired_mem_limit"\)/);
@@ -265,7 +265,7 @@ test("MLX calibration probe derives the production wired ceiling without guessin
 
 test("MLX parity control preserves the real comparison and applies only a planned output bias", async () => {
   const adapter = await source(
-    "crates/sceneworks-image-memory-adapter/src/bin/mlx.rs",
+    "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
   );
   assert.match(
     adapter,

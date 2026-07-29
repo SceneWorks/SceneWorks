@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sceneworks.ai/schemas/image-memory-matrix.schema.json",
-  "title": "SceneWorks image memory-ladder matrix",
+  "$id": "https://sceneworks.ai/schemas/memory-matrix.schema.json",
+  "title": "SceneWorks memory-ladder matrix",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
@@ -275,7 +275,7 @@
             }
           },
           "semantics": { "enum": ["current", "historical", "gated", "negative", "fixture"] },
-          "record": { "$ref": "image-memory-calibration.schema.json#/$defs/record" }
+          "record": { "$ref": "memory-calibration.schema.json#/$defs/record" }
         }
       }
     },
