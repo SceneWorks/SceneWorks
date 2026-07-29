@@ -355,14 +355,43 @@ Any honest declaration at the bottom of the ladder trips it.
 
 ### The fix
 
-Replace the order-derived walk with the declared graph from §3. Concretely:
+Replace the order-derived walk with the declared graph from §3.
 
-- Each rung's capability carries `requires: &[MemoryStrategy]` — empty for rungs 1, 2, 3;
+### As shipped (SC-15805, inference PR #325 / SceneWorks PR #1956)
+
+- `MemoryStrategy::requires() -> &'static [MemoryStrategyPrerequisite]` publishes the graph, and
+  `MemoryStrategyCapability::requires()` exposes it per rung — empty for rungs 1, 2, 3;
   `[StagedResidency]` for rung 4.
-- `validate_selection` walks *that*, not `< selection.strategy`.
-- `validate_selected_parameters` and `select_strategy` need **no change** — they already implement
-  the tolerant policy the graph implies. The fix makes three sites agree rather than adding a fourth
-  opinion.
+- It is **contract-owned, not a provider-settable field**, which is the one deviation from the
+  sketch above. Three reasons: the story's own goal is to move the fact *out of* a provider's private
+  condition and *into* the contract; a settable field is a false green waiting to happen, since a
+  provider that never sets it silently drops the edge; and the rung-4 edge is arithmetic, not policy,
+  so no provider may opt out of it. Providers still control the graph's **effect** — declaring rung 1
+  `Missing` makes rung 4 unselectable, which is the honest outcome.
+- The engagement-vs-availability distinction is a **type**: `MemoryPrerequisiteScope::EngagedInSameRequest`.
+  The refusal message says so, and states that availability does not satisfy it.
+- `validate_selection` walks that graph, not `< selection.strategy`.
+  `StructurallyNotApplicable` on a prerequisite rung satisfies it **vacuously** — it asserts the
+  architecture has no such component, which is not evidence the trunk is eagerly materialized. The
+  result is a strict *narrowing* of the old fatality set: nothing that validated before stops
+  validating.
+- The cost-order default survives, named and separated: `MemoryStrategy::engages` is the pure policy
+  and `MemoryProviderContract::engages` is that policy intersected with what the provider implements.
+  The intersection is where defeasibility lives — a rung the provider does not implement is not
+  engaged, so its parameters stop being *required* rather than the selection being refused.
+- `validate_selected_parameters` and `select_strategy` needed no behavioural change, as predicted.
+  Three *other* sites that derived engagement from the enum's order were routed through the new seam:
+  `mlx-gen-z-image`'s route-aware decode check, `sceneworks_worker::mlx_fit_gate::memory_for_selection`,
+  and `validate_selected_parameters`' own `requires_*` flags. After this, **no ordering comparison on
+  `MemoryStrategy` remains anywhere in either repo.**
+
+**Correction to the problem statement above.** `select_strategy` already funnels every candidate
+through `contract.validate_selection` (`candidate_exclusion`), so the two layers could never return
+*different* selections and the "typed failure at generate time" was not reachable. The contradiction
+surfaced instead as **over-refusal**: on a contract with rung 1 `Missing` the selector silently
+excluded rungs 2 and 3 as `Invalid` and fell back to a more expensive rung or rejected outright. Same
+root cause, same fix — but a "both layers agree" test would pass vacuously on the old code (both
+refusing is agreement too), so the shipped test asserts the expected verdict per rung as well.
 
 ---
 

@@ -128,12 +128,24 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     }
 }
 
-fn memory_for_selection(selection: MemorySelection) -> GenerationMemory {
+/// Translate a selection into the engine's per-rung engagement knobs.
+///
+/// SC-15805: this asks the contract which rungs the selection ENGAGES rather than re-deriving the
+/// answer from `MemoryStrategy`'s numeric order. The order is a cost ordering, and the cumulative
+/// default it expresses is defeasible — a rung the provider does not implement is not engaged, so a
+/// provider publishing a verified cheaper composition no longer has its unimplemented rung's knob
+/// switched on underneath it.
+fn memory_for_selection(
+    contract: &MemoryProviderContract,
+    selection: MemorySelection,
+) -> GenerationMemory {
     GenerationMemory {
-        tile_vae_decode: selection.strategy >= MemoryStrategy::BoundedDecode,
-        chunk_attention: selection.strategy >= MemoryStrategy::BoundedAttention,
-        stream_transformer_blocks: selection.strategy
-            >= MemoryStrategy::BoundedTransformerResidency,
+        tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
+        chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+        stream_transformer_blocks: contract.engages(
+            selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency,
+        ),
         ..Default::default()
     }
 }
@@ -372,7 +384,7 @@ fn evaluate_request_with_budget(
         "selected request-scoped MLX memory strategy"
     );
     Ok(MlxRequestEvaluation {
-        memory: memory_for_selection(selection),
+        memory: memory_for_selection(contract, selection),
         context: MemoryRunContext {
             selection,
             calibration_abi,
