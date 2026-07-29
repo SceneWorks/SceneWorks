@@ -41,63 +41,97 @@ const GENERATION_CAPABILITIES = new Set([
 
 // This is ownership metadata, not conformance data. Drift is checked against the
 // source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
-const MODEL_STORIES = {
-  mage_flow_edit_base: 15450,
-  mage_flow_edit: 15451,
-  mage_flow_edit_turbo: 15452,
-  mage_flow_base: 15453,
-  mage_flow: 15454,
-  mage_flow_turbo: 15455,
-  z_image_turbo: 15456,
-  z_image: 15457,
-  z_image_edit: 15458,
-  qwen_image: 15459,
-  qwen_image_edit_2511: 15460,
-  qwen_image_edit_2511_lightning: 15461,
-  lens: 15462,
-  lens_turbo: 15463,
-  sensenova_u1_8b: 15464,
-  sensenova_u1_8b_infographic_v2: 15465,
-  sensenova_u1_8b_infographic_v3: 15466,
-  sensenova_u1_8b_fast: 15467,
-  sensenova_u1_8b_infographic_v2_fast: 15468,
-  sensenova_u1_8b_infographic_v3_fast: 15469,
-  flux_schnell: 15470,
-  flux_dev: 15471,
-  ideogram_4: 15472,
-  ideogram_4_turbo: 15473,
-  boogu_image: 15474,
-  boogu_image_turbo: 15475,
-  boogu_image_edit: 15476,
-  krea_2_turbo: 15477,
-  krea_2_raw: 15478,
-  flux2_klein_9b: 15479,
-  flux2_klein_9b_kv: 15480,
-  flux2_klein_9b_true_v2: 15481,
-  flux2_dev: 15482,
-  chroma1_hd: 15483,
-  chroma1_base: 15484,
-  chroma1_flash: 15485,
-  kolors: 15486,
-  sd3_5_large: 15487,
-  sd3_5_large_turbo: 15488,
-  sd3_5_medium: 15489,
-  sana_1600m: 15490,
-  sana_sprint_1600m: 15491,
-  anima_base: 15492,
-  anima_aesthetic: 15493,
-  anima_turbo: 15494,
-  sdxl: 15495,
-  realvisxl: 15496,
-  realvisxl_lightning: 15497,
-  illustrious_xl_v1: 15498,
-  illustrious_xl_v2: 15499,
-  instantid_realvisxl: 15500,
-  pulid_flux_dev: 15501,
-  bernini_image: 15502,
+//
+// SC-15812: ownership is keyed BY BACKEND, not by model. An MLX story cannot be closed from CUDA
+// hardware and a Candle story cannot be closed from a Mac, so a dual-backend entry has two owners
+// and a cell must name the one that actually covers it. An mlx-only entry simply has no `candle`
+// key: a missing mapping then fails loudly at generation time instead of silently attributing
+// Candle cells to a story scoped to Metal — which is precisely the false green this epic exists to
+// prevent, and which shipped in the generated matrix until this change.
+export const MODEL_STORIES = {
+  mage_flow_edit_base: { mlx: 15450, candle: 15841 },
+  mage_flow_edit: { mlx: 15451, candle: 15844 },
+  mage_flow_edit_turbo: { mlx: 15452, candle: 15847 },
+  mage_flow_base: { mlx: 15453, candle: 15850 },
+  mage_flow: { mlx: 15454, candle: 15853 },
+  mage_flow_turbo: { mlx: 15455, candle: 15856 },
+  z_image_turbo: { mlx: 15456, candle: 15859 },
+  z_image: { mlx: 15457 },
+  z_image_edit: { mlx: 15458, candle: 15862 },
+  qwen_image: { mlx: 15459, candle: 15865 },
+  qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
+  qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
+  lens: { mlx: 15462 },
+  lens_turbo: { mlx: 15463, candle: 15874 },
+  sensenova_u1_8b: { mlx: 15464, candle: 15877 },
+  sensenova_u1_8b_infographic_v2: { mlx: 15465, candle: 15880 },
+  sensenova_u1_8b_infographic_v3: { mlx: 15466, candle: 15883 },
+  sensenova_u1_8b_fast: { mlx: 15467, candle: 15886 },
+  sensenova_u1_8b_infographic_v2_fast: { mlx: 15468, candle: 15889 },
+  sensenova_u1_8b_infographic_v3_fast: { mlx: 15469, candle: 15892 },
+  flux_schnell: { mlx: 15470, candle: 15895 },
+  flux_dev: { mlx: 15471, candle: 15898 },
+  ideogram_4: { mlx: 15472, candle: 15901 },
+  ideogram_4_turbo: { mlx: 15473, candle: 15904 },
+  boogu_image: { mlx: 15474, candle: 15907 },
+  boogu_image_turbo: { mlx: 15475, candle: 15910 },
+  boogu_image_edit: { mlx: 15476 },
+  krea_2_turbo: { mlx: 15477, candle: 15913 },
+  krea_2_raw: { mlx: 15478, candle: 15916 },
+  flux2_klein_9b: { mlx: 15479, candle: 15919 },
+  flux2_klein_9b_kv: { mlx: 15480 },
+  flux2_klein_9b_true_v2: { mlx: 15481 },
+  flux2_dev: { mlx: 15482, candle: 15922 },
+  chroma1_hd: { mlx: 15483 },
+  chroma1_base: { mlx: 15484 },
+  chroma1_flash: { mlx: 15485 },
+  kolors: { mlx: 15486 },
+  sd3_5_large: { mlx: 15487, candle: 15925 },
+  sd3_5_large_turbo: { mlx: 15488, candle: 15928 },
+  sd3_5_medium: { mlx: 15489, candle: 15931 },
+  sana_1600m: { mlx: 15490 },
+  sana_sprint_1600m: { mlx: 15491 },
+  anima_base: { mlx: 15492 },
+  anima_aesthetic: { mlx: 15493 },
+  anima_turbo: { mlx: 15494 },
+  sdxl: { mlx: 15495 },
+  realvisxl: { mlx: 15496 },
+  realvisxl_lightning: { mlx: 15497 },
+  illustrious_xl_v1: { mlx: 15498 },
+  illustrious_xl_v2: { mlx: 15499 },
+  instantid_realvisxl: { mlx: 15500, candle: 15934 },
+  pulid_flux_dev: { mlx: 15501, candle: 15937 },
+  bernini_image: { mlx: 15502 },
 };
 
-function familyStory(modelId) {
+// Keyed by the family's MLX story id, which doubles as the stable family group key. A family with no
+// `candle` key owns no dual-backend model; adding one to the catalog fails generation until its
+// Candle family twin is filed.
+export const FAMILY_STORIES = {
+  15509: { mlx: 15509, candle: 15813 },
+  15510: { mlx: 15510, candle: 15815 },
+  15511: { mlx: 15511, candle: 15817 },
+  15512: { mlx: 15512, candle: 15819 },
+  15513: { mlx: 15513, candle: 15821 },
+  15514: { mlx: 15514, candle: 15823 },
+  15515: { mlx: 15515, candle: 15825 },
+  15516: { mlx: 15516, candle: 15827 },
+  15517: { mlx: 15517, candle: 15829 },
+  15518: { mlx: 15518, candle: 15831 },
+  15519: { mlx: 15519, candle: 15833 },
+  15520: { mlx: 15520 },
+  15521: { mlx: 15521 },
+  15522: { mlx: 15522, candle: 15835 },
+  15523: { mlx: 15523 },
+  15524: { mlx: 15524 },
+  15525: { mlx: 15525 },
+  15526: { mlx: 15526, candle: 15837 },
+  15527: { mlx: 15527, candle: 15839 },
+  15528: { mlx: 15528 },
+};
+
+/** The stable family group key for a catalog id, which is the family's MLX story id. */
+export function familyGroup(modelId) {
   if (modelId.startsWith("mage_flow")) return 15509;
   if (modelId.startsWith("z_image")) return 15510;
   if (modelId.startsWith("qwen_image")) return 15511;
@@ -119,6 +153,129 @@ function familyStory(modelId) {
   if (modelId === "pulid_flux_dev") return 15527;
   if (modelId === "bernini_image") return 15528;
   throw new Error(`no family story for ${modelId}`);
+}
+
+export function familyStory(modelId, backend) {
+  const group = familyGroup(modelId);
+  const stories = FAMILY_STORIES[group];
+  if (!stories) throw new Error(`${modelId}: family SC-${group} has no ownership entry`);
+  const story = stories[backend];
+  if (!story) {
+    throw new Error(
+      `${modelId}: family SC-${group} owns no ${backend} story, so a ${backend} cell cannot be attributed — file the ${backend} family twin`,
+    );
+  }
+  return story;
+}
+
+export function modelStory(modelId, backend) {
+  const stories = MODEL_STORIES[modelId];
+  if (!stories) throw new Error(`${modelId}: no owning model story`);
+  const story = stories[backend];
+  if (!story) {
+    throw new Error(
+      `${modelId}: no ${backend} owning model story, so a ${backend} cell cannot be attributed — file the ${backend} twin`,
+    );
+  }
+  return story;
+}
+
+/**
+ * Index every ownership story to the single backend it is scoped to.
+ *
+ * The per-cell assertion below is only meaningful if no story claims both backends: a story present
+ * under `mlx` and `candle` would satisfy any cell and make the guard vacuous. So the table is checked
+ * first, and a story reused across backends or across the model/family roles is a mapping defect.
+ */
+export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
+  const scope = new Map();
+  const claim = (storyId, backend, role, owner) => {
+    if (!Number.isInteger(storyId)) {
+      throw new Error(`${role} for ${owner}: story id ${JSON.stringify(storyId)} is not an integer`);
+    }
+    // Any repeat is a defect, not just a cross-backend one: two models sharing a story would
+    // under-count the split, and a story used as both a model and a family owner is a typo.
+    const existing = scope.get(storyId);
+    if (existing) {
+      throw new Error(
+        `SC-${storyId} is claimed as the ${existing.backend} ${existing.role} of ${existing.owner} and as the ${backend} ${role} of ${owner}: an ownership story belongs to exactly one owner and one backend`,
+      );
+    }
+    scope.set(storyId, { backend, role, owner });
+  };
+  for (const [modelId, byBackend] of Object.entries(modelStories)) {
+    for (const [backend, storyId] of Object.entries(byBackend)) claim(storyId, backend, "model story", modelId);
+  }
+  for (const [group, byBackend] of Object.entries(familyStories)) {
+    for (const [backend, storyId] of Object.entries(byBackend)) {
+      claim(storyId, backend, "family story", `family SC-${group}`);
+    }
+  }
+  return scope;
+}
+
+/**
+ * SC-15812's un-regressable guard: every cell must name ownership stories scoped to its own backend.
+ *
+ * Before this existed the generator copied one model-level story pair onto every cell, so all 2,260
+ * candle cells in the shipped matrix named MLX-scoped stories and the epic's authoritative inventory
+ * read as covering Candle work that no story would ever cover. Without an assertion the next drift is
+ * silent again, so this throws rather than warns.
+ */
+export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBackendScope()) {
+  for (const cell of cells) {
+    for (const field of ["owningModelStory", "owningFamilyStory"]) {
+      const storyId = cell[field];
+      if (!Number.isInteger(storyId)) {
+        throw new Error(`${cell.id}: ${field} is ${JSON.stringify(storyId)}, not an ownership story id`);
+      }
+      const owner = scope.get(storyId);
+      if (!owner) {
+        throw new Error(`${cell.id}: ${field} SC-${storyId} is not a known backend-scoped ownership story`);
+      }
+      if (owner.backend !== cell.backend) {
+        throw new Error(
+          `${cell.id}: ${field} SC-${storyId} is scoped to ${owner.backend}, but the cell is ${cell.backend} — a ${cell.backend} cell cannot be covered by a ${owner.backend} story`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * The reconcile the story originally pinned as an absolute epic story count ("100 -> ~147"), restated
+ * relatively so it stops going stale every time a story is filed. Twin coverage is derived from what
+ * the catalog advertises: every dual-backend entry needs a Candle twin, and an mlx-only entry must
+ * NOT have one, because an empty Candle story can never be closed.
+ */
+export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
+  const dual = models.filter((model) => model.backends.includes("candle"));
+  const dualGroups = new Set(dual.map((model) => familyGroup(model.id)));
+  for (const model of models) {
+    const stories = modelStories[model.id];
+    if (!stories) throw new Error(`${model.id}: no owning model story`);
+    const isDual = model.backends.includes("candle");
+    if (isDual && !stories.candle) throw new Error(`${model.id}: advertises candle but has no Candle twin`);
+    if (!isDual && stories.candle) {
+      throw new Error(`${model.id}: advertises ${model.backends.join("/")} only but carries Candle twin SC-${stories.candle}`);
+    }
+  }
+  for (const [group, stories] of Object.entries(familyStories)) {
+    const owns = dualGroups.has(Number(group));
+    if (owns && !stories.candle) throw new Error(`family SC-${group}: owns dual models but has no Candle twin`);
+    if (!owns && stories.candle) {
+      throw new Error(`family SC-${group}: owns no dual model but carries Candle twin SC-${stories.candle}`);
+    }
+  }
+  const candleModelTwins = new Set(dual.map((model) => modelStories[model.id].candle));
+  if (candleModelTwins.size !== dual.length) {
+    throw new Error(`${dual.length} dual models map onto only ${candleModelTwins.size} distinct Candle model twins`);
+  }
+  const candleFamilyTwins = new Set([...dualGroups].map((group) => familyStories[group]?.candle));
+  if (candleFamilyTwins.size !== dualGroups.size) {
+    throw new Error(`${dualGroups.size} dual families map onto only ${candleFamilyTwins.size} distinct Candle family twins`);
+  }
+  return { dualModels: dual.length, dualFamilies: dualGroups.size };
 }
 
 function sha256(body) {
@@ -470,6 +627,18 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
       );
     }
   }
+  assertTwinCoverage(matrix.models);
+  assertCellOwnershipIsBackendScoped(matrix.cells);
+  for (const model of matrix.models) {
+    for (const map of ["owningFamilyStories", "owningModelStories"]) {
+      const owned = Object.keys(model[map]).sort();
+      if (JSON.stringify(owned) !== JSON.stringify([...model.backends].sort())) {
+        throw new Error(
+          `${model.id}: ${map} covers ${owned.join(",") || "nothing"} but the entry advertises ${model.backends.join(",")}`,
+        );
+      }
+    }
+  }
   for (const cell of matrix.cells) {
     if (cell.state !== "Missing" && cell.evidence.staticImplementation.length === 0) {
       throw new Error(`${cell.id}: non-Missing classification has no static evidence`);
@@ -530,16 +699,22 @@ export async function buildMatrix() {
     .map((model) => {
       const route = routes.get(model.id);
       if (!route) throw new Error(`${model.id}: no resolved route/provider`);
-      if (!MODEL_STORIES[model.id]) throw new Error(`${model.id}: no owning model story`);
+      const backends = backendScopes(model, manifestById);
       return {
         id: model.id,
         name: model.name,
         family: model.family ?? null,
         resolvedRoute: route.engine,
         routeKind: route.kind,
-        backends: backendScopes(model, manifestById),
-        owningFamilyStory: familyStory(model.id),
-        owningModelStory: MODEL_STORIES[model.id],
+        backends,
+        // Per-backend maps, not scalars: the entry has one owner per backend it advertises, and
+        // `familyStory`/`modelStory` throw if the catalog advertises a backend nobody owns.
+        owningFamilyStories: Object.fromEntries(
+          backends.map((backend) => [backend, familyStory(model.id, backend)]),
+        ),
+        owningModelStories: Object.fromEntries(
+          backends.map((backend) => [backend, modelStory(model.id, backend)]),
+        ),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -549,6 +724,10 @@ export async function buildMatrix() {
     const model = manifestById.get(modelSummary.id);
     const route = routes.get(model.id);
     for (const backend of modelSummary.backends) {
+      // SC-15812: resolved HERE, inside the per-backend loop, so a cell names the story that owns
+      // its (model, backend) pair rather than whichever backend happened to be listed first.
+      const owningFamilyStory = modelSummary.owningFamilyStories[backend];
+      const owningModelStory = modelSummary.owningModelStories[backend];
       for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend)) {
@@ -656,8 +835,8 @@ export async function buildMatrix() {
                   inference: pin,
                 },
                 calibrationFingerprint: fingerprint,
-                owningFamilyStory: modelSummary.owningFamilyStory,
-                owningModelStory: modelSummary.owningModelStory,
+                owningFamilyStory,
+                owningModelStory,
                 evidence: {
                   staticImplementation: status.source ? [{ source: status.source }] : [],
                   declaredCalibration: declaredEvidence(model, backend, tier),
@@ -783,20 +962,24 @@ function renderMarkdown(matrix) {
     "",
     "Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.",
     "",
-    "| Catalog entry | Route | Backends | Family story | Model story | MLX staged |",
+    "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
+    "",
+    "| Catalog entry | Backend | Route | Family story | Model story | Staged residency |",
     "| --- | --- | --- | --- | ---: | --- |",
   ];
   for (const model of matrix.models) {
-    const staged = matrix.cells.some(
-      (cell) =>
-        cell.modelId === model.id &&
-        cell.backend === "mlx" &&
-        cell.rung === "staged_residency" &&
-        cell.state === "Implemented/unverified",
-    );
-    lines.push(
-      `| \`${model.id}\` | \`${model.resolvedRoute}\` (${model.routeKind}) | ${model.backends.join(", ")} | SC-${model.owningFamilyStory} | SC-${model.owningModelStory} | ${staged ? "Implemented/unverified" : "Missing"} |`,
-    );
+    for (const backend of model.backends) {
+      const staged = matrix.cells.some(
+        (cell) =>
+          cell.modelId === model.id &&
+          cell.backend === backend &&
+          cell.rung === "staged_residency" &&
+          cell.state === "Implemented/unverified",
+      );
+      lines.push(
+        `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? "Implemented/unverified" : "Missing"} |`,
+      );
+    }
   }
   lines.push(
     "",

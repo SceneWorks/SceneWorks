@@ -11,60 +11,95 @@
 
 Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.
 
-| Catalog entry | Route | Backends | Family story | Model story | MLX staged |
+One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).
+
+| Catalog entry | Backend | Route | Family story | Model story | Staged residency |
 | --- | --- | --- | --- | ---: | --- |
-| `anima_aesthetic` | `anima_aesthetic` (registry) | mlx | SC-15524 | SC-15493 | Implemented/unverified |
-| `anima_base` | `anima_base` (registry) | mlx | SC-15524 | SC-15492 | Implemented/unverified |
-| `anima_turbo` | `anima_turbo` (registry) | mlx | SC-15524 | SC-15494 | Implemented/unverified |
-| `bernini_image` | `bernini` (registry) | mlx | SC-15528 | SC-15502 | Implemented/unverified |
-| `boogu_image` | `boogu_image` (registry) | mlx, candle | SC-15516 | SC-15474 | Implemented/unverified |
-| `boogu_image_edit` | `boogu_image_edit` (registry) | mlx | SC-15516 | SC-15476 | Implemented/unverified |
-| `boogu_image_turbo` | `boogu_image_turbo` (registry) | mlx, candle | SC-15516 | SC-15475 | Implemented/unverified |
-| `chroma1_base` | `chroma1_base` (registry) | mlx | SC-15520 | SC-15484 | Implemented/unverified |
-| `chroma1_flash` | `chroma1_flash` (registry) | mlx | SC-15520 | SC-15485 | Implemented/unverified |
-| `chroma1_hd` | `chroma1_hd` (registry) | mlx | SC-15520 | SC-15483 | Implemented/unverified |
-| `flux_dev` | `flux1_dev` (registry) | mlx, candle | SC-15514 | SC-15471 | Implemented/unverified |
-| `flux_schnell` | `flux1_schnell` (registry) | mlx, candle | SC-15514 | SC-15470 | Implemented/unverified |
-| `flux2_dev` | `flux2_dev` (registry) | mlx, candle | SC-15519 | SC-15482 | Implemented/unverified |
-| `flux2_klein_9b` | `flux2_klein_9b` (registry) | mlx, candle | SC-15518 | SC-15479 | Implemented/unverified |
-| `flux2_klein_9b_kv` | `flux2_klein_9b` (registry) | mlx | SC-15518 | SC-15480 | Implemented/unverified |
-| `flux2_klein_9b_true_v2` | `flux2_klein_9b` (registry) | mlx | SC-15518 | SC-15481 | Implemented/unverified |
-| `ideogram_4` | `ideogram_4` (registry) | mlx, candle | SC-15515 | SC-15472 | Implemented/unverified |
-| `ideogram_4_turbo` | `ideogram_4_turbo` (registry) | mlx, candle | SC-15515 | SC-15473 | Implemented/unverified |
-| `illustrious_xl_v1` | `sdxl` (registry) | mlx | SC-15525 | SC-15498 | Implemented/unverified |
-| `illustrious_xl_v2` | `sdxl` (registry) | mlx | SC-15525 | SC-15499 | Implemented/unverified |
-| `instantid_realvisxl` | `instantid` (bespoke) | mlx, candle | SC-15526 | SC-15500 | Missing |
-| `kolors` | `kolors` (registry) | mlx | SC-15521 | SC-15486 | Implemented/unverified |
-| `krea_2_raw` | `krea_2_raw` (registry) | mlx, candle | SC-15517 | SC-15478 | Implemented/unverified |
-| `krea_2_turbo` | `krea_2_turbo` (registry) | mlx, candle | SC-15517 | SC-15477 | Implemented/unverified |
-| `lens` | `lens` (registry) | mlx | SC-15512 | SC-15462 | Implemented/unverified |
-| `lens_turbo` | `lens_turbo` (registry) | mlx, candle | SC-15512 | SC-15463 | Implemented/unverified |
-| `mage_flow` | `mage_flow` (registry) | mlx, candle | SC-15509 | SC-15454 | Missing |
-| `mage_flow_base` | `mage_flow_base` (registry) | mlx, candle | SC-15509 | SC-15453 | Missing |
-| `mage_flow_edit` | `mage_flow_edit` (registry) | mlx, candle | SC-15509 | SC-15451 | Missing |
-| `mage_flow_edit_base` | `mage_flow_edit_base` (registry) | mlx, candle | SC-15509 | SC-15450 | Missing |
-| `mage_flow_edit_turbo` | `mage_flow_edit_turbo` (registry) | mlx, candle | SC-15509 | SC-15452 | Missing |
-| `mage_flow_turbo` | `mage_flow_turbo` (registry) | mlx, candle | SC-15509 | SC-15455 | Missing |
-| `pulid_flux_dev` | `pulid_flux` (bespoke) | mlx, candle | SC-15527 | SC-15501 | Missing |
-| `qwen_image` | `qwen_image` (registry) | mlx, candle | SC-15511 | SC-15459 | Implemented/unverified |
-| `qwen_image_edit_2511` | `qwen_image_edit` (registry) | mlx, candle | SC-15511 | SC-15460 | Implemented/unverified |
-| `qwen_image_edit_2511_lightning` | `qwen_image_edit` (registry) | mlx, candle | SC-15511 | SC-15461 | Implemented/unverified |
-| `realvisxl` | `sdxl` (registry) | mlx | SC-15525 | SC-15496 | Implemented/unverified |
-| `realvisxl_lightning` | `sdxl` (registry) | mlx | SC-15525 | SC-15497 | Implemented/unverified |
-| `sana_1600m` | `sana_1600m` (registry) | mlx | SC-15523 | SC-15490 | Implemented/unverified |
-| `sana_sprint_1600m` | `sana_sprint_1600m` (registry) | mlx | SC-15523 | SC-15491 | Implemented/unverified |
-| `sd3_5_large` | `sd3_5_large` (registry) | mlx, candle | SC-15522 | SC-15487 | Implemented/unverified |
-| `sd3_5_large_turbo` | `sd3_5_large_turbo` (registry) | mlx, candle | SC-15522 | SC-15488 | Implemented/unverified |
-| `sd3_5_medium` | `sd3_5_medium` (registry) | mlx, candle | SC-15522 | SC-15489 | Implemented/unverified |
-| `sdxl` | `sdxl` (registry) | mlx | SC-15525 | SC-15495 | Implemented/unverified |
-| `sensenova_u1_8b` | `sensenova_u1_8b` (registry) | mlx, candle | SC-15513 | SC-15464 | Missing |
-| `sensenova_u1_8b_fast` | `sensenova_u1_8b_fast` (registry) | mlx, candle | SC-15513 | SC-15467 | Missing |
-| `sensenova_u1_8b_infographic_v2` | `sensenova_u1_8b` (registry) | mlx, candle | SC-15513 | SC-15465 | Missing |
-| `sensenova_u1_8b_infographic_v2_fast` | `sensenova_u1_8b_fast` (registry) | mlx, candle | SC-15513 | SC-15468 | Missing |
-| `sensenova_u1_8b_infographic_v3` | `sensenova_u1_8b` (registry) | mlx, candle | SC-15513 | SC-15466 | Missing |
-| `sensenova_u1_8b_infographic_v3_fast` | `sensenova_u1_8b_fast` (registry) | mlx, candle | SC-15513 | SC-15469 | Missing |
-| `z_image` | `z_image` (registry) | mlx | SC-15510 | SC-15457 | Implemented/unverified |
-| `z_image_edit` | `z_image_turbo` (registry) | mlx, candle | SC-15510 | SC-15458 | Implemented/unverified |
-| `z_image_turbo` | `z_image_turbo` (registry) | mlx, candle | SC-15510 | SC-15456 | Implemented/unverified |
+| `anima_aesthetic` | mlx | `anima_aesthetic` (registry) | SC-15524 | SC-15493 | Implemented/unverified |
+| `anima_base` | mlx | `anima_base` (registry) | SC-15524 | SC-15492 | Implemented/unverified |
+| `anima_turbo` | mlx | `anima_turbo` (registry) | SC-15524 | SC-15494 | Implemented/unverified |
+| `bernini_image` | mlx | `bernini` (registry) | SC-15528 | SC-15502 | Implemented/unverified |
+| `boogu_image` | mlx | `boogu_image` (registry) | SC-15516 | SC-15474 | Implemented/unverified |
+| `boogu_image` | candle | `boogu_image` (registry) | SC-15827 | SC-15907 | Missing |
+| `boogu_image_edit` | mlx | `boogu_image_edit` (registry) | SC-15516 | SC-15476 | Implemented/unverified |
+| `boogu_image_turbo` | mlx | `boogu_image_turbo` (registry) | SC-15516 | SC-15475 | Implemented/unverified |
+| `boogu_image_turbo` | candle | `boogu_image_turbo` (registry) | SC-15827 | SC-15910 | Missing |
+| `chroma1_base` | mlx | `chroma1_base` (registry) | SC-15520 | SC-15484 | Implemented/unverified |
+| `chroma1_flash` | mlx | `chroma1_flash` (registry) | SC-15520 | SC-15485 | Implemented/unverified |
+| `chroma1_hd` | mlx | `chroma1_hd` (registry) | SC-15520 | SC-15483 | Implemented/unverified |
+| `flux_dev` | mlx | `flux1_dev` (registry) | SC-15514 | SC-15471 | Implemented/unverified |
+| `flux_dev` | candle | `flux1_dev` (registry) | SC-15823 | SC-15898 | Implemented/unverified |
+| `flux_schnell` | mlx | `flux1_schnell` (registry) | SC-15514 | SC-15470 | Implemented/unverified |
+| `flux_schnell` | candle | `flux1_schnell` (registry) | SC-15823 | SC-15895 | Implemented/unverified |
+| `flux2_dev` | mlx | `flux2_dev` (registry) | SC-15519 | SC-15482 | Implemented/unverified |
+| `flux2_dev` | candle | `flux2_dev` (registry) | SC-15833 | SC-15922 | Implemented/unverified |
+| `flux2_klein_9b` | mlx | `flux2_klein_9b` (registry) | SC-15518 | SC-15479 | Implemented/unverified |
+| `flux2_klein_9b` | candle | `flux2_klein_9b` (registry) | SC-15831 | SC-15919 | Implemented/unverified |
+| `flux2_klein_9b_kv` | mlx | `flux2_klein_9b` (registry) | SC-15518 | SC-15480 | Implemented/unverified |
+| `flux2_klein_9b_true_v2` | mlx | `flux2_klein_9b` (registry) | SC-15518 | SC-15481 | Implemented/unverified |
+| `ideogram_4` | mlx | `ideogram_4` (registry) | SC-15515 | SC-15472 | Implemented/unverified |
+| `ideogram_4` | candle | `ideogram_4` (registry) | SC-15825 | SC-15901 | Missing |
+| `ideogram_4_turbo` | mlx | `ideogram_4_turbo` (registry) | SC-15515 | SC-15473 | Implemented/unverified |
+| `ideogram_4_turbo` | candle | `ideogram_4_turbo` (registry) | SC-15825 | SC-15904 | Missing |
+| `illustrious_xl_v1` | mlx | `sdxl` (registry) | SC-15525 | SC-15498 | Implemented/unverified |
+| `illustrious_xl_v2` | mlx | `sdxl` (registry) | SC-15525 | SC-15499 | Implemented/unverified |
+| `instantid_realvisxl` | mlx | `instantid` (bespoke) | SC-15526 | SC-15500 | Missing |
+| `instantid_realvisxl` | candle | `instantid` (bespoke) | SC-15837 | SC-15934 | Missing |
+| `kolors` | mlx | `kolors` (registry) | SC-15521 | SC-15486 | Implemented/unverified |
+| `krea_2_raw` | mlx | `krea_2_raw` (registry) | SC-15517 | SC-15478 | Implemented/unverified |
+| `krea_2_raw` | candle | `krea_2_raw` (registry) | SC-15829 | SC-15916 | Missing |
+| `krea_2_turbo` | mlx | `krea_2_turbo` (registry) | SC-15517 | SC-15477 | Implemented/unverified |
+| `krea_2_turbo` | candle | `krea_2_turbo` (registry) | SC-15829 | SC-15913 | Implemented/unverified |
+| `lens` | mlx | `lens` (registry) | SC-15512 | SC-15462 | Implemented/unverified |
+| `lens_turbo` | mlx | `lens_turbo` (registry) | SC-15512 | SC-15463 | Implemented/unverified |
+| `lens_turbo` | candle | `lens_turbo` (registry) | SC-15819 | SC-15874 | Missing |
+| `mage_flow` | mlx | `mage_flow` (registry) | SC-15509 | SC-15454 | Missing |
+| `mage_flow` | candle | `mage_flow` (registry) | SC-15813 | SC-15853 | Missing |
+| `mage_flow_base` | mlx | `mage_flow_base` (registry) | SC-15509 | SC-15453 | Missing |
+| `mage_flow_base` | candle | `mage_flow_base` (registry) | SC-15813 | SC-15850 | Missing |
+| `mage_flow_edit` | mlx | `mage_flow_edit` (registry) | SC-15509 | SC-15451 | Missing |
+| `mage_flow_edit` | candle | `mage_flow_edit` (registry) | SC-15813 | SC-15844 | Missing |
+| `mage_flow_edit_base` | mlx | `mage_flow_edit_base` (registry) | SC-15509 | SC-15450 | Missing |
+| `mage_flow_edit_base` | candle | `mage_flow_edit_base` (registry) | SC-15813 | SC-15841 | Missing |
+| `mage_flow_edit_turbo` | mlx | `mage_flow_edit_turbo` (registry) | SC-15509 | SC-15452 | Missing |
+| `mage_flow_edit_turbo` | candle | `mage_flow_edit_turbo` (registry) | SC-15813 | SC-15847 | Missing |
+| `mage_flow_turbo` | mlx | `mage_flow_turbo` (registry) | SC-15509 | SC-15455 | Missing |
+| `mage_flow_turbo` | candle | `mage_flow_turbo` (registry) | SC-15813 | SC-15856 | Missing |
+| `pulid_flux_dev` | mlx | `pulid_flux` (bespoke) | SC-15527 | SC-15501 | Missing |
+| `pulid_flux_dev` | candle | `pulid_flux` (bespoke) | SC-15839 | SC-15937 | Missing |
+| `qwen_image` | mlx | `qwen_image` (registry) | SC-15511 | SC-15459 | Implemented/unverified |
+| `qwen_image` | candle | `qwen_image` (registry) | SC-15817 | SC-15865 | Implemented/unverified |
+| `qwen_image_edit_2511` | mlx | `qwen_image_edit` (registry) | SC-15511 | SC-15460 | Implemented/unverified |
+| `qwen_image_edit_2511` | candle | `qwen_image_edit` (registry) | SC-15817 | SC-15868 | Implemented/unverified |
+| `qwen_image_edit_2511_lightning` | mlx | `qwen_image_edit` (registry) | SC-15511 | SC-15461 | Implemented/unverified |
+| `qwen_image_edit_2511_lightning` | candle | `qwen_image_edit` (registry) | SC-15817 | SC-15871 | Implemented/unverified |
+| `realvisxl` | mlx | `sdxl` (registry) | SC-15525 | SC-15496 | Implemented/unverified |
+| `realvisxl_lightning` | mlx | `sdxl` (registry) | SC-15525 | SC-15497 | Implemented/unverified |
+| `sana_1600m` | mlx | `sana_1600m` (registry) | SC-15523 | SC-15490 | Implemented/unverified |
+| `sana_sprint_1600m` | mlx | `sana_sprint_1600m` (registry) | SC-15523 | SC-15491 | Implemented/unverified |
+| `sd3_5_large` | mlx | `sd3_5_large` (registry) | SC-15522 | SC-15487 | Implemented/unverified |
+| `sd3_5_large` | candle | `sd3_5_large` (registry) | SC-15835 | SC-15925 | Missing |
+| `sd3_5_large_turbo` | mlx | `sd3_5_large_turbo` (registry) | SC-15522 | SC-15488 | Implemented/unverified |
+| `sd3_5_large_turbo` | candle | `sd3_5_large_turbo` (registry) | SC-15835 | SC-15928 | Missing |
+| `sd3_5_medium` | mlx | `sd3_5_medium` (registry) | SC-15522 | SC-15489 | Implemented/unverified |
+| `sd3_5_medium` | candle | `sd3_5_medium` (registry) | SC-15835 | SC-15931 | Missing |
+| `sdxl` | mlx | `sdxl` (registry) | SC-15525 | SC-15495 | Implemented/unverified |
+| `sensenova_u1_8b` | mlx | `sensenova_u1_8b` (registry) | SC-15513 | SC-15464 | Missing |
+| `sensenova_u1_8b` | candle | `sensenova_u1_8b` (registry) | SC-15821 | SC-15877 | Missing |
+| `sensenova_u1_8b_fast` | mlx | `sensenova_u1_8b_fast` (registry) | SC-15513 | SC-15467 | Missing |
+| `sensenova_u1_8b_fast` | candle | `sensenova_u1_8b_fast` (registry) | SC-15821 | SC-15886 | Missing |
+| `sensenova_u1_8b_infographic_v2` | mlx | `sensenova_u1_8b` (registry) | SC-15513 | SC-15465 | Missing |
+| `sensenova_u1_8b_infographic_v2` | candle | `sensenova_u1_8b` (registry) | SC-15821 | SC-15880 | Missing |
+| `sensenova_u1_8b_infographic_v2_fast` | mlx | `sensenova_u1_8b_fast` (registry) | SC-15513 | SC-15468 | Missing |
+| `sensenova_u1_8b_infographic_v2_fast` | candle | `sensenova_u1_8b_fast` (registry) | SC-15821 | SC-15889 | Missing |
+| `sensenova_u1_8b_infographic_v3` | mlx | `sensenova_u1_8b` (registry) | SC-15513 | SC-15466 | Missing |
+| `sensenova_u1_8b_infographic_v3` | candle | `sensenova_u1_8b` (registry) | SC-15821 | SC-15883 | Missing |
+| `sensenova_u1_8b_infographic_v3_fast` | mlx | `sensenova_u1_8b_fast` (registry) | SC-15513 | SC-15469 | Missing |
+| `sensenova_u1_8b_infographic_v3_fast` | candle | `sensenova_u1_8b_fast` (registry) | SC-15821 | SC-15892 | Missing |
+| `z_image` | mlx | `z_image` (registry) | SC-15510 | SC-15457 | Implemented/unverified |
+| `z_image_edit` | mlx | `z_image_turbo` (registry) | SC-15510 | SC-15458 | Implemented/unverified |
+| `z_image_edit` | candle | `z_image_turbo` (registry) | SC-15815 | SC-15862 | Missing |
+| `z_image_turbo` | mlx | `z_image_turbo` (registry) | SC-15510 | SC-15456 | Implemented/unverified |
+| `z_image_turbo` | candle | `z_image_turbo` (registry) | SC-15815 | SC-15859 | Implemented/unverified |
 
 Per-model consumers must use `modelSlices` in the JSON artifact. A cell is Full only when every applicable rung is Verified or Structurally N/A; this static baseline intentionally reports zero Full models.

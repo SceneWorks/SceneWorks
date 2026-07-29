@@ -68,21 +68,38 @@ function buildPlan() {
   const matrix = JSON.parse(readFileSync(MATRIX, "utf8"));
 
   const byModel = new Map();
+  // sc-15812 made the matrix attribute cells PER (model, backend): a candle cell names the Candle
+  // twin, not the MLX story. So ownership is read per backend, and the disagreement guard is scoped
+  // within a backend — comparing across backends would now fire on a correct matrix.
+  const OWNERSHIP = {
+    mlx: { story: "mlxStory", family: "family" },
+    candle: { story: "candleStory", family: "candleFamily" },
+  };
   for (const cell of matrix.cells ?? []) {
     let entry = byModel.get(cell.modelId);
     if (!entry) {
       entry = {
         model: cell.modelId,
-        mlxStory: cell.owningModelStory,
-        family: cell.owningFamilyStory,
+        mlxStory: null,
+        family: null,
+        candleStory: null,
+        candleFamily: null,
         backends: new Set(),
       };
       byModel.set(cell.modelId, entry);
     }
     entry.backends.add(cell.backend);
-    // A model whose cells disagree about ownership means the generator changed under us.
-    if (entry.mlxStory !== cell.owningModelStory || entry.family !== cell.owningFamilyStory) {
-      die(`${cell.modelId}: cells disagree about owning story/family — regenerate the matrix`);
+    const keys = OWNERSHIP[cell.backend];
+    if (!keys) die(`${cell.modelId}: unknown cell backend ${cell.backend}`);
+    if (entry[keys.story] === null) {
+      entry[keys.story] = cell.owningModelStory;
+      entry[keys.family] = cell.owningFamilyStory;
+    } else if (
+      // A model whose same-backend cells disagree about ownership means the generator changed under us.
+      entry[keys.story] !== cell.owningModelStory ||
+      entry[keys.family] !== cell.owningFamilyStory
+    ) {
+      die(`${cell.modelId}: ${cell.backend} cells disagree about owning story/family — regenerate the matrix`);
     }
   }
 
@@ -94,6 +111,19 @@ function buildPlan() {
   const dualFamilies = [...new Set(dualModels.map((m) => m.family))].sort((a, b) => a - b);
   const allFamilies = [...new Set(models.map((m) => m.family))];
   const mlxOnlyFamilies = allFamilies.filter((f) => !dualFamilies.includes(f)).sort((a, b) => a - b);
+
+  // sc-15812: now that the matrix names both twins, the Candle ids are readable straight off it.
+  // That matters because `.shortcut-split-state.json` is gitignored, so --verify used to report all
+  // 47 twins missing from a fresh clone; the matrix is the durable source.
+  // A plain object, not a Map: --dry-run serialises the plan, and a Map would silently write `{}`.
+  const candleFamilyByFamily = {};
+  for (const m of dualModels) {
+    const seen = candleFamilyByFamily[m.family];
+    if (seen === undefined) candleFamilyByFamily[m.family] = m.candleFamily;
+    else if (seen !== m.candleFamily) {
+      die(`family SC-${m.family}: models disagree about the Candle family twin (SC-${seen} vs SC-${m.candleFamily})`);
+    }
+  }
 
   // Assert the shape BEFORE any write. A drifted catalog must stop the run, not silently
   // half-apply — the whole point of the split is a trustworthy graph.
@@ -118,7 +148,16 @@ function buildPlan() {
     if (!dualFamilies.includes(m.family)) die(`${m.model}: dual model under non-dual family SC-${m.family}`);
   }
 
-  return { models, dualModels, mlxOnly, candleOnly, dualFamilies, mlxOnlyFamilies, actual };
+  return {
+    models,
+    dualModels,
+    mlxOnly,
+    candleOnly,
+    dualFamilies,
+    mlxOnlyFamilies,
+    candleFamilyByFamily,
+    actual,
+  };
 }
 
 // ── Shortcut client — minimal, rate-limited, never logs the token ───────────────────────────────
@@ -283,12 +322,24 @@ async function verify(plan) {
   const byId = new Map(epicStories.map((s) => [s.id, s]));
   const problems = [];
 
+  // The matrix is the authority on which twin id belongs to which MLX story; the state file is only a
+  // cross-check, because it is gitignored and therefore absent on a fresh clone.
+  const expected = (fromMatrix, fromState, label) => {
+    if (fromState && fromMatrix && fromState !== fromMatrix) {
+      problems.push(`${label}: matrix names SC-${fromMatrix} but the state file names SC-${fromState}`);
+    }
+    return fromMatrix ?? fromState;
+  };
   for (const familyId of plan.dualFamilies) {
-    const twin = state.candleFamilies[familyId];
+    const twin = expected(
+      plan.candleFamilyByFamily[familyId],
+      state.candleFamilies[familyId],
+      `family SC-${familyId}`,
+    );
     if (!twin || !byId.has(twin)) problems.push(`family SC-${familyId}: no Candle twin`);
   }
   for (const m of plan.dualModels) {
-    const twin = state.candleModels[m.mlxStory];
+    const twin = expected(m.candleStory, state.candleModels[m.mlxStory], `model SC-${m.mlxStory} (${m.model})`);
     if (!twin || !byId.has(twin)) problems.push(`model SC-${m.mlxStory} (${m.model}): no Candle twin`);
     const mlx = byId.get(m.mlxStory);
     if (mlx && !mlx.name.endsWith("— MLX/Metal")) problems.push(`SC-${m.mlxStory}: not rescoped to MLX`);
@@ -296,7 +347,14 @@ async function verify(plan) {
   // No Candle work has been done yet, so a Candle twin in a completed state is a bug, not progress.
   // RELAX THIS the day genuine Candle evidence starts landing — but not before, because the state
   // was silently inherited from the MLX twin once already (SC-15815) and read as finished work.
-  for (const twin of [...Object.values(state.candleFamilies), ...Object.values(state.candleModels)]) {
+  const everyTwin = new Set([
+    ...Object.values(state.candleFamilies),
+    ...Object.values(state.candleModels),
+    ...Object.values(plan.candleFamilyByFamily),
+    ...plan.dualModels.map((m) => m.candleStory),
+  ]);
+  for (const twin of everyTwin) {
+    if (!twin) continue;
     const s = byId.get(twin);
     if (s?.completed) problems.push(`SC-${twin}: Candle twin is marked complete but no Candle work has landed`);
   }
