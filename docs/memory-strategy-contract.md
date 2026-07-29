@@ -1,8 +1,8 @@
-# Shared image-memory strategy contract
+# Shared memory-strategy contract
 
 SC-15449 defines one worker-owned selection path for every image provider. The generated
-[`image-memory-matrix.json`](generated/image-memory-matrix.json) is the authoritative inventory and
-evidence schema; `sceneworks_worker::image_memory::select_strategy` is the authoritative runtime
+[`memory-matrix.json`](generated/memory-matrix.json) is the authoritative inventory and
+evidence schema; `sceneworks_worker::memory_strategy::select_strategy` is the authoritative runtime
 selector. Providers may reject a selected strategy defensively, but must not contain a second
 least-cost selector.
 

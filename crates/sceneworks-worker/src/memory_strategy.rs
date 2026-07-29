@@ -1,14 +1,13 @@
-//! Worker-owned, backend-neutral image-memory selection (sc-15449).
+//! Worker-owned, backend-neutral memory-strategy selection (sc-15449).
 //!
 //! Providers own capabilities and lifecycle hooks. Evidence owns measured request cells. The worker
 //! owns live-budget arithmetic and the normative strategy order. Optimized candidates are admitted
 //! only through gen-core's canonical evidence validator.
 
 use gen_core::{
-    ImageMemoryCleanupSemantics, ImageMemoryEvidence, ImageMemoryEvidenceDimension,
-    ImageMemoryEvidenceVerdict, ImageMemoryGeometry, ImageMemoryNumericTier,
-    ImageMemoryProviderContract, ImageMemorySelection, ImageMemoryStrategy,
-    ImageMemoryStrategySupport,
+    MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryNumericTier, MemoryProviderContract, MemorySelection, MemoryStrategy,
+    MemoryStrategySupport,
 };
 
 /// Execute one provider request through the adopted safety/lifecycle seam. A created scope receives
@@ -16,28 +15,28 @@ use gen_core::{
 pub fn generate_with_scope(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,
-    context: Option<&gen_core::ImageMemoryRunContext>,
+    context: Option<&gen_core::MemoryRunContext>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
 ) -> gen_core::Result<gen_core::GenerationOutput> {
     let Some(context) = context else {
         return generator.generate(request, on_progress);
     };
-    if let gen_core::ImageMemorySafetyDecision::Reject { reason } =
-        generator.image_memory_safety_check(context)
+    if let gen_core::MemorySafetyDecision::Reject { reason } =
+        generator.memory_strategy_safety_check(context)
     {
         return Err(gen_core::Error::Unsupported(reason));
     }
-    let mut scope = generator.begin_image_memory_request(context)?;
+    let mut scope = generator.begin_memory_strategy_request(context)?;
     if context.selection.strategy.is_optimized() && scope.is_none() {
         return Err(gen_core::Error::Unsupported(format!(
-            "{} accepted an optimized image-memory selection without opening a request scope",
+            "{} accepted an optimized memory-strategy selection without opening a request scope",
             generator.descriptor().id
         )));
     }
     if let Some(scope) = scope.as_mut() {
         if let Err(error) = scope.configure_request(request) {
             let message = error.to_string();
-            let _ = scope.finish(gen_core::ImageMemoryRunOutcome::Error {
+            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
                 message: message.clone(),
             });
             return Err(error);
@@ -46,9 +45,9 @@ pub fn generate_with_scope(
     let result = generator.generate(request, on_progress);
     if let Some(scope) = scope.as_mut() {
         let outcome = match &result {
-            Ok(_) => gen_core::ImageMemoryRunOutcome::Complete,
-            Err(gen_core::Error::Canceled) => gen_core::ImageMemoryRunOutcome::Canceled,
-            Err(error) => gen_core::ImageMemoryRunOutcome::Error {
+            Ok(_) => gen_core::MemoryRunOutcome::Complete,
+            Err(gen_core::Error::Canceled) => gen_core::MemoryRunOutcome::Canceled,
+            Err(error) => gen_core::MemoryRunOutcome::Error {
                 message: error.to_string(),
             },
         };
@@ -66,27 +65,27 @@ pub fn generate_with_scope(
 pub struct RequestScope<'a> {
     pub resolved_route: &'a str,
     pub backend: &'a str,
-    pub tier: ImageMemoryNumericTier,
+    pub tier: MemoryNumericTier,
     pub mode: &'a str,
     pub overlay: Option<&'a str>,
-    pub geometry: ImageMemoryGeometry,
+    pub geometry: MemoryGeometry,
     pub expected_sceneworks_revision: &'a str,
     pub expected_inference_revision: &'a str,
 }
 
 /// A provider estimate submitted to the selector. Cost is intentionally absent: strategy order is
-/// worker-owned and follows [`ImageMemoryStrategy::ALL`].
+/// worker-owned and follows [`MemoryStrategy::ALL`].
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate<'a> {
-    pub selection: ImageMemorySelection,
-    pub evidence: &'a ImageMemoryEvidence,
+    pub selection: MemorySelection,
+    pub evidence: &'a MemoryEvidence,
 }
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value to GiB exactly
 /// once; callers cannot submit a second floating-point estimate with a lower coefficient.
-fn evidence_peak_gb(evidence: &ImageMemoryEvidence) -> f64 {
+fn evidence_peak_gb(evidence: &MemoryEvidence) -> f64 {
     evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB
 }
 
@@ -124,7 +123,7 @@ impl Budget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Selection {
     Selected {
-        selection: ImageMemorySelection,
+        selection: MemorySelection,
         needed_gb: f64,
         available_gb: f64,
     },
@@ -133,27 +132,27 @@ pub enum Selection {
         available_gb: f64,
     },
     Unverified {
-        reason: ImageMemoryEvidenceVerdict,
+        reason: MemoryEvidenceVerdict,
     },
 }
 
-fn verdict_priority(verdict: ImageMemoryEvidenceVerdict) -> u8 {
+fn verdict_priority(verdict: MemoryEvidenceVerdict) -> u8 {
     // Generic absence is least actionable. Concrete integrity, calibration, revision, and envelope
     // failures win deterministically regardless of candidate declaration order.
     match verdict {
-        ImageMemoryEvidenceVerdict::Satisfied => 0,
-        ImageMemoryEvidenceVerdict::Unverified => 1,
-        ImageMemoryEvidenceVerdict::Missing => 2,
-        ImageMemoryEvidenceVerdict::OutOfEnvelope => 3,
-        ImageMemoryEvidenceVerdict::Stale => 4,
-        ImageMemoryEvidenceVerdict::FingerprintMismatch => 5,
-        ImageMemoryEvidenceVerdict::Invalid => 6,
+        MemoryEvidenceVerdict::Satisfied => 0,
+        MemoryEvidenceVerdict::Unverified => 1,
+        MemoryEvidenceVerdict::Missing => 2,
+        MemoryEvidenceVerdict::OutOfEnvelope => 3,
+        MemoryEvidenceVerdict::Stale => 4,
+        MemoryEvidenceVerdict::FingerprintMismatch => 5,
+        MemoryEvidenceVerdict::Invalid => 6,
     }
 }
 
 fn accumulate_reason(
-    current: &mut Option<ImageMemoryEvidenceVerdict>,
-    candidate: ImageMemoryEvidenceVerdict,
+    current: &mut Option<MemoryEvidenceVerdict>,
+    candidate: MemoryEvidenceVerdict,
 ) {
     let replace = match *current {
         Some(reason) => verdict_priority(candidate) > verdict_priority(reason),
@@ -164,22 +163,22 @@ fn accumulate_reason(
     }
 }
 
-fn specific_unverified_reason(evidence: &ImageMemoryEvidence) -> ImageMemoryEvidenceVerdict {
+fn specific_unverified_reason(evidence: &MemoryEvidence) -> MemoryEvidenceVerdict {
     let mut reason = None;
-    for dimension in ImageMemoryEvidenceDimension::ALL {
+    for dimension in MemoryEvidenceDimension::ALL {
         let verdict = evidence.dimensions.verdict(dimension);
-        if verdict != ImageMemoryEvidenceVerdict::Satisfied {
+        if verdict != MemoryEvidenceVerdict::Satisfied {
             accumulate_reason(&mut reason, verdict);
         }
     }
-    reason.unwrap_or(ImageMemoryEvidenceVerdict::Unverified)
+    reason.unwrap_or(MemoryEvidenceVerdict::Unverified)
 }
 
 fn candidate_exclusion(
     request: RequestScope<'_>,
-    contract: &ImageMemoryProviderContract,
+    contract: &MemoryProviderContract,
     candidate: &Candidate<'_>,
-) -> Option<ImageMemoryEvidenceVerdict> {
+) -> Option<MemoryEvidenceVerdict> {
     if request.resolved_route != contract.provider_id
         || request.backend != contract.backend.backend_id()
         || candidate.evidence.key.resolved_route != request.resolved_route
@@ -190,7 +189,7 @@ fn candidate_exclusion(
         || candidate.evidence.key.strategy != candidate.selection.strategy
         || candidate.evidence.key.parameters != candidate.selection.parameters
     {
-        return Some(ImageMemoryEvidenceVerdict::Invalid);
+        return Some(MemoryEvidenceVerdict::Invalid);
     }
     let key = &candidate.evidence.key;
     if key.backend != request.backend
@@ -198,23 +197,23 @@ fn candidate_exclusion(
         || key.overlay.as_deref() != request.overlay
         || key.geometry != request.geometry
     {
-        return Some(ImageMemoryEvidenceVerdict::OutOfEnvelope);
+        return Some(MemoryEvidenceVerdict::OutOfEnvelope);
     }
     if candidate.evidence.sceneworks_revision != request.expected_sceneworks_revision
         || candidate.evidence.inference_revision != request.expected_inference_revision
     {
-        return Some(ImageMemoryEvidenceVerdict::Stale);
+        return Some(MemoryEvidenceVerdict::Stale);
     }
     if contract.validate_selection(&candidate.selection).is_err() {
-        return Some(ImageMemoryEvidenceVerdict::Invalid);
+        return Some(MemoryEvidenceVerdict::Invalid);
     }
     candidate
         .evidence
         .optimized_eligibility(contract)
         .err()
         .map(|reason| {
-            if reason == ImageMemoryEvidenceVerdict::Unverified
-                && candidate.evidence.conformance != gen_core::ImageMemoryConformanceState::Verified
+            if reason == MemoryEvidenceVerdict::Unverified
+                && candidate.evidence.conformance != gen_core::MemoryConformanceState::Verified
             {
                 specific_unverified_reason(candidate.evidence)
             } else {
@@ -227,38 +226,38 @@ fn candidate_exclusion(
 /// bounded-attention → bounded-transformer order.
 pub fn select_strategy(
     request: RequestScope<'_>,
-    contract: &ImageMemoryProviderContract,
+    contract: &MemoryProviderContract,
     budget: Option<Budget>,
     candidates: &[Candidate<'_>],
 ) -> Selection {
     if !contract.conformance_errors().is_empty()
         || contract.runtime.cancellation
-            != ImageMemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
+            != MemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
         || contract.runtime.error
-            != ImageMemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
+            != MemoryCleanupSemantics::SynchronizeAndReleaseActivePhasesAndWindows
     {
         return Selection::Unverified {
-            reason: ImageMemoryEvidenceVerdict::Invalid,
+            reason: MemoryEvidenceVerdict::Invalid,
         };
     }
     let Some(available_gb) = budget.and_then(Budget::effective_gb) else {
         return Selection::Unverified {
-            reason: ImageMemoryEvidenceVerdict::Missing,
+            reason: MemoryEvidenceVerdict::Missing,
         };
     };
     let mut deepest = None;
     let mut first_unknown = None;
-    for strategy in ImageMemoryStrategy::ALL {
+    for strategy in MemoryStrategy::ALL {
         let support = contract
             .capability(strategy)
             .map(|capability| &capability.support);
         if matches!(
             support,
-            Some(ImageMemoryStrategySupport::StructurallyNotApplicable { .. })
+            Some(MemoryStrategySupport::StructurallyNotApplicable { .. })
         ) {
             continue;
         }
-        if !matches!(support, Some(ImageMemoryStrategySupport::Implemented)) {
+        if !matches!(support, Some(MemoryStrategySupport::Implemented)) {
             continue;
         }
         let rung_candidates = candidates
@@ -266,7 +265,7 @@ pub fn select_strategy(
             .filter(|candidate| candidate.selection.strategy == strategy)
             .collect::<Vec<_>>();
         if rung_candidates.is_empty() {
-            accumulate_reason(&mut first_unknown, ImageMemoryEvidenceVerdict::Missing);
+            accumulate_reason(&mut first_unknown, MemoryEvidenceVerdict::Missing);
             continue;
         }
         let mut eligible = Vec::new();
@@ -279,7 +278,7 @@ pub fn select_strategy(
                     backend = request.backend,
                     ?strategy,
                     ?reason,
-                    "image-memory candidate excluded"
+                    "memory-strategy candidate excluded"
                 );
             } else {
                 eligible.push(candidate);
@@ -288,7 +287,7 @@ pub fn select_strategy(
         if eligible.is_empty() {
             accumulate_reason(
                 &mut first_unknown,
-                first_exclusion.unwrap_or(ImageMemoryEvidenceVerdict::Missing),
+                first_exclusion.unwrap_or(MemoryEvidenceVerdict::Missing),
             );
             continue;
         }
@@ -330,7 +329,7 @@ pub fn select_strategy(
     } else {
         deepest.map_or(
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::Missing,
+                reason: MemoryEvidenceVerdict::Missing,
             },
             |needed_gb| Selection::Reject {
                 needed_gb,
@@ -344,13 +343,11 @@ pub fn select_strategy(
 mod tests {
     use super::*;
     use gen_core::{
-        ImageMemoryBackendRealization, ImageMemoryBudget, ImageMemoryCacheState,
-        ImageMemoryCalibrationIdentity, ImageMemoryConformanceState, ImageMemoryEvidenceDimensions,
-        ImageMemoryEvidenceKey, ImageMemoryFormulaKind, ImageMemoryLifecycleCapabilities,
-        ImageMemoryMode, ImageMemoryParameterRanges, ImageMemoryParityContract,
-        ImageMemoryParityResult, ImageMemoryPhase, ImageMemoryRequestScope, ImageMemoryRunContext,
-        ImageMemoryRunOutcome, ImageMemoryStrategyCapability, ImageMemoryStrategyParameters,
-        Precision, Quant,
+        MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity,
+        MemoryConformanceState, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryFormulaKind,
+        MemoryLifecycleCapabilities, MemoryMode, MemoryParameterRanges, MemoryParityContract,
+        MemoryParityResult, MemoryPhase, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
+        MemoryStrategyCapability, MemoryStrategyParameters, Precision, Quant,
     };
     use std::sync::{Arc, Mutex};
 
@@ -358,75 +355,73 @@ mod tests {
     const SW: &str = "sc-15449-contract-v1";
     const INF: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
 
-    fn tier() -> ImageMemoryNumericTier {
-        ImageMemoryNumericTier {
+    fn tier() -> MemoryNumericTier {
+        MemoryNumericTier {
             precision: Precision::Bf16,
             quant: Some(Quant::Q4),
         }
     }
 
-    fn contract() -> ImageMemoryProviderContract {
-        let mut contract = ImageMemoryProviderContract::compatibility_default(
+    fn contract() -> MemoryProviderContract {
+        let mut contract = MemoryProviderContract::compatibility_default(
             "test",
-            ImageMemoryBackendRealization::CandleCuda {
+            MemoryBackendRealization::CandleCuda {
                 device_residency: true,
                 host_backed_weights: true,
                 host_to_device_block_materialization: true,
             },
         );
-        contract.strategies = ImageMemoryStrategy::ALL
+        contract.strategies = MemoryStrategy::ALL
             .into_iter()
-            .map(|strategy| ImageMemoryStrategyCapability {
+            .map(|strategy| MemoryStrategyCapability {
                 strategy,
-                support: ImageMemoryStrategySupport::Implemented,
+                support: MemoryStrategySupport::Implemented,
                 parameters: match strategy {
-                    ImageMemoryStrategy::BoundedDecode => ImageMemoryParameterRanges {
+                    MemoryStrategy::BoundedDecode => MemoryParameterRanges {
                         decode_tile_edges: vec![512],
                         decode_overlaps: vec![128],
                         ..Default::default()
                     },
-                    ImageMemoryStrategy::BoundedAttention => ImageMemoryParameterRanges {
+                    MemoryStrategy::BoundedAttention => MemoryParameterRanges {
                         attention_chunk_sizes: vec![1024],
                         ..Default::default()
                     },
-                    ImageMemoryStrategy::BoundedTransformerResidency => {
-                        ImageMemoryParameterRanges {
-                            transformer_window_sizes: vec![1],
-                            ..Default::default()
-                        }
-                    }
+                    MemoryStrategy::BoundedTransformerResidency => MemoryParameterRanges {
+                        transformer_window_sizes: vec![1],
+                        ..Default::default()
+                    },
                     _ => Default::default(),
                 },
             })
             .collect();
-        contract.lifecycle = ImageMemoryLifecycleCapabilities {
+        contract.lifecycle = MemoryLifecycleCapabilities {
             phases: vec![
-                ImageMemoryPhase::Conditioning,
-                ImageMemoryPhase::Denoise,
-                ImageMemoryPhase::Decode,
+                MemoryPhase::Conditioning,
+                MemoryPhase::Denoise,
+                MemoryPhase::Decode,
             ],
             synchronized_phase_release: true,
             decode_tiling: true,
             attention_chunking: true,
             transformer_window_materialization: true,
         };
-        contract.formula = ImageMemoryFormulaKind::AssetBytesPlusHeadroom;
-        contract.calibration = Some(ImageMemoryCalibrationIdentity::new(FP));
+        contract.formula = MemoryFormulaKind::AssetBytesPlusHeadroom;
+        contract.calibration = Some(MemoryCalibrationIdentity::new(FP));
         contract
     }
 
-    fn params(strategy: ImageMemoryStrategy) -> ImageMemoryStrategyParameters {
+    fn params(strategy: MemoryStrategy) -> MemoryStrategyParameters {
         match strategy {
-            ImageMemoryStrategy::BoundedDecode => ImageMemoryStrategyParameters {
+            MemoryStrategy::BoundedDecode => MemoryStrategyParameters {
                 decode_tile_edge: Some(512),
                 decode_overlap: Some(128),
                 ..Default::default()
             },
-            ImageMemoryStrategy::BoundedAttention => ImageMemoryStrategyParameters {
+            MemoryStrategy::BoundedAttention => MemoryStrategyParameters {
                 attention_chunk_size: Some(1024),
                 ..Default::default()
             },
-            ImageMemoryStrategy::BoundedTransformerResidency => ImageMemoryStrategyParameters {
+            MemoryStrategy::BoundedTransformerResidency => MemoryStrategyParameters {
                 transformer_window_size: Some(1),
                 ..Default::default()
             },
@@ -434,15 +429,15 @@ mod tests {
         }
     }
 
-    fn evidence(strategy: ImageMemoryStrategy) -> ImageMemoryEvidence {
-        ImageMemoryEvidence {
-            key: ImageMemoryEvidenceKey {
+    fn evidence(strategy: MemoryStrategy) -> MemoryEvidence {
+        MemoryEvidence {
+            key: MemoryEvidenceKey {
                 resolved_route: "test".into(),
                 backend: "candle".into(),
                 tier: tier(),
                 mode: "text_to_image".into(),
                 overlay: None,
-                geometry: ImageMemoryGeometry {
+                geometry: MemoryGeometry {
                     width: 1024,
                     height: 1024,
                     batch: 1,
@@ -451,17 +446,17 @@ mod tests {
                 strategy,
                 parameters: params(strategy),
             },
-            conformance: ImageMemoryConformanceState::Verified,
-            dimensions: ImageMemoryEvidenceDimensions::VERIFIED,
-            calibration_abi: gen_core::IMAGE_MEMORY_CALIBRATION_ABI,
+            conformance: MemoryConformanceState::Verified,
+            dimensions: MemoryEvidenceDimensions::VERIFIED,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: FP.into(),
             sceneworks_revision: SW.into(),
             inference_revision: INF.into(),
             harness_version: "test-harness-v1".into(),
             predicted_peak_bytes: 1,
             observed_peak_bytes: Some(1),
-            parity: ImageMemoryParityContract::Exact,
-            parity_result: ImageMemoryParityResult::Passed,
+            parity: MemoryParityContract::Exact,
+            parity_result: MemoryParityResult::Passed,
         }
     }
 
@@ -472,7 +467,7 @@ mod tests {
             tier: tier(),
             mode: "text_to_image",
             overlay: None,
-            geometry: ImageMemoryGeometry {
+            geometry: MemoryGeometry {
                 width: 1024,
                 height: 1024,
                 batch: 1,
@@ -485,23 +480,23 @@ mod tests {
 
     #[test]
     fn normative_order_ignores_caller_array_order_and_exact_boundary_fits() {
-        let mut resident = evidence(ImageMemoryStrategy::Resident);
+        let mut resident = evidence(MemoryStrategy::Resident);
         resident.predicted_peak_bytes = (24.0 * BYTES_PER_GIB) as u64;
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
         staged.predicted_peak_bytes = (16.0 * BYTES_PER_GIB) as u64;
         let candidates = [
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::StagedResidency,
-                    parameters: params(ImageMemoryStrategy::StagedResidency),
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: params(MemoryStrategy::StagedResidency),
                     tier: tier(),
                 },
                 evidence: &staged,
             },
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::Resident,
-                    parameters: params(ImageMemoryStrategy::Resident),
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    parameters: params(MemoryStrategy::Resident),
                     tier: tier(),
                 },
                 evidence: &resident,
@@ -509,9 +504,9 @@ mod tests {
         ];
         let mut provider = contract();
         for strategy in [
-            ImageMemoryStrategy::BoundedDecode,
-            ImageMemoryStrategy::BoundedAttention,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
         ] {
             provider.capability(strategy);
             provider
@@ -519,7 +514,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
                 reason: "test".into(),
             };
         }
@@ -536,8 +531,8 @@ mod tests {
                 &candidates,
             ),
             Selection::Selected {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::StagedResidency,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
                     ..
                 },
                 available_gb: 16.0,
@@ -548,12 +543,12 @@ mod tests {
 
     #[test]
     fn canonical_evidence_reason_is_preserved() {
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
         staged.predicted_peak_bytes = (8.0 * BYTES_PER_GIB) as u64;
         staged.observed_peak_bytes = None;
         let candidate = Candidate {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::StagedResidency,
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
                 parameters: Default::default(),
                 tier: tier(),
             },
@@ -563,9 +558,9 @@ mod tests {
         provider
             .strategies
             .iter_mut()
-            .find(|capability| capability.strategy == ImageMemoryStrategy::Resident)
+            .find(|capability| capability.strategy == MemoryStrategy::Resident)
             .unwrap()
-            .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+            .support = MemoryStrategySupport::StructurallyNotApplicable {
             reason: "test".into(),
         };
         assert_eq!(
@@ -581,21 +576,21 @@ mod tests {
                 &[candidate],
             ),
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::Invalid,
+                reason: MemoryEvidenceVerdict::Invalid,
             }
         );
     }
 
     #[test]
     fn generic_unverified_conformance_surfaces_the_specific_dimension_reason() {
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
-        staged.conformance = ImageMemoryConformanceState::ImplementedUnverified;
-        staged.dimensions.static_implementation = ImageMemoryEvidenceVerdict::Unverified;
-        staged.dimensions.current_environment_verification = ImageMemoryEvidenceVerdict::Stale;
-        staged.parity_result = ImageMemoryParityResult::NotRun;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        staged.conformance = MemoryConformanceState::ImplementedUnverified;
+        staged.dimensions.static_implementation = MemoryEvidenceVerdict::Unverified;
+        staged.dimensions.current_environment_verification = MemoryEvidenceVerdict::Stale;
+        staged.parity_result = MemoryParityResult::NotRun;
         let candidate = Candidate {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::StagedResidency,
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
                 parameters: Default::default(),
                 tier: tier(),
             },
@@ -614,23 +609,23 @@ mod tests {
                 &[candidate],
             ),
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::Stale,
+                reason: MemoryEvidenceVerdict::Stale,
             }
         );
     }
 
     #[test]
     fn later_fingerprint_failure_outranks_earlier_generic_and_missing_dimensions() {
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
-        staged.conformance = ImageMemoryConformanceState::ImplementedUnverified;
-        staged.dimensions.static_implementation = ImageMemoryEvidenceVerdict::Unverified;
-        staged.dimensions.declared_calibration = ImageMemoryEvidenceVerdict::Missing;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        staged.conformance = MemoryConformanceState::ImplementedUnverified;
+        staged.dimensions.static_implementation = MemoryEvidenceVerdict::Unverified;
+        staged.dimensions.declared_calibration = MemoryEvidenceVerdict::Missing;
         staged.dimensions.current_environment_verification =
-            ImageMemoryEvidenceVerdict::FingerprintMismatch;
-        staged.parity_result = ImageMemoryParityResult::NotRun;
+            MemoryEvidenceVerdict::FingerprintMismatch;
+        staged.parity_result = MemoryParityResult::NotRun;
         let candidate = Candidate {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::StagedResidency,
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
                 parameters: Default::default(),
                 tier: tier(),
             },
@@ -649,14 +644,14 @@ mod tests {
                 &[candidate],
             ),
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::FingerprintMismatch,
+                reason: MemoryEvidenceVerdict::FingerprintMismatch,
             }
         );
     }
 
     #[test]
     fn exclusion_reason_aggregation_is_order_independent_and_prefers_specific_causes() {
-        let aggregate = |reasons: &[ImageMemoryEvidenceVerdict]| {
+        let aggregate = |reasons: &[MemoryEvidenceVerdict]| {
             let mut result = None;
             for reason in reasons {
                 accumulate_reason(&mut result, *reason);
@@ -664,38 +659,38 @@ mod tests {
             result
         };
         let forward = [
-            ImageMemoryEvidenceVerdict::Unverified,
-            ImageMemoryEvidenceVerdict::Missing,
-            ImageMemoryEvidenceVerdict::Stale,
+            MemoryEvidenceVerdict::Unverified,
+            MemoryEvidenceVerdict::Missing,
+            MemoryEvidenceVerdict::Stale,
         ];
         let reverse = [
-            ImageMemoryEvidenceVerdict::Stale,
-            ImageMemoryEvidenceVerdict::Missing,
-            ImageMemoryEvidenceVerdict::Unverified,
+            MemoryEvidenceVerdict::Stale,
+            MemoryEvidenceVerdict::Missing,
+            MemoryEvidenceVerdict::Unverified,
         ];
-        assert_eq!(aggregate(&forward), Some(ImageMemoryEvidenceVerdict::Stale));
+        assert_eq!(aggregate(&forward), Some(MemoryEvidenceVerdict::Stale));
         assert_eq!(aggregate(&reverse), aggregate(&forward));
     }
 
     #[test]
     fn excluded_cheaper_rung_does_not_block_a_verified_deeper_fit() {
-        let mut stale_staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let mut stale_staged = evidence(MemoryStrategy::StagedResidency);
         stale_staged.inference_revision = "1111111111111111111111111111111111111111".into();
-        let mut bounded_decode = evidence(ImageMemoryStrategy::BoundedDecode);
+        let mut bounded_decode = evidence(MemoryStrategy::BoundedDecode);
         bounded_decode.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
         let candidates = [
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::StagedResidency,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
                     parameters: Default::default(),
                     tier: tier(),
                 },
                 evidence: &stale_staged,
             },
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::BoundedDecode,
-                    parameters: params(ImageMemoryStrategy::BoundedDecode),
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    parameters: params(MemoryStrategy::BoundedDecode),
                     tier: tier(),
                 },
                 evidence: &bounded_decode,
@@ -703,16 +698,16 @@ mod tests {
         ];
         let mut provider = contract();
         for strategy in [
-            ImageMemoryStrategy::Resident,
-            ImageMemoryStrategy::BoundedAttention,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::Resident,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
         ] {
             provider
                 .strategies
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
                 reason: "selector unit-test envelope".into(),
             };
         }
@@ -729,8 +724,8 @@ mod tests {
                 &candidates,
             ),
             Selection::Selected {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::BoundedDecode,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
                     ..
                 },
                 needed_gb: 8.0,
@@ -741,23 +736,23 @@ mod tests {
 
     #[test]
     fn resident_baseline_remains_eligible_before_verified_optimized_rungs() {
-        let mut resident = evidence(ImageMemoryStrategy::Resident);
-        resident.conformance = ImageMemoryConformanceState::ImplementedUnverified;
+        let mut resident = evidence(MemoryStrategy::Resident);
+        resident.conformance = MemoryConformanceState::ImplementedUnverified;
         resident.predicted_peak_bytes = 20 * 1024 * 1024 * 1024;
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
         staged.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
         let candidates = [
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::Resident,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
                     parameters: Default::default(),
                     tier: tier(),
                 },
                 evidence: &resident,
             },
             Candidate {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::StagedResidency,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
                     parameters: Default::default(),
                     tier: tier(),
                 },
@@ -766,16 +761,16 @@ mod tests {
         ];
         let mut provider = contract();
         for strategy in [
-            ImageMemoryStrategy::BoundedDecode,
-            ImageMemoryStrategy::BoundedAttention,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
         ] {
             provider
                 .strategies
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
                 reason: "selector unit-test envelope".into(),
             };
         }
@@ -790,8 +785,8 @@ mod tests {
         assert!(matches!(
             select_strategy(request(), &provider, budget(20.0), &candidates),
             Selection::Selected {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::Resident,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
                     ..
                 },
                 ..
@@ -800,8 +795,8 @@ mod tests {
         assert!(matches!(
             select_strategy(request(), &provider, budget(8.0), &candidates),
             Selection::Selected {
-                selection: ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::StagedResidency,
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
                     ..
                 },
                 ..
@@ -809,20 +804,20 @@ mod tests {
         ));
     }
 
-    fn staged_only_provider() -> ImageMemoryProviderContract {
+    fn staged_only_provider() -> MemoryProviderContract {
         let mut provider = contract();
         for strategy in [
-            ImageMemoryStrategy::Resident,
-            ImageMemoryStrategy::BoundedDecode,
-            ImageMemoryStrategy::BoundedAttention,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::Resident,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
         ] {
             provider
                 .strategies
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
                 reason: "selector unit-test envelope".into(),
             };
         }
@@ -831,10 +826,10 @@ mod tests {
 
     #[test]
     fn canonical_predicted_peak_bytes_are_the_only_admission_number() {
-        let mut staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
         staged.predicted_peak_bytes = 8 * 1024 * 1024 * 1024 + 1;
-        let selection = ImageMemorySelection {
-            strategy: ImageMemoryStrategy::StagedResidency,
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
             parameters: Default::default(),
             tier: tier(),
         };
@@ -874,10 +869,10 @@ mod tests {
 
     #[test]
     fn route_and_backend_identity_are_bound_across_request_contract_and_evidence() {
-        let staged = evidence(ImageMemoryStrategy::StagedResidency);
+        let staged = evidence(MemoryStrategy::StagedResidency);
         let candidate = Candidate {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::StagedResidency,
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
                 parameters: Default::default(),
                 tier: tier(),
             },
@@ -894,7 +889,7 @@ mod tests {
         assert_eq!(
             select_strategy(wrong_route, &staged_only_provider(), budget, &[candidate],),
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::Invalid,
+                reason: MemoryEvidenceVerdict::Invalid,
             }
         );
 
@@ -911,22 +906,22 @@ mod tests {
                 }],
             ),
             Selection::Unverified {
-                reason: ImageMemoryEvidenceVerdict::Invalid,
+                reason: MemoryEvidenceVerdict::Invalid,
             }
         );
     }
 
     #[test]
     fn within_rung_choice_is_fit_aware_and_declaration_order_invariant() {
-        let mut high = evidence(ImageMemoryStrategy::BoundedDecode);
+        let mut high = evidence(MemoryStrategy::BoundedDecode);
         high.predicted_peak_bytes = 9 * 1024 * 1024 * 1024;
         high.key.parameters.decode_tile_edge = Some(768);
-        let mut low = evidence(ImageMemoryStrategy::BoundedDecode);
+        let mut low = evidence(MemoryStrategy::BoundedDecode);
         low.predicted_peak_bytes = 7 * 1024 * 1024 * 1024;
         let high_candidate = Candidate {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::BoundedDecode,
-                parameters: params(ImageMemoryStrategy::BoundedDecode),
+            selection: MemorySelection {
+                strategy: MemoryStrategy::BoundedDecode,
+                parameters: params(MemoryStrategy::BoundedDecode),
                 tier: tier(),
             },
             evidence: &high,
@@ -937,24 +932,24 @@ mod tests {
         };
         let mut provider = contract();
         for strategy in [
-            ImageMemoryStrategy::Resident,
-            ImageMemoryStrategy::StagedResidency,
-            ImageMemoryStrategy::BoundedAttention,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
         ] {
             provider
                 .strategies
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = ImageMemoryStrategySupport::StructurallyNotApplicable {
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
                 reason: "selector unit-test envelope".into(),
             };
         }
         provider
             .strategies
             .iter_mut()
-            .find(|capability| capability.strategy == ImageMemoryStrategy::BoundedDecode)
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
             .unwrap()
             .parameters
             .decode_tile_edges = vec![512, 768];
@@ -1005,8 +1000,8 @@ mod tests {
         assert!(matches!(
             tied,
             Selection::Selected {
-                selection: ImageMemorySelection {
-                    parameters: ImageMemoryStrategyParameters {
+                selection: MemorySelection {
+                    parameters: MemoryStrategyParameters {
                         decode_tile_edge: Some(768),
                         ..
                     },
@@ -1045,7 +1040,7 @@ mod tests {
     #[derive(Default)]
     struct LifecycleRecord {
         configure_calls: usize,
-        finish_calls: Vec<ImageMemoryRunOutcome>,
+        finish_calls: Vec<MemoryRunOutcome>,
     }
 
     struct MockScope {
@@ -1053,7 +1048,7 @@ mod tests {
         configure_fails: bool,
     }
 
-    impl ImageMemoryRequestScope for MockScope {
+    impl MemoryRequestScope for MockScope {
         fn configure_request(
             &mut self,
             _request: &mut gen_core::GenerationRequest,
@@ -1066,11 +1061,11 @@ mod tests {
             }
         }
 
-        fn enter_phase(&mut self, _phase: ImageMemoryPhase) -> gen_core::Result<()> {
+        fn enter_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
             Ok(())
         }
 
-        fn leave_phase(&mut self, _phase: ImageMemoryPhase) -> gen_core::Result<()> {
+        fn leave_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
             Ok(())
         }
 
@@ -1078,7 +1073,7 @@ mod tests {
             &mut self,
             _tile_edge: u32,
             _overlap: u32,
-            _geometry: ImageMemoryGeometry,
+            _geometry: MemoryGeometry,
         ) -> gen_core::Result<()> {
             Ok(())
         }
@@ -1095,7 +1090,7 @@ mod tests {
             Ok(())
         }
 
-        fn finish(&mut self, outcome: ImageMemoryRunOutcome) -> gen_core::Result<()> {
+        fn finish(&mut self, outcome: MemoryRunOutcome) -> gen_core::Result<()> {
             self.record.lock().unwrap().finish_calls.push(outcome);
             Ok(())
         }
@@ -1103,7 +1098,7 @@ mod tests {
 
     struct MockGenerator {
         descriptor: gen_core::ModelDescriptor,
-        contract: ImageMemoryProviderContract,
+        contract: MemoryProviderContract,
         record: Arc<Mutex<LifecycleRecord>>,
         generate: MockGenerate,
         configure_fails: bool,
@@ -1133,14 +1128,14 @@ mod tests {
             &self.descriptor
         }
 
-        fn image_memory_contract(&self) -> Option<&ImageMemoryProviderContract> {
+        fn memory_strategy_contract(&self) -> Option<&MemoryProviderContract> {
             Some(&self.contract)
         }
 
-        fn begin_image_memory_request(
+        fn begin_memory_strategy_request(
             &self,
-            _context: &ImageMemoryRunContext,
-        ) -> gen_core::Result<Option<Box<dyn ImageMemoryRequestScope + '_>>> {
+            _context: &MemoryRunContext,
+        ) -> gen_core::Result<Option<Box<dyn MemoryRequestScope + '_>>> {
             Ok(Some(Box::new(MockScope {
                 record: Arc::clone(&self.record),
                 configure_fails: self.configure_fails,
@@ -1166,34 +1161,34 @@ mod tests {
         }
     }
 
-    fn run_context() -> ImageMemoryRunContext {
-        ImageMemoryRunContext {
-            selection: ImageMemorySelection {
-                strategy: ImageMemoryStrategy::StagedResidency,
+    fn run_context() -> MemoryRunContext {
+        MemoryRunContext {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
                 parameters: Default::default(),
                 tier: tier(),
             },
             calibration_abi: 0,
             calibration_fingerprint: String::new(),
-            mode: ImageMemoryMode::TextToImage,
+            mode: MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
             has_phases: false,
-            geometry: ImageMemoryGeometry {
+            geometry: MemoryGeometry {
                 width: 1024,
                 height: 1024,
                 batch: 1,
                 frames: 1,
             },
             overlay: None,
-            budget: ImageMemoryBudget {
+            budget: MemoryBudget {
                 total_bytes: 16,
                 committed_bytes: 0,
                 reclaimable_bytes: 0,
                 reserved_headroom_bytes: 0,
             },
             predicted_peak_bytes: 8,
-            cache_state: ImageMemoryCacheState::Cold,
+            cache_state: MemoryCacheState::Cold,
             evidence_revision: "test".into(),
         }
     }
@@ -1201,7 +1196,7 @@ mod tests {
     fn assert_single_terminal(
         generate: MockGenerate,
         configure_fails: bool,
-        expected: ImageMemoryRunOutcome,
+        expected: MemoryRunOutcome,
     ) {
         let generator = MockGenerator::new(generate, configure_fails);
         let mut request = gen_core::GenerationRequest::default();
@@ -1212,7 +1207,7 @@ mod tests {
             Some(&run_context()),
             &mut progress,
         );
-        if matches!(expected, ImageMemoryRunOutcome::Complete) {
+        if matches!(expected, MemoryRunOutcome::Complete) {
             assert!(result.is_ok());
         } else {
             assert!(result.is_err());
@@ -1224,27 +1219,19 @@ mod tests {
 
     #[test]
     fn lifecycle_finishes_exactly_once_on_success_cancel_error_and_configure_failure() {
-        assert_single_terminal(
-            MockGenerate::Complete,
-            false,
-            ImageMemoryRunOutcome::Complete,
-        );
-        assert_single_terminal(
-            MockGenerate::Canceled,
-            false,
-            ImageMemoryRunOutcome::Canceled,
-        );
+        assert_single_terminal(MockGenerate::Complete, false, MemoryRunOutcome::Complete);
+        assert_single_terminal(MockGenerate::Canceled, false, MemoryRunOutcome::Canceled);
         assert_single_terminal(
             MockGenerate::Error,
             false,
-            ImageMemoryRunOutcome::Error {
+            MemoryRunOutcome::Error {
                 message: "unsupported: render failed".into(),
             },
         );
         assert_single_terminal(
             MockGenerate::Complete,
             true,
-            ImageMemoryRunOutcome::Error {
+            MemoryRunOutcome::Error {
                 message: "unsupported: configure failed".into(),
             },
         );

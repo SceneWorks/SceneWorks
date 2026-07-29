@@ -492,8 +492,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "the shared selector must make Krea's resident decision before the legacy defense gate"
     );
     assert!(
-        candle_stream.contains("image_memory_context.as_ref()")
-            && base.contains("crate::image_memory::generate_with_scope("),
+        candle_stream.contains("memory_strategy_context.as_ref()")
+            && base.contains("crate::memory_strategy::generate_with_scope("),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
     );
     let probes: Vec<usize> = candle_stream

@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "b739a1835178f27301d008c88f63c45e0869ae1e";
+pub const INFERENCE_PIN: &str = "00b9a515f2a9ad878f7971a660b17234bcffbb67";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
@@ -312,7 +312,7 @@ pub fn gated_fragment(
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
-    eprintln!("image-memory provider adapter: {}", message.as_ref());
+    eprintln!("memory-strategy provider adapter: {}", message.as_ref());
     std::process::exit(1);
 }
 

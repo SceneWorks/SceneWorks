@@ -318,20 +318,20 @@ pub(crate) enum KreaTurboFit {
     Resident {
         peak_gb: f64,
         needed_gb: f64,
-        selection: gen_core::ImageMemorySelection,
+        selection: gen_core::MemorySelection,
     },
     Fits {
         rung: KreaTurboRung,
         phases: KreaTurboPhasePeaks,
         needed_gb: f64,
-        selection: gen_core::ImageMemorySelection,
+        selection: gen_core::MemorySelection,
     },
     Reject {
         phases: KreaTurboPhasePeaks,
         needed_gb: f64,
     },
     Unverified {
-        reason: gen_core::ImageMemoryEvidenceVerdict,
+        reason: gen_core::MemoryEvidenceVerdict,
     },
 }
 
@@ -503,7 +503,7 @@ fn krea_rung_phase_peaks(
 fn krea_rung_parameters(
     turbo_fit: &Value,
     rung: KreaTurboRung,
-) -> Option<gen_core::ImageMemoryStrategyParameters> {
+) -> Option<gen_core::MemoryStrategyParameters> {
     let parameters = turbo_fit
         .get("strategyParameters")?
         .get(rung.manifest_key())?
@@ -514,11 +514,30 @@ fn krea_rung_parameters(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
     };
-    Some(gen_core::ImageMemoryStrategyParameters {
+    Some(gen_core::MemoryStrategyParameters {
         decode_tile_edge: value("decodeTileEdge"),
         decode_overlap: value("decodeOverlap"),
         attention_chunk_size: value("attentionChunkSize"),
         transformer_window_size: value("transformerWindowSize"),
+        // Rung 4's window scope (SC-15794). `Dit` is the only scope that is correct here:
+        // `candle-gen-krea` leaves `transformer_window_components` empty, which the contract reads
+        // as the DiT-only pre-SC-15794 behaviour, and every measured `strategyParameters` row in
+        // the manifest was collected against DiT block streaming. It is also the published default
+        // SC-15794 upheld -- a text-encoder scope cut z-image conditioning 46.5% but moved the
+        // request peak 0.0%, so widening the scope buys an admission gate nothing.
+        //
+        // The scope is declared only on the rung that owns it. `validate_selected_parameters`
+        // rejects any `Some(..)` below `BoundedTransformerResidency` as "irrelevant below its
+        // owning strategy rung", and the three cheaper rungs here pair with cheaper strategies
+        // (see `rung_pairs`); a blanket `Some` would fail `validate_selection` on three of the
+        // four candidates and silently downgrade their evidence verdicts. `None` on those rungs
+        // carries the identical DiT meaning without tripping that check.
+        transformer_window_component: match rung {
+            KreaTurboRung::StreamedBlocks => Some(gen_core::TransformerComponent::Dit),
+            KreaTurboRung::ThreeStage
+            | KreaTurboRung::TiledVae
+            | KreaTurboRung::ChunkedAttention => None,
+        },
     })
 }
 
@@ -537,12 +556,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<KreaTurboFit> {
-    use crate::image_memory::{self, Budget, Candidate, RequestScope, Selection};
+    use crate::memory_strategy::{self, Budget, Candidate, RequestScope, Selection};
     use gen_core::{
-        ImageMemoryConformanceState, ImageMemoryEvidence, ImageMemoryEvidenceDimensions,
-        ImageMemoryEvidenceKey, ImageMemoryEvidenceVerdict, ImageMemoryGeometry,
-        ImageMemoryParityContract, ImageMemoryParityResult, ImageMemorySelection,
-        ImageMemoryStrategy, ImageMemoryStrategyParameters,
+        MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
+        MemoryEvidenceVerdict, MemoryGeometry, MemoryParityContract, MemoryParityResult,
+        MemorySelection, MemoryStrategy, MemoryStrategyParameters,
     };
 
     let budget = budget?;
@@ -552,7 +570,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let scene_works_revision = turbo_fit.get("sceneWorksRevision")?.as_str()?;
     let inference_revision = turbo_fit.get("inferenceRevision")?.as_str()?;
     let max_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
-    let geometry = ImageMemoryGeometry {
+    let geometry = MemoryGeometry {
         width,
         height,
         batch: 1,
@@ -561,20 +579,20 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
     if pixels > max_pixels {
         return Some(KreaTurboFit::Unverified {
-            reason: ImageMemoryEvidenceVerdict::OutOfEnvelope,
+            reason: MemoryEvidenceVerdict::OutOfEnvelope,
         });
     }
     let load_root = runtime
         .map(|runtime| runtime.resolved_artifact_root.clone())
         .unwrap_or_default();
     let provider_contract = crate::inference_runtime::media()
-        .image_memory_contract(
+        .memory_strategy_contract(
             "krea_2_turbo",
             &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(load_root)),
         )
         .ok()
         .flatten()?;
-    let numeric_tier = gen_core::ImageMemoryNumericTier {
+    let numeric_tier = gen_core::MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: match tier {
             "q4" => Some(gen_core::Quant::Q4),
@@ -618,7 +636,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 && record.get("width").and_then(Value::as_u64) == Some(u64::from(width))
                 && record.get("height").and_then(Value::as_u64) == Some(u64::from(height))
         });
-    let make_evidence = |selection: ImageMemorySelection,
+    let make_evidence = |selection: MemorySelection,
                          manifest_rung: Option<&str>,
                          fallback_predicted_peak_gb: f64,
                          fallback_phases: Option<KreaTurboPhasePeaks>| {
@@ -646,7 +664,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             .and_then(Value::as_object);
         let verdict = |condition, failure| {
             if condition {
-                ImageMemoryEvidenceVerdict::Satisfied
+                MemoryEvidenceVerdict::Satisfied
             } else {
                 failure
             }
@@ -746,39 +764,39 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             })
             && phases_match
             && provider_contract.validate_selection(&selection).is_ok();
-        let evidence_dimensions = ImageMemoryEvidenceDimensions {
-            static_implementation: verdict(static_valid, ImageMemoryEvidenceVerdict::Invalid),
+        let evidence_dimensions = MemoryEvidenceDimensions {
+            static_implementation: verdict(static_valid, MemoryEvidenceVerdict::Invalid),
             declared_calibration: verdict(
                 declared_calibration,
-                ImageMemoryEvidenceVerdict::FingerprintMismatch,
+                MemoryEvidenceVerdict::FingerprintMismatch,
             ),
             historical_verification: verdict(
                 historical_compatible,
                 if evidence_record.is_some() {
-                    ImageMemoryEvidenceVerdict::Stale
+                    MemoryEvidenceVerdict::Stale
                 } else {
-                    ImageMemoryEvidenceVerdict::Missing
+                    MemoryEvidenceVerdict::Missing
                 },
             ),
             current_environment_verification: verdict(
                 current_environment,
                 if evidence_record.is_some() {
-                    ImageMemoryEvidenceVerdict::Stale
+                    MemoryEvidenceVerdict::Stale
                 } else {
-                    ImageMemoryEvidenceVerdict::Missing
+                    MemoryEvidenceVerdict::Missing
                 },
             ),
             canonical_route_loadability: verdict(
                 loadability_matches_record,
                 if evidence_record.is_some() {
-                    ImageMemoryEvidenceVerdict::Unverified
+                    MemoryEvidenceVerdict::Unverified
                 } else {
-                    ImageMemoryEvidenceVerdict::Missing
+                    MemoryEvidenceVerdict::Missing
                 },
             ),
             exact_strategy_parameters: verdict(
                 exact_parameters,
-                ImageMemoryEvidenceVerdict::OutOfEnvelope,
+                MemoryEvidenceVerdict::OutOfEnvelope,
             ),
         };
         let verified = observed_peak_gb.is_some()
@@ -788,8 +806,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     && parity.get("result").and_then(Value::as_str) == Some("passed")
             })
             && evidence_dimensions.all_satisfied();
-        let parity_contract = parity.map_or(ImageMemoryParityContract::Exact, |parity| {
-            ImageMemoryParityContract::Golden {
+        let parity_contract = parity.map_or(MemoryParityContract::Exact, |parity| {
+            MemoryParityContract::Golden {
                 fixture: parity
                     .get("fixture")
                     .and_then(Value::as_str)
@@ -806,8 +824,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     .unwrap_or_default(),
             }
         });
-        ImageMemoryEvidence {
-            key: ImageMemoryEvidenceKey {
+        MemoryEvidence {
+            key: MemoryEvidenceKey {
                 resolved_route: "krea_2_turbo".to_owned(),
                 backend: "candle".to_owned(),
                 tier: numeric_tier,
@@ -819,9 +837,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 parameters: selection.parameters,
             },
             conformance: if verified {
-                ImageMemoryConformanceState::Verified
+                MemoryConformanceState::Verified
             } else {
-                ImageMemoryConformanceState::ImplementedUnverified
+                MemoryConformanceState::ImplementedUnverified
             },
             dimensions: evidence_dimensions,
             calibration_abi,
@@ -833,31 +851,28 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             observed_peak_bytes: observed_peak_gb.map(bytes),
             parity: parity_contract,
             parity_result: if verified {
-                ImageMemoryParityResult::Passed
+                MemoryParityResult::Passed
             } else {
-                ImageMemoryParityResult::NotRun
+                MemoryParityResult::NotRun
             },
         }
     };
-    let resident_selection = ImageMemorySelection {
-        strategy: ImageMemoryStrategy::Resident,
-        parameters: ImageMemoryStrategyParameters::default(),
+    let resident_selection = MemorySelection {
+        strategy: MemoryStrategy::Resident,
+        parameters: MemoryStrategyParameters::default(),
         tier: numeric_tier,
     };
 
     let rung_pairs = [
-        (
-            KreaTurboRung::ThreeStage,
-            ImageMemoryStrategy::StagedResidency,
-        ),
-        (KreaTurboRung::TiledVae, ImageMemoryStrategy::BoundedDecode),
+        (KreaTurboRung::ThreeStage, MemoryStrategy::StagedResidency),
+        (KreaTurboRung::TiledVae, MemoryStrategy::BoundedDecode),
         (
             KreaTurboRung::ChunkedAttention,
-            ImageMemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedAttention,
         ),
         (
             KreaTurboRung::StreamedBlocks,
-            ImageMemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategy::BoundedTransformerResidency,
         ),
     ];
     let mut evidence = vec![make_evidence(
@@ -873,7 +888,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         let phase_peak_gb = phases.peak_gb();
         let needed_gb = phase_peak_gb + HEADROOM_GB;
         let parameters = krea_rung_parameters(turbo_fit, rung)?;
-        let selection = ImageMemorySelection {
+        let selection = MemorySelection {
             strategy,
             parameters,
             tier: numeric_tier,
@@ -895,7 +910,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             evidence,
         })
         .collect::<Vec<_>>();
-    let selection = image_memory::select_strategy(
+    let selection = memory_strategy::select_strategy(
         request,
         &provider_contract,
         Some(Budget {
@@ -909,8 +924,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     match selection {
         Selection::Selected {
             selection:
-                selected @ ImageMemorySelection {
-                    strategy: ImageMemoryStrategy::Resident,
+                selected @ MemorySelection {
+                    strategy: MemoryStrategy::Resident,
                     ..
                 },
             needed_gb,
@@ -1841,7 +1856,7 @@ mod tests {
         assert_eq!(
             fit(&stale),
             Some(KreaTurboFit::Unverified {
-                reason: gen_core::ImageMemoryEvidenceVerdict::Stale,
+                reason: gen_core::MemoryEvidenceVerdict::Stale,
             })
         );
 
@@ -1851,7 +1866,7 @@ mod tests {
         assert_eq!(
             fit(&unloadable),
             Some(KreaTurboFit::Unverified {
-                reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+                reason: gen_core::MemoryEvidenceVerdict::Unverified,
             })
         );
 
@@ -1861,7 +1876,7 @@ mod tests {
         assert_eq!(
             fit(&fingerprint),
             Some(KreaTurboFit::Unverified {
-                reason: gen_core::ImageMemoryEvidenceVerdict::FingerprintMismatch,
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
             })
         );
     }
@@ -1883,7 +1898,7 @@ mod tests {
         assert!(matches!(
             run(Some(&wrong_hardware)),
             Some(KreaTurboFit::Unverified {
-                reason: gen_core::ImageMemoryEvidenceVerdict::Stale,
+                reason: gen_core::MemoryEvidenceVerdict::Stale,
             })
         ));
 
@@ -1892,7 +1907,7 @@ mod tests {
         assert!(matches!(
             run(Some(&wrong_artifact)),
             Some(KreaTurboFit::Unverified {
-                reason: gen_core::ImageMemoryEvidenceVerdict::Unverified,
+                reason: gen_core::MemoryEvidenceVerdict::Unverified,
             })
         ));
     }
@@ -2205,7 +2220,7 @@ mod tests {
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::ImageMemoryEvidenceVerdict::OutOfEnvelope,
+                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
                 })
             ));
         }

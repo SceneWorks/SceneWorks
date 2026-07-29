@@ -4455,7 +4455,7 @@
         // Tiled decode is a measured no-op for the denoise-owned Q8/BF16 peaks, so those curves
         // intentionally cannot displace the cheaper three-stage rung.
         "turboFit": {
-          // sc-15449 shared image-memory selector provenance. The worker accepts these measured curves
+          // sc-15449 shared memory-strategy selector provenance. The worker accepts these measured curves
           // only while both source revisions and the provider request ABI fingerprint match.
           "calibrationAbi": 1,
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",

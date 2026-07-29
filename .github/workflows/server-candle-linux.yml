@@ -86,6 +86,12 @@ jobs:
       # core "does the candle worker code compile on Linux" gate.
       - name: Clippy candle-gated code
         run: cargo clippy -p sceneworks-worker --features backend-candle -- -D warnings
+      # The Linux half of the same guard the Windows lane now carries: the Candle
+      # memory-calibration adapter binary (epic 15448). `src/bin/candle.rs` is `compile_error!` on
+      # macOS and macos-mlx.yml builds only `--bin memory-mlx-adapter`, so this lane and the
+      # Windows one are the only places it is ever compiled.
+      - name: Check the candle memory adapter builds (memory-candle-adapter)
+        run: cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
       - name: Install web dependencies
         run: npm ci --prefix apps/web
       # `embed-web` bakes apps/web/dist into the binary (rust-embed), so build the

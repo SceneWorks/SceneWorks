@@ -12,17 +12,17 @@ import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-MATRIX = ROOT / "docs" / "generated" / "image-memory-matrix.json"
-SCHEMA = ROOT / "packages" / "schemas" / "image-memory-matrix.schema.json"
+MATRIX = ROOT / "docs" / "generated" / "memory-matrix.json"
+SCHEMA = ROOT / "packages" / "schemas" / "memory-matrix.schema.json"
 
 
 def load_matrix():
     return json.loads(MATRIX.read_text(encoding="utf-8"))
 
 
-def test_generated_image_memory_matrix_is_current_and_schema_valid():
+def test_generated_memory_matrix_is_current_and_schema_valid():
     subprocess.run(
-        ["node", "scripts/generate-image-memory-matrix.mjs", "--check"],
+        ["node", "scripts/generate-memory-matrix.mjs", "--check"],
         cwd=ROOT,
         check=True,
     )
@@ -64,12 +64,12 @@ def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
 
 def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     calibration_schema = json.loads(
-        (ROOT / "packages/schemas/image-memory-calibration.schema.json").read_text(
+        (ROOT / "packages/schemas/memory-calibration.schema.json").read_text(
             encoding="utf-8"
         )
     )
     calibration = json.loads(
-        (ROOT / "docs/generated/image-memory-calibration-evidence.json").read_text(
+        (ROOT / "docs/generated/memory-calibration-evidence.json").read_text(
             encoding="utf-8"
         )
     )
@@ -88,7 +88,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     (repo / "docs" / "generated").mkdir(parents=True)
-    (repo / "docs" / "generated" / "image-memory-matrix.json").write_text(
+    (repo / "docs" / "generated" / "memory-matrix.json").write_text(
         json.dumps({"generatedFrom": {"sceneWorksRevision": f"source-tree:{'1' * 64}"}}),
         encoding="utf-8",
     )
@@ -137,11 +137,11 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     config_path = tmp_path / "config.json"
     output_path = tmp_path / "evidence.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    provider = ROOT / "scripts/fixtures/image-memory-provider-fixture.mjs"
+    provider = ROOT / "scripts/fixtures/memory-provider-fixture.mjs"
     subprocess.run(
         [
             "node",
-            "scripts/image-memory-calibration-harness.mjs",
+            "scripts/memory-calibration-harness.mjs",
             "run",
             "--config",
             str(config_path),
@@ -158,7 +158,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
         check=True,
     )
     schema = json.loads(
-        (ROOT / "packages/schemas/image-memory-calibration.schema.json").read_text(
+        (ROOT / "packages/schemas/memory-calibration.schema.json").read_text(
             encoding="utf-8"
         )
     )
@@ -189,12 +189,12 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
         mutate(invalid["records"][0])
         with pytest.raises(jsonschema.ValidationError):
             validator.validate(invalid)
-    mutating_provider = ROOT / "scripts/fixtures/image-memory-provider-mutates-repo-fixture.mjs"
+    mutating_provider = ROOT / "scripts/fixtures/memory-provider-mutates-repo-fixture.mjs"
     with pytest.raises(subprocess.CalledProcessError):
         subprocess.run(
             [
                 "node",
-                "scripts/image-memory-calibration-harness.mjs",
+                "scripts/memory-calibration-harness.mjs",
                 "run",
                 "--config",
                 str(config_path),

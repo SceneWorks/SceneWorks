@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, Generator, ImageMemoryCacheState, LoadSpec, MoeExpert, OffloadPolicy,
+    AdapterKind, AdapterSpec, Generator, LoadSpec, MemoryCacheState, MoeExpert, OffloadPolicy,
     Precision, Quant, WeightsSource,
 };
 
@@ -446,7 +446,7 @@ pub(crate) async fn with_cached_generator_for_request<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
-    run: impl FnOnce(&dyn Generator, ImageMemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
@@ -501,7 +501,7 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-    run: impl FnOnce(&dyn Generator, ImageMemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
@@ -531,8 +531,8 @@ where
     };
     let run = move |cached: &CachedGenerator, access| {
         let cache_state = match access {
-            CacheAccess::Cold => ImageMemoryCacheState::Cold,
-            CacheAccess::Warm => ImageMemoryCacheState::Warm,
+            CacheAccess::Cold => MemoryCacheState::Cold,
+            CacheAccess::Warm => MemoryCacheState::Warm,
         };
         run(
             cached.generator.as_ref(),

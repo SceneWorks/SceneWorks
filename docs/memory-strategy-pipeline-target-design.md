@@ -5,7 +5,7 @@
 **Scope:** the epic remains the 53 image catalog entries. The *vocabulary* is lane-neutral by design
 (§13) so video and audio can adopt without a second contract; whether the ladder itself transfers is
 unproven and explicitly not claimed here.
-**Relationship to existing docs:** extends [`image-memory-strategy-contract.md`](image-memory-strategy-contract.md) (SC-15449) and epic [15448](https://app.shortcut.com/trefry/epic/15448).
+**Relationship to existing docs:** extends [`memory-strategy-contract.md`](memory-strategy-contract.md) (SC-15449) and epic [15448](https://app.shortcut.com/trefry/epic/15448).
 
 ---
 
@@ -72,7 +72,7 @@ Each rung declares exactly four things, each in exactly one place, each derived 
 | **Availability** | Can *this loaded model* execute this rung at all? | provider, built per `LoadSpec` | static, per load | `Implemented` / `StructurallyNotApplicable` / `Missing` |
 | **Prerequisites** | Which rungs must also engage for this one to mean anything? | the shared contract, declared per rung | static | explicit edge set — **never** derived from enum order |
 | **Engagement** | Is this rung on for *this request*, and with what parameters? | worker selection → `GenerationMemory` | per request | one boolean + its owned parameters |
-| **Cost rank** | What order does the selector try rungs in? | worker | policy | the normative order of `ImageMemoryStrategy::ALL` |
+| **Cost rank** | What order does the selector try rungs in? | worker | policy | the normative order of `MemoryStrategy::ALL` |
 
 ### The invariant that makes it checkable
 
@@ -109,7 +109,7 @@ Rung 4's `transformer_window_component` (`Dit` / `TextEncoder` / `Both`, SC-1579
 with a published candidate domain**, exactly like `decode_tile_edges` and `attention_chunk_sizes` —
 not a new axis. Availability stays one verdict per rung; which transformer the window applies to is
 chosen within it. This is the shape any future component scope should take, including Wan's MoE
-expert residency (§13).
+expert residency (§14).
 
 ### The prerequisite graph — explicit, and small
 
@@ -334,7 +334,7 @@ and it keeps `Residency` `Sync` without touching `Generator`.
 `gen_core::validate_selection` derives dependency from the enum's numeric order:
 
 ```rust
-for rung in ImageMemoryStrategy::ALL.into_iter().filter(|rung| *rung < selection.strategy) {
+for rung in MemoryStrategy::ALL.into_iter().filter(|rung| *rung < selection.strategy) {
     if matches!(support, Some(Missing) | None) { return Err(Error::Unsupported(...)); }
 }
 ```
@@ -345,7 +345,7 @@ Three sites read the order, and they encode **two different policies**:
 |---|---|
 | `gen_core::validate_selection` prerequisite walk | **fatal** — `Error::Unsupported` |
 | `gen_core::validate_selected_parameters` | tolerant — guards on `implemented(...)`, stops requiring that rung's parameters |
-| `sceneworks_worker::image_memory::select_strategy` | tolerant — `continue`s past any non-`Implemented` rung, keeps looking |
+| `sceneworks_worker::memory_strategy::select_strategy` | tolerant — `continue`s past any non-`Implemented` rung, keeps looking |
 
 The selector and the validator **already contradict each other**: `select_strategy` will return rung
 2 on a contract where rung 1 is `Missing`, and `validate_selection` will hard-error on exactly that
@@ -357,7 +357,7 @@ Any honest declaration at the bottom of the ladder trips it.
 
 Replace the order-derived walk with the declared graph from §3. Concretely:
 
-- Each rung's capability carries `requires: &[ImageMemoryStrategy]` — empty for rungs 1, 2, 3;
+- Each rung's capability carries `requires: &[MemoryStrategy]` — empty for rungs 1, 2, 3;
   `[StagedResidency]` for rung 4.
 - `validate_selection` walks *that*, not `< selection.strategy`.
 - `validate_selected_parameters` and `select_strategy` need **no change** — they already implement
@@ -469,7 +469,7 @@ duplicates the shared selector.
 
 With all four gone, `plan_memory_adaptation`, `StagePeaks`, `LaneLevers` and `MemoryPlan` have
 nothing left to decide. Their job — *given a budget and shape-derived peaks, pick the lightest
-sufficient setting* — is `sceneworks_worker::image_memory::select_strategy`'s job. The contract doc
+sufficient setting* — is `sceneworks_worker::memory_strategy::select_strategy`'s job. The contract doc
 already forbids the duplication:
 
 > "Providers may reject a selected strategy defensively, but must not contain a second least-cost
@@ -507,7 +507,7 @@ everywhere else.** Current scores:
 |---|---|---|---|
 | rung 4 needs a non-materialized trunk | **4** *(was 3)* | `streamable`, numeric-order walk, `resolve_block_window`, **+ the loader's `streamable` flag (PR #323)** | **1** — prerequisite edge |
 | rung 1 is inert under `Resident` | **0** | prose in a module doc; declared nowhere | **0 needed** — the condition ceases to exist |
-| the escalation order | **2** | `ImageMemoryStrategy::ALL`, `mempolicy::Lever` | **1** |
+| the escalation order | **2** | `MemoryStrategy::ALL`, `mempolicy::Lever` | **1** |
 | the control branch's tier | **2** | installed artifact, `BranchQuant` lever | **1** |
 | the attention budget constant | **2** | `gen_core::attention_budget`, candle's copy | **1** (SC-15796) |
 | what a `Missing` lower rung means | **2 policies / 3 sites** | fatal vs tolerant | **1** |
@@ -635,9 +635,11 @@ pipeline from acquiring an opinion about image quality.
 
 ---
 
-## 13. Naming — the vocabulary becomes lane-neutral
+## 13. Naming — the vocabulary is lane-neutral
 
 **Decision: drop `Image` from every type, and name the module `gen_core::memory_strategy`.**
+**Status: done — SC-15804, paired inference + SceneWorks PRs. This section is now a record of what
+was renamed, not a plan.**
 
 Nothing in the ladder is image-specific. Rung 1 sheds a conditioning component; rung 2 bounds decoder
 scratch; rung 3 bounds attention; rung 4 bounds transformer residency. Video and audio have all four.
@@ -649,10 +651,11 @@ generalizes, so video and audio can adopt without a second contract.
 ### Why not bare `gen_core::memory`
 
 Five crates already have a `memory` module, meaning two unrelated things: `mlx_gen::memory` is the
-MLX allocator interface (`safe_budget_gib`, `clear_cache`, `apply_memory_cap_env`), while
-`mlx-gen-sam2::memory` is SAM2's *model* memory bank. Every MLX provider file imports the first one,
-so `gen_core::memory` would sit next to it in the same `use` block. `memory_strategy` collides with
-nothing and says what it is.
+MLX budget interface (`safe_budget_gib`, `clamp_budget_to_cap`, `apply_memory_cap_env`), while
+`mlx-gen-sam2::memory` is SAM2's *model* memory bank. A third sits one crate away —
+`mlx_rs::memory` is the allocator itself (`clear_cache`, `get_peak_memory`). MLX provider files
+import the first directly, so `gen_core::memory` would sit next to it in the same `use` block.
+`memory_strategy` collides with nothing and says what it is.
 
 The **types** stay bare — `MemoryStrategy`, `MemoryBudget`, `MemoryPhase` — because none of them
 collide. The existing bare `Memory*` names in the workspace (`MemoryEncoder`, `MemoryAttention`,
@@ -661,8 +664,8 @@ in other crates, and `MemoryPlan` is deleted by §8.
 
 ### The Rust surface — mechanical
 
-`gen_core::image_memory` exports **36 public items**, every one prefixed `ImageMemory*`, plus
-`IMAGE_MEMORY_CALIBRATION_ABI`. The rename is a prefix strip with no judgment calls:
+The module exported **36 public items**, every one prefixed `ImageMemory*`, plus
+`IMAGE_MEMORY_CALIBRATION_ABI`. The rename was a prefix strip with no judgment calls:
 
 ```
 gen_core::image_memory              →  gen_core::memory_strategy
@@ -671,31 +674,49 @@ ImageMemoryStrategy                 →  MemoryStrategy
 ImageMemoryProviderContract         →  MemoryProviderContract
 ImageMemorySelection                →  MemorySelection
 ImageMemoryEvidence                 →  MemoryEvidence
-…and 30 more, identically
+…and 32 more, identically
 sceneworks_worker::image_memory     →  sceneworks_worker::memory_strategy
 ```
 
-`GenerationMemory` is already lane-neutral and does not change.
+`GenerationMemory` and `TransformerComponent` are already lane-neutral and did not change.
+
+Three items outside that 36 carried the same prefix and were renamed with it, because leaving them
+would have left the contract half-named: `gen_core::registry::ImageMemoryRegistration` →
+`MemoryRegistration` (it *holds* a `MemoryProviderContract`), its builder method
+`register_image_memory` → `register_memory_strategy`, and the three `Generator` hooks
+(`image_memory_contract`, `image_memory_safety_check`, `begin_image_memory_request`). Provider-local
+`IMAGE_MEMORY_REGISTRATION` / `IMAGE_MEMORY_CALIBRATION_FINGERPRINT` constants and the
+`{Krea,Mage,ZImage}ImageMemoryScope` types followed the same strip.
 
 ### The SceneWorks surface — file and crate names, not payloads
 
 | kind | items |
 |---|---|
-| crate | `sceneworks-image-memory-adapter` → `sceneworks-memory-adapter` (+ `Cargo.toml`, `Cargo.lock`, workspace manifest, `docker/rust.Dockerfile`) |
-| schemas | `packages/schemas/image-memory-{matrix,calibration}.schema.json` |
-| generated | `docs/generated/image-memory-{matrix.json,matrix.md,calibration-evidence.json}` |
-| scripts | `generate-image-memory-matrix.mjs`, `image-memory-calibration-harness.mjs`, + their tests |
-| tests | `tests/test_image_memory_matrix.py` |
+| crate | `sceneworks-image-memory-adapter` → `sceneworks-memory-adapter` (+ `Cargo.toml`, `Cargo.lock`, workspace manifest, `docker/rust.Dockerfile`, both `[[bin]]` targets, and the `macos-mlx.yml` dispatch input/env/artifact names that reference them) |
+| schemas | `packages/schemas/image-memory-{matrix,calibration}.schema.json` → `memory-{matrix,calibration}.schema.json` |
+| generated | `docs/generated/image-memory-{matrix.json,matrix.md,calibration-evidence.json}` → `memory-*` |
+| config | `config/image-memory-calibration-plan.json` → `config/memory-calibration-plan.json` |
+| scripts | `generate-image-memory-matrix.mjs`, `image-memory-calibration-harness.mjs`, their tests, the four `scripts/fixtures/image-memory-provider-*.mjs`, plus the path/identifier citations in `bump-inference.mjs`, `platform-review-contracts.test.mjs`, `split-memory-strategy-stories.mjs`, and the four `package.json` npm scripts |
+| tests | `tests/test_image_memory_matrix.py` → `tests/test_memory_matrix.py` |
 | docs | `image-memory-strategy-contract.md`, `image-memory-calibration-harness.md`, this file |
 
-**What does *not* change: the JSON payloads.** There are zero `imageMemory*` keys in
-`config/manifests/builtin.models.jsonc` or in either schema. No manifest migration, no key rewrite.
+**What did *not* change: the JSON payloads.** There were zero `imageMemory*` keys in
+`config/manifests/builtin.models.jsonc` or in either schema. No manifest migration, no key rewrite —
+the only manifest edit in the whole rename is one `//` comment line, confirmed by diff.
 
-**What does change in content**, and it is exactly two things:
+The one `imageMemory` key that existed anywhere was `generatedFrom.sources.imageMemory` in the
+**generated** matrix — a source-path map entry emitted by `generate-memory-matrix.mjs`, under a
+`generatedFrom` that the matrix schema types as an unconstrained object. It regenerates as
+`memoryStrategy`.
 
-1. The schema `$id` URLs — `https://sceneworks.ai/schemas/image-memory-*.schema.json`.
+**What did change in content**, and it is exactly two things:
+
+1. The schema `$id` URLs — now `https://sceneworks.ai/schemas/memory-*.schema.json`.
 2. The `harnessVersion` **const**, asserted twice in the calibration schema:
-   `"sceneworks-image-memory-v2"` → `"sceneworks-memory-v3"`.
+   `"sceneworks-image-memory-v2"` → `"sceneworks-memory-v3"`, matched by `HARNESS_VERSION` in the
+   harness. `scripts/memory-calibration-harness.test.mjs` asserts that a record which is well-formed
+   and self-consistent in every other respect is still rejected at the prior version, with a control
+   case proving the same record passes at the current one.
 
 ### The timing argument, precisely
 
@@ -704,9 +725,10 @@ evidence. **That is not a cost — it is the mechanism working.** The const is a
 stale-evidence gate, and a vocabulary change is exactly the kind of thing it exists to invalidate.
 The rename rides a versioning path that is already designed.
 
-The cost is only the evidence that has to be re-captured, and right now that is nearly nothing:
+The cost is only the evidence that has to be re-captured, and at the time of the rename that was
+nothing:
 
-- `docs/generated/image-memory-calibration-evidence.json` contains **`"records": []`** — 92 bytes.
+- `docs/generated/memory-calibration-evidence.json` contained **`"records": []`** — 92 bytes.
 - The ~9 real records (1 Candle/RTX, 8 MLX/M5 Max) live in gated CI artifacts, unpromoted.
 
 After the calibration wave there will be hundreds, each bound to a revision pair. **Do this before
@@ -730,7 +752,7 @@ Three things to establish before either lane adopts, flagged so they are not ass
 
 ---
 
-## 13. Portability to the video and audio lanes
+## 14. Portability to the video and audio lanes
 
 **Intent:** the same ladder serves video and audio once the image lane is through. This section
 records what that requires, so the image work does not quietly foreclose it.
@@ -749,16 +771,18 @@ records what that requires, so the image work does not quietly foreclose it.
 Rung 2 was never image-only. Nothing in §2 (the four facts), §3's graph shape, §6 (never substitute
 output), §7 (tier integrity), §8 (one pipeline) or §9 (single-encoding) is image-specific either.
 
-### Three things that do not port
+### Three things that did not port — the first is now done
 
-**1. The naming and the calibration ABI — cheap now, expensive after calibration.**
-The contract is image-named throughout: ~25 public `ImageMemory*` types and
-`IMAGE_MEMORY_CALIBRATION_ABI`. An ABI bump makes existing evidence stale *by design*. Today there
-are three provider adopters and near-zero promoted evidence; every one of the 53 calibration stories
-adds records keyed to this ABI. **Rename before the calibration wave, not after.**
+**1. The naming and the calibration ABI — done, SC-15804.**
+The contract *was* image-named throughout: 36 public `ImageMemory*` items plus
+`IMAGE_MEMORY_CALIBRATION_ABI`. An ABI bump makes existing evidence stale *by design*, and every one
+of the 53 calibration stories adds records keyed to that ABI — so the rename had to land while there
+were still only three provider adopters and near-zero promoted evidence, which is exactly when it
+did. §13 records what it touched. The vocabulary is lane-neutral today, so this is no longer a
+portability blocker; the two items below still are.
 
 **2. The contract asserts the ladder has exactly five rungs.**
-`ImageMemoryStrategy::ALL: [Self; 5]`, and `conformance_errors` rejects any contract whose
+`MemoryStrategy::ALL: [Self; 5]`, and `conformance_errors` rejects any contract whose
 `strategies.len()` differs — so every provider must declare all five. A sixth rung is a breaking
 change to every declaration. Two candidates video plausibly needs, neither of which is any current
 rung:
@@ -769,7 +793,7 @@ rung:
 - **Expert residency.** Wan A14B swaps between two expert weight sets mid-denoise. Residency-bounding,
   partitioned by expert rather than by block — a sibling of rung 4, not an instance of it.
 
-**3. `ImageMemoryGeometry` carries an image's axes.** Video needs frames; audio needs duration.
+**3. `MemoryGeometry` carries an image's axes.** Video needs frames; audio needs duration.
 
 ### Audio's structural difference — streaming output
 

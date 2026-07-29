@@ -267,7 +267,7 @@ fn start_cached_gen_stream_with_request_state<D>(
 where
     D: FnOnce(
             &dyn Generator,
-            gen_core::ImageMemoryCacheState,
+            gen_core::MemoryCacheState,
             gen_core::OffloadPolicy,
             u64,
             tokio::sync::mpsc::Sender<GenEvent>,

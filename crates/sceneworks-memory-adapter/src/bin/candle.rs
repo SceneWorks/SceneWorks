@@ -1,15 +1,14 @@
 #[cfg(target_os = "macos")]
-compile_error!("image-memory-candle-adapter is supported only on CUDA hosts");
+compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
 use candle_gen::testkit::VramProbe;
 use runtime_cuda::gen_core::{
-    GenerationRequest, ImageMemoryBudget, ImageMemoryCacheState, ImageMemoryGeometry,
-    ImageMemoryMode, ImageMemoryNumericTier, ImageMemoryPhase, ImageMemoryRunContext,
-    ImageMemoryRunOutcome, ImageMemorySelection, ImageMemoryStrategy,
-    ImageMemoryStrategyParameters, LoadSpec, OffloadPolicy, Precision, Progress, Quant,
-    WeightsSource,
+    GenerationRequest, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySelection,
+    MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant,
+    TransformerComponent, WeightsSource,
 };
-use sceneworks_image_memory_adapter as protocol;
+use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::process::Command;
@@ -219,16 +218,16 @@ fn loadability_fingerprint(repository: &str, revision: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn execute_lifecycle_request(
     generator: &dyn runtime_cuda::gen_core::Generator,
-    context: &ImageMemoryRunContext,
+    context: &MemoryRunContext,
     edge: u32,
     overlap: u32,
     attention: u32,
     window: u32,
-    fault_phase: Option<ImageMemoryPhase>,
-    cancel_phase: Option<ImageMemoryPhase>,
+    fault_phase: Option<MemoryPhase>,
+    cancel_phase: Option<MemoryPhase>,
 ) -> Result<(), String> {
     let mut scope = generator
-        .begin_image_memory_request(context)
+        .begin_memory_strategy_request(context)
         .map_err(|error| format!("begin lifecycle Krea scope: {error}"))?
         .ok_or_else(|| "lifecycle Krea selection did not create a provider scope".to_owned())?;
     scope
@@ -259,35 +258,35 @@ fn execute_lifecycle_request(
         .ok_or_else(|| "optimized lifecycle request did not receive GenerationMemory".to_owned())?;
     memory.calibration_error_phase = fault_phase;
     scope
-        .enter_phase(ImageMemoryPhase::Conditioning)
+        .enter_phase(MemoryPhase::Conditioning)
         .map_err(|error| format!("enter lifecycle conditioning phase: {error}"))?;
 
     let cancel = generation.cancel.clone();
-    let mut phase = ImageMemoryPhase::Conditioning;
+    let mut phase = MemoryPhase::Conditioning;
     let result = generator.generate(&generation, &mut |progress| match progress {
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::TextEncoder)
-            if cancel_phase == Some(ImageMemoryPhase::Conditioning) =>
+            if cancel_phase == Some(MemoryPhase::Conditioning) =>
         {
             cancel.cancel();
         }
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Conditioning =>
+            if phase == MemoryPhase::Conditioning =>
         {
-            let _ = scope.leave_phase(ImageMemoryPhase::Conditioning);
-            let _ = scope.enter_phase(ImageMemoryPhase::Denoise);
-            phase = ImageMemoryPhase::Denoise;
-            if cancel_phase == Some(ImageMemoryPhase::Denoise) {
+            let _ = scope.leave_phase(MemoryPhase::Conditioning);
+            let _ = scope.enter_phase(MemoryPhase::Denoise);
+            phase = MemoryPhase::Denoise;
+            if cancel_phase == Some(MemoryPhase::Denoise) {
                 cancel.cancel();
             }
         }
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Denoise =>
+            if phase == MemoryPhase::Denoise =>
         {
-            let _ = scope.leave_phase(ImageMemoryPhase::Denoise);
-            let _ = scope.enter_phase(ImageMemoryPhase::Decode);
-            phase = ImageMemoryPhase::Decode;
+            let _ = scope.leave_phase(MemoryPhase::Denoise);
+            let _ = scope.enter_phase(MemoryPhase::Decode);
+            phase = MemoryPhase::Decode;
         }
-        Progress::Decoding if cancel_phase == Some(ImageMemoryPhase::Decode) => {
+        Progress::Decoding if cancel_phase == Some(MemoryPhase::Decode) => {
             cancel.cancel();
         }
         _ => {}
@@ -301,21 +300,21 @@ fn execute_lifecycle_request(
                 .leave_phase(phase)
                 .map_err(|error| format!("leave successful lifecycle phase: {error}"))?;
             scope
-                .finish(ImageMemoryRunOutcome::Complete)
+                .finish(MemoryRunOutcome::Complete)
                 .map_err(|error| format!("finish successful lifecycle request: {error}"))
         }
         (Some(expected), None, Err(error))
-            if error.to_string().contains("injected image-memory calibration error")
+            if error.to_string().contains("injected memory-strategy calibration error")
                 && error.to_string().contains(&format!("{expected:?}")) =>
         {
             scope
-                .finish(ImageMemoryRunOutcome::Error {
+                .finish(MemoryRunOutcome::Error {
                     message: error.to_string(),
                 })
                 .map_err(|finish| format!("finish injected-error lifecycle request: {finish}"))
         }
         (None, Some(_), Err(runtime_cuda::gen_core::Error::Canceled)) => scope
-            .finish(ImageMemoryRunOutcome::Canceled)
+            .finish(MemoryRunOutcome::Canceled)
             .map_err(|error| format!("finish canceled lifecycle request: {error}")),
         (expected_fault, expected_cancel, actual) => Err(format!(
             "lifecycle outcome mismatch: fault={expected_fault:?}, cancel={expected_cancel:?}, actual={}",
@@ -329,15 +328,15 @@ fn execute_lifecycle_request(
 
 fn execute_parity_request(
     generator: &dyn runtime_cuda::gen_core::Generator,
-    baseline_context: &ImageMemoryRunContext,
-    strategy: ImageMemoryStrategy,
-    parameters: ImageMemoryStrategyParameters,
+    baseline_context: &MemoryRunContext,
+    strategy: MemoryStrategy,
+    parameters: MemoryStrategyParameters,
 ) -> Result<runtime_cuda::gen_core::Image, String> {
     let mut context = baseline_context.clone();
     context.selection.strategy = strategy;
     context.selection.parameters = parameters;
     let mut scope = generator
-        .begin_image_memory_request(&context)
+        .begin_memory_strategy_request(&context)
         .map_err(|error| format!("begin parity Krea scope for {strategy:?}: {error}"))?
         .ok_or_else(|| format!("parity Krea strategy {strategy:?} did not create a scope"))?;
     if strategy.is_optimized() {
@@ -377,23 +376,23 @@ fn execute_parity_request(
         .configure_request(&mut generation)
         .map_err(|error| format!("apply parity request strategy: {error}"))?;
     scope
-        .enter_phase(ImageMemoryPhase::Conditioning)
+        .enter_phase(MemoryPhase::Conditioning)
         .map_err(|error| format!("enter parity conditioning phase: {error}"))?;
-    let mut phase = ImageMemoryPhase::Conditioning;
+    let mut phase = MemoryPhase::Conditioning;
     let result = generator.generate(&generation, &mut |progress| match progress {
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Conditioning =>
+            if phase == MemoryPhase::Conditioning =>
         {
-            let _ = scope.leave_phase(ImageMemoryPhase::Conditioning);
-            let _ = scope.enter_phase(ImageMemoryPhase::Denoise);
-            phase = ImageMemoryPhase::Denoise;
+            let _ = scope.leave_phase(MemoryPhase::Conditioning);
+            let _ = scope.enter_phase(MemoryPhase::Denoise);
+            phase = MemoryPhase::Denoise;
         }
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Denoise =>
+            if phase == MemoryPhase::Denoise =>
         {
-            let _ = scope.leave_phase(ImageMemoryPhase::Denoise);
-            let _ = scope.enter_phase(ImageMemoryPhase::Decode);
-            phase = ImageMemoryPhase::Decode;
+            let _ = scope.leave_phase(MemoryPhase::Denoise);
+            let _ = scope.enter_phase(MemoryPhase::Decode);
+            phase = MemoryPhase::Decode;
         }
         _ => {}
     });
@@ -401,7 +400,7 @@ fn execute_parity_request(
         Ok(output) => output,
         Err(error) => {
             let message = error.to_string();
-            let _ = scope.finish(ImageMemoryRunOutcome::Error {
+            let _ = scope.finish(MemoryRunOutcome::Error {
                 message: message.clone(),
             });
             return Err(format!(
@@ -413,7 +412,7 @@ fn execute_parity_request(
         .leave_phase(phase)
         .map_err(|error| format!("leave parity terminal phase: {error}"))?;
     scope
-        .finish(ImageMemoryRunOutcome::Complete)
+        .finish(MemoryRunOutcome::Complete)
         .map_err(|error| format!("finish parity Krea request: {error}"))?;
     match output {
         runtime_cuda::gen_core::GenerationOutput::Images(mut images) if images.len() == 1 => {
@@ -476,7 +475,7 @@ fn preflight_fragment(
         Value::Null,
         json!({ "result": "not_run", "resolvedPathFingerprint": null }),
         protocol::diagnostics(
-            "image-memory-candle-adapter",
+            "memory-candle-adapter",
             "gated_before_execution",
             [blocker.clone()],
             [(measurement_name, "count", 1)],
@@ -523,11 +522,11 @@ fn run(request: &Value) -> Result<Value, String> {
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let contract = catalog
         .media()
-        .image_memory_contract(KREA_ID, &spec)
-        .map_err(|error| format!("read {KREA_ID} image-memory contract: {error}"))?
+        .memory_strategy_contract(KREA_ID, &spec)
+        .map_err(|error| format!("read {KREA_ID} memory-strategy contract: {error}"))?
         .ok_or_else(|| {
             format!(
-                "{KREA_ID} has no image-memory contract at {}",
+                "{KREA_ID} has no memory-strategy contract at {}",
                 protocol::INFERENCE_PIN
             )
         })?;
@@ -559,16 +558,24 @@ fn run(request: &Value) -> Result<Value, String> {
     let overlap = protocol::parameter(request, "decodeOverlap")?;
     let attention = protocol::parameter(request, "attentionChunkSize")?;
     let window = protocol::parameter(request, "transformerWindowSize")?;
-    let selected = ImageMemoryStrategyParameters {
+    let selected = MemoryStrategyParameters {
         decode_tile_edge: Some(edge),
         decode_overlap: Some(overlap),
         attention_chunk_size: Some(attention),
         transformer_window_size: Some(window),
+        // Rung 4's window scope (SC-15794). This adapter windows Krea's DiT blocks, and
+        // `candle-gen-krea` declares no `transformer_window_components`, which the contract reads
+        // as DiT-only -- so `Dit` is the one scope a request may name here. Stated explicitly
+        // rather than left `None` so the `validate_selection` call below actively checks the scope
+        // against the pinned provider's declared candidates; if a future Krea revision narrows
+        // rung 4 to a different component, this calibration run fails loudly at preflight instead
+        // of recording evidence under a silently-defaulted scope.
+        transformer_window_component: Some(TransformerComponent::Dit),
     };
-    let selection = ImageMemorySelection {
-        strategy: ImageMemoryStrategy::BoundedTransformerResidency,
+    let selection = MemorySelection {
+        strategy: MemoryStrategy::BoundedTransformerResidency,
         parameters: selected,
-        tier: ImageMemoryNumericTier {
+        tier: MemoryNumericTier {
             precision: Precision::Bf16,
             quant: Some(Quant::Q4),
         },
@@ -601,29 +608,29 @@ fn run(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let (width, height) = protocol::target_geometry(request)?;
-    let context = ImageMemoryRunContext {
+    let context = MemoryRunContext {
         selection,
         calibration_abi: actual_calibration.abi,
         calibration_fingerprint: actual_calibration.fingerprint.clone(),
-        mode: ImageMemoryMode::TextToImage,
+        mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
         has_phases: false,
-        geometry: ImageMemoryGeometry {
+        geometry: MemoryGeometry {
             width,
             height,
             batch: 1,
             frames: 1,
         },
         overlay: None,
-        budget: ImageMemoryBudget {
+        budget: MemoryBudget {
             total_bytes,
             committed_bytes: 0,
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 2 * GIB,
         },
         predicted_peak_bytes: total_bytes.saturating_sub(2 * GIB),
-        cache_state: ImageMemoryCacheState::Cold,
+        cache_state: MemoryCacheState::Cold,
         evidence_revision: format!("sc-15508-adapter@{}", protocol::INFERENCE_PIN),
     };
 
@@ -635,8 +642,8 @@ fn run(request: &Value) -> Result<Value, String> {
         .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
     vram.end_load(load_sample);
     let mut scope = generator
-        .begin_image_memory_request(&context)
-        .map_err(|error| format!("begin real Krea image-memory scope: {error}"))?
+        .begin_memory_strategy_request(&context)
+        .map_err(|error| format!("begin real Krea memory-strategy scope: {error}"))?
         .ok_or_else(|| "optimized Krea selection did not create a provider scope".to_owned())?;
     scope
         .configure_decode(edge, overlap, context.geometry)
@@ -661,32 +668,32 @@ fn run(request: &Value) -> Result<Value, String> {
         .configure_request(&mut generation)
         .map_err(|error| format!("apply Krea request-scoped strategy: {error}"))?;
     scope
-        .enter_phase(ImageMemoryPhase::Conditioning)
+        .enter_phase(MemoryPhase::Conditioning)
         .map_err(|error| format!("enter Krea conditioning phase: {error}"))?;
 
     let generation_sample = vram.phase();
     let mut phase_sample = Some(vram.phase());
-    let mut phase = ImageMemoryPhase::Conditioning;
+    let mut phase = MemoryPhase::Conditioning;
     let mut conditioning_peak_gb = None;
     let mut denoise_peak_gb = None;
     let mut decode_peak_gb = None;
     let result = generator.generate(&generation, &mut |progress| match progress {
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Conditioning =>
+            if phase == MemoryPhase::Conditioning =>
         {
             conditioning_peak_gb = phase_sample.take().map(|sample| vram.end_observed(sample));
-            let _ = scope.leave_phase(ImageMemoryPhase::Conditioning);
-            let _ = scope.enter_phase(ImageMemoryPhase::Denoise);
-            phase = ImageMemoryPhase::Denoise;
+            let _ = scope.leave_phase(MemoryPhase::Conditioning);
+            let _ = scope.enter_phase(MemoryPhase::Denoise);
+            phase = MemoryPhase::Denoise;
             phase_sample = Some(vram.phase());
         }
         Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer)
-            if phase == ImageMemoryPhase::Denoise =>
+            if phase == MemoryPhase::Denoise =>
         {
             denoise_peak_gb = phase_sample.take().map(|sample| vram.end_observed(sample));
-            let _ = scope.leave_phase(ImageMemoryPhase::Denoise);
-            let _ = scope.enter_phase(ImageMemoryPhase::Decode);
-            phase = ImageMemoryPhase::Decode;
+            let _ = scope.leave_phase(MemoryPhase::Denoise);
+            let _ = scope.enter_phase(MemoryPhase::Decode);
+            phase = MemoryPhase::Decode;
             phase_sample = Some(vram.phase());
         }
         _ => {}
@@ -694,9 +701,9 @@ fn run(request: &Value) -> Result<Value, String> {
     if let Some(sample) = phase_sample.take() {
         let terminal_peak_gb = vram.end_observed(sample);
         match phase {
-            ImageMemoryPhase::Conditioning => conditioning_peak_gb = Some(terminal_peak_gb),
-            ImageMemoryPhase::Denoise => denoise_peak_gb = Some(terminal_peak_gb),
-            ImageMemoryPhase::Decode => decode_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Conditioning => conditioning_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Denoise => denoise_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Decode => decode_peak_gb = Some(terminal_peak_gb),
         }
     }
     vram.end_gen(generation_sample);
@@ -705,7 +712,7 @@ fn run(request: &Value) -> Result<Value, String> {
         Ok(output) => output,
         Err(error) => {
             let message = error.to_string();
-            let _ = scope.finish(ImageMemoryRunOutcome::Error {
+            let _ = scope.finish(MemoryRunOutcome::Error {
                 message: message.clone(),
             });
             return Err(format!("real Krea q4 generation failed: {message}"));
@@ -715,8 +722,8 @@ fn run(request: &Value) -> Result<Value, String> {
         .leave_phase(phase)
         .map_err(|error| format!("leave terminal Krea phase: {error}"))?;
     scope
-        .finish(ImageMemoryRunOutcome::Complete)
-        .map_err(|error| format!("finish real Krea image-memory scope: {error}"))?;
+        .finish(MemoryRunOutcome::Complete)
+        .map_err(|error| format!("finish real Krea memory-strategy scope: {error}"))?;
     let image_count = match output {
         runtime_cuda::gen_core::GenerationOutput::Images(images) => images.len(),
         _ => 0,
@@ -740,9 +747,9 @@ fn run(request: &Value) -> Result<Value, String> {
     let overall_bytes = decimal_gb_to_bytes(report.peak_gb);
     let baseline = decimal_gb_to_bytes(report.baseline_gb);
     let lifecycle_phases = [
-        ImageMemoryPhase::Conditioning,
-        ImageMemoryPhase::Denoise,
-        ImageMemoryPhase::Decode,
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
     ];
     let smi = NvidiaSmi::resolve()?;
     let cleanup_tolerance_bytes = 64 * MIB;
@@ -809,23 +816,23 @@ fn run(request: &Value) -> Result<Value, String> {
             None,
         )?;
     }
-    let resident_parameters = ImageMemoryStrategyParameters::default();
+    let resident_parameters = MemoryStrategyParameters::default();
     let resident_a = execute_parity_request(
         generator.as_ref(),
         &context,
-        ImageMemoryStrategy::Resident,
+        MemoryStrategy::Resident,
         resident_parameters,
     )?;
     let bounded_b = execute_parity_request(
         generator.as_ref(),
         &context,
-        ImageMemoryStrategy::BoundedTransformerResidency,
+        MemoryStrategy::BoundedTransformerResidency,
         selected,
     )?;
     let resident_a_repeat = execute_parity_request(
         generator.as_ref(),
         &context,
-        ImageMemoryStrategy::Resident,
+        MemoryStrategy::Resident,
         resident_parameters,
     )?;
     let (resident_repeat_max_error, resident_repeat_mean_error) =
@@ -852,7 +859,7 @@ fn run(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
         }),
         protocol::diagnostics(
-            "image-memory-candle-adapter",
+            "memory-candle-adapter",
             "executed",
             [blocker.to_owned()],
             [

@@ -3287,7 +3287,7 @@ fn generate_one(
     // Quality-preserving, request-scoped memory adaptations selected by the candle Krea Turbo fit
     // ladder. `None` is the historical path for every other provider and unconstrained Krea jobs.
     memory: Option<gen_core::GenerationMemory>,
-    image_memory_context: Option<&gen_core::ImageMemoryRunContext>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -3336,10 +3336,10 @@ fn generate_one(
         ..Default::default()
     };
     enhance.apply(&mut request);
-    let output = crate::image_memory::generate_with_scope(
+    let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,
-        image_memory_context,
+        memory_strategy_context,
         on_progress,
     )
         .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
@@ -5015,7 +5015,7 @@ fn log_krea_turbo_evidence_exclusion(
     width: u32,
     height: u32,
     consumer: &str,
-    reason: Option<gen_core::ImageMemoryEvidenceVerdict>,
+    reason: Option<gen_core::MemoryEvidenceVerdict>,
 ) {
     tracing::warn!(
         model,
@@ -5023,8 +5023,8 @@ fn log_krea_turbo_evidence_exclusion(
         width,
         height,
         consumer,
-        reason = ?reason.unwrap_or(gen_core::ImageMemoryEvidenceVerdict::Missing),
-        "shared Krea image-memory evidence excluded; optimized execution is disabled"
+        reason = ?reason.unwrap_or(gen_core::MemoryEvidenceVerdict::Missing),
+        "shared Krea memory-strategy evidence excluded; optimized execution is disabled"
     );
 }
 
@@ -5936,7 +5936,7 @@ async fn generate_candle_stream(
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
-    let mut image_memory_selection: Option<gen_core::ImageMemorySelection> = None;
+    let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut adapted_peak_gb: Option<f64> = None;
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
@@ -5985,7 +5985,7 @@ async fn generate_candle_stream(
         }) =
             shared_krea_fit
         {
-            image_memory_selection = Some(selection);
+            memory_strategy_selection = Some(selection);
             adapted_peak_gb = Some(peak_gb);
             tracing::info!(
                 model = %request.model,
@@ -5994,7 +5994,7 @@ async fn generate_candle_stream(
                 height,
                 needed_gb,
                 available_gb = budget.map_or(0.0, |budget| budget.free_gb),
-                "shared image-memory selector retained Krea Turbo resident execution"
+                "shared memory-strategy selector retained Krea Turbo resident execution"
             );
             false
         } else {
@@ -6046,7 +6046,7 @@ async fn generate_candle_stream(
                             needed_gb,
                             selection,
                         }) => {
-                            image_memory_selection = Some(selection);
+                            memory_strategy_selection = Some(selection);
                             generation_memory = Some(match rung {
                                 crate::vram_gate::KreaTurboRung::ThreeStage => {
                                     gen_core::GenerationMemory::default()
@@ -6291,7 +6291,7 @@ async fn generate_candle_stream(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let image_memory_context = image_memory_selection.and_then(|selection| {
+    let memory_strategy_context = memory_strategy_selection.and_then(|selection| {
         let budget = budget?;
         let predicted_peak_gb = adapted_peak_gb?;
         let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
@@ -6315,24 +6315,24 @@ async fn generate_candle_stream(
             requested_tier,
             effective_tier = tier,
             strategy = ?selection.strategy,
-            "shared image-memory selection admitted"
+            "shared memory-strategy selection admitted"
         );
-        Some(gen_core::ImageMemoryRunContext {
+        Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
             calibration_fingerprint,
-            mode: gen_core::ImageMemoryMode::TextToImage,
+            mode: gen_core::MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
             has_phases: false,
-            geometry: gen_core::ImageMemoryGeometry {
+            geometry: gen_core::MemoryGeometry {
                 width,
                 height,
                 batch: 1,
                 frames: 1,
             },
             overlay: None,
-            budget: gen_core::ImageMemoryBudget {
+            budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
                 committed_bytes: gb_to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
                 reclaimable_bytes: 0,
@@ -6340,9 +6340,9 @@ async fn generate_candle_stream(
             },
             predicted_peak_bytes: gb_to_bytes(predicted_peak_gb),
             cache_state: if reclaimable_gb > 0.0 {
-                gen_core::ImageMemoryCacheState::Warm
+                gen_core::MemoryCacheState::Warm
             } else {
-                gen_core::ImageMemoryCacheState::Cold
+                gen_core::MemoryCacheState::Cold
             },
             evidence_revision:
                 "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
@@ -6415,7 +6415,7 @@ async fn generate_candle_stream(
                         use_pid,
                         text_style_gain,
                         generation_memory,
-                        image_memory_context.as_ref(),
+                        memory_strategy_context.as_ref(),
                         &enhance,
                         &cancel,
                         on_progress,

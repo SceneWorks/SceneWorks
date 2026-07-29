@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sceneworks.ai/schemas/image-memory-calibration.schema.json",
+  "$id": "https://sceneworks.ai/schemas/memory-calibration.schema.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
     "schemaVersion": { "const": 2 },
-    "harnessVersion": { "const": "sceneworks-image-memory-v2" },
+    "harnessVersion": { "const": "sceneworks-memory-v3" },
     "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
   },
   "$defs": {
@@ -259,7 +259,7 @@
         },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
-        "harnessVersion": { "const": "sceneworks-image-memory-v2" }
+        "harnessVersion": { "const": "sceneworks-memory-v3" }
       },
       "allOf": [
         {

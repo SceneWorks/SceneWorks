@@ -149,6 +149,21 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-rust-api --features backend-candle
+      # PR guard for the Candle memory-calibration adapter binary (epic 15448). Like the
+      # candle-gated worker code it is invisible to every other lane: `src/bin/candle.rs` is
+      # `compile_error!` on macOS, macos-mlx.yml builds only `--bin memory-mlx-adapter`, and the
+      # Linux candle lane is workflow_dispatch-only. Before this step a break in it stayed hidden
+      # until someone ran Candle calibration on a CUDA host — which is exactly where this epic's
+      # downstream Candle stories start (sc-15804 review: an exhaustive
+      # `MemoryStrategyParameters` literal here went stale against the inference contract with
+      # nothing to catch it). `cargo check` is enough: this binary is only ever run by hand on a
+      # calibration host, so typechecking the CUDA build is the coverage that was missing.
+      - name: Check the candle memory adapter builds (memory-candle-adapter)
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
       - name: Clippy (candle worker)
         shell: cmd
         run: |

@@ -5,9 +5,9 @@ members = [
     "apps/rust-api",
     "apps/rust-worker",
     "crates/sceneworks-core",
-    "crates/sceneworks-image-memory-adapter",
     "crates/sceneworks-image-quality",
     "crates/sceneworks-mcp",
+    "crates/sceneworks-memory-adapter",
     "crates/sceneworks-worker",
 ]
 # apps/desktop (Tauri) needs platform GUI libs (WebKit/GTK on Linux) and is built
@@ -84,4 +84,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "b739a1835178f27301d008c88f63c45e0869ae1e" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "00b9a515f2a9ad878f7971a660b17234bcffbb67" }
