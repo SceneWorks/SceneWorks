@@ -1367,6 +1367,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The keys of a JSON object, sorted, so an assertion about WHICH keys survived the
+    /// allow-list cannot accidentally assert the order they came out in.
+    ///
+    /// `serde_json::Map` is a `BTreeMap` (sorted iteration) with the `preserve_order` feature
+    /// off and an `IndexMap` (insertion order) with it on — and Cargo unifies features across
+    /// every crate being built, so the SAME map iterates differently under `cargo test -p
+    /// sceneworks-core` than under the workspace build the `parity` job runs (`sceneworks-worker`
+    /// → `sceneworks-gen-core` → `core-llm` turns `preserve_order` on). An assertion written as an
+    /// ordered `Vec` therefore passes locally and fails in CI while the sanitizer is correct in
+    /// both. Sorting here makes these assertions say what they mean — the key SET — under either
+    /// configuration.
+    fn sorted_keys(object: &JsonObject) -> Vec<&str> {
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
     fn asset_fixture() -> Asset {
         serde_json::from_value(json!({
             "schemaVersion": 1,
@@ -1466,7 +1483,7 @@ mod tests {
         .cloned()
         .expect("object");
         let sanitized = sanitize_advanced(&advanced);
-        assert_eq!(sanitized.keys().collect::<Vec<_>>(), vec!["steps"]);
+        assert_eq!(sorted_keys(&sanitized), vec!["steps"]);
     }
 
     #[test]
@@ -1480,7 +1497,7 @@ mod tests {
         .cloned()
         .expect("object");
         let sanitized = sanitize_advanced(&advanced);
-        assert_eq!(sanitized.keys().collect::<Vec<_>>(), vec!["steps"]);
+        assert_eq!(sorted_keys(&sanitized), vec!["steps"]);
     }
 
     #[test]
@@ -1955,10 +1972,7 @@ mod tests {
         .expect("object");
         let sanitized = sanitize_advanced(&advanced);
         let pose = sanitized["poses"][0].as_object().expect("object");
-        assert_eq!(
-            pose.keys().collect::<Vec<_>>(),
-            vec!["face", "hands", "keypoints"]
-        );
+        assert_eq!(sorted_keys(pose), vec!["face", "hands", "keypoints"]);
         let encoded = serde_json::to_string(&sanitized).expect("serializes");
         for leak in ["pose_local_uuid", "Standing", "sourcePath", "C:\\\\poses"] {
             assert!(!encoded.contains(leak), "{leak} leaked into the envelope");
@@ -1973,7 +1987,7 @@ mod tests {
         .expect("object");
         let sanitized = sanitize_advanced(&smuggled);
         let pose = sanitized["poses"][0].as_object().expect("object");
-        assert_eq!(pose.keys().collect::<Vec<_>>(), vec!["keypoints"]);
+        assert_eq!(sorted_keys(pose), vec!["keypoints"]);
     }
 
     #[test]
@@ -2065,7 +2079,7 @@ mod tests {
             "somethingNew": "dropped"
         });
         let share = parse_workflow_share(&hostile).expect("parses");
-        assert_eq!(share.advanced.keys().collect::<Vec<_>>(), vec!["steps"]);
+        assert_eq!(sorted_keys(&share.advanced), vec!["steps"]);
         let encoded = serde_json::to_string(&share).expect("serializes");
         assert!(!encoded.contains("somethingNew"));
     }
@@ -2161,7 +2175,7 @@ mod tests {
         assert_eq!(share.producer.url, "");
         assert_eq!(share.producer.version, "");
 
-        assert_eq!(share.advanced.keys().collect::<Vec<_>>(), vec!["steps"]);
+        assert_eq!(sorted_keys(&share.advanced), vec!["steps"]);
 
         let encoded = serde_json::to_string(&share).expect("serializes");
         for leak in [

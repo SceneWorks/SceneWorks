@@ -158,6 +158,14 @@ fn load_golden_fixture() -> Value {
 // Golden fixture + round trip (matching tests/contract_roundtrip.rs)
 // ---------------------------------------------------------------------------
 
+// The three tests below compare parsed `Value`s and MUST keep doing so — never serialized text,
+// and never a byte comparison against the fixture file. `serde_json::Map` is a `BTreeMap`
+// (sorted) or an `IndexMap` (insertion-ordered) depending on the `preserve_order` feature, which
+// Cargo unifies across the workspace, so the same envelope serializes its keys in a different
+// ORDER under `cargo test -p sceneworks-core` than under the workspace build the `parity` job
+// runs. `Value` equality is order-independent under both; a text comparison would not be, and
+// would fail in exactly one of the two configurations while nothing was wrong (sc-15946).
+
 #[test]
 fn golden_envelope_round_trips_without_field_drift() {
     let original = load_golden_fixture();
