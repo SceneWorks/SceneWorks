@@ -262,3 +262,7 @@ __marimo__/
 
 # Local Windows build convenience script (loads vcvars + NVCC_CCBIN, runs tauri build)
 build.bat
+
+# One-off Shortcut migration run state (sc-15812)
+.shortcut-split-state.json
+.shortcut-split-plan.json
