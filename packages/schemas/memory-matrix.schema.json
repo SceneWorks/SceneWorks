@@ -77,6 +77,16 @@
         "source": { "type": "string", "minLength": 1 },
         "reason": { "type": "string", "minLength": 1 }
       }
+    },
+    "backendScopedStories": {
+      "description": "Owning Shortcut story per advertised backend (SC-15812). An mlx-only entry carries only `mlx`; a Candle cell can never be covered by the MLX story.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "mlx": { "type": "integer" },
+        "candle": { "type": "integer" }
+      }
     }
   },
   "required": [
@@ -91,7 +101,10 @@
     "modelSlices"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": {
+      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version.",
+      "const": 2
+    },
     "generatedFrom": { "type": "object" },
     "conformanceStates": {
       "type": "array",
@@ -130,8 +143,8 @@
           "resolvedRoute",
           "routeKind",
           "backends",
-          "owningFamilyStory",
-          "owningModelStory"
+          "owningFamilyStories",
+          "owningModelStories"
         ],
         "properties": {
           "id": { "type": "string" },
@@ -145,8 +158,8 @@
             "items": { "enum": ["mlx", "candle"] },
             "uniqueItems": true
           },
-          "owningFamilyStory": { "type": "integer" },
-          "owningModelStory": { "type": "integer" }
+          "owningFamilyStories": { "$ref": "#/$defs/backendScopedStories" },
+          "owningModelStories": { "$ref": "#/$defs/backendScopedStories" }
         }
       }
     },

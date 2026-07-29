@@ -61,3 +61,13 @@ evidence.
 The provider ABI types and compatibility defaults live in the pinned SceneWorks inference
 repository. A provider that does not implement the additive contract exposes resident-only,
 unverified defaults, preserving its current behavior without claiming optimization.
+
+## Adding a backend to a catalog entry
+
+Matrix ownership is keyed per (entry, backend) and is not inferred (SC-15812): a cell must name the
+Shortcut story that can actually close it, and an MLX story cannot be closed from CUDA hardware. So
+adding a `candle` block to an entry in `config/manifests/builtin.models.jsonc` — or adding a new
+entry — fails the `parity` lane until that backend's owning model story and family story are recorded
+in `MODEL_STORIES`/`FAMILY_STORIES` in `scripts/generate-memory-matrix.mjs`. The failure is deliberate
+and its message names the missing twin, but it does mean a catalog change is blocked on filing a
+Shortcut story first. File the backend twin, add the id, then regenerate.

@@ -62,27 +62,56 @@ function die(message) {
   process.exit(1);
 }
 
-// ── phase A: plan, computed purely from the generated matrix ───────────────────────────────────
-function buildPlan() {
-  if (!existsSync(MATRIX)) die(`matrix not found at ${MATRIX}`);
-  const matrix = JSON.parse(readFileSync(MATRIX, "utf8"));
+/**
+ * A rejected plan. `buildPlan` throws instead of exiting so it is testable in-process; the CLI maps
+ * this back onto the same `FAIL ...` + exit 1 it always produced.
+ */
+export class PlanError extends Error {}
 
+function planFail(message) {
+  throw new PlanError(message);
+}
+
+function loadMatrix() {
+  if (!existsSync(MATRIX)) planFail(`matrix not found at ${MATRIX}`);
+  return JSON.parse(readFileSync(MATRIX, "utf8"));
+}
+
+// ── phase A: plan, computed purely from the generated matrix ───────────────────────────────────
+export function buildPlan(matrix = loadMatrix(), expect = EXPECT) {
   const byModel = new Map();
+  // sc-15812 made the matrix attribute cells PER (model, backend): a candle cell names the Candle
+  // twin, not the MLX story. So ownership is read per backend, and the disagreement guard is scoped
+  // within a backend — comparing across backends would now fire on a correct matrix.
+  const OWNERSHIP = {
+    mlx: { story: "mlxStory", family: "family" },
+    candle: { story: "candleStory", family: "candleFamily" },
+  };
   for (const cell of matrix.cells ?? []) {
     let entry = byModel.get(cell.modelId);
     if (!entry) {
       entry = {
         model: cell.modelId,
-        mlxStory: cell.owningModelStory,
-        family: cell.owningFamilyStory,
+        mlxStory: null,
+        family: null,
+        candleStory: null,
+        candleFamily: null,
         backends: new Set(),
       };
       byModel.set(cell.modelId, entry);
     }
     entry.backends.add(cell.backend);
-    // A model whose cells disagree about ownership means the generator changed under us.
-    if (entry.mlxStory !== cell.owningModelStory || entry.family !== cell.owningFamilyStory) {
-      die(`${cell.modelId}: cells disagree about owning story/family — regenerate the matrix`);
+    const keys = OWNERSHIP[cell.backend];
+    if (!keys) planFail(`${cell.modelId}: unknown cell backend ${cell.backend}`);
+    if (entry[keys.story] === null) {
+      entry[keys.story] = cell.owningModelStory;
+      entry[keys.family] = cell.owningFamilyStory;
+    } else if (
+      // A model whose same-backend cells disagree about ownership means the generator changed under us.
+      entry[keys.story] !== cell.owningModelStory ||
+      entry[keys.family] !== cell.owningFamilyStory
+    ) {
+      planFail(`${cell.modelId}: ${cell.backend} cells disagree about owning story/family — regenerate the matrix`);
     }
   }
 
@@ -95,6 +124,21 @@ function buildPlan() {
   const allFamilies = [...new Set(models.map((m) => m.family))];
   const mlxOnlyFamilies = allFamilies.filter((f) => !dualFamilies.includes(f)).sort((a, b) => a - b);
 
+  // sc-15812: now that the matrix names both twins, the Candle ids are readable straight off it.
+  // That matters because `.shortcut-split-state.json` is gitignored, so --verify used to report all
+  // 47 twins missing from a fresh clone; the matrix is the durable source.
+  // A plain object, not a Map: --dry-run serialises the plan, and a Map would silently write `{}`.
+  const candleFamilyByFamily = {};
+  for (const m of dualModels) {
+    const seen = candleFamilyByFamily[m.family];
+    if (seen === undefined) candleFamilyByFamily[m.family] = m.candleFamily;
+    else if (seen !== m.candleFamily) {
+      planFail(
+        `family SC-${m.family}: models disagree about the Candle family twin (SC-${seen} vs SC-${m.candleFamily})`,
+      );
+    }
+  }
+
   // Assert the shape BEFORE any write. A drifted catalog must stop the run, not silently
   // half-apply — the whole point of the split is a trustworthy graph.
   const actual = {
@@ -105,9 +149,9 @@ function buildPlan() {
     dualFamilies: dualFamilies.length,
     mlxOnlyFamilies: mlxOnlyFamilies.length,
   };
-  for (const [key, want] of Object.entries(EXPECT)) {
+  for (const [key, want] of Object.entries(expect)) {
     if (actual[key] !== want) {
-      die(
+      planFail(
         `invariant ${key}: matrix says ${actual[key]}, sc-15812 says ${want}.\n` +
           `        The catalog changed. Re-derive the split and update EXPECT before applying.`,
       );
@@ -115,10 +159,19 @@ function buildPlan() {
   }
   // A dual model whose family is not itself dual would strand the Candle story with no parent.
   for (const m of dualModels) {
-    if (!dualFamilies.includes(m.family)) die(`${m.model}: dual model under non-dual family SC-${m.family}`);
+    if (!dualFamilies.includes(m.family)) planFail(`${m.model}: dual model under non-dual family SC-${m.family}`);
   }
 
-  return { models, dualModels, mlxOnly, candleOnly, dualFamilies, mlxOnlyFamilies, actual };
+  return {
+    models,
+    dualModels,
+    mlxOnly,
+    candleOnly,
+    dualFamilies,
+    mlxOnlyFamilies,
+    candleFamilyByFamily,
+    actual,
+  };
 }
 
 // ── Shortcut client — minimal, rate-limited, never logs the token ───────────────────────────────
@@ -176,6 +229,15 @@ function mlxName(name) {
   return name.endsWith(" — MLX/Metal") ? name : `${name} — MLX/Metal`;
 }
 
+/**
+ * The Candle twin's name for a story currently named `name`, whether or not it has been rescoped yet.
+ * Names are the natural key within the epic, so `apply` and `verify` MUST derive them identically —
+ * hence one function rather than the same expression written twice.
+ */
+export function candleTwinName(name) {
+  return candleName(mlxName(name).replace(" — MLX/Metal", ""));
+}
+
 // ── phase B: apply ─────────────────────────────────────────────────────────────────────────────
 async function apply(plan) {
   const tok = token();
@@ -193,7 +255,7 @@ async function apply(plan) {
       console.warn(`  state names SC-${state[kind][mlxId]} for SC-${mlxId} but it is gone; recreating`);
     }
     const twin = await api("GET", `/stories/${mlxId}`, null, tok);
-    const name = candleName(mlxName(twin.name).replace(" — MLX/Metal", ""));
+    const name = candleTwinName(twin.name);
     const adopted = byName.get(name);
     if (adopted) {
       state[kind][mlxId] = adopted.id;
@@ -281,14 +343,27 @@ async function verify(plan) {
   const state = loadState();
   const epicStories = await api("GET", `/epics/${EPIC_ID}/stories`, null, tok);
   const byId = new Map(epicStories.map((s) => [s.id, s]));
+  const byName = new Map(epicStories.map((s) => [s.name, s]));
   const problems = [];
 
+  // The matrix is the authority on which twin id belongs to which MLX story; the state file is only a
+  // cross-check, because it is gitignored and therefore absent on a fresh clone.
+  const expected = (fromMatrix, fromState, label) => {
+    if (fromState && fromMatrix && fromState !== fromMatrix) {
+      problems.push(`${label}: matrix names SC-${fromMatrix} but the state file names SC-${fromState}`);
+    }
+    return fromMatrix ?? fromState;
+  };
   for (const familyId of plan.dualFamilies) {
-    const twin = state.candleFamilies[familyId];
+    const twin = expected(
+      plan.candleFamilyByFamily[familyId],
+      state.candleFamilies[familyId],
+      `family SC-${familyId}`,
+    );
     if (!twin || !byId.has(twin)) problems.push(`family SC-${familyId}: no Candle twin`);
   }
   for (const m of plan.dualModels) {
-    const twin = state.candleModels[m.mlxStory];
+    const twin = expected(m.candleStory, state.candleModels[m.mlxStory], `model SC-${m.mlxStory} (${m.model})`);
     if (!twin || !byId.has(twin)) problems.push(`model SC-${m.mlxStory} (${m.model}): no Candle twin`);
     const mlx = byId.get(m.mlxStory);
     if (mlx && !mlx.name.endsWith("— MLX/Metal")) problems.push(`SC-${m.mlxStory}: not rescoped to MLX`);
@@ -296,16 +371,35 @@ async function verify(plan) {
   // No Candle work has been done yet, so a Candle twin in a completed state is a bug, not progress.
   // RELAX THIS the day genuine Candle evidence starts landing — but not before, because the state
   // was silently inherited from the MLX twin once already (SC-15815) and read as finished work.
-  for (const twin of [...Object.values(state.candleFamilies), ...Object.values(state.candleModels)]) {
+  const everyTwin = new Set([
+    ...Object.values(state.candleFamilies),
+    ...Object.values(state.candleModels),
+    ...Object.values(plan.candleFamilyByFamily),
+    ...plan.dualModels.map((m) => m.candleStory),
+  ]);
+  for (const twin of everyTwin) {
+    if (!twin) continue;
     const s = byId.get(twin);
     if (s?.completed) problems.push(`SC-${twin}: Candle twin is marked complete but no Candle work has landed`);
   }
 
   // The mlx-only set must be untouched: a Candle twin there could never be closed.
+  //
+  // The state file is gitignored, so on the fresh clone this check exists to support it is `{}` and a
+  // state-only lookup can NEVER fire — the guard would read as green while proving nothing. So the
+  // authority is the live epic, resolved by the same name key `apply` creates twins under.
   for (const m of plan.mlxOnly) {
     if (state.candleModels[m.mlxStory]) problems.push(`SC-${m.mlxStory} (${m.model}): mlx-only but has a Candle twin`);
     const s = byId.get(m.mlxStory);
-    if (s && s.name.endsWith("— MLX/Metal")) problems.push(`SC-${m.mlxStory}: mlx-only should not be renamed`);
+    if (!s) continue;
+    if (s.name.endsWith("— MLX/Metal")) problems.push(`SC-${m.mlxStory}: mlx-only should not be renamed`);
+    const twinName = candleTwinName(s.name);
+    const named = byName.get(twinName);
+    if (named) {
+      problems.push(
+        `SC-${m.mlxStory} (${m.model}): mlx-only but the epic carries "${twinName}" (SC-${named.id}) — an mlx-only entry's Candle twin can never be closed`,
+      );
+    }
   }
 
   if (problems.length) {
@@ -317,35 +411,45 @@ async function verify(plan) {
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────────────────────
-const mode = process.argv.find((a) => ["--dry-run", "--apply", "--verify"].includes(a)) ?? "--dry-run";
-const plan = buildPlan();
-
-if (mode === "--dry-run") {
-  console.log("\nInvariants (matrix vs sc-15812)");
-  for (const [k, v] of Object.entries(plan.actual)) console.log(`  ok  ${k.padEnd(18)} ${v}`);
-
-  console.log(`\nWould create ${plan.dualFamilies.length} Candle family stories:`);
-  for (const f of plan.dualFamilies) {
-    const kids = plan.dualModels.filter((m) => m.family === f);
-    console.log(`  SC-${f} -> Candle twin, blocking ${kids.length} model twin(s)`);
+// Guarded so the plan builder can be imported by its test without running the CLI (or reading the real
+// matrix) as an import side effect.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const mode = process.argv.find((a) => ["--dry-run", "--apply", "--verify"].includes(a)) ?? "--dry-run";
+  let plan;
+  try {
+    plan = buildPlan();
+  } catch (error) {
+    if (!(error instanceof PlanError)) throw error;
+    die(error.message);
   }
-  console.log(`\nWould create ${plan.dualModels.length} Candle model stories:`);
-  for (const m of plan.dualModels) console.log(`  SC-${m.mlxStory}  fam SC-${m.family}  ${m.model}`);
 
-  console.log(`\nWould rescope ${plan.dualFamilies.length + plan.dualModels.length} existing stories to MLX/Metal.`);
-  console.log(`Would leave UNTOUCHED: ${plan.mlxOnly.length} mlx-only models, ${plan.mlxOnlyFamilies.length} mlx-only families (SC-${plan.mlxOnlyFamilies.join(", SC-")}).`);
+  if (mode === "--dry-run") {
+    console.log("\nInvariants (matrix vs sc-15812)");
+    for (const [k, v] of Object.entries(plan.actual)) console.log(`  ok  ${k.padEnd(18)} ${v}`);
 
-  const writes =
-    (plan.dualFamilies.length + plan.dualModels.length) * 2 +
-    plan.dualFamilies.length * FAMILY_GATES.length +
-    plan.dualModels.length +
-    (plan.dualFamilies.length + plan.dualModels.length);
-  console.log(`\nApprox ${writes} writes. Re-runnable; state in ${STATE}`);
+    console.log(`\nWould create ${plan.dualFamilies.length} Candle family stories:`);
+    for (const f of plan.dualFamilies) {
+      const kids = plan.dualModels.filter((m) => m.family === f);
+      console.log(`  SC-${f} -> Candle twin, blocking ${kids.length} model twin(s)`);
+    }
+    console.log(`\nWould create ${plan.dualModels.length} Candle model stories:`);
+    for (const m of plan.dualModels) console.log(`  SC-${m.mlxStory}  fam SC-${m.family}  ${m.model}`);
 
-  writeFileSync(PLAN, `${JSON.stringify(plan, null, 2)}\n`);
-  console.log(`Plan written to ${PLAN}`);
-} else if (mode === "--apply") {
-  await apply(plan);
-} else {
-  await verify(plan);
+    console.log(`\nWould rescope ${plan.dualFamilies.length + plan.dualModels.length} existing stories to MLX/Metal.`);
+    console.log(`Would leave UNTOUCHED: ${plan.mlxOnly.length} mlx-only models, ${plan.mlxOnlyFamilies.length} mlx-only families (SC-${plan.mlxOnlyFamilies.join(", SC-")}).`);
+
+    const writes =
+      (plan.dualFamilies.length + plan.dualModels.length) * 2 +
+      plan.dualFamilies.length * FAMILY_GATES.length +
+      plan.dualModels.length +
+      (plan.dualFamilies.length + plan.dualModels.length);
+    console.log(`\nApprox ${writes} writes. Re-runnable; state in ${STATE}`);
+
+    writeFileSync(PLAN, `${JSON.stringify(plan, null, 2)}\n`);
+    console.log(`Plan written to ${PLAN}`);
+  } else if (mode === "--apply") {
+    await apply(plan);
+  } else {
+    await verify(plan);
+  }
 }
