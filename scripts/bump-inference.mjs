@@ -4,12 +4,11 @@
 // SceneWorks is its only consumer, so a formal release does not belong on the critical path between
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
-// The pins live in crates/sceneworks-worker/Cargo.toml: sceneworks-gen-core + the runtime-macos /
-// runtime-cuda bundles, all on https://github.com/SceneWorks/inference. The root Cargo.toml
-// additionally `[patch]`es candle-kernels to the multi-arch vendored copy inside the same
-// inference revision (sc-7544 / sc-13510) — that rev must move in lockstep or the patched kernels
-// skew against the pinned candle-core. This rewrites each of those `tag = "..."` / `rev = "..."`
-// pins (in BOTH manifests) to `rev = "<sha>"` and regenerates the lockfile.
+// The pins live in crates/sceneworks-worker/Cargo.toml and
+// crates/sceneworks-image-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
+// candle-kernels to the multi-arch vendored copy inside the same inference revision (sc-7544 /
+// sc-13510) — that rev must move in lockstep or the patched kernels skew against candle-core. This
+// rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
 // it must resolve to the same fork the pinned inference uses or Cargo builds two mlx-rs and the
@@ -28,6 +27,8 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
+const IMAGE_MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-image-memory-adapter/Cargo.toml");
+const LOCKFILE = join(repoRoot, "Cargo.lock");
 // Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
@@ -80,6 +81,8 @@ function inferenceManifests() {
 
 const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
 const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
+const IMAGE_MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-image-memory-adapter/src/lib.rs");
+const IMAGE_MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 // --- pure: rewrite the inference pins to rev=<sha> (self-tested; no fs/network) ---------------
@@ -116,6 +119,16 @@ function repinSemanticProvenance(source, sha) {
   return source.replace(SEMANTIC_PROVENANCE_RE, `$1${sha}$2`);
 }
 
+function repinImageMemoryProvenance(source, sha) {
+  if (!IMAGE_MEMORY_PROVENANCE_RE.test(source)) {
+    throw new Error(
+      `no INFERENCE_PIN constant found in ${IMAGE_MEMORY_PROVENANCE} -- the calibration adapter ` +
+        "provenance stamp must move with the pin",
+    );
+  }
+  return source.replace(IMAGE_MEMORY_PROVENANCE_RE, `$1${sha}$2`);
+}
+
 // --- git / cargo orchestration ----------------------------------------------------------------
 
 function latestInferenceSha() {
@@ -125,8 +138,41 @@ function latestInferenceSha() {
   return sha;
 }
 
-function cargoUpdate() {
-  const spec = [...INFERENCE_CRATES, ...PATCHED_CRATES].flatMap((crate) => ["-p", crate]);
+function packageSpecsForUpdate(crate, sha, lockText = readFileSync(LOCKFILE, "utf8")) {
+  const packages = lockText
+    .split("[[package]]")
+    .slice(1)
+    .map((block) => ({
+      name: block.match(/\nname = "([^"]+)"/)?.[1],
+      version: block.match(/\nversion = "([^"]+)"/)?.[1],
+      source: block.match(/\nsource = "([^"]+)"/)?.[1],
+    }))
+    .filter(({ name, source }) => name === crate && source?.includes(INFERENCE_GIT));
+  if (packages.length <= 1) return [crate];
+
+  const stale = packages.filter(({ source }) => !source.includes(`?rev=${sha}#`));
+  if (stale.length === 0) return [crate];
+  return stale.map(({ name, version, source }) => {
+    const sourceWithoutCommit = source.slice(0, source.lastIndexOf("#"));
+    return `${sourceWithoutCommit}#${name}@${version}`;
+  });
+}
+
+function lockHasStaleInferenceRevision(sha, lockText = readFileSync(LOCKFILE, "utf8")) {
+  return lockText
+    .split("\n")
+    .some(
+      (line) =>
+        line.includes(`source = "git+${INFERENCE_GIT}?rev=`) &&
+        !line.includes(`?rev=${sha}#`),
+    );
+}
+
+function cargoUpdate(sha) {
+  const packages = [...new Set([...INFERENCE_CRATES, ...PATCHED_CRATES])];
+  const spec = packages.flatMap((crate) =>
+    packageSpecsForUpdate(crate, sha).flatMap((packageSpec) => ["-p", packageSpec]),
+  );
   console.log(`$ cargo update ${spec.join(" ")}`);
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
@@ -228,6 +274,43 @@ function selfTest() {
     "neighbouring 40-hex CLIP_MODEL_REVISION is left byte-identical",
     stampBumped.includes(CLIP_DECOY) && !stampBumped.includes(`CLIP_MODEL_REVISION: &str = "${SHA}"`),
   );
+  check(
+    "image-memory adapter provenance stamp bumps with the pin",
+    repinImageMemoryProvenance(
+      `pub const INFERENCE_PIN: &str = "${"b".repeat(40)}";`,
+      SHA,
+    ) === `pub const INFERENCE_PIN: &str = "${SHA}";`,
+  );
+  const OLD_SHA = "b".repeat(40);
+  const OLD_COMMIT = "c".repeat(40);
+  const CURRENT_COMMIT = "d".repeat(40);
+  const duplicateLock = `
+[[package]]
+name = "mlx-gen"
+version = "0.0.0"
+source = "git+${INFERENCE_GIT}?rev=${OLD_SHA}#${OLD_COMMIT}"
+
+[[package]]
+name = "mlx-gen"
+version = "0.0.0"
+source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
+`;
+  check(
+    "duplicate lock revisions select only the stale source-qualified package",
+    packageSpecsForUpdate("mlx-gen", SHA, duplicateLock).join("\n") ===
+      `git+${INFERENCE_GIT}?rev=${OLD_SHA}#mlx-gen@0.0.0`,
+  );
+  check(
+    "stale inference lock revisions are detected",
+    lockHasStaleInferenceRevision(SHA, duplicateLock),
+  );
+  check(
+    "a lock containing only the requested revision is clean",
+    !lockHasStaleInferenceRevision(
+      SHA,
+      duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+    ),
+  );
   let stampThrew = false;
   try {
     repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
@@ -274,24 +357,39 @@ function main() {
   // exists because a whole new crate once slipped the marker vocabulary and shipped unclassified
   // (sc-15138 -> sc-15191).
   const manifests = [
+    // DISCOVERED, not enumerated. A hand-written list is exactly how
+    // `crates/sceneworks-image-memory-adapter` got stranded on the previous revision: the crate was
+    // added later and nobody remembered to add its manifest here, so the bump rewrote two of the
+    // three and left one behind. Discovery makes the next such crate correct by default.
     ...inferenceManifests().map((path) => ({
       path,
       rewrite: (text) => repin(text, sha, path),
     })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
+    {
+      path: IMAGE_MEMORY_PROVENANCE,
+      rewrite: (text) => repinImageMemoryProvenance(text, sha),
+    },
   ].map(({ path, rewrite }) => {
     const current = readFileSync(path, "utf8");
     return { path, current, bumped: rewrite(current) };
   });
   // NOTE: "manifests already say `sha`" is NOT the same as "the lockfile agrees". This used to
-  // early-return here, so a tree whose manifests were correct but whose `Cargo.lock` still carried
-  // the previous revision could never self-heal -- re-running the script just said "already pinned"
-  // and did nothing. That is precisely the state a partially-applied bump leaves behind. Fall through
-  // to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and running them unconditionally
-  // makes the script idempotent AND verifying rather than idempotent and blind.
+  // early-return on the manifests alone, so a tree whose manifests were correct but whose
+  // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
+  // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
+  // leaves behind. Fall through to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and
+  // running them unconditionally makes the script idempotent AND verifying rather than idempotent
+  // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
+  // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
+  // pmetal-mlx-rs) that no revision-string comparison can see.
   const manifestsAlreadyPinned = manifests.every((m) => m.bumped === m.current);
   if (manifestsAlreadyPinned) {
-    console.log(`bump-inference: manifests already pinned at ${sha}; verifying the lockfile agrees`);
+    console.log(
+      lockHasStaleInferenceRevision(sha)
+        ? `bump-inference: manifests already pinned at ${sha}, but the lockfile is STALE; repairing`
+        : `bump-inference: manifests already pinned at ${sha}; verifying the lockfile agrees`,
+    );
   }
   console.log(
     `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
@@ -308,7 +406,7 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  cargoUpdate();
+  cargoUpdate(sha);
   verifyNoSkew();
   console.log("bump-inference: done");
 }

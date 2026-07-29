@@ -954,8 +954,9 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(qwen.default_steps(), 20);
     assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
     // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440 aligned the
-    // descriptor with what the engine renders: klein is not the embedded-guidance variant, so it
-    // advertises a negative prompt (dev, which is, still does not).
+    // descriptor with what the engine renders: klein is not the embedded-guidance variant, so that
+    // path consumes a real user negative prompt. That is standard guidance, NOT the
+    // `supports_true_cfg` capability. FLUX.2-dev below remains embedded-only.
     for id in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -985,9 +986,9 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_kv").unwrap().default_repo(),
         "SceneWorks/flux2-klein-9b-kv-mlx"
     );
-    // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
-    // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
-    // guidance 4.0). Shares the `mlx_flux2` adapter.
+    // FLUX.2-dev (epic 5914): its OWN engine model (not a Klein weight variant), embedded
+    // distilled guidance (guidance scalar, no negative prompt — unlike the current Klein path;
+    // ~28 steps / guidance 4.0). Shares the `mlx_flux2` adapter.
     let dev = mlx_model("flux2_dev").unwrap();
     assert_eq!(dev.engine_id(), "flux2_dev");
     assert_eq!(dev.adapter_label(), "mlx_flux2");
