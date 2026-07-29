@@ -398,11 +398,18 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // descriptor-derived `true` is behavior-equivalent — the CFG-off recipe is
         // engine-enforced, not a model capability the worker has to suppress.
         ("qwen_image_edit_2511_lightning", true, true),
-        ("flux2_klein_9b", true, false),
-        ("flux2_klein_9b_kv", true, false),
-        ("flux2_klein_9b_true_v2", true, false),
-        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id, embedded distilled
-        // guidance (supports_guidance=true) with no negative prompt / true-CFG.
+        // FLUX.2-klein (sc-15440): the engine advertises `supports_negative_prompt =
+        // !uses_embedded_guidance()`, and klein is NOT the embedded-guidance variant — it renders a
+        // real negative branch. These rows read `false` until sc-15440 aligned the descriptor with
+        // what the engine actually does; the expectation follows the descriptor, it does not set it
+        // (`EngineModel::supports_negative_prompt` reads `descriptor.capabilities` directly).
+        ("flux2_klein_9b", true, true),
+        ("flux2_klein_9b_kv", true, true),
+        ("flux2_klein_9b_true_v2", true, true),
+        // FLUX.2-dev (epic 5914 / sc-5921): its own `flux2_dev` engine id. Dev IS the
+        // embedded-guidance variant (`uses_embedded_guidance() == is_dev()`), so it keeps
+        // `supports_guidance=true` with no negative prompt / true-CFG — the contrast that makes the
+        // klein rows above a real distinction rather than a blanket flip.
         ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),

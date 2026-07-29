@@ -953,7 +953,9 @@ fn mlx_model_table_maps_known_families() {
     assert_eq!(qwen.adapter_label(), "mlx_qwen");
     assert_eq!(qwen.default_steps(), 20);
     assert!(qwen.supports_guidance() && qwen.supports_negative_prompt());
-    // All three FLUX.2-klein variants share the engine's single txt2img model.
+    // All three FLUX.2-klein variants share the engine's single txt2img model. sc-15440 aligned the
+    // descriptor with what the engine renders: klein is not the embedded-guidance variant, so it
+    // advertises a negative prompt (dev, which is, still does not).
     for id in [
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -962,7 +964,7 @@ fn mlx_model_table_maps_known_families() {
         let m = mlx_model(id).unwrap();
         assert_eq!(m.engine_id(), "flux2_klein_9b");
         assert_eq!(m.adapter_label(), "mlx_flux2");
-        assert!(m.supports_guidance() && !m.supports_negative_prompt());
+        assert!(m.supports_guidance() && m.supports_negative_prompt());
     }
     // Distilled variants are 4-step; the undistilled true_v2 is 24-step.
     assert_eq!(mlx_model("flux2_klein_9b").unwrap().default_steps(), 4);
