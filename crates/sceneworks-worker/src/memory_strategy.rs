@@ -1236,4 +1236,119 @@ mod tests {
             },
         );
     }
+
+    /// Every parameter an engaged rung owns, for a selection at `strategy` on [`contract`].
+    fn cumulative_params(strategy: MemoryStrategy) -> MemoryStrategyParameters {
+        MemoryStrategyParameters {
+            decode_tile_edge: strategy
+                .engages(MemoryStrategy::BoundedDecode)
+                .then_some(512),
+            decode_overlap: strategy
+                .engages(MemoryStrategy::BoundedDecode)
+                .then_some(128),
+            attention_chunk_size: strategy
+                .engages(MemoryStrategy::BoundedAttention)
+                .then_some(1024),
+            transformer_window_size: strategy
+                .engages(MemoryStrategy::BoundedTransformerResidency)
+                .then_some(1),
+            transformer_window_component: None,
+        }
+    }
+
+    /// SC-15805 — the selector/validator contradiction, pinned closed on the contract shape that
+    /// exposes it: rung 1 declared `Missing`.
+    ///
+    /// `select_strategy` runs every candidate through `contract.validate_selection`
+    /// (see `candidate_exclusion`), so the two layers cannot return *different* selections — the
+    /// disagreement surfaces instead as OVER-REFUSAL, the selector silently excluding rungs the
+    /// provider implements and the request falling back to a more expensive rung or being rejected.
+    /// This asserts the agreement AND the verdict each rung should get, so a graph that drops rung
+    /// 4's edge or invents one on rung 2 turns it red.
+    #[test]
+    fn selector_and_validator_agree_rung_by_rung_when_rung_one_is_missing() {
+        let mut provider = contract();
+        provider
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::StagedResidency)
+            .expect("rung 1 capability")
+            .support = MemoryStrategySupport::Missing;
+        assert!(
+            provider.conformance_errors().is_empty(),
+            "a Missing rung 1 is a legal declaration: {:?}",
+            provider.conformance_errors()
+        );
+
+        for probe in MemoryStrategy::ALL {
+            // Only the probed rung fits the 8 GiB budget, so the selector's answer is exactly
+            // "is this rung selectable on this contract".
+            let evidences = MemoryStrategy::ALL
+                .into_iter()
+                .map(|strategy| {
+                    let mut record = evidence(strategy);
+                    record.key.parameters = cumulative_params(strategy);
+                    record.predicted_peak_bytes = if strategy == probe {
+                        1024 * 1024 * 1024
+                    } else {
+                        100 * 1024 * 1024 * 1024
+                    };
+                    record
+                })
+                .collect::<Vec<_>>();
+            let candidates = MemoryStrategy::ALL
+                .into_iter()
+                .zip(&evidences)
+                .map(|(strategy, record)| Candidate {
+                    selection: MemorySelection {
+                        strategy,
+                        parameters: cumulative_params(strategy),
+                        tier: tier(),
+                    },
+                    evidence: record,
+                })
+                .collect::<Vec<_>>();
+
+            let probed = MemorySelection {
+                strategy: probe,
+                parameters: cumulative_params(probe),
+                tier: tier(),
+            };
+            let validator_accepts = provider.validate_selection(&probed).is_ok();
+            let selector_accepts = matches!(
+                select_strategy(
+                    request(),
+                    &provider,
+                    Some(Budget {
+                        available_gb: 8.0,
+                        reclaimable_gb: 0.0,
+                        total_gb: 8.0,
+                        reserved_headroom_gb: 0.0,
+                    }),
+                    &candidates,
+                ),
+                Selection::Selected { selection, .. } if selection.strategy == probe
+            );
+
+            let expected = match probe {
+                // Rungs 2 and 3 bound scratch and depend on nothing — the case that was impossible
+                // under the numeric-order walk.
+                MemoryStrategy::Resident
+                | MemoryStrategy::BoundedDecode
+                | MemoryStrategy::BoundedAttention => true,
+                // Rung 1 is Missing; rung 4 declares an engagement prerequisite on it.
+                MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency => {
+                    false
+                }
+            };
+            assert_eq!(
+                validator_accepts, expected,
+                "validate_selection verdict for {probe:?} under a Missing rung 1"
+            );
+            assert_eq!(
+                selector_accepts, expected,
+                "select_strategy verdict for {probe:?} under a Missing rung 1"
+            );
+        }
+    }
 }

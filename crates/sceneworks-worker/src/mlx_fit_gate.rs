@@ -128,12 +128,24 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     }
 }
 
-fn memory_for_selection(selection: MemorySelection) -> GenerationMemory {
+/// Translate a selection into the engine's per-rung engagement knobs.
+///
+/// SC-15805: this asks the contract which rungs the selection ENGAGES rather than re-deriving the
+/// answer from `MemoryStrategy`'s numeric order. The order is a cost ordering, and the cumulative
+/// default it expresses is defeasible — a rung the provider does not implement is not engaged, so a
+/// provider publishing a verified cheaper composition no longer has its unimplemented rung's knob
+/// switched on underneath it.
+fn memory_for_selection(
+    contract: &MemoryProviderContract,
+    selection: MemorySelection,
+) -> GenerationMemory {
     GenerationMemory {
-        tile_vae_decode: selection.strategy >= MemoryStrategy::BoundedDecode,
-        chunk_attention: selection.strategy >= MemoryStrategy::BoundedAttention,
-        stream_transformer_blocks: selection.strategy
-            >= MemoryStrategy::BoundedTransformerResidency,
+        tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
+        chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+        stream_transformer_blocks: contract.engages(
+            selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency,
+        ),
         ..Default::default()
     }
 }
@@ -372,7 +384,7 @@ fn evaluate_request_with_budget(
         "selected request-scoped MLX memory strategy"
     );
     Ok(MlxRequestEvaluation {
-        memory: memory_for_selection(selection),
+        memory: memory_for_selection(contract, selection),
         context: MemoryRunContext {
             selection,
             calibration_abi,
@@ -1720,6 +1732,88 @@ mod tests {
             use_pid: false,
             has_phases: false,
         }
+    }
+
+    /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
+    /// [`GenerationMemory`] it builds reaches the engine via `image_jobs/base.rs`. It asks the
+    /// CONTRACT which rungs a selection engages instead of re-deriving the answer from
+    /// `MemoryStrategy`'s numeric order, and that difference is only observable when a provider
+    /// declares a cheaper rung unavailable.
+    ///
+    /// Every other test in this module uses [`mage_request_contract`], whose optimized rungs are all
+    /// `Missing`, so it never selects past `Resident` and never sets these knobs at all — a test that
+    /// passes because a field was never set is a false green. This one sets the field.
+    ///
+    /// Reverting `memory_for_selection` to `selection.strategy >= MemoryStrategy::BoundedDecode`
+    /// (etc.) must turn this RED.
+    #[test]
+    fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
+        use gen_core::{MemoryParameterRanges, MemoryStrategyCapability, MemoryStrategySupport};
+
+        let contract_with = |missing: MemoryStrategy| {
+            let mut contract = mage_request_contract();
+            contract.strategies = MemoryStrategy::ALL
+                .into_iter()
+                .map(|strategy| MemoryStrategyCapability {
+                    strategy,
+                    support: if strategy == missing {
+                        MemoryStrategySupport::Missing
+                    } else {
+                        MemoryStrategySupport::Implemented
+                    },
+                    parameters: MemoryParameterRanges::default(),
+                })
+                .collect();
+            contract
+        };
+        let deepest = MemorySelection {
+            strategy: MemoryStrategy::BoundedTransformerResidency,
+            parameters: Default::default(),
+            tier: request_plan().tier,
+        };
+
+        // Rung 2 unavailable: the deepest selection must not tile the decode.
+        let memory = memory_for_selection(&contract_with(MemoryStrategy::BoundedDecode), deepest);
+        assert!(
+            !memory.tile_vae_decode,
+            "BoundedDecode is declared Missing, so a BoundedTransformerResidency selection must \
+             not switch decode tiling on underneath the provider: the ladder's numeric order is a \
+             COST ordering, not a dependency"
+        );
+        // ...and the rungs the provider does declare are still engaged, so this is not the vacuous
+        // "everything is false" green that would also pass if the function returned Default.
+        assert!(memory.chunk_attention);
+        assert!(memory.stream_transformer_blocks);
+
+        // Rung 3 unavailable: same property, one knob over.
+        let memory =
+            memory_for_selection(&contract_with(MemoryStrategy::BoundedAttention), deepest);
+        assert!(
+            !memory.chunk_attention,
+            "BoundedAttention is declared Missing, so a deeper selection must not chunk attention"
+        );
+        assert!(memory.tile_vae_decode);
+        assert!(memory.stream_transformer_blocks);
+
+        // Positive control: with every rung implemented, the cumulative default still applies in
+        // full. Without this, a `memory_for_selection` that returned `Default` unconditionally would
+        // satisfy both assertions above.
+        let all_implemented = {
+            let mut contract = mage_request_contract();
+            contract.strategies = MemoryStrategy::ALL
+                .into_iter()
+                .map(|strategy| MemoryStrategyCapability {
+                    strategy,
+                    support: MemoryStrategySupport::Implemented,
+                    parameters: MemoryParameterRanges::default(),
+                })
+                .collect();
+            contract
+        };
+        let memory = memory_for_selection(&all_implemented, deepest);
+        assert!(memory.tile_vae_decode);
+        assert!(memory.chunk_attention);
+        assert!(memory.stream_transformer_blocks);
     }
 
     #[test]
