@@ -387,6 +387,28 @@ Replace the order-derived walk with the declared graph from §3.
   and `MemoryProviderContract::engages` is that policy intersected with what the provider implements.
   The intersection is where defeasibility lives — a rung the provider does not implement is not
   engaged, so its parameters stop being *required* rather than the selection being refused.
+- **Rung 1 is excluded from the cost-order default.** Selecting rung 2 or rung 3 does *not* engage
+  `StagedResidency`. The three are not the same kind of thing: rungs 2 and 3 bound **scratch**
+  (activations born and dying inside one request), which costs the caller nothing, whereas rung 1
+  bounds **residency** and per the epic *"may evict the warm cross-request cache"* — a real cost paid
+  by the *next* request. Applying it by default to a selection that never needed it is a straight loss
+  for zero benefit, and it contradicts this section's own root cause read the other way (*"bounding
+  scratch is correct whether or not a residency rung engaged"*). It also matches the story's AC as
+  written: *"cost-order defaults still apply (rung 4 engages 2 and 3)"* — the AC never says rung 1.
+
+  Rung 1 is engaged when the selection **is** rung 1, or when the selection's `requires()` graph names
+  it. Derived from the graph, not hardcoded to rung 4, so a future edge implies its own engagement.
+
+  **The subtlety that makes the naive edit dangerous:** `engages` is what SATISFIES rung 4's
+  prerequisite in `validate_selection`. Excluding rung 1 from `engages` outright would make rung 4
+  **permanently unselectable**. Rung 4 keeps engaging rung 1 because its `requires()` edge names it —
+  not because `1 <= 4` — so the prerequisite walk is unchanged. A dedicated regression test guards
+  this (`rung_one_is_not_dragged_in_by_cost_order_but_the_rung_four_edge_still_engages_it`).
+
+  **Inert at runtime today.** `GenerationMemory` carries only the rung-2/3/4 levers
+  (`tile_vae_decode`, `chunk_attention`, `stream_transformer_blocks`) and has no rung-1 field, so no
+  selection→controls site reads rung-1 engagement and no shipping behavior changes. **SC-15806** —
+  which request-scopes rung 1 — is what makes this rule observable.
 - `validate_selected_parameters` and `select_strategy` needed no behavioural change, as predicted.
   *Other* sites that derived engagement from the enum's cost order were routed through the new seam.
   Two spellings of the same hazard had to be swept, not one:
