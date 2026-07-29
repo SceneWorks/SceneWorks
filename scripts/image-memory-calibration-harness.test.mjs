@@ -118,7 +118,7 @@ function qwenPositiveComplete() {
       rung: "bounded_decode",
       parameters: { decodeTileEdge: 512, decodeOverlap: 64 },
     },
-    calibrationFingerprint: "qwen-vae-identical-latent-v2",
+    calibrationFingerprint: "qwen-vae-identical-latent-v3",
   });
   const edges = [768, 640, 512, 448, 384, 320, 256];
   record.sweep = {
@@ -128,9 +128,21 @@ function qwenPositiveComplete() {
         parameters: { decodeTileEdge, decodeOverlap: 64 },
         result: "passed",
       })),
-      { parameters: { decodeTileEdge: 256, decodeOverlap: 32 }, result: "failed" },
+      {
+        parameters: {
+          decodeTileEdge: 256,
+          decodeOverlap: 32,
+          comparisonOutputBias: 0.05,
+        },
+        result: "failed",
+      },
     ],
     rangeVerified: true,
+  };
+  record.negativeMutation.parameters = {
+    decodeTileEdge: 256,
+    decodeOverlap: 32,
+    comparisonOutputBias: 0.05,
   };
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
@@ -290,13 +302,17 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
   assert.ok(calibrationBinding(frames, cell).reasons.includes("frames-out-of-envelope"));
 });
 
-test("plan separates the seven passing Qwen overlap-64 cells from 256/32 negative", async () => {
+test("plan separates seven identical-latent positives from a deterministic output-bias negative", async () => {
   const config = JSON.parse(await readFile(new URL("../config/image-memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
   const qwen = cases.filter((item) => item.backend === "mlx");
   assert.equal(qwen.filter((item) => item.expectedResult === "passed").length, 7);
   const negative = qwen.find((item) => item.negative);
-  assert.deepEqual(negative.strategy.parameters, { decodeTileEdge: 256, decodeOverlap: 32 });
+  assert.deepEqual(negative.strategy.parameters, {
+    decodeTileEdge: 256,
+    decodeOverlap: 32,
+    comparisonOutputBias: 0.05,
+  });
 });
 
 test("Krea current v1 production truth is separate from non-promotable v2 candidates", async () => {
@@ -339,7 +355,11 @@ test("positive Qwen completion never suppresses the separate 256/32 negative pla
   const qwenRemaining = expandPlan(config, [record]).filter((item) => item.backend === "mlx");
   assert.equal(qwenRemaining.length, 1);
   assert.equal(qwenRemaining[0].negative, true);
-  assert.deepEqual(qwenRemaining[0].strategy.parameters, { decodeTileEdge: 256, decodeOverlap: 32 });
+  assert.deepEqual(qwenRemaining[0].strategy.parameters, {
+    decodeTileEdge: 256,
+    decodeOverlap: 32,
+    comparisonOutputBias: 0.05,
+  });
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {

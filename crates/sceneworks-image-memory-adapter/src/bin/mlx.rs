@@ -264,7 +264,12 @@ fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, Strin
     Ok(latent)
 }
 
-fn max_mean_abs(left: &Array, right: &Array) -> Result<(f64, f64), String> {
+fn decoded_max_mean_abs(
+    left: &Array,
+    right: &Array,
+    comparison_output_bias: Option<f64>,
+) -> Result<(f64, f64), String> {
+    protocol::validate_comparison_shapes(left.shape(), right.shape())?;
     let left = left
         .reshape(&[-1])
         .map_err(|error| format!("flatten baseline decode: {error}"))?;
@@ -273,21 +278,7 @@ fn max_mean_abs(left: &Array, right: &Array) -> Result<(f64, f64), String> {
         .map_err(|error| format!("flatten tiled decode: {error}"))?;
     let left = left.as_slice::<f32>();
     let right = right.as_slice::<f32>();
-    if left.len() != right.len() || left.is_empty() {
-        return Err(format!(
-            "decode output length mismatch: baseline={} tiled={}",
-            left.len(),
-            right.len()
-        ));
-    }
-    let mut maximum = 0.0_f64;
-    let mut sum = 0.0_f64;
-    for (left, right) in left.iter().zip(right) {
-        let difference = f64::from((left - right).abs());
-        maximum = maximum.max(difference);
-        sum += difference;
-    }
-    Ok((maximum, sum / left.len() as f64))
+    protocol::max_mean_abs(left, right, comparison_output_bias)
 }
 
 fn sweep(parameters: &serde_json::Map<String, Value>, passed: bool) -> Value {
@@ -313,7 +304,11 @@ fn sweep(parameters: &serde_json::Map<String, Value>, passed: bool) -> Value {
         })
         .collect();
     cases.push(json!({
-        "parameters": { "decodeTileEdge": 256, "decodeOverlap": 32 },
+        "parameters": {
+            "decodeTileEdge": 256,
+            "decodeOverlap": 32,
+            "comparisonOutputBias": 0.05,
+        },
         "result": if current_edge == 256 && current_overlap == 32 {
             if passed { "passed" } else { "failed" }
         } else {
@@ -342,6 +337,8 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let parameters = protocol::strategy_parameters(request)?;
+    let expected_failure = protocol::expected_failure(request);
+    let comparison_output_bias = protocol::comparison_output_bias(parameters, expected_failure)?;
     let tile_edge = protocol::parameter(request, "decodeTileEdge")?;
     let overlap = protocol::parameter(request, "decodeOverlap")?;
     let tile_edge_i32 = i32::try_from(tile_edge)
@@ -406,13 +403,19 @@ fn run(request: &Value) -> Result<Value, String> {
     let tiled_peak = get_peak_memory() as u64;
     let active = get_active_memory() as u64;
     let cache = get_cache_memory() as u64;
-    let (maximum, mean) = max_mean_abs(&baseline, &tiled)?;
-    let passed = maximum <= MAX_THRESHOLD && mean <= MEAN_THRESHOLD;
-    let expected_failure = protocol::expected_failure(request);
+    let (actual_maximum, actual_mean) = decoded_max_mean_abs(&baseline, &tiled, None)?;
+    let actual_passed = actual_maximum <= MAX_THRESHOLD && actual_mean <= MEAN_THRESHOLD;
     if expected_failure {
-        if passed {
+        if !actual_passed {
             return Err(format!(
-                "negative mutation {tile_edge}/{overlap} did not breach the identical-latent threshold: max={maximum:.6}, mean={mean:.6}"
+                "negative control requires a passing unmodified identical-latent comparison: max={actual_maximum:.6}, mean={actual_mean:.6}"
+            ));
+        }
+        let (mutated_maximum, mutated_mean) =
+            decoded_max_mean_abs(&baseline, &tiled, comparison_output_bias)?;
+        if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
+            return Err(format!(
+                "negative mutation {tile_edge}/{overlap} did not breach the identical-latent threshold: max={mutated_maximum:.6}, mean={mutated_mean:.6}"
             ));
         }
         let blocker =
@@ -424,9 +427,9 @@ fn run(request: &Value) -> Result<Value, String> {
             json!({
                 "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
                 "identicalLatents": true,
-                "result": "failed",
-                "maximumError": maximum,
-                "meanError": mean,
+                "result": "passed",
+                "maximumError": actual_maximum,
+                "meanError": actual_mean,
                 "maximumErrorThreshold": MAX_THRESHOLD,
                 "meanErrorThreshold": MEAN_THRESHOLD,
             }),
@@ -434,8 +437,8 @@ fn run(request: &Value) -> Result<Value, String> {
                 "parameters": parameters,
                 "measured": true,
                 "result": "failed_as_expected",
-                "maximumError": maximum,
-                "meanError": mean,
+                "maximumError": mutated_maximum,
+                "meanError": mutated_mean,
             }),
             json!({
                 "result": "passed",
@@ -464,14 +467,14 @@ fn run(request: &Value) -> Result<Value, String> {
     );
     Ok(protocol::gated_fragment(
         artifact,
-        sweep(parameters, passed),
+        sweep(parameters, actual_passed),
         blocker,
         json!({
             "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
             "identicalLatents": true,
-            "result": if passed { "passed" } else { "failed" },
-            "maximumError": maximum,
-            "meanError": mean,
+            "result": if actual_passed { "passed" } else { "failed" },
+            "maximumError": actual_maximum,
+            "meanError": actual_mean,
             "maximumErrorThreshold": MAX_THRESHOLD,
             "meanErrorThreshold": MEAN_THRESHOLD,
         }),

@@ -181,10 +181,10 @@ fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_GENERATOR_CACHE_IDLE_SECONDS)
 }
 
-/// Apply the user-configured GPU memory ceiling to the MLX runtime (epic 7819, sc-7820).
+/// Apply the GPU memory ceiling to the MLX runtime (epic 7819, sc-7820).
 ///
-/// `bytes == 0` is a no-op — MLX keeps its own default budget (1.5× the device recommended working
-/// set), so an unset limit is byte-identical to prior behavior. When non-zero we set two MLX knobs:
+/// `bytes == 0` means the user configured no ceiling; a **derived default** is applied instead — see
+/// [`resolve_gpu_memory_limit`] (GitHub #1932). When non-zero we set two MLX knobs:
 /// - `set_memory_limit` — soft backpressure: when active memory exceeds the limit MLX blocks and
 ///   waits for in-flight GPU work to drain rather than hard-failing. It is a target, not a hard
 ///   sandbox; a single oversized allocation can still exceed it (and on a too-low cap a model whose
@@ -203,13 +203,24 @@ fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
 /// The MLX limit is **process-global**, so calling this once at worker startup (before any model
 /// load) covers generations, upscales, AND LoRA training — even though training takes a separate
 /// path from the generator cache.
-/// The GPU memory ceiling (bytes) currently applied to this process's MLX runtime, so the live
+/// The GPU memory ceiling (bytes) currently *requested* of this process's MLX runtime, so the live
 /// sync (sc-7824) only re-applies on an actual change. `u64::MAX` is the "nothing applied yet"
-/// sentinel — distinct from `0` ("no limit"), so the first real value (including a deliberate `0`
-/// that clears a prior cap) always takes effect.
+/// sentinel — distinct from `0` ("no user ceiling"), so the first real value (including a deliberate
+/// `0` that drops back to the derived default) always takes effect.
+///
+/// This holds the REQUESTED value, not the resolved one, precisely so the dedupe stays stable: a
+/// user with no ceiling writes `0` to the handoff file forever, and comparing that against a
+/// *resolved* default would re-apply on every poll. The resolved figure lives in
+/// [`EFFECTIVE_GPU_MEMORY_LIMIT`].
 #[cfg(all(target_os = "macos", not(test)))]
 static APPLIED_GPU_MEMORY_LIMIT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// The ceiling (bytes) actually handed to `set_memory_limit`, for the Settings telemetry readout.
+/// `0` = nothing applied (no user ceiling AND no memory probe signal, so MLX keeps its own default).
+#[cfg(all(target_os = "macos", not(test)))]
+static EFFECTIVE_GPU_MEMORY_LIMIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Clamp a requested wired-residency cap (bytes) to the device's wired ceiling (sc-12178).
 ///
@@ -230,6 +241,44 @@ pub(crate) fn clamp_wired_limit(requested: usize, device_ceiling: usize) -> usiz
     requested.min(device_ceiling)
 }
 
+/// Resolve the memory limit (bytes) to hand MLX, given the user's configured ceiling (`0` = none)
+/// and the machine's total unified memory. `0` out means "apply nothing, leave MLX on its default".
+///
+/// ## Why an unset ceiling can NOT stay on the MLX default (GitHub #1932)
+/// MLX's default budget is **1.5× the device recommended working set**, and that working set is
+/// itself ~2/3 of unified memory on Apple Silicon — see [`device_wired_ceiling_bytes`], which
+/// recovers the ceiling by dividing the default limit by 1.5. Composing the two: MLX's default
+/// budget is ≈ **100% of physical RAM**. On a large Mac the headroom above a model's real footprint
+/// hides that; on an 8 GB Mac it means MLX will keep climbing until the machine has nothing left for
+/// macOS itself, and a unified-memory exhaustion with GPU allocations outstanding takes the whole
+/// system down (the #1932 report: an 8 GB iMac M3 hard-restarting within ~10 s of pressing Generate,
+/// far too fast to be the thermal event it looks like). MLX's limit is soft backpressure — on
+/// reaching it MLX frees its cache and waits for in-flight GPU work to drain instead of climbing —
+/// so a limit set *below* physical RAM is exactly the mechanism that keeps the pressure recoverable.
+///
+/// The derived default is `total − OS_RESERVE_GB`, reusing the fit gate's own OS floor
+/// ([`crate::mlx_fit_gate::OS_RESERVE_GB`]) rather than a second, independent number. That agreement
+/// is load-bearing in both directions: the fit gate's weights-fit floor (sc-12179, GitHub #1544)
+/// admits a model whose weights fit `budget − OS_RESERVE_GB`, so a runtime ceiling derived the same
+/// way can never refuse to hold a tier the gate just admitted. On an 8 GB Mac that is a 6 GiB
+/// ceiling, which still clears the 5.49 GiB z-image-turbo q4 baseline the floor is anchored on.
+///
+/// A configured ceiling always wins unchanged — this only fills in the unset case. No probe signal
+/// ⇒ `0` ⇒ MLX keeps its default, the same fail-open the fit gate takes when it cannot size the
+/// machine. `total <= reserve` likewise yields `0`: a machine smaller than the OS reserve has no
+/// sensible ceiling to derive, and a nonsense-small limit would thrash rather than protect.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Option<u64>) -> u64 {
+    if requested > 0 {
+        return requested;
+    }
+    let Some(total) = total_unified_bytes else {
+        return 0;
+    };
+    let reserve = (crate::mlx_fit_gate::OS_RESERVE_GB * crate::fit_gate::BYTES_PER_GIB) as u64;
+    total.saturating_sub(reserve)
+}
+
 /// The device's wired-residency ceiling in bytes (`recommendedMaxWorkingSetSize`), derived once.
 ///
 /// MLX documents its default memory limit as 1.5× the device recommended working set
@@ -246,35 +295,51 @@ fn device_wired_ceiling_bytes() -> usize {
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
-fn set_gpu_memory_limit_inner(bytes: u64) {
+fn set_gpu_memory_limit_inner(requested: u64) {
     use std::sync::atomic::Ordering;
-    let limit = bytes as usize;
     // Capture the device wired ceiling BEFORE mutating the memory limit — the derivation reads MLX's
     // default `get_memory_limit`, which is only the hardware default until the first `set_memory_limit`.
     let wired_ceiling = device_wired_ceiling_bytes();
+    let effective = resolve_gpu_memory_limit(
+        requested,
+        crate::mlx_fit_gate::probe_total_unified_memory_bytes(),
+    );
+    APPLIED_GPU_MEMORY_LIMIT.store(requested, Ordering::SeqCst);
+    if effective == 0 {
+        // No user ceiling and no probe signal: leave MLX on its own default budget, byte-identical
+        // to the pre-#1932 behavior. Nothing to report to the telemetry readout either.
+        EFFECTIVE_GPU_MEMORY_LIMIT.store(0, Ordering::SeqCst);
+        return;
+    }
+    let limit = effective as usize;
     let previous_limit = mlx_rs::memory::set_memory_limit(limit);
-    // Clamp so `set_wired_limit` can never throw and `exit(-1)` the worker (sc-12178, GitHub #1544).
-    let wired_limit = clamp_wired_limit(limit, wired_ceiling);
-    let previous_wired = mlx_rs::memory::set_wired_limit(wired_limit);
-    APPLIED_GPU_MEMORY_LIMIT.store(bytes, Ordering::SeqCst);
+    // The wired cap is only touched for a ceiling the USER configured. `set_wired_limit` raises the
+    // amount MLX PINS (macOS cannot reclaim pinned pages), so applying one off the derived default
+    // would push the small Mac in #1932 the wrong way — the point there is to let the OS reclaim.
+    // Clamped so `set_wired_limit` can never throw and `exit(-1)` the worker (sc-12178, GitHub #1544).
+    // `0` in both log fields means "left untouched", which is exactly what MLX reads `0` as too.
+    let (wired_limit, previous_wired) = if requested > 0 {
+        let wired_limit = clamp_wired_limit(limit, wired_ceiling);
+        (wired_limit, mlx_rs::memory::set_wired_limit(wired_limit))
+    } else {
+        (0, 0)
+    };
+    EFFECTIVE_GPU_MEMORY_LIMIT.store(effective, Ordering::SeqCst);
     tracing::info!(
         event = "gpu_memory_limit_applied",
+        requestedBytes = requested,
         limitBytes = limit,
         wiredLimitBytes = wired_limit,
         deviceWiredCeilingBytes = wired_ceiling,
         previousLimitBytes = previous_limit,
         previousWiredLimitBytes = previous_wired,
-        "applied user-configured GPU memory ceiling to the MLX runtime"
+        derivedDefault = requested == 0,
+        "applied GPU memory ceiling to the MLX runtime"
     );
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
-    if bytes == 0 {
-        // Unset at startup: leave MLX on its own default budget — byte-identical to prior behavior.
-        // (The live sync below still applies a deliberate `0` to *clear* a previously-set cap.)
-        return;
-    }
     set_gpu_memory_limit_inner(bytes);
 }
 
@@ -282,7 +347,9 @@ pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
 /// value (epic 7819, sc-7824). Called from the worker poll loop *between jobs*, so moving the
 /// Settings slider takes effect on the next job without a worker restart. An absent file is a
 /// no-op (the spawn-time `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` value stays in force); a written `0`
-/// actively clears a previously-applied cap (MLX treats `0` as "no limit").
+/// actively drops a previously-applied cap back to the derived default ([`resolve_gpu_memory_limit`]).
+/// The dedupe compares REQUESTED values, so a user with no ceiling (a permanent `0` in the file)
+/// re-applies once and then stays quiet.
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn sync_gpu_memory_limit(config_dir: &Path) {
     use std::sync::atomic::Ordering;
@@ -305,12 +372,14 @@ pub(crate) fn sync_gpu_memory_limit(config_dir: &Path) {
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn write_gpu_telemetry(config_dir: &Path) {
     use std::sync::atomic::Ordering;
-    let applied = APPLIED_GPU_MEMORY_LIMIT.load(Ordering::SeqCst);
+    // The EFFECTIVE ceiling, so "peak vs limit" reads honestly on a machine running the derived
+    // default (GitHub #1932) — that is a cap this worker really applied, not MLX's internal budget.
+    // Still `0` when nothing was applied at all.
     let telemetry = sceneworks_core::app_paths::GpuMemoryTelemetry {
         active_bytes: mlx_rs::memory::get_active_memory() as u64,
         peak_bytes: mlx_rs::memory::get_peak_memory() as u64,
         cache_bytes: mlx_rs::memory::get_cache_memory() as u64,
-        limit_bytes: if applied == u64::MAX { 0 } else { applied },
+        limit_bytes: EFFECTIVE_GPU_MEMORY_LIMIT.load(Ordering::SeqCst),
     };
     if let Ok(json) = serde_json::to_string(&telemetry) {
         let path = sceneworks_core::app_paths::gpu_telemetry_file(config_dir);
@@ -656,6 +725,46 @@ mod tests {
         // The clamp target must not throw (would exit(-1) this process). Restore the prior value after.
         let prev = mlx_rs::memory::set_wired_limit(clamp_wired_limit(usize::MAX, ceiling));
         mlx_rs::memory::set_wired_limit(prev);
+    }
+
+    // GitHub #1932: with no user-configured ceiling, MLX's own default budget is ~1.5x the device
+    // recommended working set — itself ~2/3 of unified memory — i.e. roughly ALL of physical RAM. On
+    // an 8 GB Mac that lets MLX starve macOS and take the machine down. The derived default keeps a
+    // reserve free so MLX hits soft backpressure first.
+    #[test]
+    fn unset_gpu_ceiling_derives_a_default_that_reserves_memory_for_the_os() {
+        let gib = 1024 * 1024 * 1024_u64;
+        let reserve = 2 * gib; // mlx_fit_gate::OS_RESERVE_GB
+
+        // An 8 GB Mac (the #1932 machine): 6 GiB, which still clears the 5.49 GiB z-image-turbo q4
+        // baseline the fit gate's weights-fit floor admits — the ceiling never refuses a tier the
+        // gate just let in.
+        assert_eq!(
+            resolve_gpu_memory_limit(0, Some(8 * gib)),
+            8 * gib - reserve
+        );
+        assert!(resolve_gpu_memory_limit(0, Some(8 * gib)) < 8 * gib);
+        // Same shape on bigger machines — a flat reserve, never a fraction that would lock a large
+        // Mac out of its own memory.
+        assert_eq!(
+            resolve_gpu_memory_limit(0, Some(128 * gib)),
+            128 * gib - reserve
+        );
+
+        // A configured ceiling always wins unchanged; the derived default only fills the unset case.
+        assert_eq!(resolve_gpu_memory_limit(4 * gib, Some(8 * gib)), 4 * gib);
+        // ...including one ABOVE the derived default: the user's explicit choice is not second-guessed.
+        assert_eq!(resolve_gpu_memory_limit(7 * gib, Some(8 * gib)), 7 * gib);
+
+        // No probe signal ⇒ 0 ⇒ leave MLX on its default, the same fail-open the fit gate takes when
+        // it cannot size the machine (and the pre-#1932 behavior).
+        assert_eq!(resolve_gpu_memory_limit(0, None), 0);
+        // A machine at or below the reserve has no sensible ceiling to derive — 0, not a nonsense
+        // limit that would thrash instead of protect.
+        assert_eq!(resolve_gpu_memory_limit(0, Some(reserve)), 0);
+        assert_eq!(resolve_gpu_memory_limit(0, Some(gib)), 0);
+        // A configured ceiling is still honored on an unprobeable machine.
+        assert_eq!(resolve_gpu_memory_limit(4 * gib, None), 4 * gib);
     }
 
     #[test]
