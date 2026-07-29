@@ -6,7 +6,7 @@ use runtime_cuda::gen_core::{
     GenerationRequest, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
     MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySelection,
     MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant,
-    WeightsSource,
+    TransformerComponent, WeightsSource,
 };
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
@@ -563,6 +563,14 @@ fn run(request: &Value) -> Result<Value, String> {
         decode_overlap: Some(overlap),
         attention_chunk_size: Some(attention),
         transformer_window_size: Some(window),
+        // Rung 4's window scope (SC-15794). This adapter windows Krea's DiT blocks, and
+        // `candle-gen-krea` declares no `transformer_window_components`, which the contract reads
+        // as DiT-only -- so `Dit` is the one scope a request may name here. Stated explicitly
+        // rather than left `None` so the `validate_selection` call below actively checks the scope
+        // against the pinned provider's declared candidates; if a future Krea revision narrows
+        // rung 4 to a different component, this calibration run fails loudly at preflight instead
+        // of recording evidence under a silently-defaulted scope.
+        transformer_window_component: Some(TransformerComponent::Dit),
     };
     let selection = MemorySelection {
         strategy: MemoryStrategy::BoundedTransformerResidency,

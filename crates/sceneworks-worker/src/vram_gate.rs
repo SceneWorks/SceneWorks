@@ -519,6 +519,25 @@ fn krea_rung_parameters(
         decode_overlap: value("decodeOverlap"),
         attention_chunk_size: value("attentionChunkSize"),
         transformer_window_size: value("transformerWindowSize"),
+        // Rung 4's window scope (SC-15794). `Dit` is the only scope that is correct here:
+        // `candle-gen-krea` leaves `transformer_window_components` empty, which the contract reads
+        // as the DiT-only pre-SC-15794 behaviour, and every measured `strategyParameters` row in
+        // the manifest was collected against DiT block streaming. It is also the published default
+        // SC-15794 upheld -- a text-encoder scope cut z-image conditioning 46.5% but moved the
+        // request peak 0.0%, so widening the scope buys an admission gate nothing.
+        //
+        // The scope is declared only on the rung that owns it. `validate_selected_parameters`
+        // rejects any `Some(..)` below `BoundedTransformerResidency` as "irrelevant below its
+        // owning strategy rung", and the three cheaper rungs here pair with cheaper strategies
+        // (see `rung_pairs`); a blanket `Some` would fail `validate_selection` on three of the
+        // four candidates and silently downgrade their evidence verdicts. `None` on those rungs
+        // carries the identical DiT meaning without tripping that check.
+        transformer_window_component: match rung {
+            KreaTurboRung::StreamedBlocks => Some(gen_core::TransformerComponent::Dit),
+            KreaTurboRung::ThreeStage
+            | KreaTurboRung::TiledVae
+            | KreaTurboRung::ChunkedAttention => None,
+        },
     })
 }
 

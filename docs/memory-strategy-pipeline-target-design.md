@@ -109,7 +109,7 @@ Rung 4's `transformer_window_component` (`Dit` / `TextEncoder` / `Both`, SC-1579
 with a published candidate domain**, exactly like `decode_tile_edges` and `attention_chunk_sizes` —
 not a new axis. Availability stays one verdict per rung; which transformer the window applies to is
 chosen within it. This is the shape any future component scope should take, including Wan's MoE
-expert residency (§13).
+expert residency (§14).
 
 ### The prerequisite graph — explicit, and small
 
@@ -752,7 +752,7 @@ Three things to establish before either lane adopts, flagged so they are not ass
 
 ---
 
-## 13. Portability to the video and audio lanes
+## 14. Portability to the video and audio lanes
 
 **Intent:** the same ladder serves video and audio once the image lane is through. This section
 records what that requires, so the image work does not quietly foreclose it.
@@ -771,13 +771,15 @@ records what that requires, so the image work does not quietly foreclose it.
 Rung 2 was never image-only. Nothing in §2 (the four facts), §3's graph shape, §6 (never substitute
 output), §7 (tier integrity), §8 (one pipeline) or §9 (single-encoding) is image-specific either.
 
-### Three things that do not port
+### Three things that did not port — the first is now done
 
-**1. The naming and the calibration ABI — cheap now, expensive after calibration.**
-The contract is image-named throughout: ~25 public `Memory*` types and
-`MEMORY_CALIBRATION_ABI`. An ABI bump makes existing evidence stale *by design*. Today there
-are three provider adopters and near-zero promoted evidence; every one of the 53 calibration stories
-adds records keyed to this ABI. **Rename before the calibration wave, not after.**
+**1. The naming and the calibration ABI — done, SC-15804.**
+The contract *was* image-named throughout: 36 public `ImageMemory*` items plus
+`IMAGE_MEMORY_CALIBRATION_ABI`. An ABI bump makes existing evidence stale *by design*, and every one
+of the 53 calibration stories adds records keyed to that ABI — so the rename had to land while there
+were still only three provider adopters and near-zero promoted evidence, which is exactly when it
+did. §13 records what it touched. The vocabulary is lane-neutral today, so this is no longer a
+portability blocker; the two items below still are.
 
 **2. The contract asserts the ladder has exactly five rungs.**
 `MemoryStrategy::ALL: [Self; 5]`, and `conformance_errors` rejects any contract whose
