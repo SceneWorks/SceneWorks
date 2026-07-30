@@ -96,20 +96,37 @@ Note the severity that follows: like every rule in `conformance_errors`, an erro
 That is right for "this contract cannot be interpreted" and would be wrong for a cost verdict, which is
 a second reason the rule does not attempt one.
 
-### Where the magnitude *does* reach a decision — one layer up
+### Where the magnitude reaches a tier decision — and why that is allowed
 
 Reason 1 is a statement about the **ladder**, and must not be over-read into "the cost never matters".
 The Krea capability-downtier consumes the ladder's verdict as a boolean: `KreaTurboFit::Resident` and
 `KreaTurboFit::Fits` both collapse to `TierFit::Fits`
-(`crates/sceneworks-worker/src/image_jobs/base.rs`), and `choose_downtier` keeps the
-highest-fidelity tier that fits. So a tier whose *only* fit is rung 4 outranks a lower tier that fits
-resident, and there the cost genuinely decides — a q8 rung-4 render measured at ~1466 ms/block
-(~44 s/step) can be kept over a q4 resident one. That evidence is Verified today and rung 4 is offered
-on any adapterless Krea job.
+(`crates/sceneworks-worker/src/image_jobs/base.rs`), and `choose_downtier` keeps the highest-fidelity
+tier that fits. So under **Auto** a tier whose *only* fit is rung 4 outranks a lower tier that fits
+resident, and the cost of that rung is what the higher tier is bought with — extrapolating z-image's
+measured q8 figure (~1466 ms/block), tens of seconds per step rather than a q4 resident render's
+low single digits.
 
-That is a lossy boolean at the tier/strategy seam, not a defect in this order, and forking the order
-would not fix it. **SC-16104 owns it**, and it is why SC-15791's recommendation *"do not enable rung 4
-on q8 until the repack is hoisted"* is **not** discharged by this decision.
+**That is intended, and is the same rule the rest of this epic applies.** Fidelity the user asked for is
+not a memory lever: tier integrity refuses to substitute precision, SC-15807 refuses to substitute
+geometry, and refusing to substitute *speed-for-fidelity* is the same refusal. A slow render at the
+selected tier beats a fast render of something the user did not choose. So the downtier's ordering
+stands as written, on both the explicit and the Auto path.
+
+Two things this does **not** license:
+
+- **An explicit pick never reaches the downtier at all** and never had to — `explicit_pick`
+  (`mlxQuantizeExplicit`) skips it outright, as does an NVFP4 selection, which is unrankable on purpose.
+  The rule above is about Auto only.
+- **Accepting the cost is not the same as hiding it.** Nothing today tells a caller that its render is
+  slow *because* it is streaming blocks to hold the tier, and a render 1-2 orders of magnitude slower
+  than the same job at a lower tier is operationally indistinguishable from a hang. Disclosure is
+  SC-16104's remaining scope; the policy question it was filed to settle is settled here.
+
+One consequence to carry forward: this **declines** SC-15791's recommendation *"do not enable rung 4 on
+q8 until the repack is hoisted"*. Deliberately — gating q8 would be exactly the fidelity substitution the
+rule forbids. It does mean the per-window conversion is paid on the tier where it is worst, which raises
+the value of SC-16096 rather than lowering it.
 
 ### A rung declares no non-VRAM resource cost
 
