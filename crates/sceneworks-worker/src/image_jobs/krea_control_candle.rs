@@ -1,14 +1,16 @@
+use super::{
+    admit_conditioning_paths, gate_tier_key, gate_with_evict_reclaim, krea_model_subdir,
+    lora_label, nvfp4_host_eligible, nvfp4_selected, pose_entries, resolve_adapters,
+    resolve_advanced_or_manifest_u32, resolve_text_style_gain, run_candle_strict_control,
+    trusted_control_weight_revision, AdapterSpec, ApiClient, CancelFlag, CandleStrictControl,
+    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings,
+    Value, WorkerError, WorkerResult,
+};
 use super::{advanced, huggingface_snapshot_dir};
 use super::{
     ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename, DownloadContext,
 };
-use super::{
-    gate_tier_key, gate_with_evict_reclaim, krea_model_subdir, lora_label, nvfp4_host_eligible,
-    nvfp4_selected, pose_entries, resolve_adapters, resolve_advanced_or_manifest_u32,
-    resolve_text_style_gain, run_candle_strict_control, trusted_control_weight_revision,
-    AdapterSpec, ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest,
-    JobSnapshot, JsonObject, Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
+use crate::conditioning_fit::ConditioningAdmission;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
@@ -394,6 +396,28 @@ impl CandleStrictControl for KreaStrictControl {
         self.height
     }
 
+    /// This lane is admitted in its OWN preamble — `generate_candle_krea_control_stream` runs both the
+    /// shared weights floor ([`admit_conditioning_paths`]) and the measured [`crate::krea_control_fit`]
+    /// ladder there — so the shared driver's gate stands down (sc-16069).
+    ///
+    /// **It is an ORDERING requirement, not an exemption.** The preamble records the peak it admitted at
+    /// with [`crate::vram_gate::note_loaded_peak`]. A rejection arriving after that call would leave a
+    /// reclaimable high-water standing for a load that never allocated — over-crediting the pool, which
+    /// lets the NEXT gate over-admit an OOM. So the floor has to run BEFORE the ladder, which is before
+    /// control ever reaches the driver. Re-gating in the driver would add a second `nvidia-smi` probe and
+    /// risk a second generator eviction for no new information.
+    ///
+    /// The floor and the ladder answer different questions and both are needed here. The ladder's peaks
+    /// are superseded upper bounds today (`candle.control.measured == false`), so it declines to reject
+    /// (`KreaControlFit::BestEffort`); at a tier with no priced row it cannot judge the render at all
+    /// (`KreaControlFit::Unverified`). In both cases the floor is the only check that can still refuse a
+    /// host which cannot hold the weights. Its footprint counts the BASE only — see the preamble.
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        ConditioningAdmission::GatedInPreamble {
+            gate: "krea_control_fit",
+        }
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
             root: self.base.clone(),
@@ -514,28 +538,46 @@ pub(super) async fn generate_candle_krea_control_stream(
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
     );
-    // Fit-ladder inputs are budget-independent; resolve them once, then run the two-pass gate below.
-    let peak =
-        crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier);
-    let sequential_peak = crate::krea_control_fit::predicted_control_sequential_peak_gb(
-        &request.model_manifest_entry,
-        tier,
-    );
-    let decode_tile_save =
-        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier);
-    let chunk_attn_save =
-        crate::krea_control_fit::chunk_attn_save_gb(&request.model_manifest_entry);
     // Tier integrity (sc-15799): the control branch's tier is derived from the resolved BASE tier, NOT
     // from the fit ladder, so it is decided here — before any budget is read — and holds on every path
     // below, `Unknown` included. A branch that only packs when VRAM is tight is precisely the defect this
     // removes: it left ~3.3 GB of precision a q8 render never requested resident on every roomy card
     // (the branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8).
     let branch_tier = crate::krea_control_fit::control_branch_tier_for_key(tier);
-    // Is the `candle.control` block's evidence current, or superseded by the branch repack? `false`
-    // today (sc-16013 owes the re-measure), which stops the ladder turning a stale UPPER BOUND into a
-    // hard reject — see `krea_control_fit::fit_ladder`.
-    let evidence_is_current =
-        crate::krea_control_fit::control_evidence_is_current(&request.model_manifest_entry);
+
+    // Conditioning-overlay weights FLOOR (sc-16069) — run HERE, before the ladder, and therefore before
+    // the `note_loaded_peak` below. Ordering is the whole reason this lane gates itself instead of through
+    // `run_candle_strict_control` (`ConditioningAdmission::GatedInPreamble`): a rejection after
+    // `note_loaded_peak` would leave a reclaimable high-water standing for a load that never allocated,
+    // over-crediting the pool for the next gate.
+    //
+    // It is NOT redundant with the ladder. The shipped `candle.control` rows are superseded upper bounds
+    // (`measured == false`), so the ladder deliberately never rejects — `KreaControlFit::BestEffort` — and
+    // at a tier it cannot price (`Unverified`, reachable today via `nvfp4`) it makes no memory claim at
+    // all. Without this floor those paths reach allocation with no hard check, which is exactly the
+    // sc-16069 defect the rest of this story removes everywhere else.
+    //
+    // The footprint counts the BASE ONLY when the branch is packed. The branch is folded onto the GPU at
+    // `branch_tier` (sc-15799) — ~3.3 GB at q8, ~1.7 GB at q4 against a ~6.6 GB published bf16 checkpoint
+    // — so pricing the file would over-count a packed base by several GB and could refuse a render that
+    // fits, the one direction this gate must never take. A DENSE branch (`branch_tier == None`, i.e. a
+    // bf16 base) loads at exactly the published bytes, so there it is counted and the floor is tighter.
+    {
+        let control_overlay: Vec<&Path> = if branch_tier.is_some() {
+            Vec::new()
+        } else {
+            vec![control.as_path()]
+        };
+        admit_conditioning_paths(
+            settings,
+            "Krea 2",
+            "pose-ControlNet branch",
+            &base,
+            &control_overlay,
+        )
+        .await?;
+    }
+
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -546,14 +588,16 @@ pub(super) async fn generate_candle_krea_control_stream(
     let (fit, _budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
+        // sc-16069: ONE seam (`fit_ladder_for_entry`) reads every manifest row for the resolved tier,
+        // instead of the lane hand-threading six of them in. That is what makes the "block present but no
+        // row for THIS tier" case expressible at all: as six separate `Option`s a missing row arrived as
+        // an indistinguishable `None` and the ladder took the zero-adaptation big-card path in silence.
+        // It also removes the standing risk of pairing one tier's peak with another tier's savings.
         |budget| {
-            crate::krea_control_fit::fit_ladder(
-                peak,
-                sequential_peak,
+            crate::krea_control_fit::fit_ladder_for_entry(
+                &request.model_manifest_entry,
+                tier,
                 budget,
-                decode_tile_save,
-                chunk_attn_save,
-                evidence_is_current,
             )
         },
         // Two non-fits differing only in their reported free number are the same non-outcome — a reclaim
@@ -570,6 +614,12 @@ pub(super) async fn generate_candle_krea_control_stream(
                 ) | (
                     crate::krea_control_fit::KreaControlFit::BestEffort { .. },
                     crate::krea_control_fit::KreaControlFit::BestEffort { .. }
+                ) | (
+                    // sc-16069: `Unverified` is budget-INDEPENDENT (the tier has no row to price at any
+                    // budget), so reclaiming can never change it. Evicting the warm txt2img cache for it
+                    // would be pure loss.
+                    crate::krea_control_fit::KreaControlFit::Unverified { .. },
+                    crate::krea_control_fit::KreaControlFit::Unverified { .. }
                 )
             ) && raw != reclaimed
         },
@@ -604,6 +654,35 @@ pub(super) async fn generate_candle_krea_control_stream(
                 branch_tier = ?branch_tier,
                 "Krea control VRAM fit ladder: predicted peak exceeds free VRAM — engaging rungs \
                  (sequential residency, VAE-decode tiling, attention chunking) to fit"
+            );
+            (offload_policy, tile, chunk)
+        }
+        // The `candle.control` block exists but carries NO peak row for the resolved base tier
+        // (sc-16069) — so the render cannot be priced. Previously this collapsed into `Unknown` and took
+        // the big-card fast path with no log: no staging, no tiling, no chunking, no reject, no trace.
+        // Now it is an explicit, named, logged decision that stages residency (the cheapest adaptation,
+        // no quality cost) and still never rejects — there is no evidence to reject on. The hard check for
+        // this tier is the `conditioning_fit` weights floor already run in this function's preamble above
+        // (it must precede `note_loaded_peak`, hence not in `run_candle_strict_control`). Records no
+        // reclaimable peak (`incurred_peak_gb` → None).
+        crate::krea_control_fit::KreaControlFit::Unverified {
+            offload_policy,
+            tile_vae_decode: tile,
+            chunk_attention: chunk,
+            tier_key,
+        } => {
+            tracing::warn!(
+                model = %request.model,
+                tier = %tier_key,
+                offload_policy = ?offload_policy,
+                branch_tier = ?branch_tier,
+                "Krea control VRAM fit ladder: the candle.control block has NO peak row for this base \
+                 tier, so this render cannot be priced. Staging component residency (the cheapest, \
+                 quality-free adaptation) and declining to reject on absent evidence. The on-disk \
+                 weights floor already applied in this lane's preamble is the only hard check for this \
+                 tier until it is measured, so a render whose TRANSIENTS overflow can still reach a \
+                 reactive CUDA OOM. Add a bf16Branch*PeakGbByTier row for it (sc-16013 owns the \
+                 control-lane re-measure)."
             );
             (offload_policy, tile, chunk)
         }

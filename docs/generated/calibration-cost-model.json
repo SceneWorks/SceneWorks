@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e21b1857d702cc2dbc9c76a4a3707247c219028ef424c29769c5f417ddf70774",
-    "matrixRevision": "source-tree:9937778f662c05b556e55bac56b1b9b98664c5b4f6f7c613ced94f3e7aa0fdea",
+    "sceneWorksRevision": "source-tree:ea20ca7919c83073f9ffd5f3f7b897ed9083b0669a382c68b662919f293edffb",
+    "matrixRevision": "source-tree:5230a72dc0fa5327b029ce9776e07bbc9656743451319c90fc443611e9dc3e01",
     "inferenceRevision": "b9e15fedb7d43b74dda913061fd4ddd7d731e6d6",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "4845aa7d8f8850c18999f6cc254a1b45c110c3c4159fba257caa0561198d5d32"
+        "sha256": "abe2220b82adb78924fbe070a38e7f28509ac00fd512125dea020201411bed88"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -19,11 +19,11 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "9e6205cf5bca1ba0d6edf8eabe4923bfd89aadce21478108d862c973837e20f1"
+        "sha256": "75d55d242e6da7d2cc3c25bb93a7c15bc6c2a73add8dee177f8501c58d03e0f0"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "0cb75c3106fae1633a894f7e478d3619912e1fe9b10ce7142e023ad59740848e"
+        "sha256": "f6cc6e49a5b03f62f5994e7a8d863c90d053f36ece541a96ddf89273467706cf"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -35,7 +35,7 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "96cbdbfde3086692f5175efec2b1ca1f8e0e45cd2779a5033f80003d9bcf9b7f"
+        "sha256": "578900de7b19f033b7d522598cd90521cedf6716a1428c62ffe5afe90a9b5791"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
@@ -74,9 +74,9 @@
         "label": "Non-`none` overlay: no adapter can emit a truthful overlay scenario",
         "blockedBy": "provider-adapter code",
         "citation": "crates/sceneworks-memory-adapter/src/bin/candle.rs hardcodes the overlay scenario to `not_applicable` with the fixed reason \"ordinary Krea Turbo text-to-image calibration has no overlay\", which is false for a lora/identity/control target; crates/sceneworks-memory-adapter/src/bin/mlx.rs contains no overlay handling at all, so its overlay scenario stays `not_run` (from lib.rs#not_run_scenarios), which scripts/memory-calibration-harness.mjs#validateComplete rejects outright",
-        "cells": 3919,
-        "mlx": 2605,
-        "candle": 1314
+        "cells": 4354,
+        "mlx": 2890,
+        "candle": 1464
       },
       {
         "id": "no-provider-adapter",
@@ -113,9 +113,9 @@
           "overlay-declined"
         ],
         "description": "no-provider-adapter + overlay-declined",
-        "cells": 3835,
-        "mlx": 2575,
-        "candle": 1260
+        "cells": 4240,
+        "mlx": 2830,
+        "candle": 1410
       },
       {
         "blockers": [
@@ -132,8 +132,8 @@
           "overlay-declined"
         ],
         "description": "adapter-gated + overlay-declined",
-        "cells": 84,
-        "mlx": 30,
+        "cells": 114,
+        "mlx": 60,
         "candle": 54
       },
       {
@@ -156,33 +156,33 @@
     "independentBlocking": [
       {
         "id": "no-provider-adapter",
-        "cellsTouched": 6445,
+        "cellsTouched": 6850,
         "soleBlockerCells": 2610,
-        "coBlockedCells": 3835,
-        "coBlockedShare": 0.595,
+        "coBlockedCells": 4240,
+        "coBlockedShare": 0.619,
         "coBlockedWith": {
-          "overlay-declined": 3835
+          "overlay-declined": 4240
         }
       },
       {
         "id": "adapter-gated",
-        "cellsTouched": 144,
+        "cellsTouched": 174,
         "soleBlockerCells": 60,
-        "coBlockedCells": 84,
-        "coBlockedShare": 0.5833,
+        "coBlockedCells": 114,
+        "coBlockedShare": 0.6552,
         "coBlockedWith": {
-          "overlay-declined": 84
+          "overlay-declined": 114
         }
       },
       {
         "id": "overlay-declined",
-        "cellsTouched": 3919,
+        "cellsTouched": 4354,
         "soleBlockerCells": 0,
-        "coBlockedCells": 3919,
+        "coBlockedCells": 4354,
         "coBlockedShare": 1,
         "coBlockedWith": {
-          "adapter-gated": 84,
-          "no-provider-adapter": 3835
+          "adapter-gated": 114,
+          "no-provider-adapter": 4240
         }
       }
     ],
@@ -191,13 +191,13 @@
         "adapter-gated": 60,
         "no-provider-adapter": 2610,
         "no-run-needed": 6,
-        "overlay-declined": 3919
+        "overlay-declined": 4354
       },
       "adapterCoverageFirst": {
         "adapter-gated": 60,
-        "no-provider-adapter": 6445,
+        "no-provider-adapter": 6850,
         "no-run-needed": 6,
-        "overlay-declined": 84
+        "overlay-declined": 114
       },
       "note": "The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'."
     },
@@ -208,22 +208,33 @@
         "adapter-gated",
         "overlay-declined"
       ],
-      "overlayChargedByFirstMatch": 3919,
-      "overlayAlsoBlockedByAdapterCoverage": 3919,
+      "overlayChargedByFirstMatch": 4354,
+      "overlayAlsoBlockedByAdapterCoverage": 4354,
       "overlayIndependentlyBlocking": 0,
-      "overlayBindingAfterAdapterCoverage": 84,
-      "finding": "`overlay-declined` is charged 3919 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 3835 of them (97.9%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 84 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 84 while `no-provider-adapter` rises to 6445. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2610 cells and it touches 6445. Scoping overlay support in both adapters is still necessary, but on its own it moves 84 cells, not 3919."
+      "overlayBindingAfterAdapterCoverage": 114,
+      "finding": "`overlay-declined` is charged 4354 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 4240 of them (97.4%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 114 while `no-provider-adapter` rises to 6850. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2610 cells and it touches 6850. Scoping overlay support in both adapters is still necessary, but on its own it moves 114 cells, not 4354."
     },
-    "behindProviderCode": 6589,
+    "behindProviderCode": 7024,
     "behindProviderCodeShare": 0.9991,
     "producibleToday": 0,
     "headline": "ZERO cells are producible today. The binding constraint on this epic is provider-adapter code, not GPU hours: no adapter has ever emitted a `complete` record, and 2 of 53 entries have an adapter at all. Every hour in the wall-clock sweep below is hypothetical until that changes."
   },
   "controlUndercount": {
     "declaredControlPairs": [
-      "krea_2_turbo|candle"
+      "flux2_dev|candle",
+      "flux2_dev|mlx",
+      "flux_dev|candle",
+      "flux_dev|mlx",
+      "kolors|mlx",
+      "krea_2_turbo|candle",
+      "krea_2_turbo|mlx",
+      "qwen_image|candle",
+      "qwen_image|mlx",
+      "z_image_turbo|candle",
+      "z_image_turbo|mlx",
+      "z_image|mlx"
     ],
-    "controlCells": 30,
+    "controlCells": 465,
     "manifestDeclarations": 1,
     "citation": "scripts/generate-memory-matrix.mjs#overlaysFor pushes \"control\" only when `model[backend].control` is present",
     "knownOmission": {
@@ -322,70 +333,70 @@
     "sensitivityNote": "Each additional (entry, backend) pair that declares `control` adds tiers x modes x rungs cells, so the control count here is a FLOOR on demand rather than a measurement of it."
   },
   "cells": {
-    "total": 6595,
+    "total": 7030,
     "byState": {
-      "Implemented/unverified": 2131,
-      "Missing": 4458,
+      "Implemented/unverified": 2305,
+      "Missing": 4719,
       "Structurally N/A": 6
     },
     "byBackend": {
-      "candle": 2260,
-      "mlx": 4335
+      "candle": 2410,
+      "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 604,
-      "Implemented/unverified @ mlx": 1527,
-      "Missing @ candle": 1650,
-      "Missing @ mlx": 2808,
+      "Implemented/unverified @ candle": 664,
+      "Implemented/unverified @ mlx": 1641,
+      "Missing @ candle": 1740,
+      "Missing @ mlx": 2979,
       "Structurally N/A @ candle": 6
     },
     "byRung": {
-      "bounded_attention": 1319,
-      "bounded_decode": 1319,
-      "bounded_transformer_residency": 1319,
-      "resident": 1319,
-      "staged_residency": 1319
+      "bounded_attention": 1406,
+      "bounded_decode": 1406,
+      "bounded_transformer_residency": 1406,
+      "resident": 1406,
+      "staged_residency": 1406
     },
     "byTier": {
-      "bf16": 2135,
-      "q4": 2215,
-      "q8": 2245
+      "bf16": 2270,
+      "q4": 2365,
+      "q8": 2395
     },
     "byMode": {
-      "character_image": 1380,
-      "edit_image": 1570,
+      "character_image": 1450,
+      "edit_image": 1630,
       "image_detail": 180,
       "image_inpaint": 270,
       "image_to_image": 60,
-      "style_variations": 920,
-      "text_to_image": 2215
+      "style_variations": 1065,
+      "text_to_image": 2375
     },
     "byOverlay": {
-      "control": 30,
+      "control": 465,
       "identity": 1525,
       "lora": 2370,
       "none": 2670
     },
-    "geometryExpandedCells": 41100,
-    "geometryCollapseFactor": 6.232,
+    "geometryExpandedCells": 43170,
+    "geometryCollapseFactor": 6.141,
     "sessions": {
-      "total": 1319,
+      "total": 1406,
       "byBackend": {
-        "candle": 452,
-        "mlx": 867
+        "candle": 482,
+        "mlx": 924
       },
-      "geometryExpanded": 8220,
+      "geometryExpanded": 8634,
       "rungsPerSession": [
         5
       ]
     },
     "fitGroups": {
-      "total": 464,
+      "total": 494,
       "byBackend": {
-        "candle": 159,
-        "mlx": 305
+        "candle": 170,
+        "mlx": 324
       },
-      "tierSum": 1319
+      "tierSum": 1406
     }
   },
   "overlayLoadContract": {
@@ -492,22 +503,22 @@
       }
     },
     "certifyingRecords": {
-      "total": 6589,
-      "mlx": 4335,
-      "candle": 2254
+      "total": 7024,
+      "mlx": 4620,
+      "candle": 2404
     },
     "warmSessions": {
-      "total": 1319,
-      "mlx": 867,
-      "candle": 452
+      "total": 1406,
+      "mlx": 924,
+      "candle": 482
     },
     "overlayAmortisedSessions": {
       "total": 534,
       "mlx": 346,
       "candle": 188
     },
-    "overlayLoadCollapseFactor": 2.47,
-    "recordsPerWarmSession": 4.995,
+    "overlayLoadCollapseFactor": 2.63,
+    "recordsPerWarmSession": 4.996,
     "rungCollapseFactor": 5
   },
   "naSensitivity": {
@@ -515,7 +526,7 @@
     "selectionRule": "Projected exemptions are applied to NAMED cells, not to a count, so the session arithmetic stays exact rather than becoming a division. Within each rung the exempted cells are the first N by ASCENDING CELL ID. That is deterministic but ARBITRARY: cell ids lead with the model id, so an alphabetical prefix does not split evenly across backends. Consequently the MLX/Candle columns of a PROJECTION row are partly an artifact of this rule. Only the `current` row's split is a fact. Each projection row therefore also reports what its split would be under proportional allocation, so the size of the artifact is visible instead of implied.",
     "irreducibleFloor": {
       "rung": "resident",
-      "cells": 1319,
+      "cells": 1406,
       "reason": "Rung 0 is the unoptimised baseline every model has by definition, so it can never be Structurally N/A. No survey outcome can remove these cells from the campaign."
     },
     "scenarios": [
@@ -524,14 +535,14 @@
         "kind": "fact",
         "note": "What the generated matrix classifies today.",
         "certifyingRecords": {
-          "total": 6589,
-          "mlx": 4335,
-          "candle": 2254
+          "total": 7024,
+          "mlx": 4620,
+          "candle": 2404
         },
         "warmSessions": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "exemptedByBackend": {
           "mlx": 0,
@@ -548,22 +559,22 @@
         "kind": "projection",
         "note": "Half of all bounded_transformer_residency cells turn out structurally inapplicable. SC-15969 names the two breakers: heterogeneous blocks (the floor is the largest single block, so the saving collapses) and skip connections (encoder activations must persist).",
         "certifyingRecords": {
-          "total": 5932,
-          "mlx": 3873,
-          "candle": 2059
+          "total": 6324,
+          "mlx": 4125,
+          "candle": 2199
         },
         "warmSessions": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "exemptedByBackend": {
-          "mlx": 462,
-          "candle": 195
+          "mlx": 495,
+          "candle": 205
         },
         "exemptedByBackendIfProportional": {
-          "mlx": 434,
-          "candle": 223
+          "mlx": 462,
+          "candle": 238
         },
         "backendSplitIsSelectionArtifact": true
       },
@@ -572,22 +583,22 @@
         "kind": "projection",
         "note": "Upper bound on the rung-4 axis alone: every rung-4 cell is exempt. This is the most optimistic single-rung outcome and it still leaves four rungs to measure.",
         "certifyingRecords": {
-          "total": 5276,
-          "mlx": 3468,
-          "candle": 1808
+          "total": 5624,
+          "mlx": 3696,
+          "candle": 1928
         },
         "warmSessions": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "exemptedByBackend": {
-          "mlx": 867,
-          "candle": 446
+          "mlx": 924,
+          "candle": 476
         },
         "exemptedByBackendIfProportional": {
-          "mlx": 867,
-          "candle": 446
+          "mlx": 924,
+          "candle": 476
         },
         "backendSplitIsSelectionArtifact": false
       },
@@ -596,22 +607,22 @@
         "kind": "projection",
         "note": "Half of bounded_decode, bounded_attention and bounded_transformer_residency exempt — i.e. a large fraction of the catalog turns out to have a non-tileable decoder AND non-chunkable attention. Aggressive; included to show the shape of the curve, not because anything supports it.",
         "certifyingRecords": {
-          "total": 4612,
-          "mlx": 2949,
-          "candle": 1663
+          "total": 4918,
+          "mlx": 3137,
+          "candle": 1781
         },
         "warmSessions": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "exemptedByBackend": {
-          "mlx": 1386,
-          "candle": 591
+          "mlx": 1483,
+          "candle": 623
         },
         "exemptedByBackendIfProportional": {
-          "mlx": 1301,
-          "candle": 675
+          "mlx": 1386,
+          "candle": 720
         },
         "backendSplitIsSelectionArtifact": true
       },
@@ -620,22 +631,22 @@
         "kind": "bound",
         "note": "Absolute floor. Every constrained rung on every entry is exempt; only the resident baseline is measured. Rung 0 can never be Structurally N/A — it is the unoptimised baseline every model has by definition — so this is the smallest campaign that can exist.",
         "certifyingRecords": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "warmSessions": {
-          "total": 1319,
-          "mlx": 867,
-          "candle": 452
+          "total": 1406,
+          "mlx": 924,
+          "candle": 482
         },
         "exemptedByBackend": {
-          "mlx": 3468,
-          "candle": 1802
+          "mlx": 3696,
+          "candle": 1922
         },
         "exemptedByBackendIfProportional": {
-          "mlx": 3468,
-          "candle": 1802
+          "mlx": 3696,
+          "candle": 1922
         },
         "backendSplitIsSelectionArtifact": false
       }
@@ -668,14 +679,14 @@
       {
         "perRunSeconds": 30,
         "recordHours": {
-          "total": 54.9,
-          "mlx": 36.1,
-          "candle": 18.8
+          "total": 58.5,
+          "mlx": 38.5,
+          "candle": 20
         },
         "warmSessionHours": {
-          "total": 11,
-          "mlx": 7.2,
-          "candle": 3.8
+          "total": 11.7,
+          "mlx": 7.7,
+          "candle": 4
         },
         "overlayAmortisedSessionHours": {
           "total": 4.5,
@@ -686,14 +697,14 @@
       {
         "perRunSeconds": 60,
         "recordHours": {
-          "total": 109.8,
-          "mlx": 72.3,
-          "candle": 37.6
+          "total": 117.1,
+          "mlx": 77,
+          "candle": 40.1
         },
         "warmSessionHours": {
-          "total": 22,
-          "mlx": 14.5,
-          "candle": 7.5
+          "total": 23.4,
+          "mlx": 15.4,
+          "candle": 8
         },
         "overlayAmortisedSessionHours": {
           "total": 8.9,
@@ -704,14 +715,14 @@
       {
         "perRunSeconds": 120,
         "recordHours": {
-          "total": 219.6,
-          "mlx": 144.5,
-          "candle": 75.1
+          "total": 234.1,
+          "mlx": 154,
+          "candle": 80.1
         },
         "warmSessionHours": {
-          "total": 44,
-          "mlx": 28.9,
-          "candle": 15.1
+          "total": 46.9,
+          "mlx": 30.8,
+          "candle": 16.1
         },
         "overlayAmortisedSessionHours": {
           "total": 17.8,
@@ -722,14 +733,14 @@
       {
         "perRunSeconds": 300,
         "recordHours": {
-          "total": 549.1,
-          "mlx": 361.3,
-          "candle": 187.8
+          "total": 585.3,
+          "mlx": 385,
+          "candle": 200.3
         },
         "warmSessionHours": {
-          "total": 109.9,
-          "mlx": 72.3,
-          "candle": 37.7
+          "total": 117.2,
+          "mlx": 77,
+          "candle": 40.2
         },
         "overlayAmortisedSessionHours": {
           "total": 44.5,
@@ -740,14 +751,14 @@
       {
         "perRunSeconds": 600,
         "recordHours": {
-          "total": 1098.2,
-          "mlx": 722.5,
-          "candle": 375.7
+          "total": 1170.7,
+          "mlx": 770,
+          "candle": 400.7
         },
         "warmSessionHours": {
-          "total": 219.8,
-          "mlx": 144.5,
-          "candle": 75.3
+          "total": 234.3,
+          "mlx": 154,
+          "candle": 80.3
         },
         "overlayAmortisedSessionHours": {
           "total": 89,
@@ -758,14 +769,14 @@
       {
         "perRunSeconds": 1200,
         "recordHours": {
-          "total": 2196.3,
-          "mlx": 1445,
-          "candle": 751.3
+          "total": 2341.3,
+          "mlx": 1540,
+          "candle": 801.3
         },
         "warmSessionHours": {
-          "total": 439.7,
-          "mlx": 289,
-          "candle": 150.7
+          "total": 468.7,
+          "mlx": 308,
+          "candle": 160.7
         },
         "overlayAmortisedSessionHours": {
           "total": 178,
@@ -837,28 +848,28 @@
     "strategies": [
       {
         "name": "exhaustive-exact-geometry",
-        "sessions": 8220,
-        "providerInvocations": 41100,
+        "sessions": 8634,
+        "providerInvocations": 43170,
         "policy": "Measure every advertised resolution. This is what the manifest's own evidenceRecords comment demands: 'exact request envelopes, not permission to interpolate'."
       },
       {
         "name": "exhaustive-per-cell",
-        "sessions": 1319,
-        "providerInvocations": 6589,
+        "sessions": 1406,
+        "providerInvocations": 7024,
         "policy": "One measurement per cell at one geometry, relying on the binding logic accepting any resolution inside the envelope. Cheaper, but it certifies an envelope from a point."
       },
       {
         "name": "fit-then-validate",
-        "sessions": 2704,
-        "providerInvocations": 13520,
-        "fitSessions": 2638,
-        "validationSessions": 66,
+        "sessions": 2883,
+        "providerInvocations": 14415,
+        "fitSessions": 2812,
+        "validationSessions": 71,
         "policy": "Measure 2 geometry points per (entry, backend, mode, overlay, tier) to determine the affine curve, then spot-check a sample against the prediction. Covers every geometry in the envelope that is at or below the tier's `maxMeasuredPixels`, including ones never rendered — but ONLY up to that bound. Above it the curve is not consulted at all: `krea_rung_phase_peaks` returns `None` and `krea_turbo_fit_with_runtime` returns `Unverified { OutOfEnvelope }` (vram_gate.rs:481-485 and :578-583), and the manifest says why in its own words — \"do not extrapolate these curves into unvalidated attention shapes\". So a fit does not buy coverage of the whole envelope; it buys coverage of the measured sub-envelope. Note this is UNKNOWN, not `Reject`: the job is not refused, the measured ladder is simply declined and the older sequential gate decides (vram_gate.rs:548-549 draws that distinction explicitly)."
       }
     ],
     "ratios": {
-      "exactGeometryOverFit": 3.04,
-      "exactGeometryOverPerCell": 6.23,
+      "exactGeometryOverFit": 2.99,
+      "exactGeometryOverPerCell": 6.14,
       "fitOverPerCell": 2.05
     },
     "finding": "Fitting does NOT beat the per-cell campaign on run count — it costs more, because the matrix already collapsed geometry and a curve needs a second geometry point the per-cell campaign never takes. Fitting wins only against the policy the manifest actually states (no interpolation), where it is the difference between a campaign that covers every advertised resolution and one that does not. The decision is therefore about which geometry policy is true, not about which strategy is cheaper.",
@@ -884,203 +895,203 @@
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0,
-          "fitSessions": 2638,
+          "fitSessions": 2812,
           "validationSessions": 0,
-          "modelLoads": 2638,
-          "exactGeometryOverFit": 3.12,
+          "modelLoads": 2812,
+          "exactGeometryOverFit": 3.07,
           "fitOverPerCell": 2
         },
         {
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.05,
-          "fitSessions": 2638,
-          "validationSessions": 66,
-          "modelLoads": 2704,
-          "exactGeometryOverFit": 3.04,
+          "fitSessions": 2812,
+          "validationSessions": 71,
+          "modelLoads": 2883,
+          "exactGeometryOverFit": 2.99,
           "fitOverPerCell": 2.05
         },
         {
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.25,
-          "fitSessions": 2638,
-          "validationSessions": 330,
-          "modelLoads": 2968,
-          "exactGeometryOverFit": 2.77,
+          "fitSessions": 2812,
+          "validationSessions": 352,
+          "modelLoads": 3164,
+          "exactGeometryOverFit": 2.73,
           "fitOverPerCell": 2.25
         },
         {
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0,
-          "fitSessions": 1783,
+          "fitSessions": 1900,
           "validationSessions": 0,
-          "modelLoads": 1783,
-          "exactGeometryOverFit": 4.61,
+          "modelLoads": 1900,
+          "exactGeometryOverFit": 4.54,
           "fitOverPerCell": 1.35
         },
         {
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.05,
-          "fitSessions": 1783,
-          "validationSessions": 66,
-          "modelLoads": 1849,
-          "exactGeometryOverFit": 4.45,
+          "fitSessions": 1900,
+          "validationSessions": 71,
+          "modelLoads": 1971,
+          "exactGeometryOverFit": 4.38,
           "fitOverPerCell": 1.4
         },
         {
           "geometryPointsPerFit": 2,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.25,
-          "fitSessions": 1783,
-          "validationSessions": 330,
-          "modelLoads": 2113,
-          "exactGeometryOverFit": 3.89,
+          "fitSessions": 1900,
+          "validationSessions": 352,
+          "modelLoads": 2252,
+          "exactGeometryOverFit": 3.83,
           "fitOverPerCell": 1.6
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0,
-          "fitSessions": 3957,
+          "fitSessions": 4218,
           "validationSessions": 0,
-          "modelLoads": 3957,
-          "exactGeometryOverFit": 2.08,
+          "modelLoads": 4218,
+          "exactGeometryOverFit": 2.05,
           "fitOverPerCell": 3
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.05,
-          "fitSessions": 3957,
-          "validationSessions": 66,
-          "modelLoads": 4023,
-          "exactGeometryOverFit": 2.04,
+          "fitSessions": 4218,
+          "validationSessions": 71,
+          "modelLoads": 4289,
+          "exactGeometryOverFit": 2.01,
           "fitOverPerCell": 3.05
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.25,
-          "fitSessions": 3957,
-          "validationSessions": 330,
-          "modelLoads": 4287,
-          "exactGeometryOverFit": 1.92,
+          "fitSessions": 4218,
+          "validationSessions": 352,
+          "modelLoads": 4570,
+          "exactGeometryOverFit": 1.89,
           "fitOverPerCell": 3.25
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0,
-          "fitSessions": 2247,
+          "fitSessions": 2394,
           "validationSessions": 0,
-          "modelLoads": 2247,
-          "exactGeometryOverFit": 3.66,
+          "modelLoads": 2394,
+          "exactGeometryOverFit": 3.61,
           "fitOverPerCell": 1.7
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.05,
-          "fitSessions": 2247,
-          "validationSessions": 66,
-          "modelLoads": 2313,
-          "exactGeometryOverFit": 3.55,
+          "fitSessions": 2394,
+          "validationSessions": 71,
+          "modelLoads": 2465,
+          "exactGeometryOverFit": 3.5,
           "fitOverPerCell": 1.75
         },
         {
           "geometryPointsPerFit": 3,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.25,
-          "fitSessions": 2247,
-          "validationSessions": 330,
-          "modelLoads": 2577,
-          "exactGeometryOverFit": 3.19,
+          "fitSessions": 2394,
+          "validationSessions": 352,
+          "modelLoads": 2746,
+          "exactGeometryOverFit": 3.14,
           "fitOverPerCell": 1.95
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0,
-          "fitSessions": 5276,
+          "fitSessions": 5624,
           "validationSessions": 0,
-          "modelLoads": 5276,
-          "exactGeometryOverFit": 1.56,
+          "modelLoads": 5624,
+          "exactGeometryOverFit": 1.54,
           "fitOverPerCell": 4
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.05,
-          "fitSessions": 5276,
-          "validationSessions": 66,
-          "modelLoads": 5342,
-          "exactGeometryOverFit": 1.54,
+          "fitSessions": 5624,
+          "validationSessions": 71,
+          "modelLoads": 5695,
+          "exactGeometryOverFit": 1.52,
           "fitOverPerCell": 4.05
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": false,
           "validationSampleFraction": 0.25,
-          "fitSessions": 5276,
-          "validationSessions": 330,
-          "modelLoads": 5606,
-          "exactGeometryOverFit": 1.47,
+          "fitSessions": 5624,
+          "validationSessions": 352,
+          "modelLoads": 5976,
+          "exactGeometryOverFit": 1.44,
           "fitOverPerCell": 4.25
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0,
-          "fitSessions": 2711,
+          "fitSessions": 2888,
           "validationSessions": 0,
-          "modelLoads": 2711,
-          "exactGeometryOverFit": 3.03,
-          "fitOverPerCell": 2.06
+          "modelLoads": 2888,
+          "exactGeometryOverFit": 2.99,
+          "fitOverPerCell": 2.05
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.05,
-          "fitSessions": 2711,
-          "validationSessions": 66,
-          "modelLoads": 2777,
-          "exactGeometryOverFit": 2.96,
-          "fitOverPerCell": 2.11
+          "fitSessions": 2888,
+          "validationSessions": 71,
+          "modelLoads": 2959,
+          "exactGeometryOverFit": 2.92,
+          "fitOverPerCell": 2.1
         },
         {
           "geometryPointsPerFit": 4,
           "slopeSharedAcrossTiers": true,
           "validationSampleFraction": 0.25,
-          "fitSessions": 2711,
-          "validationSessions": 330,
-          "modelLoads": 3041,
-          "exactGeometryOverFit": 2.7,
-          "fitOverPerCell": 2.31
+          "fitSessions": 2888,
+          "validationSessions": 352,
+          "modelLoads": 3240,
+          "exactGeometryOverFit": 2.66,
+          "fitOverPerCell": 2.3
         }
       ],
       "defaultRow": {
         "geometryPointsPerFit": 2,
         "slopeSharedAcrossTiers": false,
         "validationSampleFraction": 0.05,
-        "fitSessions": 2638,
-        "validationSessions": 66,
-        "modelLoads": 2704,
-        "exactGeometryOverFit": 3.04,
+        "fitSessions": 2812,
+        "validationSessions": 71,
+        "modelLoads": 2883,
+        "exactGeometryOverFit": 2.99,
         "fitOverPerCell": 2.05
       },
       "exactGeometryOverFitRange": [
-        1.47,
-        4.61
+        1.44,
+        4.54
       ],
       "fitOverPerCellRange": [
         1.35,
         4.25
       ],
       "inversionHoldsEverywhere": true,
-      "note": "These three parameters were previously fixed and unswept while the file's own policy says an unknowable value must be exposed and swept. They move the exact-geometry/fit ratio across the range above — a factor of about 3.1 — so the single headline ratio is a point on a surface, not a constant. What does NOT move is the DIRECTION: fit/per-cell exceeds 1 at every grid point, so fitting costs more than the per-cell campaign under every combination tested. The finding is robust; its magnitude is not."
+      "note": "These three parameters were previously fixed and unswept while the file's own policy says an unknowable value must be exposed and swept. They move the exact-geometry/fit ratio across the range above — a factor of about 3.2 — so the single headline ratio is a point on a surface, not a constant. What does NOT move is the DIRECTION: fit/per-cell exceeds 1 at every grid point, so fitting costs more than the per-cell campaign under every combination tested. The finding is robust; its magnitude is not."
     }
   },
   "parameters": {
@@ -1108,11 +1119,11 @@
     {
       "gate": "no-provider-adapter",
       "input": "how much provider-adapter work the CATALOG COVERAGE gap needs",
-      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2610 cells and it touches 6445 — 3919 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6445 cells.",
+      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2610 cells and it touches 6850 — 4354 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6850 cells.",
       "howToResolve": "Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.",
       "story": 15508,
       "independentlyBlockingCells": 2610,
-      "cellsTouched": 6445
+      "cellsTouched": 6850
     },
     {
       "input": "perRunSeconds",
@@ -1122,20 +1133,20 @@
     {
       "gate": "adapter-gated",
       "input": "what a `complete` record actually requires from an existing adapter",
-      "why": "60 cells are blocked ONLY by this, and 144 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.",
+      "why": "60 cells are blocked ONLY by this, and 174 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.",
       "howToResolve": "Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.",
       "story": 15508,
       "independentlyBlockingCells": 60,
-      "cellsTouched": 144
+      "cellsTouched": 174
     },
     {
       "gate": "overlay-declined",
       "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 3919 cells (59.5% of the matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 3919 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 84 cells, not 3919. It remains necessary work — 3,925 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4354 cells (59.5% of the matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 4354 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 114 cells, not 4354. It remains necessary work — 3,925 cells cannot be certified without it — but it is not where the schedule is decided.",
       "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a 2.47x load saving. The related control-declaration omission is SC-16073.",
       "story": 16072,
       "independentlyBlockingCells": 0,
-      "cellsTouched": 3919
+      "cellsTouched": 4354
     },
     {
       "input": "whether the harness can amortise a model load across a target's rungs",

@@ -10,6 +10,7 @@ use super::{
     Progress, QwenFunControl, QwenFunControlPaths, QwenFunControlRequest, Settings, Value,
     WorkerError, WorkerResult,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Qwen-Image 2512-Fun-Controlnet-Union (strict control) route (sc-5489 origin /
@@ -374,6 +375,17 @@ impl CandleStrictControl for QwenStrictControl {
 
     fn out_height(&self) -> u32 {
         self.height
+    }
+
+    /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
+    /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            "Qwen-Image",
+            "strict-pose ControlNet branch",
+            &self.qwen_base,
+            &[&self.controlnet],
+        ))
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {

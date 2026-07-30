@@ -9,6 +9,7 @@ use super::{
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) FLUX.1-dev strict-control Fun-Controlnet-Union route (sc-8412, epic 8236) —
@@ -284,6 +285,17 @@ impl CandleStrictControl for Flux1StrictControl {
 
     fn out_height(&self) -> u32 {
         self.height
+    }
+
+    /// The FLUX.1-dev base tier dir + the Shakker Union-Pro-2.0 control overlay, exactly the two paths
+    /// [`Self::load`] hands `Flux1ControlPaths` (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            "FLUX.1-dev",
+            "strict-control Union-Pro-2.0 branch",
+            &self.base,
+            &[&self.control],
+        ))
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {

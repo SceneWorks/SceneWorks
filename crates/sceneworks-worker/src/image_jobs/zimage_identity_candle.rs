@@ -3,10 +3,11 @@ use super::zimage_edit_candle::{
     resolve_zimage_edit_candle_base, zimage_edit_candle_steps, ZIMAGE_EDIT_CANDLE_DEFAULT_REPO,
 };
 use super::{
-    consume_gen_events, drive_gen_items_scored, fit_engine_image, load_reference_image,
-    pose_entries, resolve_character_image_likeness_source, resolve_seed, stage_likeness,
-    start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path,
-    Settings, Value, WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths, ZImageEditRequest,
+    admit_conditioning_paths, consume_gen_events, drive_gen_items_scored, fit_engine_image,
+    load_reference_image, pose_entries, resolve_character_image_likeness_source, resolve_seed,
+    stage_likeness, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, Settings, Value, WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths,
+    ZImageEditRequest,
 };
 use serde_json::json;
 
@@ -220,6 +221,23 @@ pub(super) async fn generate_candle_zimage_identity_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+
+    // Conditioning VRAM admission (sc-16069, epic 15448). This lane is diverted by
+    // `resolve_candle_image_route` before the generic txt2img arm and loads through the UNcached
+    // `start_gen_stream`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
+    // `generator_cache` `apply_residency_policy` — before this it allocated with no pre-flight check.
+    //
+    // Unlike its sibling conditioning lanes this one overlays NO second network: identity-init is an
+    // img2img reconditioning of the Z-Image base (`ZImageEditPaths { base }`), so the floor is the base
+    // weights alone and the rejection says so rather than pricing a phantom overlay.
+    admit_conditioning_paths(
+        settings,
+        "Z-Image",
+        "identity-init reference conditioning",
+        &base,
+        &[],
+    )
+    .await?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

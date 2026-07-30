@@ -1,13 +1,13 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
-    non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
+    admit_conditioning_paths, consume_gen_events, curated_image_menu, drive_gen_items_scored,
+    load_reference_image, non_empty, normalize_sampling_knob, read_advanced_sampling_knobs,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
     ApiClient, Image, ImagePlan, ImageRequest, IpAdapterKolors, IpAdapterKolorsPaths,
     IpAdapterKolorsRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
     WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
 use serde_json::json;
 
@@ -314,6 +314,19 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         .collect();
     let total = work.len();
     let negative_prompt = request.negative_prompt.clone();
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the Kolors base held co-resident with
+    // the IP-Adapter overlay. This lane loads through the UNcached `start_gen_stream` with a bespoke
+    // `IpAdapterKolorsPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor the
+    // `generator_cache` `apply_residency_policy`; before this it allocated unchecked.
+    admit_conditioning_paths(
+        settings,
+        "Kolors",
+        "IP-Adapter",
+        &kolors_base,
+        &[ip_adapter.as_path()],
+    )
+    .await?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

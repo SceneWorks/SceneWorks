@@ -439,12 +439,68 @@ function modesFor(model) {
   return modes.length ? sortedUnique(modes) : ["catalog_default"];
 }
 
+// SC-16069: the model ids that SHIP a strict-pose control lane. This is a DECLARATION of what exists,
+// deliberately separate from whether that lane has been MEASURED.
+//
+// ## The blind spot this replaces
+//
+// `overlaysFor` used to emit the `control` overlay only when `model[backend].control` existed — but that
+// key is a MEASUREMENT block (`bf16BranchPeakGbByTier`, `decodeTileSaveGb`, …), and `"control"` appears
+// exactly once in `config/manifests/builtin.models.jsonc`: inside `krea_2_turbo`'s **candle** block. So a
+// shipping lane with no measurements had **zero cells** — it was invisible to the very matrix that exists
+// to show what is unmeasured. The MLX Krea control lane is the concrete case: `mlx-gen-krea`'s
+// `model_control.rs` registers `krea_2_turbo_control` and the worker routes it
+// (`image_jobs/krea_control.rs`), yet the matrix showed no `krea_2_turbo`/`mlx` control cell at all. Absent
+// evidence read as absent feature, which is the exact false green this epic exists to prevent.
+//
+// ## Why both backends, for every id here
+//
+// Both worker routers wire the SAME seven families, and `crates/sceneworks-worker/src/image_jobs/base.rs`
+// says so in the source: `WIRED_MLX_POSE_FAMILIES` is documented as "the MLX twin of
+// `WIRED_CANDLE_POSE_FAMILIES` … and the SAME id set — every candle wired family has a matching MLX control
+// lane". A model listed here therefore has a control lane on whichever backends it supports at all; the
+// per-backend loop below already restricts to those. `candle_declaration_matches_the_memory_matrix_generator`
+// in `crates/sceneworks-worker/src/tests/gpu_and_manifest.rs` is the cross-language guard: adding a candle
+// control lane without adding it here turns that test red.
+export const CONTROL_LANE_MODELS = [
+  "flux2_dev",
+  "flux_dev",
+  "kolors",
+  "krea_2_turbo",
+  "qwen_image",
+  "z_image",
+  "z_image_turbo",
+];
+
 function overlaysFor(model, backend) {
   const overlays = ["none"];
   if (model.loraCompatibility) overlays.push("lora");
-  if (model[backend]?.control) overlays.push("control");
+  // A DECLARED lane, not a measured one — see CONTROL_LANE_MODELS.
+  if (CONTROL_LANE_MODELS.includes(model.id)) overlays.push("control");
   if ((model.capabilities ?? []).includes("character_image")) overlays.push("identity");
   return sortedUnique(overlays);
+}
+
+// Drift in the other direction: a `[backend].control` MEASUREMENT block for a lane nobody declared. That
+// would mean measurements exist for a lane the matrix does not believe ships, so the cells they belong to
+// were never generated and the evidence is orphaned. Fail loudly at generation time rather than emit a
+// matrix that quietly drops them (the same posture as MODEL_STORIES' missing-mapping failure).
+function assertDeclaredControlLanes(models) {
+  const undeclared = [];
+  for (const model of models) {
+    for (const backend of ["mlx", "candle"]) {
+      if (model[backend]?.control && !CONTROL_LANE_MODELS.includes(model.id)) {
+        undeclared.push(`${model.id}:${backend}`);
+      }
+    }
+  }
+  if (undeclared.length) {
+    throw new Error(
+      `memory-matrix: ${undeclared.join(", ")} carry a [backend].control measurement block but are not in ` +
+        "CONTROL_LANE_MODELS, so no control cells were generated for them and the measurements are " +
+        "orphaned. Add them to CONTROL_LANE_MODELS (sc-16069).",
+    );
+  }
 }
 
 function geometryFor(model, backend) {
@@ -720,6 +776,10 @@ export async function buildMatrix() {
       .map(([name]) => bodies[name])
       .join(""),
   )}`;
+
+  // sc-16069: no orphaned control measurements — a `[backend].control` block for an undeclared lane means
+  // its cells were never generated.
+  assertDeclaredControlLanes(images);
 
   const models = images
     .map((model) => {

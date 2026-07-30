@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  CONTROL_LANE_MODELS,
   FAMILY_STORIES,
   MODEL_STORIES,
   assertCellOwnershipIsBackendScoped,
@@ -288,5 +290,48 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
   assert.throws(
     () => assertTwinCoverage(models, { ...MODEL_STORIES, boogu_image: { mlx: 15474, candle: 15910 } }),
     /33 dual models map onto only 32 distinct Candle model twins/,
+  );
+});
+
+test("a shipping control lane is declared, not inferred from having been measured (sc-16069)", async () => {
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  const control = matrix.cells.filter((cell) => cell.overlay === "control");
+
+  // The named regression: the MLX Krea control lane SHIPS (mlx-gen-krea registers
+  // `krea_2_turbo_control`, image_jobs/krea_control.rs routes it) but has no manifest `mlx.control`
+  // measurement block, so keying the overlay off that block gave it ZERO cells — a shipping feature
+  // invisible to the matrix that exists to show what is unmeasured.
+  const kreaMlx = control.filter((cell) => cell.modelId === "krea_2_turbo" && cell.backend === "mlx");
+  assert.ok(
+    kreaMlx.length > 0,
+    "the shipping MLX Krea control lane must have control cells even with no mlx.control block",
+  );
+
+  // Every declared lane is represented on every backend the entry advertises — the declaration is what
+  // generates cells now, so a lane can be unmeasured without being invisible.
+  for (const id of CONTROL_LANE_MODELS) {
+    const model = matrix.models.find((entry) => entry.id === id);
+    assert.ok(model, `${id} must be a catalog entry`);
+    for (const backend of model.backends) {
+      assert.ok(
+        control.some((cell) => cell.modelId === id && cell.backend === backend),
+        `${id}/${backend} ships a control lane, so it must have control cells`,
+      );
+    }
+  }
+
+  // No control cells for anything undeclared: the overlay axis must not grow by accident.
+  const undeclared = [...new Set(control.map((cell) => cell.modelId))].filter(
+    (id) => !CONTROL_LANE_MODELS.includes(id),
+  );
+  assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
+
+  // Declaring a lane must NOT fabricate evidence: these cells are honestly unverified.
+  assert.equal(
+    control.filter((cell) => cell.state === "Verified").length,
+    0,
+    "declaring a lane must not manufacture verification — no overlay cell has been measured",
   );
 });

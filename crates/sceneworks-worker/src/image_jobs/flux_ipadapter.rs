@@ -1,12 +1,12 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, drive_gen_items_scored, load_reference_image, non_empty,
-    resolve_advanced_or_manifest_f32_with, resolve_advanced_or_manifest_u32_with,
+    admit_conditioning_paths, consume_gen_events, drive_gen_items_scored, load_reference_image,
+    non_empty, resolve_advanced_or_manifest_f32_with, resolve_advanced_or_manifest_u32_with,
     resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
     ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux, IpAdapterFluxPaths,
     IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
     WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
 use serde_json::json;
 
@@ -314,6 +314,20 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1 base held co-resident with
+    // the XLabs IP-Adapter and its CLIP image encoder. This lane loads through the UNcached
+    // `start_gen_stream` with a bespoke `IpAdapterFluxPaths`, so it reaches neither the
+    // `generate_candle_stream` `vram_gate` nor the `generator_cache` `apply_residency_policy`; before this
+    // it allocated unchecked.
+    admit_conditioning_paths(
+        settings,
+        "FLUX.1",
+        "IP-Adapter",
+        &flux_base,
+        &[adapter_file.as_path(), encoder_dir.as_path()],
+    )
+    .await?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

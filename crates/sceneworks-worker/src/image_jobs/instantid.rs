@@ -874,6 +874,55 @@ async fn generate_instantid_stream(
             WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
         })?
     };
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — candle only: the macOS MLX InstantID
+    // lane loads a registered generator and is already admitted by
+    // `mlx_fit_gate::apply_residency_policy` in `generator_cache`. The candle lane is not: it is claimed
+    // by `resolve_candle_image_route`'s FIRST arm (`instantid_realvisxl` is not an `is_candle_engine`
+    // txt2img id) and loads a bespoke `InstantIdPaths` through the UNcached `start_gen_stream`, so before
+    // this it allocated with no pre-flight check at all.
+    //
+    // InstantID's overlay is its whole identity stack: IdentityNet, the identity IP-Adapter, the SCRFD
+    // detector + ArcFace embedder, the pose-mode OpenPose ControlNet branch, and an opted-in PiD decoder
+    // pair. Priced before anything is moved into the load closure. (The `sdxl` components built above are
+    // already borrowed by value into `SdxlComponents`, so the fp16-fix VAE is not re-summed here; it is a
+    // few hundred MB against tens of GB, and a lower floor only ever admits.)
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        // The OpenPose branch resolves to a DIRECTORY, and on the warm path that directory is the whole
+        // `xinsir/controlnet-openpose-sdxl-1.0` HF snapshot — which may carry checkpoints this render does
+        // not load. Price the two files the lane actually names (`INSTANTID_CONTROLNET_FILES`) instead of
+        // scanning the snapshot, so an alternate checkpoint sitting beside them cannot inflate the floor
+        // into refusing a render that fits (sc-16069 review). A file that is absent contributes 0, so the
+        // freshly-downloaded layout (where both files ARE the directory's contents) prices identically.
+        let openpose_dir = openpose
+            .as_ref()
+            .map(crate::conditioning_fit::weights_source_path);
+        let openpose_files: Vec<std::path::PathBuf> = openpose_dir
+            .map(|dir| {
+                INSTANTID_CONTROLNET_FILES
+                    .iter()
+                    .map(|file| dir.join(file))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut overlays = vec![
+            crate::conditioning_fit::weights_source_path(&controlnet),
+            ip_adapter.as_path(),
+            scrfd_path.as_path(),
+            arcface_path.as_path(),
+        ];
+        overlays.extend(openpose_files.iter().map(std::path::PathBuf::as_path));
+        overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        admit_conditioning_paths(
+            settings,
+            "InstantID",
+            "face-identity conditioning stack",
+            &sdxl_base,
+            &overlays,
+        )
+        .await?;
+    }
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
