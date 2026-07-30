@@ -4377,10 +4377,10 @@
         "calibrations": [
           {
             "abi": 1,
-            "fingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "8e186c913d7661aef565b0bf0d559c9dc651d90e",
+            "inferenceRevision": "85b8aa7afbfabafea43b7354f526ceb5133d99a3",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",
@@ -4395,10 +4395,10 @@
           },
           {
             "abi": 1,
-            "fingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "8e186c913d7661aef565b0bf0d559c9dc651d90e",
+            "inferenceRevision": "85b8aa7afbfabafea43b7354f526ceb5133d99a3",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",

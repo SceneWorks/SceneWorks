@@ -33,8 +33,8 @@ const KREA_MEAN_THRESHOLD: f64 = 5e-3;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
-const KREA_FINGERPRINT: &str = "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64";
-const KREA_TILE_EDGES: [u32; 2] = [512, 384];
+const KREA_FINGERPRINT: &str = "krea-control-mlx-v4-q4-pose-bounded-decode-512-64";
+const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const MIB: u64 = 1024 * 1024;
 
@@ -694,29 +694,20 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
         return Err("a synchronized Krea lifecycle phase reported a zero active peak".to_owned());
     }
 
-    let mut sweep_images = Vec::new();
-    for edge in KREA_TILE_EDGES {
-        let sweep_context = krea_context(width, height, edge, 1, KREA_FINGERPRINT);
-        sweep_images.push((
-            edge,
-            one_image(scoped_generate(
-                generator.as_ref(),
-                krea_request(width, height, 8),
-                &sweep_context,
-                None,
-                &mut |_| {},
-            )?)?,
-        ));
-    }
-    let alternate = &sweep_images
-        .iter()
-        .find(|(edge, _)| *edge == KREA_TILE_EDGES[1])
-        .expect("fixed sweep edge")
-        .1;
-    let (maximum_error, mean_error) = image_max_mean_abs(&baseline, alternate)?;
+    // The first pass above is the exact production 512/64 route whose synchronized memory peaks are
+    // published. Compare it against the provider's unbounded default on this probed 128 GB machine;
+    // with no request memory selection, the provider executes its single-pass Qwen-VAE decode.
+    // Running the reference second preserves the production route as the cold measurement.
+    let untiled_reference = one_image(
+        generator
+            .generate(&krea_request(width, height, 8), &mut |_| {})
+            .map_err(|error| format!("generate untiled Krea quality reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&baseline, &untiled_reference)?;
     if maximum_error > KREA_MAX_THRESHOLD || mean_error > KREA_MEAN_THRESHOLD {
         return Err(format!(
-            "Krea bounded-decode sweep exceeded parity: max={maximum_error:.6}, mean={mean_error:.6}"
+            "Krea 512/64 bounded decode exceeded untiled parity: \
+             max={maximum_error:.6}, mean={mean_error:.6}"
         ));
     }
     let warm_repeat = one_image(scoped_generate(
@@ -901,7 +892,7 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
             "overall": overall.json(),
         },
         "quality": {
-            "contract": "same seed and control latent, exact 512/64 versus 384/64 bounded Qwen-VAE decode",
+            "contract": "same seed and control latent, exact production 512/64 bounded decode versus single-pass Qwen-VAE decode",
             "identicalLatents": true,
             "result": "passed",
             "maximumError": maximum_error,

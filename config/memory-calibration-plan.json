@@ -47,7 +47,7 @@
         "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
-      "calibrationFingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
         { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }
@@ -66,7 +66,7 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
-      "calibrationFingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
         { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }
