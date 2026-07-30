@@ -1090,12 +1090,20 @@ pub async fn save_image_export(
 /// user returns to their last-used save location (sc-8737); an empty/missing/non-existent
 /// hint is ignored. Returns `Ok(None)` when the user cancels the dialog and `Ok(Some(dest))`
 /// with the absolute destination path on success.
+///
+/// `without_workflow` (sc-15953) writes the copy with any embedded `sceneworks:workflow` chunk
+/// excised, for a user who wants to share the image but not the recipe that made it. It is a
+/// byte-level removal, not a re-encode — `copy_without_workflow_chunk` copies IHDR, every IDAT and
+/// IEND through unchanged — so the saved file has the same pixels as the same compressed data, and
+/// a source with nothing to strip goes through the same `std::fs::copy` the plain save uses. The
+/// SOURCE asset is never touched: this is one copy written differently, not a cleanup pass.
 #[tauri::command]
 pub async fn save_asset_as(
     app: AppHandle,
     source_path: String,
     suggested_filename: String,
     start_dir: Option<String>,
+    without_workflow: Option<bool>,
 ) -> Result<Option<String>, String> {
     // Guard the SOURCE before opening any dialog: only files inside the SceneWorks data
     // dir / HF cache may be copied out.
@@ -1117,7 +1125,12 @@ pub async fn save_asset_as(
         return Ok(None);
     };
 
-    std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+    if without_workflow.unwrap_or(false) {
+        sceneworks_core::workflow_png::copy_without_workflow_chunk(&source, &destination)
+            .map_err(|error| error.to_string())?;
+    } else {
+        std::fs::copy(&source, &destination).map_err(|error| error.to_string())?;
+    }
     Ok(Some(destination.to_string_lossy().into_owned()))
 }
 

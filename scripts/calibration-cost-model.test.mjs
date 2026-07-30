@@ -57,6 +57,36 @@ test("comment-only manifest edits produce no calibration cost-model change", asy
   );
 });
 
+test("control coverage follows CONTROL_LANE_MODELS, not backend measurement blocks", async () => {
+  const model = await buildCostModel();
+  assert.ok(model.controlCoverage.declaredControlModels.includes("krea_2_turbo"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("krea_2_turbo|mlx"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("kolors|candle"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("z_image|candle"));
+  assert.match(model.controlCoverage.citation, /CONTROL_LANE_MODELS/);
+  assert.doesNotMatch(
+    JSON.stringify(model.controlCoverage),
+    /model\[backend\]\.control|knownOmission|manifestDeclarations/,
+  );
+});
+
+test("published overlay prose derives its census and load ratio from the current matrix", async () => {
+  const model = await buildCostModel();
+  const overlayCells = model.cells.total - model.cells.byOverlay.none;
+  const overlayAxis = model.collapsing.axes.find((axis) => axis.axis === "overlay");
+  const overlayUncertainty = model.biggestUncertainties.find(
+    (entry) => entry.gate === "overlay-declined",
+  );
+
+  assert.match(overlayAxis.rule, new RegExp(`${overlayCells} of the ${model.cells.total} cells`));
+  assert.match(overlayAxis.factor, new RegExp(`${model.runs.overlayLoadCollapseFactor}x`));
+  assert.match(
+    overlayUncertainty.why,
+    new RegExp(`${model.producibility.blockerRanking.overlayChargedByFirstMatch} cells`),
+  );
+  assert.doesNotMatch(JSON.stringify(model), /3,925|6,595|2\.47x|SC-16073/);
+});
+
 /**
  * A small synthetic matrix with the shape that matters:
  *

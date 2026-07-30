@@ -89,6 +89,7 @@ describe("saveAssetAs — desktop (sc-8727)", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "save_asset_as", {
       sourcePath: "/data/project_1/assets/images/Mira.png",
       suggestedFilename: "Mira.png",
+      withoutWorkflow: false,
     });
     expect(dest).toBe("/Users/me/Desktop/Mira.png");
   });
@@ -106,6 +107,7 @@ describe("saveAssetAs — desktop (sc-8727)", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "save_asset_as", {
       sourcePath: "/data/project_1/assets/videos/Clip.mp4",
       suggestedFilename: "Clip.mp4",
+      withoutWorkflow: false,
     });
   });
 
@@ -280,5 +282,76 @@ describe("revealAsset (sc-8727)", () => {
   it("throws in browser mode (desktop-only)", async () => {
     const { revealAsset } = await importBrowser();
     await expect(revealAsset(IMAGE_ASSET)).rejects.toThrow(/desktop app/i);
+  });
+});
+
+describe("Save without the workflow (sc-15953)", () => {
+  it("only offers the option for a PNG, the one format the envelope rides in", async () => {
+    const { assetCanCarryWorkflow } = await importBrowser();
+    expect(assetCanCarryWorkflow(IMAGE_ASSET)).toBe(true);
+    expect(assetCanCarryWorkflow(VIDEO_ASSET)).toBe(false);
+    expect(
+      assetCanCarryWorkflow({ file: { path: "a/b.jpg", mimeType: "image/jpeg" } }),
+    ).toBe(false);
+    // The mime fallback, for an asset whose path carries no extension.
+    expect(assetCanCarryWorkflow({ file: { path: "a/b", mimeType: "image/png" } })).toBe(true);
+    expect(assetCanCarryWorkflow(null)).toBe(false);
+  });
+
+  it("asks the desktop command for the stripping copy", async () => {
+    const invoke = vi.fn(async (command) => {
+      if (command === "resolve_asset_path") return "/data/project_1/assets/images/Mira.png";
+      if (command === "save_asset_as") return "/Users/me/Desktop/Mira.png";
+      return null;
+    });
+    const { saveAssetAs } = await importDesktop(invoke);
+
+    await saveAssetAs(IMAGE_ASSET, { withoutWorkflow: true });
+
+    expect(invoke).toHaveBeenNthCalledWith(2, "save_asset_as", {
+      sourcePath: "/data/project_1/assets/images/Mira.png",
+      suggestedFilename: "Mira.png",
+      withoutWorkflow: true,
+    });
+  });
+
+  it("asks the file route to strip for a browser download", async () => {
+    // A bare <a download> cannot transform bytes, so the flag has to ride on the URL.
+    const { saveAssetAs } = await importBrowser();
+    const clicked = [];
+    vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(function mockClick() {
+      clicked.push({ href: this.href, download: this.download });
+    });
+
+    await saveAssetAs(IMAGE_ASSET, { withoutWorkflow: true });
+
+    expect(clicked[0].href).toContain("stripWorkflow=true");
+    expect(clicked[0].download).toBe("Mira.png");
+  });
+
+  it("appends the flag as another pair so a media ticket on the same URL survives", async () => {
+    // In remote/LAN mode `assetUrl` already carries `?ticket=…`. The ticket allow-list matches on
+    // the PATH and pulls the ticket out of an `&`-separated pair, so the strip flag must be
+    // appended rather than replace the query.
+    const { stripWorkflowUrl } = await importBrowser();
+    expect(stripWorkflowUrl("/api/v1/projects/p/files/a.png")).toBe(
+      "/api/v1/projects/p/files/a.png?stripWorkflow=true",
+    );
+    expect(stripWorkflowUrl("/api/v1/projects/p/files/a.png?ticket=abc")).toBe(
+      "/api/v1/projects/p/files/a.png?ticket=abc&stripWorkflow=true",
+    );
+    expect(stripWorkflowUrl("")).toBe("");
+  });
+
+  it("still saves the ordinary copy by default", async () => {
+    const { saveAssetAs } = await importBrowser();
+    const clicked = [];
+    vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(function mockClick() {
+      clicked.push({ href: this.href });
+    });
+
+    await saveAssetAs(IMAGE_ASSET);
+
+    expect(clicked[0].href).not.toContain("stripWorkflow");
   });
 });

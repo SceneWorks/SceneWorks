@@ -289,6 +289,13 @@ pub struct AppState {
     pub(crate) media_tickets: Arc<TicketStore>,
     /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.
     pub(crate) thumbnail_generation_slots: Arc<Semaphore>,
+    /// Bounds memory consumed by `?stripWorkflow=true` downloads (sc-15953).
+    ///
+    /// The sibling of `thumbnail_generation_slots`, deliberately: they are the two derived
+    /// representations of the same route, and both read a whole file into memory. A strip holds
+    /// the source buffer for as long as the response body is being written, so without a gate the
+    /// ceiling is "however many clients ask at once" times the file size.
+    pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
