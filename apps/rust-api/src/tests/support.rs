@@ -25,6 +25,7 @@ pub(crate) use crate::{
     sweep_stale_lora_uploads_before, sweep_stale_uploads, validate_model_id, Settings,
     WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST,
     EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    TEST_MAX_WORKFLOW_INSPECT_BYTES,
 };
 
 pub(crate) use axum::body::{to_bytes, Body};
