@@ -1,6 +1,8 @@
 import React, { useCallback, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetUrl } from "../components/assetMedia.jsx";
+import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
@@ -305,15 +307,28 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
 
 // Download uses a real anchor (the media URL already carries the auth ticket in
 // remote-auth mode, sc-8810) rather than a fetch — the browser owns the save dialog.
+//
+// A PNG gets a SECOND anchor, pointed at the same URL with `?stripWorkflow=true` (sc-15953). The
+// settings copy in this very shell tells the user to reach for "Save a copy without the workflow"
+// when sharing an image already on disk, and until this existed the only place that control lived
+// was the advanced shell's right-click context menu. The Simple shell is the default on a phone,
+// and a phone has no right-click — so the copy was naming a control this shell did not have. The
+// strip is server-side because a bare `<a download>` cannot transform bytes; everything here is
+// one query param on the URL the anchor already points at, ticket and all.
 export function DownloadButton({ asset, className = "su-result-action su-result-action--dl", label = null }) {
   const anchorRef = useRef(null);
+  const strippedRef = useRef(null);
   const { toast } = useSimpleUi();
+  const href = assetUrl(asset);
+  // On the FORMAT, not on whether this particular file has a chunk: answering that needs the bytes,
+  // and the answer is the same either way — a PNG with no chunk downloads as a plain copy.
+  const canStrip = Boolean(href) && assetCanCarryWorkflow(asset);
   return (
     <>
       <a
         aria-hidden="true"
         download={asset.displayName ?? ""}
-        href={assetUrl(asset)}
+        href={href}
         ref={anchorRef}
         style={{ display: "none" }}
         tabIndex={-1}
@@ -332,6 +347,33 @@ export function DownloadButton({ asset, className = "su-result-action su-result-
         <Icon.Download size={label ? 15 : 14} />
         {label}
       </button>
+      {canStrip ? (
+        <>
+          <a
+            aria-hidden="true"
+            download={asset.displayName ?? ""}
+            href={stripWorkflowUrl(href)}
+            ref={strippedRef}
+            style={{ display: "none" }}
+            tabIndex={-1}
+          >
+            download without the workflow
+          </a>
+          <button
+            aria-label={SAVE_WITHOUT_WORKFLOW_LABEL}
+            className={className}
+            onClick={() => {
+              strippedRef.current?.click();
+              toast("Downloading without the recipe…");
+            }}
+            title={SAVE_WITHOUT_WORKFLOW_LABEL}
+            type="button"
+          >
+            <Icon.DownloadStripped size={label ? 15 : 14} />
+            {label ? "Without recipe" : null}
+          </button>
+        </>
+      ) : null}
     </>
   );
 }

@@ -1088,3 +1088,95 @@ async fn the_asset_route_404s_for_an_asset_that_does_not_exist() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// The embed preference and its first-run disclosure (sc-15953)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_embed_toggle_and_its_disclosure_flag_persist_where_the_worker_looks() {
+    // The Settings toggle's whole job is to land `embedWorkflowInImages` in the file the WORKER
+    // re-reads at its PNG write seam, per job — so this asserts against that reader rather than
+    // against the route's own echo, and asserts the merge is partial in both directions.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let config_dir = settings.config_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // An untouched install: nothing stored, and every reader resolves that to ON.
+    assert!(sceneworks_core::app_paths::embed_workflow_in_images(
+        &config_dir
+    ));
+
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "embedWorkflowInImages": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["embedWorkflowInImages"], false);
+    assert!(
+        !sceneworks_core::app_paths::embed_workflow_in_images(&config_dir),
+        "the worker's own reader must see the opt-out on the next job, with no restart"
+    );
+
+    // An unrelated preference write must not disturb it — the failure this guards is a client
+    // PUTting a whole cached preferences object and silently turning embedding back on.
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(saved["embedWorkflowInImages"], false);
+    assert!(!sceneworks_core::app_paths::embed_workflow_in_images(
+        &config_dir
+    ));
+
+    // And back on, because the toggle has to work in both directions.
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "embedWorkflowInImages": true }),
+    )
+    .await;
+    assert_eq!(saved["embedWorkflowInImages"], true);
+    assert!(sceneworks_core::app_paths::embed_workflow_in_images(
+        &config_dir
+    ));
+
+    // The disclosure flag. Absent until dismissed, which is what makes an install upgrading into
+    // this build get the notice once rather than never.
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert!(prefs.get("workflowEmbedNoticeSeen").is_none());
+
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "workflowEmbedNoticeSeen": true }),
+    )
+    .await;
+    assert_eq!(saved["workflowEmbedNoticeSeen"], true);
+
+    // One-way. "Never repeated" has to survive a client that PUTs a stale preferences object back
+    // wholesale, so a `false` is ignored rather than obeyed.
+    let (_, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "workflowEmbedNoticeSeen": false }),
+    )
+    .await;
+    assert_eq!(saved["workflowEmbedNoticeSeen"], true);
+
+    // It survives a restart because it is on disk, not in the browser's origin-keyed storage —
+    // which the desktop shell throws away every launch.
+    let (_, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(prefs["workflowEmbedNoticeSeen"], true);
+    assert_eq!(prefs["embedWorkflowInImages"], true);
+}

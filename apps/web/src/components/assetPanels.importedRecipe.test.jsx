@@ -8,7 +8,13 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../assetActions.js", () => ({ saveAssetAs: vi.fn(), revealAsset: vi.fn() }));
+// `assetCanCarryWorkflow` gates the without-the-workflow save beside Save As (sc-15953). Answered
+// false here so the footer row this suite counts is the one it was written against.
+vi.mock("../assetActions.js", () => ({
+  saveAssetAs: vi.fn(),
+  revealAsset: vi.fn(),
+  assetCanCarryWorkflow: () => false,
+}));
 vi.mock("../runtime.js", () => ({
   isDesktop: false,
   tauriInvoke: vi.fn(),

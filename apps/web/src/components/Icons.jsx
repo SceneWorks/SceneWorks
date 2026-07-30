@@ -96,6 +96,10 @@ export const Icon = {
   // the preview/warning banner. Additive — no existing render site changes.
   Menu: (p) => <I {...p} d="M4 6h16M4 12h16M4 18h16" />,
   Download: (p) => <I {...p} d="M12 3v11M8 10.5l4 4 4-4M4 19h16" />,
+  // "Download, with the embedded recipe struck out" (sc-15953). Sits beside `Download` in the
+  // Simple shell, which is the DEFAULT on a phone and where a right-click context menu — the only
+  // other place this control exists — is not reachable at all.
+  DownloadStripped: (p) => <I {...p} d="M12 3v9M8.5 9l3.5 3.5L15.5 9M4 19h16M5 4l14 13" />,
   Check: (p) => <I {...p} d="M4 12.5L9 17.5 20 6.5" />,
   Warning: (p) => <I {...p} d="M12 3l9.5 17H2.5zM12 9v5M12 17.5h.01" />,
 };

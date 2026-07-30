@@ -119,6 +119,18 @@ pub(crate) struct UiPreferences {
     /// sc-15953 owns the Settings toggle and the first-run disclosure that write it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     embed_workflow_in_images: Option<bool>,
+    /// Whether the one-time embedded-workflow disclosure has been shown and dismissed (sc-15953).
+    ///
+    /// Durable rather than a browser flag because the desktop shell serves the UI from a
+    /// `127.0.0.1:<port>` origin that changes each launch, taking origin-keyed storage with it — a
+    /// `localStorage`-only "already told them" flag would re-show the notice on every launch.
+    ///
+    /// Absent means NOT shown, and that is the state an install upgrading into this build is in:
+    /// embedding defaults ON, so someone who has been generating for months has never been told,
+    /// and the notice fires once for them rather than only for fresh installs. Nothing ever writes
+    /// `false` back — this only goes from absent to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow_embed_notice_seen: Option<bool>,
 }
 
 /// Retained workspaces in a studio-settings map. The map grows by one entry per workspace the
@@ -348,6 +360,13 @@ pub(crate) async fn set_ui_preferences(
         // normalization — an out-of-vocabulary value cannot parse.
         if let Some(embed_workflow_in_images) = payload.embed_workflow_in_images {
             prefs.embed_workflow_in_images = Some(embed_workflow_in_images);
+        }
+        // One-way (sc-15953): once the disclosure has been shown it stays shown. A payload
+        // carrying `false` is ignored rather than obeyed, so no unrelated client — or a stale
+        // cached copy of an older preferences object PUT back wholesale — can make a user who has
+        // already been told see the notice again.
+        if payload.workflow_embed_notice_seen == Some(true) {
+            prefs.workflow_embed_notice_seen = Some(true);
         }
         if let Some(active_view) = normalize_preference_id(payload.active_view.as_deref(), 48) {
             prefs.active_view = Some(active_view);
