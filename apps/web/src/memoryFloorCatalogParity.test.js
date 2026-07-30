@@ -44,6 +44,44 @@ function isSupportedModelDownload(download) {
   return download?.provider === "huggingface" && typeof download?.repo === "string" && download.repo !== "";
 }
 
+// apps/rust-api/src/lib.rs:3080 `json_size_to_u64` — a non-negative integer, or a decimal STRING of one.
+function jsonSizeToU64(value) {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return null;
+}
+
+// apps/rust-api/src/models.rs:5060 `manifest_download_size_bytes` — these three keys IN THIS ORDER off the
+// selected download entry, then the same three off the model as a legacy fallback.
+const DOWNLOAD_SIZE_KEYS = ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"];
+function firstDeclaredSize(source) {
+  for (const key of DOWNLOAD_SIZE_KEYS) {
+    const size = jsonSizeToU64(source?.[key]);
+    if (size !== null) {
+      return size;
+    }
+  }
+  return null;
+}
+
+// The `variants[].downloadSizeBytes` the catalog emits, per models.rs:3489 —
+// `manifest_download_size_bytes(model, entry).or_else(|| variant_footprint_disk_bytes(entry))` — and
+// re-asserted verbatim by `refresh_variant_download_sizes` (models.rs:3595) after live HF estimation.
+// The trailing `footprint.diskSizeBytes` leg cannot change any answer here (`variantFootprintBytes`
+// already reads that field at its priority 3, AHEAD of `downloadSizeBytes` at priority 4), but the
+// catalog emits it, so the mirror does too rather than a shape the client never receives.
+function catalogDownloadSizeBytes(manifestModel, download) {
+  return (
+    firstDeclaredSize(download) ??
+    firstDeclaredSize(manifestModel) ??
+    jsonSizeToU64(download?.footprint?.diskSizeBytes)
+  );
+}
+
 function loadManifestModels() {
   const parsed = JSON5.parse(readFileSync(MANIFEST_PATH, "utf8"));
   const models = Array.isArray(parsed) ? parsed : parsed.models;
@@ -60,18 +98,53 @@ function loadManifestModels() {
 //     `repo`. `model_variant_downloads` applies this in the SAME filter as the co-requisite check, so a
 //     row from another provider is not a selectable tier either.
 //   * `model_variant_downloads` — duplicate `variant` keys collapse FIRST-wins.
-//   * `apply_variant_fields` — emits `variants[]` carrying the raw `footprint`, plus `hasVariantMatrix`.
+//   * `apply_variant_fields` — emits `variants[]` carrying the raw `footprint` AND `downloadSizeBytes`
+//     (`catalogDownloadSizeBytes` above), plus `hasVariantMatrix`.
 // The rest of the entry passes through unchanged (the catalog decorates the manifest object in place),
 // which is what makes `mlx` / `candle` — including `candle.vramGbByTier` — reach the client at all.
 //
-// AN HONEST LIMIT ON WHAT THIS MIRROR CAN CATCH: it is a JS re-implementation, so it pins the MANIFEST
-// against the mirror, NOT the mirror against the Rust. If someone changes `retain_downloads_for_os`,
-// `is_co_requisite_download` or `is_supported_model_download` in models.rs, nothing here goes red — the
-// two just silently disagree, and this file would then be asserting about a catalog shape the client
-// never receives. The provider/repo filter above is a case in point: it was missing from the first
-// version of this mirror and drifted zero rows only because every shipped download happens to be a
-// huggingface entry with a repo. Cross-language enforcement would need the Rust to emit the projection
-// (or a shared fixture); that is out of scope here and deliberately not claimed.
+// AN HONEST LIMIT ON WHAT THIS MIRROR CAN CATCH — (A) DRIFT. It is a JS re-implementation, so it pins the
+// MANIFEST against the mirror, NOT the mirror against the Rust. If someone changes
+// `retain_downloads_for_os`, `is_co_requisite_download` or `is_supported_model_download` in models.rs,
+// nothing here goes red — the two just silently disagree, and this file would then be asserting about a
+// catalog shape the client never receives. The provider/repo filter above is a case in point: it was
+// missing from the first version of this mirror and drifted zero rows only because every shipped download
+// happens to be a huggingface entry with a repo. Cross-language enforcement would need the Rust to emit
+// the projection (or a shared fixture); that is out of scope here and deliberately not claimed.
+//
+// (B) FIELDS AND SHAPES THE MIRROR DOES NOT MODEL. These are not drift risks, they are areas the sweep
+// below simply cannot see. This file is this PR's central evidence, so its blind spots are written down
+// next to it rather than left to be rediscovered:
+//   * `downloadSizeBytes` WAS one of them, and its absence hid a real hole. `variantFootprintBytes`
+//     consumes it as its LAST-RESORT priority 4 (tierSuggestion.js:92-98, reached via
+//     `mlxEstimatedPeakGb`), and `krea_2_raw`/`krea_2_turbo` — the only two shipped matrix entries whose
+//     downloads carry NO `footprint` at all — reach the fill through exactly that leg. Without the field
+//     the mirror answered `needs 48 GB` (the `mlx.minMemoryGb` blanket) for all eight bf16-containing
+//     install sets across the two models, where production answers 53; and because those tiers were
+//     `variantFootprintBytes(...) === null` in the mirror they were `continue`d out of the invariant
+//     sweep, so nothing asserted about them even though `tierFits` REFUSES bf16 at 48. It is modelled
+//     now, and the sweep bounds those tiers like any other.
+//   * `mlxTierStates` / `mlxTiers` — the convert-at-install tier shapes. `installedTiers`
+//     (quantTier.js:196, :208) has a branch for each, and the mirror emits neither, so BOTH are
+//     unreachable from the sweep; every row below goes through the `hasVariantMatrix` branch. The
+//     convert-at-install models that use them (`anima_*`, `flux2_klein_9b_true_v2`, `ltx_2_3_eros`) also
+//     have no per-tier size anywhere, so their label is always the blanket — tracked separately.
+//   * SINGLE-VARIANT ENTRIES ARE DROPPED ENTIRELY. `tiersOn` returns [] for a model that projects to just
+//     the `"default"` pseudo-variant, and the sweep `continue`s on that — 33 of the 86 manifest entries on
+//     macOS, 37 of 84 on windows. For those entries `needsLabel`'s blanket fallthrough is the ONLY branch
+//     reachable (no matrix ⇒ no installed tiers and no declared tiers), and none of them is swept. The
+//     fallthrough itself is not uncovered — 94 sweep rows across 24 (model, os) pairs reach it, via matrix
+//     models whose whole install set is gated out by host-eligibility or which declare no per-tier
+//     evidence — but it is covered only in that flavour.
+//   * `cacheState` / `installedPath` / `missingRequiredFiles` (models.rs:3566-3579) — the mirror emits a
+//     binary installed/missing. A torn or incomplete install is therefore indistinguishable from a clean
+//     one here, and any future rule that consults completeness would be invisible to this sweep.
+//   * `catalogScope`, AND WITH IT EVERY NON-BUILTIN ENTRY. The catalog stamps every row
+//     `catalogScope: "builtin" | "user"` (models.rs:3966), plus `"external"` for scanned externally-owned
+//     bases (external_base_models.rs); no manifest entry declares the field, and the mirror emits none of
+//     it. This projects `config/manifests/builtin.models.jsonc` only, so every claim below is about
+//     BUILTIN entries — a user-scope or external model reaches the catalog by another route entirely and
+//     is outside what this file can say anything about.
 //
 // `installedTiers` is the set to mark installed, so a caller can ask "what would this host be told if
 // exactly these tiers were on disk".
@@ -99,6 +172,7 @@ function catalogEntry(manifestModel, os, installedTierKeys) {
       variant: key,
       installed,
       installState: installed ? "installed" : "missing",
+      downloadSizeBytes: catalogDownloadSizeBytes(manifestModel, entry),
       footprint: entry.footprint ?? null,
     });
   }
@@ -647,12 +721,24 @@ describe("catalog memory floors: duplicate tier keys cannot reach the client", (
 // `hostGbForPeakGb(_, "mlx")` is `ceil(peak / 0.9)`, literally `tierFits`'s own boundary.
 //
 // On candle it is not an invariant, it is a category error, and asserting it there would overwrite every
-// number this PR's review confirmed. Measured against the shipped catalog: requiring it on candle demands
-// `flux_dev` 51 where `vram_gate` requires 34, `sd3_5_medium` 42 against 36, `lens_turbo` 50 against 44 —
-// 346 combinations in total, and all 294 of the fully-evidenced ones. Those are the figures the candle gate
-// itself admits at (`peak + 2` on `candle.vramGbByTier`, a discrete-VRAM measurement), so raising them would
-// re-create precisely the over-warning MAJOR 3 removed. The candle lane's correct analogue is its own gate's
-// criterion, which is what the evidence sweeps above already assert with zero violations.
+// number this PR's review confirmed. Measured against the shipped catalog (`wouldRaise`, below): requiring
+// it on candle would raise 754 (model, os, subset, eligibility, tier) rows across 26 models — 698 of them
+// on install-sets whose candle coverage is COMPLETE, i.e. where no fill is involved and the quoted figure
+// is purely the candle gate's own arithmetic. The example that carries the argument is `lens_turbo` q8:
+// its `candle.vramGbByTier.q8` of 42 puts the gate at 44, which is the number the row shows, while
+// `tierFits`'s MLX budget demands 50 for the same tier off its 30.50 GiB on-disk size (+14 GiB transient
+// = 44.50, and `ceil(44.50 / 0.9)` = 50). Those gate figures are the ones the candle lane itself admits
+// at (`peak + 2` on `candle.vramGbByTier`, a discrete-VRAM measurement), so raising them would re-create
+// precisely the over-warning MAJOR 3 removed.
+//
+// An earlier revision of this paragraph cited `flux_dev` 34→51 and `sd3_5_medium` 36→42 alongside
+// `lens_turbo`, which MIXED TWO FRAMINGS: both of those figures come from a tier with NO candle evidence
+// at all (`flux_dev` bf16, `sd3_5_medium` q8 — neither has a `vramGbByTier` row), so neither can appear in
+// `wouldRaise` (it requires lane evidence) and neither entry has COMPLETE candle coverage. What those two
+// contribute is a DIFFERENT tier: `flux_dev` q8 at 35 against the shown 34, and `sd3_5_medium` q4/bf16 at
+// 41/44 against the shown 36. The corrected figures above are derived by the test, not transcribed.
+// The candle lane's correct analogue is its own gate's criterion, which is what the evidence sweeps above
+// already assert with zero violations.
 // ---------------------------------------------------------------------------------------------------
 
 // The candle-only tiers' host-eligibility gates, as `SimpleModelManager` derives them from live workers.
@@ -790,6 +876,7 @@ describe("catalog memory floors: the label never contradicts the module's own pi
     // entries whose candle coverage is COMPLETE (so no fill is involved and the figure is purely the gate's
     // own arithmetic). Forcing agreement would raise those confirmed numbers.
     const wouldRaise = [];
+    const wouldRaiseComplete = [];
     for (const row of SWEEP) {
       if (row.backend !== "candle" || row.subset.length === 0) {
         continue;
@@ -798,7 +885,12 @@ describe("catalog memory floors: the label never contradicts the module's own pi
       if (shown === null) {
         continue;
       }
-      for (const tier of row.subset.filter((t) => tierHostEligible(t, row.eligibility))) {
+      const eligible = row.subset.filter((t) => tierHostEligible(t, row.eligibility));
+      // COMPLETE candle coverage: every eligible installed tier has its own `vramGbByTier` row, so no fill
+      // and no blanket substitution is involved and `shown` is purely the candle gate's own arithmetic.
+      const completeCoverage =
+        eligible.length > 0 && eligible.every((t) => laneEvidenceGb(row.model, row.os, t) !== null);
+      for (const tier of eligible) {
         const variant = row.entry.variants.find((v) => v.variant === tier);
         const footprint = variantFootprintBytes(variant);
         const evidence = laneEvidenceGb(row.model, row.os, tier);
@@ -810,10 +902,22 @@ describe("catalog memory floors: the label never contradicts the module's own pi
           hostGbForPeakGb(evidence, "candle"),
         );
         wouldRaise.push(`${row.id} ${tier}`);
+        if (completeCoverage) {
+          wouldRaiseComplete.push(`${row.id} ${tier}`);
+        }
       }
     }
-    // Real and numerous, on entries with full candle coverage — flux_dev among them.
-    expect(wouldRaise.length).toBeGreaterThanOrEqual(50);
+    // FLOORS NEAR THE REAL FIGURES, not a token ">= 50". The previous floor was 50 against an actual 644,
+    // so a >10x erosion of the fact it protects would have gone unnoticed; these sit ~80% of the measured
+    // values (754 / 698 / 26 / 65 at the time of writing) so real erosion reds while routine catalog churn
+    // does not. The COMPLETE-coverage subset is asserted SEPARATELY because that is the load-bearing half
+    // of the claim above — an over-count driven purely by fill-based rows would not support it.
+    expect(wouldRaise.length).toBeGreaterThanOrEqual(600);
+    expect(wouldRaiseComplete.length).toBeGreaterThanOrEqual(550);
+    expect(new Set(wouldRaise.map((row) => row.split(" ")[0])).size).toBeGreaterThanOrEqual(20);
+    expect(new Set(wouldRaise).size).toBeGreaterThanOrEqual(50);
+    // `lens_turbo` q8 is the example the comment argues from, and it is a COMPLETE-coverage row.
+    expect(wouldRaiseComplete).toContain("lens_turbo q8");
     expect(wouldRaise.join(",")).toContain("flux_dev");
   });
 
@@ -960,6 +1064,37 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(byId.get("krea_2_raw").mlx?.minMemoryGb).toBe(48);
     for (const download of byId.get("krea_2_raw").downloads ?? []) {
       expect(download.footprint, "krea_2_raw ships no footprint at all").toBeUndefined();
+    }
+    // ...and it is NOT the only one: krea_2_turbo has the identical shape, and the two of them are the
+    // complete set of footprint-less matrix entries. The fixture comment claimed "the ONE shipped entry".
+    const footprintless = manifestModels
+      .filter((model) => tiersOn(model, "macos").length > 0)
+      .filter((model) =>
+        (model.downloads ?? []).every((download) => download.footprint === undefined),
+      )
+      .map((model) => model.id)
+      .sort();
+    expect(footprintless).toEqual(["krea_2_raw", "krea_2_turbo"]);
+    // The same fixture comment also claimed there is "nothing for `mlxEstimatedPeakGb` to read" on these
+    // two. There is: `estimatedSizeBytes`, which the catalog emits as `variants[].downloadSizeBytes` and
+    // `variantFootprintBytes` consumes at priority 4. This is the field whose absence from the mirror hid
+    // the eight `needs 48 GB` answers production states as 53 — pinned so it cannot silently go away.
+    for (const id of footprintless) {
+      const bf16 = (byId.get(id).downloads ?? []).find((download) => download.variant === "bf16");
+      expect(catalogDownloadSizeBytes(byId.get(id), bf16), `${id} bf16 size`).toBeGreaterThan(
+        30 * BYTES_PER_GB,
+      );
+      const entry = { ...catalogEntry(byId.get(id), "macos", ["bf16"]), installState: "installed" };
+      const estimated =
+        variantFootprintBytes(entry.variants.find((variant) => variant.variant === "bf16")).bytes /
+        BYTES_PER_GB;
+      expect(
+        needsLabel(entry, { backend: "mlx", convRotEligible: true, nvfp4Eligible: true }),
+        `${id} bf16-only install`,
+      ).toBe(`needs ${hostGbForPeakGb(estimated, "mlx")} GB`);
+      // ...and that this really is ABOVE the blanket 48 the mirror used to answer, so the pin would red if
+      // the fill ever silently reverted to it.
+      expect(hostGbForPeakGb(estimated, "mlx")).toBeGreaterThan(byId.get(id).mlx.minMemoryGb);
     }
     // The genuinely blanket-only shape the corrected fixture uses instead.
     expect(byId.get("kokoro_82m").candle).toMatchObject({ minMemoryGb: 2, measured: false });

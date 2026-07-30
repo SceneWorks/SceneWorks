@@ -246,14 +246,25 @@ describe("SimpleModelManager memory label", () => {
     expect(metaText(container)).toEqual(["needs 48 GB"]);
   });
 
-  // krea_2_raw AS SHIPPED, in full. An earlier version of this fixture claimed "as shipped" while omitting
-  // the `candle` block the manifest really carries (`minMemoryGb: 32`, `vramGbByTier { q4: 28.8, q8: 33.4,
-  // bf16: 46.4 }`, `measured: false`) — and that omission concealed the candle under-statement for two
-  // review rounds, because with no candle block the row could only ever fall silent on that lane.
+  // krea_2_raw's shipped MEMORY BLOCKS, plus a deliberately SIZE-LESS variant array. An earlier version of
+  // this fixture claimed "as shipped" while omitting the `candle` block the manifest really carries
+  // (`minMemoryGb: 32`, `vramGbByTier { q4: 28.8, q8: 33.4, bf16: 46.4 }`, `measured: false`) — and that
+  // omission concealed the candle under-statement for two review rounds, because with no candle block the
+  // row could only ever fall silent on that lane.
   //
-  // It is also the one shipped matrix entry whose downloads carry NO `footprint` AT ALL — not even a
-  // `diskSizeBytes` — which makes it the fixture for `installedFloorHostGb`'s "still unbounded after the
-  // fill" path: there is nothing for `mlxEstimatedPeakGb` to read, so the blanket has to carry the answer.
+  // WHAT THIS FIXTURE IS AND IS NOT. Its `mlx` / `candle` blocks are verbatim from the manifest (pinned by
+  // `memoryFloorCatalogParity.test.js`), but its variants carry NO size of ANY kind, which is a synthetic
+  // shape chosen to exercise `installedFloorHostGb`'s "still unbounded after the fill" path — nothing for
+  // `mlxEstimatedPeakGb` to read, so the blanket has to carry the answer. Two earlier claims here were
+  // wrong and are corrected rather than repeated:
+  //   * it was NOT "the one shipped matrix entry" with no `footprint`. `krea_2_turbo` is identical, and the
+  //     two of them are the pair — nothing else in the manifest has that shape.
+  //   * "there is nothing for `mlxEstimatedPeakGb` to read" is FALSE of the real catalog. Both entries'
+  //     downloads declare `estimatedSizeBytes`, which the catalog emits as `variants[].downloadSizeBytes`
+  //     (models.rs:3579) and `variantFootprintBytes` consumes at its priority 4 — so in production bf16
+  //     estimates at 47.23 GiB and every bf16-containing install set reads `needs 53 GB`, NOT this
+  //     fixture's 48. That real shape is asserted from the manifest by `memoryFloorCatalogParity.test.js`;
+  //     this fixture keeps the size-less path covered, and the two are complementary, not duplicates.
   function krea2Raw() {
     return {
       id: "krea_2_raw",

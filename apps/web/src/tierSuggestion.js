@@ -481,8 +481,14 @@ function installedCeiling(model, options, fill = null) {
 //      strict subset is not a bound on the set, and quoting it is a false claim rather than a
 //      conservative one. Silence is the honest answer; `installedTierPeakGb`'s doc calls this
 //      "unbounded", and this is where that distinction is finally respected instead of discarded.
-//      Unreachable on the shipped catalog (pinned by memoryFloorCatalogParity.test.js) — every lane that
-//      cannot estimate also ships a blanket wherever it ships any per-tier row.
+//      This branch is LIVE on the shipped catalog, not dead: it fires for 16 (model, os) pairs — every
+//      candle/windows+linux entry that ships neither `candle.vramGbByTier` nor `candle.minMemoryGb`
+//      (`z_image`, `z_image_edit`, `sdxl`, `lens`, `kolors`, `ltx_2_3`, `chroma1_base`/`_flash`/`_hd`,
+//      `realvisxl`, `realvisxl_lightning`, `instantid_realvisxl`, `illustrious_xl_v1`/`_v2`,
+//      `pulid_flux_dev`, `flux2_klein_9b_kv`) — and on all 16 it is doing exactly its job: the lane has NO
+//      evidence of any kind, so there is nothing to quote. What IS unreachable is the EVIDENCE-DISCARDING
+//      form of the branch — a partial candle row-set with no blanket, where returning null would throw away
+//      a real per-tier measurement. `memoryFloorCatalogParity.test.js` pins that shape at 0 entries.
 //
 // `options` forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible), so a
 // tier this host cannot serve never raises the number.
