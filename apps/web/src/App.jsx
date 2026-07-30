@@ -29,6 +29,8 @@ import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
+import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
+import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
@@ -683,9 +685,9 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
-  // Stop a file dropped outside a real dropzone from navigating the webview to
-  // the image and replacing the whole UI (issue #1308).
-  useDropNavigationGuard();
+  // The drop guard that stops a stray file from navigating the webview (issue #1308) is
+  // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
+  // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -2393,6 +2395,41 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
+  // THE prefill path into Image Studio (sc-15951). Every caller that wants the studio's form
+  // populated from a recorded recipe goes through here — the viewer's "Use this recipe" below,
+  // and the dropped-image "Use this workflow" — so there is one launch shape, one hydration
+  // race guard, and one injection effect on the other side (`screens/ImageStudio.jsx`). A second
+  // parallel prefill would drift from this one the first time the recipe shape changed.
+  //
+  // `assetId` / `sourceAssetId` are null for a launch with no asset behind it, which is exactly
+  // the dropped-file case: the studio's edit branch then leaves its source picker empty rather
+  // than pointing at an image this install does not have.
+  async function launchImageRecipe({
+    recipe,
+    replaySeed = null,
+    assetId = null,
+    sourceAssetId = null,
+  }) {
+    if (!recipe) {
+      return false;
+    }
+    const projectId = activeProjectRef.current?.id;
+    setActiveView("Image");
+    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
+      return false;
+    }
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view: "Image",
+      assetId,
+      sourceAssetId,
+      recipe,
+      replaySeed,
+    });
+    return true;
+  }
+
   async function sendAssetRecipeToImage(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
@@ -2404,21 +2441,13 @@ export function App() {
     // Null → Image Studio leaves the seed random (a close variation), the default.
     const seed = assetSeed(asset);
     const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
-    const projectId = activeProjectRef.current?.id;
     setSelectedAssetId(asset.id);
     closePreview();
-    setActiveView("Image");
-    const hydration = await stableHydrateLaunchDomains("Image", projectId);
-    if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
-      return;
-    }
-    setStudioLaunch({
-      id: crypto.randomUUID(),
-      view: "Image",
-      assetId: asset.id,
-      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
+    await launchImageRecipe({
       recipe,
       replaySeed,
+      assetId: asset.id,
+      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
     });
   }
 
@@ -2748,6 +2777,41 @@ export function App() {
       }
     },
     [activeProject, setError, token],
+  );
+
+  // Drop a shared image anywhere → "Workflow found" → prefill Image Studio (sc-15951).
+  //
+  // The guard below is the unchanged issue-#1308 fallback: it swallows any drag no in-app
+  // dropzone claimed so the webview cannot navigate to the file. The only addition is that an
+  // unclaimed drop of exactly one file is now also offered to the inspector, on that SAME
+  // "nothing else claimed it" branch — the five real dropzones (AssetPicker, the Image Editor
+  // canvas, DatasetAddDialog, DocumentStudio, PoseLibraryScreen) each preventDefault() as the
+  // event bubbles through them, so their drops never reach either behaviour.
+  //
+  // `launchRecipe` is `launchImageRecipe`, the same seam the viewer's "Use this recipe" uses.
+  // `importAsset` is the ordinary upload path, which is what records `extra.importedWorkflow`
+  // on the asset (sc-15949).
+  const workflowDrop = useWorkflowDrop({
+    // Inspecting needs a live, authenticated API. Before the gate opens every request 401s, and
+    // a drop on the login screen has nothing to prefill anyway.
+    enabled: gateStatus === "open",
+    projectId: activeProject?.id ?? null,
+    token,
+    importAsset,
+    launchRecipe: launchImageRecipe,
+  });
+  useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
+  // Rendered from a single place even though the app has two shells: `Modal` portals to
+  // <body>, so this element does not have to sit inside whichever shell is on screen.
+  const workflowDropPanel = (
+    <WorkflowDropPanel
+      canImport={Boolean(activeProject)}
+      importState={workflowDrop.importState}
+      offer={workflowDrop.offer}
+      onDismiss={workflowDrop.dismiss}
+      onImport={workflowDrop.importImage}
+      onUse={workflowDrop.useWorkflow}
+    />
   );
 
   const jobAction = useCallback(
@@ -3175,6 +3239,11 @@ export function App() {
             preferencesHydrated={navigationHydrated}
             simpleDefault={simpleUiDefault}
           />
+          {/* The dropped-workflow offer (sc-15951). The drop guard is installed at App level
+              and therefore runs in BOTH shells, so the panel it opens has to render in both
+              too — otherwise a Simple-UI user's drop would be inspected and then answered by
+              nothing. It portals to <body>, so it does not disturb this shell's layout. */}
+          {workflowDropPanel}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3457,6 +3526,11 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
+          after the file turned out to carry a recipe. Renders nothing otherwise, which is the
+          common case for every image that did not come from SceneWorks. */}
+      {workflowDropPanel}
     </main>
     </AppLiveContext.Provider>
     </AppStaticContext.Provider>
