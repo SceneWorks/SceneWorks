@@ -1,6 +1,14 @@
-import { readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import {
@@ -125,10 +133,10 @@ function loadManifestModels() {
 //     sweep, so nothing asserted about them even though `tierFits` REFUSES bf16 at 48. It is modelled
 //     now, and the sweep bounds those tiers like any other.
 //   * `mlxTierStates` / `mlxTiers` — the convert-at-install tier shapes. `installedTiers`
-//     (quantTier.js:196, :208) has a branch for each, and the mirror emits neither, so BOTH are
-//     unreachable from the sweep; every row below goes through the `hasVariantMatrix` branch. The
-//     convert-at-install models that use them (`anima_*`, `flux2_klein_9b_true_v2`, `ltx_2_3_eros`) also
-//     have no per-tier size anywhere, so their label is always the blanket — tracked separately.
+//     (quantTier.js:196, :208) has a branch for each, and the general mirror emits neither, so BOTH are
+//     unreachable from the sweep; every sweep row below goes through the `hasVariantMatrix` branch.
+//     SC-16045 added runtime `mlxTierStates[].diskSizeBytes`; the targeted real-manifest + real-file
+//     assertion below covers that path, while the broad combinatorial sweep deliberately stays manifest-only.
 //   * SINGLE-VARIANT ENTRIES ARE DROPPED ENTIRELY. `tiersOn` returns [] for a model that projects to just
 //     the `"default"` pseudo-variant, and the sweep `continue`s on that — 33 of the 86 manifest entries on
 //     macOS, 37 of 84 on windows. For those entries `needsLabel`'s blanket fallthrough is the ONLY branch
@@ -205,6 +213,52 @@ const manifestModels = loadManifestModels();
 const OSES = ["macos", "windows"];
 // The lane each OS runs, matching every consumer's `macGatingActive ? "mlx" : "candle"`.
 const BACKEND_FOR_OS = { macos: "mlx", windows: "candle" };
+
+describe("convert-at-install memory floors", () => {
+  it("derives anima_base's bf16-only label from real catalog inputs instead of its blanket", () => {
+    const anima = manifestModels.find((model) => model.id === "anima_base");
+    expect(anima, "anima_base must still be in the real manifest").toBeTruthy();
+    const blanket = blanketFloorGb(anima, "mlx");
+    expect(blanket).toBeGreaterThan(0);
+
+    // The Rust emitter independently tests the same contract from a converted directory. Here the
+    // file's stat supplies runtime data instead of transcribing a model-size literal into the test.
+    const converted = mkdtempSync(join(tmpdir(), "sc-16045-anima-"));
+    const bf16Weights = join(converted, "anima-bf16.safetensors");
+    try {
+      writeFileSync(bf16Weights, "");
+      truncateSync(bf16Weights, 2 * BYTES_PER_GB);
+      const diskSizeBytes = statSync(bf16Weights).size;
+      const entry = {
+        ...anima,
+        installState: "installed",
+        hasVariantMatrix: false,
+        variants: [],
+        mlxTierStates: [
+          {
+            tier: "bf16",
+            installState: "installed",
+            cacheState: "complete",
+            diskSizeBytes,
+          },
+        ],
+      };
+      const shown = shownGb(
+        needsLabel(entry, {
+          backend: "mlx",
+          convRotEligible: true,
+          nvfp4Eligible: true,
+        }),
+      );
+      const estimatedPeak =
+        variantFootprintBytes({ footprint: { diskSizeBytes } }).bytes / BYTES_PER_GB;
+      expect(shown).toBe(hostGbForPeakGb(estimatedPeak, "mlx"));
+      expect(shown).toBeGreaterThan(blanket);
+    } finally {
+      rmSync(converted, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("catalog memory floors: the displayed number satisfies the app's own fit criterion", () => {
   // Every (model, tier) on macOS that carries a real measured MLX footprint. This is the set whose
