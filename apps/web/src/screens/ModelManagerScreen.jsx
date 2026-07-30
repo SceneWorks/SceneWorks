@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
-import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
+import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import {
   extractFamilies,
   loraHasResolvableFamily,
@@ -13,12 +13,12 @@ import {
 } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
-import { apiFetch } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
-import { isDesktop, tauriInvoke } from "../runtime.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
-import { suggestTier, tierFits } from "../tierSuggestion.js";
+import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
 import { safeExternalUrl } from "../urls.js";
 
 function matchesFamily(item, familyFilter) {
@@ -382,6 +382,7 @@ function orderedMatrixVariants(model) {
 function ModelTierDownloadPanel({
   model,
   unifiedMemoryGb,
+  backend,
   downloadJobs,
   licenseAckRequired,
   onDownloadVariant,
@@ -389,7 +390,7 @@ function ModelTierDownloadPanel({
   deletingItem,
 }) {
   const variants = orderedMatrixVariants(model);
-  const suggested = suggestTier(model, unifiedMemoryGb);
+  const suggested = suggestTier(model, unifiedMemoryGb, { backend });
   // In-flight download job per tier, keyed by the job payload's `variant` (sc-8508 records it).
   const activeJobByTier = new Map();
   for (const job of downloadJobs) {
@@ -464,7 +465,7 @@ function ModelTierDownloadPanel({
           // model-level warning: q4/q8 that actually fit show nothing; only a genuinely over-budget tier
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
-          const overBudget = !tierFits(variant, unifiedMemoryGb);
+          const overBudget = !tierFits(variant, unifiedMemoryGb, { backend, model });
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
@@ -738,11 +739,9 @@ export function ModelManagerScreen() {
       setActiveTab(prevTab || "image");
     }
   };
-  // Read the host's memory so MLX models can be gated against their memory tier.
-  // Desktop reads it from the Tauri GPU probe; a remote LAN browser reads the
-  // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
-  // from the unified runtime helper (story 6).
-  const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
+  const hostMemory = useHostMemory();
+  const memoryBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, memoryBackend);
   // "Update" orchestration for convert-at-install models (epic 10285): re-download the newer
   // source checkpoint, then auto-fire the re-convert once that download completes. Maps a model id
   // to the specific download job id we're waiting on — a specific id (not "any completed download")
@@ -820,39 +819,6 @@ export function ModelManagerScreen() {
         : current,
     );
   }, [importForm.family]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (isDesktop) {
-      // Desktop: read unified memory straight from the Tauri GPU probe.
-      tauriInvoke("get_gpu_info")
-        .then((info) => {
-          if (!cancelled && info && typeof info.unifiedMemoryMb === "number") {
-            setUnifiedMemoryGb(info.unifiedMemoryMb / 1024);
-          }
-        })
-        .catch(() => {});
-    } else {
-      // Remote LAN browser (epic 4484 story 9): the Tauri probe is unavailable, so
-      // read the host's memory from the auth-protected REST signal derived from the
-      // registered GPU worker (unified memory on macOS / GPU VRAM on Windows). Without
-      // this, memory gating would silently no-op for remote users.
-      apiFetch("/api/v1/host-capabilities", serverToken())
-        .then((caps) => {
-          if (cancelled || !caps) {
-            return;
-          }
-          const gb = caps.unifiedMemoryGb ?? caps.gpuMemoryGb;
-          if (typeof gb === "number") {
-            setUnifiedMemoryGb(gb);
-          }
-        })
-        .catch(() => {});
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (!hasGatedModel) {
@@ -1210,8 +1176,10 @@ export function ModelManagerScreen() {
     const deleteKey = `model:${model.id}`;
     const canDelete = Boolean(onDeleteModel) && model.removable !== false;
     // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
+    // Conversion state is a platform capability supplied by the API, not a memory measurement.
+    // Keep that control surface intact while guarding the MLX memory block by the active lane.
     const mlxState = model.mlxConversionState;
-    const mlxMinGb = model.mlx?.minMemoryGb ?? null;
+    const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx") : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
     const convertJobs = convertJobsFor(model);
     const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
@@ -1367,6 +1335,7 @@ export function ModelManagerScreen() {
           <ModelTierDownloadPanel
             model={model}
             unifiedMemoryGb={unifiedMemoryGb}
+            backend={memoryBackend}
             downloadJobs={downloadJobs}
             licenseAckRequired={licenseAckRequired}
             onDownloadVariant={onDownloadVariant}

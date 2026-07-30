@@ -180,7 +180,7 @@ async fn host_capabilities_requires_token_and_reports_host_memory() {
     assert_eq!(status, StatusCode::OK);
 
     let (status, caps) = request_with_headers(
-        app,
+        app.clone(),
         "GET",
         "/api/v1/host-capabilities",
         Value::Null,
@@ -189,8 +189,48 @@ async fn host_capabilities_requires_token_and_reports_host_memory() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(caps["unifiedMemoryGb"], 128.0);
+    if std::env::consts::OS == "macos" {
+        assert_eq!(caps["memoryKind"], "unified");
+        assert_eq!(caps["memoryGb"], 128.0);
+    } else {
+        assert!(caps.get("memoryKind").is_none());
+        assert!(caps.get("memoryGb").is_none());
+    }
     // No host paths or secrets leak through this endpoint.
     assert!(caps.get("directories").is_none());
+
+    let (status, _) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "cuda-test",
+            "gpuId": "cuda:0",
+            "capabilities": [],
+            "loadedModels": [],
+            "utilization": { "memoryTotalMb": 24576 }
+        }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, caps) = request_with_headers(
+        app,
+        "GET",
+        "/api/v1/host-capabilities",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caps["gpuMemoryGb"], 24.0);
+    if std::env::consts::OS == "macos" {
+        assert_eq!(caps["memoryKind"], "unified");
+        assert_eq!(caps["memoryGb"], 128.0);
+    } else {
+        assert_eq!(caps["memoryKind"], "dedicated");
+        assert_eq!(caps["memoryGb"], 24.0);
+    }
 }
 
 #[tokio::test]

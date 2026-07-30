@@ -735,7 +735,13 @@ pub struct GpuInfo {
     platform: String,
     devices: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    memory_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     unified_memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_memory_mb: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wired_limit_mb: Option<u64>,
 }
@@ -1238,13 +1244,17 @@ pub fn get_gpu_info() -> GpuInfo {
         GpuInfo {
             platform: "macos".to_owned(),
             devices,
+            memory_kind: unified_memory_mb.map(|_| "unified"),
+            memory_mb: unified_memory_mb,
             unified_memory_mb,
+            gpu_memory_mb: None,
             wired_limit_mb,
         }
     }
     #[cfg(target_os = "windows")]
     {
         let mut devices = Vec::new();
+        let mut gpu_memory_mb = None;
         if let Some(output) = run_capture(
             "nvidia-smi",
             &[
@@ -1255,7 +1265,14 @@ pub fn get_gpu_info() -> GpuInfo {
             for line in output.lines() {
                 let parts: Vec<&str> = line.split(',').map(str::trim).collect();
                 match parts.as_slice() {
-                    [name, memory, ..] => devices.push(format!("{name} ({memory} MB)")),
+                    [name, memory, ..] => {
+                        devices.push(format!("{name} ({memory} MB)"));
+                        if let Ok(value) = memory.parse::<u64>() {
+                            gpu_memory_mb = Some(
+                                gpu_memory_mb.map_or(value, |current: u64| current.max(value)),
+                            );
+                        }
+                    }
                     [name] => devices.push((*name).to_owned()),
                     _ => {}
                 }
@@ -1264,19 +1281,42 @@ pub fn get_gpu_info() -> GpuInfo {
         GpuInfo {
             platform: "windows".to_owned(),
             devices,
+            memory_kind: gpu_memory_mb.map(|_| "dedicated"),
+            memory_mb: gpu_memory_mb,
             unified_memory_mb: None,
+            gpu_memory_mb,
             wired_limit_mb: None,
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let devices = run_capture("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"])
-            .map(|output| output.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        let mut devices = Vec::new();
+        let mut gpu_memory_mb = None;
+        if let Some(output) = run_capture(
+            "nvidia-smi",
+            &[
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+        ) {
+            for line in output.lines() {
+                let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+                if let [name, memory, ..] = parts.as_slice() {
+                    devices.push(format!("{name} ({memory} MB)"));
+                    if let Ok(value) = memory.parse::<u64>() {
+                        gpu_memory_mb =
+                            Some(gpu_memory_mb.map_or(value, |current: u64| current.max(value)));
+                    }
+                }
+            }
+        }
         GpuInfo {
             platform: "linux".to_owned(),
             devices,
+            memory_kind: gpu_memory_mb.map(|_| "dedicated"),
+            memory_mb: gpu_memory_mb,
             unified_memory_mb: None,
+            gpu_memory_mb,
             wired_limit_mb: None,
         }
     }

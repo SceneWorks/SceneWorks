@@ -92,6 +92,17 @@ describe("resolutionFitsMemory", () => {
       resolutionFitsMemory(model, "2048x2048", exactBudgetGb - 0.001, { backend: "mlx" }),
     ).toBe(false);
   });
+
+  it("uses the dedicated-VRAM host boundary on Candle instead of the MLX fraction", () => {
+    const required = predictedResolutionPeakGb(kreaModel(), "2048x2048", "candle");
+    expect(resolutionFitsMemory(kreaModel(), "2048x2048", required, { backend: "candle" })).toBe(
+      true,
+    );
+    expect(
+      resolutionFitsMemory(kreaModel(), "2048x2048", required - 0.001, { backend: "candle" }),
+    ).toBe(false);
+    expect(required / MEMORY_HEADROOM_FRACTION).toBeGreaterThan(required);
+  });
 });
 
 describe("predictedResolutionPeakGb", () => {

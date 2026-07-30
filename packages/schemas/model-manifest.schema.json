@@ -644,7 +644,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "model.mlx?.minMemoryGb" }],
+                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\")" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "calibrations": {

@@ -592,15 +592,21 @@ function fidelityRank(tier) {
 // Whether a variant's PEAK footprint fits within `unifiedMemoryGb` with headroom. When the memory
 // signal is unknown (null) OR the tier has no estimable footprint, we treat it as fitting — we never
 // withhold or block a tier on missing data; the worst case is suggesting a heavier tier.
-export function tierFits(variant, unifiedMemoryGb) {
-  if (unifiedMemoryGb == null || !Number.isFinite(unifiedMemoryGb)) {
+export function tierFits(variant, hostMemoryGb, options = {}) {
+  if (hostMemoryGb == null || !Number.isFinite(hostMemoryGb)) {
     return true;
+  }
+  if (options.backend === "candle") {
+    const tier = variant?.variant;
+    const peak = tier ? peakGbByTier(options.model, "candle").get(tier) ?? null : null;
+    // Missing Candle evidence is unknown, never permission to borrow the MLX footprint.
+    return peak === null ? true : peak + CANDLE_HEADROOM_GB <= hostMemoryGb;
   }
   const footprint = variantFootprintBytes(variant);
   if (footprint === null) {
     return true;
   }
-  const budgetBytes = unifiedMemoryGb * BYTES_PER_GB * MEMORY_HEADROOM_FRACTION;
+  const budgetBytes = hostMemoryGb * BYTES_PER_GB * MEMORY_HEADROOM_FRACTION;
   return footprint.bytes <= budgetBytes;
 }
 
@@ -611,7 +617,7 @@ export function tierFits(variant, unifiedMemoryGb) {
 //
 // This never affects installability — it just picks which tier to pre-select/highlight. A 32 GB host
 // lands on q4, a 512 GB Studio on bf16, and either can override.
-export function suggestTier(model, unifiedMemoryGb) {
+export function suggestTier(model, hostMemoryGb, options = {}) {
   const tiers = declaredTiers(model);
   if (tiers.length === 0) {
     return null;
@@ -624,7 +630,7 @@ export function suggestTier(model, unifiedMemoryGb) {
   // `tiers` is already highest-fidelity first; the first that fits wins.
   for (const tier of tiers) {
     const variant = byKey.get(tier);
-    if (variant && tierFits(variant, unifiedMemoryGb)) {
+    if (variant && tierFits(variant, hostMemoryGb, { ...options, model })) {
       return tier;
     }
   }

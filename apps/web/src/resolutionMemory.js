@@ -130,7 +130,11 @@ export function resolutionFitsMemory(model, resolution, unifiedMemoryGb, options
   if (required == null) {
     return true;
   }
-  return required <= unifiedMemoryGb * MEMORY_HEADROOM_FRACTION;
+  // `candle.minMemoryGb` is already a dedicated-VRAM host requirement. Applying the MLX 0.9
+  // shared-pool budget to it would mix memory kinds and hide resolutions on CUDA hosts.
+  return backend === "candle"
+    ? required <= unifiedMemoryGb
+    : required <= unifiedMemoryGb * MEMORY_HEADROOM_FRACTION;
 }
 
 // Filter a list of "WxH" buckets to those that fit `unifiedMemoryGb`, preserving order. The studio's

@@ -253,6 +253,12 @@ pub(crate) struct HostCapabilitiesResponse {
     /// API host OS (`macos`/`windows`/`linux`) so the client gates with the right
     /// memory concept (unified vs VRAM).
     pub(crate) platform: &'static str,
+    /// Active memory pool and its kind. Kept as a pair so clients cannot silently treat
+    /// shared system memory as dedicated VRAM (or the reverse).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory_gb: Option<f64>,
     /// Unified system memory (GB) — the macOS MLX worker reports `sysctl hw.memsize`.
     /// `None` when no MLX worker is registered.
     #[serde(skip_serializing_if = "Option::is_none")]

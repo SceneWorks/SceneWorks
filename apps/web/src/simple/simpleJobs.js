@@ -44,7 +44,12 @@ export function workerAdvertises(workers, capability) {
 // sticky first, then the global quality setting, then the capability-aware Auto suggestion —
 // all clamped to what's actually installed.
 export function resolveSimpleTier(model, screen, options = {}) {
-  const { convRotEligible = false, nvfp4Eligible = false, unifiedMemoryGb = null } = options;
+  const {
+    convRotEligible = false,
+    nvfp4Eligible = false,
+    unifiedMemoryGb = null,
+    backend = "mlx",
+  } = options;
   const tierOptions = { convRotEligible, nvfp4Eligible };
   const available = installedTiers(model, tierOptions);
   if (available.length === 0) {
@@ -55,7 +60,7 @@ export function resolveSimpleTier(model, screen, options = {}) {
     defaultTierSelection(model, sticky, {
       ...tierOptions,
       defaultQuality: readDefaultGenerationQuality(),
-      autoTier: suggestTier(model, unifiedMemoryGb),
+      autoTier: suggestTier(model, unifiedMemoryGb, { backend }),
     }) ?? "";
   return {
     quantTier,

@@ -714,31 +714,9 @@ describe("catalog memory floors: duplicate tier keys cannot reach the client", (
 // the evidence sweeps cannot, and it is why "label ≥ what tierFits demands" is the invariant that makes the
 // class unrepeatable rather than merely fixing the instance.
 //
-// WHY IT IS ASSERTED ON THE MLX LANE ONLY. `tierFits` is lane-BLIND and MLX-flavoured in both of its parts:
-// its input is `variantFootprintBytes` (disk × 1.0 + a 14 GiB transient measured by the MLX
-// `footprint_measure.rs` harness at 1024², an Apple unified-memory quantity) and its criterion is
-// `peak <= host × 0.9`, the MLX budget. On MLX that makes the invariant hold BY CONSTRUCTION —
-// `hostGbForPeakGb(_, "mlx")` is `ceil(peak / 0.9)`, literally `tierFits`'s own boundary.
-//
-// On candle it is not an invariant, it is a category error, and asserting it there would overwrite every
-// number this PR's review confirmed. Measured against the shipped catalog (`wouldRaise`, below): requiring
-// it on candle would raise 754 (model, os, subset, eligibility, tier) rows across 26 models — 698 of them
-// on install-sets whose candle coverage is COMPLETE, i.e. where no fill is involved and the quoted figure
-// is purely the candle gate's own arithmetic. The example that carries the argument is `lens_turbo` q8:
-// its `candle.vramGbByTier.q8` of 42 puts the gate at 44, which is the number the row shows, while
-// `tierFits`'s MLX budget demands 50 for the same tier off its 30.50 GiB on-disk size (+14 GiB transient
-// = 44.50, and `ceil(44.50 / 0.9)` = 50). Those gate figures are the ones the candle lane itself admits
-// at (`peak + 2` on `candle.vramGbByTier`, a discrete-VRAM measurement), so raising them would re-create
-// precisely the over-warning MAJOR 3 removed.
-//
-// An earlier revision of this paragraph cited `flux_dev` 34→51 and `sd3_5_medium` 36→42 alongside
-// `lens_turbo`, which MIXED TWO FRAMINGS: both of those figures come from a tier with NO candle evidence
-// at all (`flux_dev` bf16, `sd3_5_medium` q8 — neither has a `vramGbByTier` row), so neither can appear in
-// `wouldRaise` (it requires lane evidence) and neither entry has COMPLETE candle coverage. What those two
-// contribute is a DIFFERENT tier: `flux_dev` q8 at 35 against the shown 34, and `sd3_5_medium` q4/bf16 at
-// 41/44 against the shown 36. The corrected figures above are derived by the test, not transcribed.
-// The candle lane's correct analogue is its own gate's criterion, which is what the evidence sweeps above
-// already assert with zero violations.
+// SC-15613 makes that picker lane-aware. MLX still compares its own footprint against a shared-pool
+// budget; Candle reads only `candle.vramGbByTier` and applies the worker-owned dedicated-VRAM slack.
+// Missing Candle evidence remains unknown/fail-open and must never borrow the MLX footprint.
 // ---------------------------------------------------------------------------------------------------
 
 // The candle-only tiers' host-eligibility gates, as `SimpleModelManager` derives them from live workers.
@@ -868,15 +846,9 @@ describe("catalog memory floors: the label never contradicts the module's own pi
     expect(subsetsCovered).toBeGreaterThanOrEqual(400);
   });
 
-  it("records WHY the same invariant is not asserted on the candle lane", () => {
-    // A manifest fact, pinned so the asymmetry above cannot be mistaken for an oversight — and so that if it
-    // ever stopped being true, the choice would be revisited rather than silently inherited.
-    //
-    // `tierFits`'s MLX budget demands strictly MORE than the candle gate on the shipped corpus, including on
-    // entries whose candle coverage is COMPLETE (so no fill is involved and the figure is purely the gate's
-    // own arithmetic). Forcing agreement would raise those confirmed numbers.
-    const wouldRaise = [];
-    const wouldRaiseComplete = [];
+  it("Candle: every evidenced installed tier fits at the dedicated-VRAM host the label quotes", () => {
+    const violations = [];
+    let asserted = 0;
     for (const row of SWEEP) {
       if (row.backend !== "candle" || row.subset.length === 0) {
         continue;
@@ -886,39 +858,22 @@ describe("catalog memory floors: the label never contradicts the module's own pi
         continue;
       }
       const eligible = row.subset.filter((t) => tierHostEligible(t, row.eligibility));
-      // COMPLETE candle coverage: every eligible installed tier has its own `vramGbByTier` row, so no fill
-      // and no blanket substitution is involved and `shown` is purely the candle gate's own arithmetic.
-      const completeCoverage =
-        eligible.length > 0 && eligible.every((t) => laneEvidenceGb(row.model, row.os, t) !== null);
       for (const tier of eligible) {
         const variant = row.entry.variants.find((v) => v.variant === tier);
-        const footprint = variantFootprintBytes(variant);
         const evidence = laneEvidenceGb(row.model, row.os, tier);
-        if (footprint === null || evidence === null || tierFits(variant, shown)) {
+        if (evidence === null) {
           continue;
         }
-        // The candle GATE is satisfied at the quoted host; only the MLX-flavoured `tierFits` is not.
-        expect(shown, `${row.id} ${tier}: the candle gate must still be satisfied`).toBeGreaterThanOrEqual(
-          hostGbForPeakGb(evidence, "candle"),
-        );
-        wouldRaise.push(`${row.id} ${tier}`);
-        if (completeCoverage) {
-          wouldRaiseComplete.push(`${row.id} ${tier}`);
+        asserted++;
+        if (!tierFits(variant, shown, { backend: "candle", model: row.entry })) {
+          violations.push(
+            `${row.id} on ${row.os} [${row.subset.join(",")}]: ${tier} rejected at ${shown} GB`,
+          );
         }
       }
     }
-    // FLOORS NEAR THE REAL FIGURES, not a token ">= 50". The previous floor was 50 against an actual 644,
-    // so a >10x erosion of the fact it protects would have gone unnoticed; these sit ~80% of the measured
-    // values (754 / 698 / 26 / 65 at the time of writing) so real erosion reds while routine catalog churn
-    // does not. The COMPLETE-coverage subset is asserted SEPARATELY because that is the load-bearing half
-    // of the claim above — an over-count driven purely by fill-based rows would not support it.
-    expect(wouldRaise.length).toBeGreaterThanOrEqual(600);
-    expect(wouldRaiseComplete.length).toBeGreaterThanOrEqual(550);
-    expect(new Set(wouldRaise.map((row) => row.split(" ")[0])).size).toBeGreaterThanOrEqual(20);
-    expect(new Set(wouldRaise).size).toBeGreaterThanOrEqual(50);
-    // `lens_turbo` q8 is the example the comment argues from, and it is a COMPLETE-coverage row.
-    expect(wouldRaiseComplete).toContain("lens_turbo q8");
-    expect(wouldRaise.join(",")).toContain("flux_dev");
+    expect(violations.join("\n")).toBe("");
+    expect(asserted).toBeGreaterThanOrEqual(500);
   });
 
   it("pins that the linux projection is byte-identical to windows, so two OSes sweep exhaustively", () => {

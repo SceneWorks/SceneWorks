@@ -175,9 +175,34 @@ describe("tierFits", () => {
     expect(tierFits(atBudget, budgetGb)).toBe(true);
     expect(tierFits(overBudget, budgetGb)).toBe(false);
   });
+
+  it("uses Candle VRAM evidence and never the variant's MLX footprint on a CUDA host", () => {
+    const variant = { variant: "q4", footprint: { peakMemoryBytes: 100 * GB } };
+    const model = { candle: { vramGbByTier: { q4: 6 } } };
+    expect(tierFits(variant, 8, { backend: "candle", model })).toBe(true);
+    expect(tierFits(variant, 7, { backend: "candle", model })).toBe(false);
+    expect(tierFits(variant, 8, { backend: "mlx", model })).toBe(false);
+  });
+
+  it("fails open when Candle has no evidence instead of borrowing MLX measurements", () => {
+    const variant = { variant: "q8", footprint: { peakMemoryBytes: 100 * GB } };
+    expect(tierFits(variant, 8, { backend: "candle", model: { candle: {} } })).toBe(true);
+  });
 });
 
 describe("suggestTier", () => {
+  it("suggests from the Candle ladder on a dedicated-VRAM host", () => {
+    const model = {
+      ...matrixModel([
+        { variant: "q4", peakGb: 100 },
+        { variant: "q8", peakGb: 100 },
+        { variant: "bf16", peakGb: 100 },
+      ]),
+      candle: { vramGbByTier: { q4: 6, q8: 10, bf16: 20 } },
+    };
+    expect(suggestTier(model, 12, { backend: "candle" })).toBe("q8");
+  });
+
   it("suggests q4 on a 32 GB host when the larger tiers overflow the budget (acceptance)", () => {
     // Peak-based budget on 32 GB = 32 × 0.9 = 28.8 GB. Estimated peak = diskGb × 1.0 + 14 GB transient.
     // Size q8/bf16 to exceed the budget so only q4 fits (a 32 GB user sees q4 pre-selected).

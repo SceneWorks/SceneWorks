@@ -152,7 +152,8 @@ import {
   tierPickerOptions,
 } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
-import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { readLastTier } from "../lastTierStore.js";
 import {
   PROMPT_REFINE_MODEL_ID,
@@ -861,10 +862,12 @@ export function ImageStudio() {
   // default), so a small model (SANA-Sprint) defaults to bf16 and a heavy one on a small Mac to what
   // fits — instead of a flat q8. `null` memory (probe pending / unavailable) leans to the highest tier;
   // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
-  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const hostMemory = useHostMemory();
+  const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
-    () => suggestTier(selectedModel, unifiedMemoryGb),
-    [selectedModel, unifiedMemoryGb],
+    () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
+    [selectedModel, unifiedMemoryGb, activeBackend],
   );
   const { quantTier, tierSwitching, handleTierChange } = useQuantTierPicker({
     screen: TIER_SCREEN,
@@ -1152,12 +1155,13 @@ export function ImageStudio() {
     const declared = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTION_OPTIONS;
-    const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
-    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
+      backend: activeBackend,
+    });
     // Never collapse to an empty picker: if the gate somehow trims everything (it never trims
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, macCapabilities]);
+  }, [selectedModel, unifiedMemoryGb, activeBackend]);
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000
@@ -1189,7 +1193,6 @@ export function ImageStudio() {
   // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
-  const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   const samplerOptions = useMemo(
     () => samplerOptionsFromModel(selectedModel, activeBackend),
     [selectedModel, activeBackend],
