@@ -187,6 +187,46 @@ export function serializePhases(phases = [], selectedLoras = []) {
   });
 }
 
+// The exact inverse of `serializePhases`: read a recorded `advanced.phases` list back into the
+// editor's id-keyed shape, resolving each `index` against the LoRA ids the studio is about to
+// select (sc-15951).
+//
+// Replay needs this because the emitted contract is index-keyed and the editor is id-keyed, and
+// nothing else in the app converts back. Without it a shared — or re-run — 3-phase schedule loads
+// as a single-pass render, which is a DIFFERENT image rather than a degraded one: the phases are
+// what decide how many steps run with which adapters attached.
+//
+// `selectedLoraIds` must be the same order `serializePhases` would emit against (the studio's
+// `selectedLoraIds`, which is `request.loras` order). An index with no LoRA behind it is dropped —
+// a share whose LoRA did not resolve here has nothing to point at, and repointing it at a
+// neighbour would silently attach the wrong adapter. Duplicates collapse, mirroring the forward
+// direction, so a round trip is stable.
+export function deserializePhases(phases = [], selectedLoraIds = []) {
+  if (!Array.isArray(phases)) {
+    return [];
+  }
+  return phases.map((phase) => {
+    const steps = Math.trunc(Number(phase?.steps));
+    const guidance = Number(phase?.guidance);
+    const seen = new Set();
+    return {
+      steps: Number.isFinite(steps) ? steps : 0,
+      guidance: Number.isFinite(guidance) ? guidance : 0,
+      loras: (Array.isArray(phase?.loras) ? phase.loras : []).flatMap((ref) => {
+        const index = Number(ref?.index);
+        const id = Number.isInteger(index) && index >= 0 ? selectedLoraIds[index] : undefined;
+        if (id == null || seen.has(id)) {
+          return [];
+        }
+        seen.add(id);
+        const weight = Number(ref?.weight);
+        const hasWeight = ref?.weight != null && ref.weight !== "" && Number.isFinite(weight);
+        return [{ id, weight: hasWeight ? weight : null }];
+      }),
+    };
+  });
+}
+
 // The multi-phase rule set, in the app-wide validation vocabulary (epic 10644). Errors, not silent
 // requirements: an enabled-but-broken phase list blocks Generate and nothing else on the form
 // explains why. Returns [] when the editor is disabled — a disabled editor emits no phases, so a

@@ -433,6 +433,26 @@ exist:
 Both of those are in `workflow_share_doc.rs`, not in the lint file above. A green
 `workflow_share.rs` is not the finish line.
 
+#### And say what the receiving studio does with it
+
+An `allow` decides that the key may leave the machine. It says nothing about whether the install
+that opens the file has a control for it — and those are different questions, because an image
+envelope carries keys from four lanes (the Image Studio, the standalone Detail pass, the Character
+studio's angle set, the interleaved-document lane) while the "use this workflow" prefill lands in
+exactly one of them.
+
+So a shared key also needs a row in `ADVANCED_PREFILL` (`apps/web/src/workflowShare.js`), which is
+read by BOTH halves of the offer panel: the recipe carries exactly the keys marked as reaching a
+control, and the panel marks exactly the rest as "not restored", with the reason you write there. A
+key with no row is treated as not restored — rendered and marked, never silently dropped — and
+`workflowShare.test.js` fails if this document's [Shared](#shared) table and that map disagree in
+either direction.
+
+That guardrail exists because the first cut of the panel displayed ten knobs — `enhancePrompt`,
+`usePid`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
+`poses`, `phases` — as ordinary settings rows while none of them reached a control. Being told a
+recipe replayed faithfully when it did not is the failure this whole contract exists to prevent.
+
 If the value is authored text the user typed rather than a slug, say so in the reason and add it to
 `PROSE_KEYS` — which makes it path-exempt, so you are also adding a field to the privacy callout at
 the top of this document and must add that row too.
