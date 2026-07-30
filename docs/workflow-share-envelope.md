@@ -22,8 +22,11 @@ This document is the contract. It exists for two people:
 > These six fields are recorded as authored, and are deliberately **exempt from the filesystem-path
 > guard** that drops every other field that looks like a location. Silently mangling someone's
 > prompt because it mentions a directory would be worse than the leak it prevents — you wrote it,
-> and you can read it back before you share. The only things removed from them are invisible
-> formatting characters and anything past the 16 KiB prose ceiling.
+> and you can read it back before you share. The only things removed from them are control
+> characters other than newline and tab, Unicode `Cf` format characters, the whitespace around the
+> whole value, and anything past the 16 KiB prose ceiling. Nothing in the middle of the text is
+> rewritten — but a prompt written with Windows line endings arrives with its carriage returns
+> gone, and one typed with a leading or trailing blank line arrives trimmed.
 >
 > <!-- PINNED: prose-fields -->
 >
@@ -71,8 +74,11 @@ a test asserts it is strict semver.
 
 ### Two versions, and only one of them is parsed
 
-`schemaVersion` is the contract version and is **the only field the parser branches on**.
-`producer.version` is recorded so a bug report is actionable and is never interpreted.
+`schemaVersion` is the contract version and is **the only version the parser branches on**.
+`producer.version` is recorded so a bug report is actionable and is never interpreted. (It is not
+the only *field* the parser branches on: the `sceneworksWorkflow` marker is checked too, and a blob
+whose marker names a lane this build does not read — a future video envelope, say — is refused as an
+unsupported kind rather than parsed as an image one.)
 
 | The file says | This build does |
 | --- | --- |
@@ -137,16 +143,24 @@ in that table is not in the file. Named explicitly because these are the ones pe
   installation id. `producer` names the *software*, never the install.
 - **Filesystem paths, anywhere.** Every non-prose string is dropped if it looks like a location —
   absolute or relative, Windows or POSIX, `~` expansions, UNC shares, `file://`, percent-encoded
-  forms and `..` traversals. A value that trips the check is dropped rather than trimmed. Two
-  honest limits on that: it is a **shape** test and not knowledge of your disk, so a bare name with
-  no separators in it (`acme-brief`) is not a location and travels; and it does **not** apply to
-  the six prose fields, which is the callout at the top of this document.
+  forms and `..` traversals. A value that trips the check is dropped rather than trimmed. Three
+  honest limits on that. **One:** it is a *shape* test and not knowledge of your disk, so a bare
+  name with no separators in it (`acme-brief`) is not a location and travels. **Two:** a relative
+  POSIX path of only **two** segments is deliberately not treated as a location — two segments is
+  the shape of a Hugging Face repo id (`acme/mira`), which `loras[].repo` carries for real, and a
+  slash turns up in free-text labels people write by hand (`Ghibli / soft light`). So a
+  `loras[].name` or a `styleId` reading `Clients/Acme` is not caught and reaches the file; three or
+  more segments (`Clients/Acme/brief`) is. **Three:** it does not apply at all to the six prose
+  fields, which is the callout at the top of this document.
 - **Project, job and asset identity.** `projectId`, `projectName`, `jobId`, `assetId`,
   `generationSetId`, `characterId`, `characterLookId`.
 - **Timestamps.** The envelope has no time field.
 - **The rest of the batch.** `seeds` does not travel; `seed` is the one that rendered this file.
-- **This machine's hardware budget.** Quant tier, INT8-ConvRot selection, flash-attention, the
-  requested GPU. The receiving install picks its own. See the withheld table below.
+- **This machine's hardware budget.** Quant tier, INT8-ConvRot selection and flash-attention are
+  classified and deliberately dropped — see the withheld table below. The requested GPU is not in
+  that table because it never enters `advanced` at all: it is a top-level request field, and the
+  envelope has no slot for it, so it is left behind by the field list being closed rather than by a
+  decision written down against its name. Either way the receiving install picks its own.
 - **Local ids that resolve to nothing elsewhere.** Recipe preset ids, control-image asset ids,
   trained-overlay ids and their resolved weights paths, Key Point Library collection ids.
 - **Pose library ids.** A pose selection travels as coordinate arrays (`keypoints`, `hands`,
@@ -278,10 +292,12 @@ exists to prevent.
 ## Ceilings
 
 Two kinds of bound. Per-collection caps, each inherited from the validator that already limits the
-thing — where one exists; `MAX_SHARE_POSES` is the one that has no upstream validator to inherit
-and is derived from the size of the shipped pose library instead. And one ceiling on the serialized
-envelope, checked after every per-field rule has run. The second is what actually composes:
-per-field bounds did not, and each new measurement found a new way to spend what they left.
+thing — where one exists. Two are not inherited: `MAX_SHARE_INPUTS` is a **shape** rather than a
+validator's number (it is `INPUT_KINDS.len()` — one entry per kind, and the kinds are closed), and
+`MAX_SHARE_POSES` has no upstream validator to inherit at all and is derived from the size of the
+shipped pose library instead. And one ceiling on the serialized envelope, checked after every
+per-field rule has run. The second is what actually composes: per-field bounds did not, and each new
+measurement found a new way to spend what they left.
 
 <!-- PINNED: ceilings -->
 
@@ -296,7 +312,7 @@ per-field bounds did not, and each new measurement found a new way to spend what
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_SHARE_POSE_SLOTS` | 6,144 | Coordinate slots across the whole `advanced.poses` array — a number, or a `null` standing in for one. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_WORKFLOW_TEXT_BYTES` | 1,048,576 | The **decompressed** chunk text, on read. | Decompression stops and the file is refused, so a zip bomb costs a megabyte rather than its claimed size. |
-| `MAX_METADATA_BYTES` | 8,388,608 | What the PNG decoder may buffer from an untrusted file's ancillary chunks, cumulatively. | The read is refused, whatever length a chunk header *claims*. |
+| `MAX_METADATA_BYTES` | 8,388,608 | **Approximately** what the PNG decoder may buffer from an untrusted file's ancillary chunks, cumulatively. `png` grows the buffer and only then finds it over budget, so a measured refusal peaks at 8,408,413 bytes live rather than at this number. | The read is refused, whatever length a chunk header *claims* — in the walk before the image data. A budget already spent by the time the post-IDAT tail pass runs is reported as an absence instead, so a fat-but-foreign PNG that read as "no workflow" before that pass existed still does. |
 
 <!-- END PINNED: ceilings -->
 
@@ -372,9 +388,53 @@ whether the key describes **what to make** or **what this machine can afford to 
 - `deny(key, reason)` — it describes this install (a tier, a kernel, a GPU) or names something local
   (an id, a path, a preset). It is dropped, and a shared image will not reproduce whatever it did.
 
-Either way write the reason; the test requires one. If the value is authored text the user typed
-rather than a slug, say so in the reason and add it to `PROSE_KEYS` — but understand that you are
-adding a field to the callout at the top of this document, and update that table too.
+Either way write the reason; the test requires one.
+
+#### Tag the rule with the builder that emits it
+
+Every rule carries an `AdvancedKeySource`, and `allow` / `deny` are shorthands that hard-code
+`AdvancedKeySource::StudioBuilder`. Reaching for them out of habit is the most likely way to end up
+red: a `buildDetailJobBody` key written as `allow(…)` is classified correctly and tagged wrongly,
+and the tag is what two of the four lints are about.
+
+<!-- PINNED: rule-helpers -->
+
+| Helper | The source tag it sets | Use it for |
+| --- | --- | --- |
+| `allow(key, shape, reason)` | `StudioBuilder` | A key that travels, emitted by `buildImageJobAdvanced`. |
+| `deny(key, reason)` | `StudioBuilder` | A key that is withheld, emitted by `buildImageJobAdvanced`. |
+| `allow_from(key, shape, source, reason)` | Whichever variant you pass | A key that travels, emitted by any other registered builder. |
+| `deny_from(key, source, reason)` | Whichever variant you pass | A key that is withheld, emitted by any other registered builder. |
+| `deny_server(key, reason)` | `Server` | A key the API stamps onto `advanced` after the request arrives. No web builder emits it, and the lint does not look for it in the JS. |
+
+<!-- END PINNED: rule-helpers -->
+
+The variant to pass is the one on the builder's row in [Registering a
+builder](#registering-a-builder) — `DetailBuilder` for `buildDetailJobBody`, `InterleaveBuilder` for
+`DocumentStudio.submit`, and so on. A key more than one builder emits is tagged with its primary
+builder; the "is every emitted key classified?" half of the lint runs for every registered builder
+regardless of tags, and only the "is every classified key still emitted?" half is per-tag.
+
+#### Then add the row to this document
+
+Classifying the key is half of it. `ADVANCED_KEY_RULES` and the two tables above are pinned to each
+other **in both directions** by `crates/sceneworks-core/tests/workflow_share_doc.rs`, so a key in the
+code that this document does not list fails just as loudly as a row here for a key that does not
+exist:
+
+- an `allow` needs a row in [Shared](#shared) — the key, its `Shape` spelled exactly as the enum
+  variant is, and what it is — or `the_doc_lists_exactly_the_shared_advanced_keys` fails;
+- a `deny` needs a row in [Withheld](#withheld) — the key and why — or
+  `the_doc_lists_exactly_the_withheld_advanced_keys` fails.
+
+Both of those are in `workflow_share_doc.rs`, not in the lint file above. A green
+`workflow_share.rs` is not the finish line.
+
+If the value is authored text the user typed rather than a slug, say so in the reason and add it to
+`PROSE_KEYS` — which makes it path-exempt, so you are also adding a field to the privacy callout at
+the top of this document and must add that row too.
+`the_doc_lists_exactly_the_path_exempt_prose_fields` seeds a filesystem path into every field of a
+real request and fails if the callout and the sanitizer disagree about which ones carry it through.
 
 ### Registering a builder
 
@@ -396,7 +456,30 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 <!-- END PINNED: builders -->
 
 Adding an entry to `ADVANCED_BUILDERS` is what turns the lint on for that builder — at which point
-every key it emits needs an `allow`/`deny` decision.
+every key it emits needs an `allow`/`deny` decision, and a row in the table above, which
+`the_doc_lists_exactly_the_registered_builders` pins in both directions.
+
+An entry is more than a path and a function: it is what tells the lint how to read that file, and
+how to know it still can.
+
+<!-- PINNED: builder-fields -->
+
+| Field | What to put in it |
+| --- | --- |
+| `source` | A **new** `AdvancedKeySource` variant for this builder, added to `AdvancedKeySource::ALL` as well as declared. One variant per registered builder, checked both ways, or `every_source_tag_names_exactly_one_registered_builder` fails. |
+| `path` | Repo-relative path of the file that defines it. Read out of the repo, so a move fails loudly. |
+| `function` | The JS function whose body the extractor reads. Read out of the repo, so a rename fails loudly. |
+| `shape` | Which `AdvancedBuilderShape` the JS is written in, and therefore which extractor can read it: `ReturnedObject`, `FlatAdvancedLiteral`, `AssignedObject`, `ExtrasLiteral`, or `NoAdvancedMap` for a builder that posts no `advanced` map at all. |
+| `lane` | Prose: the embedding lane this builder's payload ends up written by, so a reader can see why the keys matter. |
+| `anchors` | Keys the extractor **must** still find. The floor against an extractor that has quietly stopped understanding the file — a lint that reads zero keys and passes is the failure mode the whole registry exists to prevent. |
+| `minimum_keys` | The smallest key count the extractor may report before the lint calls itself broken. Set it well under the real count; it is a floor, not a census. |
+| `spread_of` | Identifiers spread into an `AssignedObject` initializer whose keys another registry entry already accounts for. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
+
+<!-- END PINNED: builder-fields -->
+
+A new variant on `AdvancedKeySource` is the step most easily missed, because nothing about writing
+`allow_from(…, AdvancedKeySource::MyBuilder, …)` reminds you that the variant also has to appear in
+`::ALL`.
 
 If the lane does **not** embed, the entry goes in `DEFERRED_ADVANCED_BUILDERS` with a reason naming
 the story that will classify it, or a `PERMANENT EXEMPTION:` reason saying why no story ever will
@@ -455,9 +538,21 @@ code does not have fails, and a thing the code has that is not a row here fails 
 | `advanced-shared` / `advanced-withheld` | `ADVANCED_KEY_RULES`, key and disposition, plus the `Shape` column. |
 | `input-kinds` | `INPUT_KINDS`. |
 | `omitted-fields` | `OMITTED_FIELDS`. |
-| `ceilings` | Observed behaviour for the collection and string bounds — the largest input that survives and the smallest that does not — and the constants for the envelope and PNG ceilings. |
+| `ceilings` | Observed behaviour for the collection and string bounds — the largest input that survives, the smallest that does not, and whether the overflow **truncates** or **drops**, which is read out of the last column rather than assumed — and the constants for the envelope and PNG ceilings. |
 | `builders` / `deferred-builders` | `ADVANCED_BUILDERS` and `DEFERRED_ADVANCED_BUILDERS`, file path and function name. |
+| `builder-fields` | The fields of the `AdvancedBuilder` struct, so a registry entry that grows a field a contributor is never told to fill fails. |
+| `rule-helpers` | The `const fn … -> AdvancedKeyRule` constructors in `workflow_share.rs`, so a helper this section does not mention fails. |
 | `lints` | Each named test exists in `crates/sceneworks-core/tests/workflow_share.rs`. |
+
+Three claims outside a pinned block are checked too, because each had a way to drift silently:
+
+- the **16 KiB** the privacy callout quotes is asserted to be the `PROSE_MAX_BYTES` row of the
+  `ceilings` table, which is itself measured — so the callout cannot restate a ceiling the code
+  stopped having;
+- the pose **coordinate arrays** the callout-adjacent bullet and the `poses` row name are asserted
+  to be exactly `POSE_FIELDS`;
+- the number of prose fields the callout says it lists ("These six fields") is asserted against the
+  row count of the table under it.
 
 What is **not** machine-checked is the prose in the right-hand "what it is" columns and the narrative
 sections. Those are read against the source, not derived from it. The version-behaviour table, the

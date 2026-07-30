@@ -15,7 +15,15 @@
 //!   `PROSE_KEYS` constant that could itself be wrong.
 //! * [`the_documented_ceilings_are_the_real_limits`] finds each collection and string bound by
 //!   experiment — the largest input that survives and the smallest that does not — so the numbers in
-//!   the document are the numbers a user actually hits.
+//!   the document are the numbers a user actually hits. Its last column is read too, not assumed:
+//!   whether overflowing a ceiling truncates, drops or refuses is parsed out of the table and
+//!   turned into the assertion.
+//!
+//! Three claims live in the narrative prose rather than in a block, and each had a way to drift
+//! silently, so each is pinned on its own: the prose ceiling the privacy callout quotes
+//! ([`the_privacy_callout_quotes_the_real_prose_ceiling`]), the counts it spells out in words
+//! ([`the_privacy_callout_counts_its_own_prose_fields`]) and the pose coordinate arrays it names
+//! twice ([`the_doc_names_exactly_the_pose_fields_that_travel`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -29,7 +37,7 @@ use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedDisposition, AdvancedShape,
     WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
     ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
-    INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, PRODUCER_NAME, PRODUCER_URL,
+    INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
     WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
     WORKFLOW_SHARE_SCHEMA_VERSION,
 };
@@ -40,6 +48,9 @@ const DOC_PATH: &str = "docs/workflow-share-envelope.md";
 
 /// The integration-test file whose lint names the document quotes.
 const LINT_TEST_PATH: &str = "crates/sceneworks-core/tests/workflow_share.rs";
+
+/// The module the contributor section sends people to edit.
+const SHARE_SOURCE_PATH: &str = "crates/sceneworks-core/src/workflow_share.rs";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -116,6 +127,65 @@ fn pinned_rows(doc: &str, name: &str) -> Vec<Vec<String>> {
 /// One cell, with its surrounding backticks removed.
 fn code(cell: &str) -> String {
     cell.trim().trim_matches('`').trim().to_owned()
+}
+
+/// The document with every run of whitespace collapsed to a single space.
+///
+/// A claim in the narrative prose is a sentence, not a line: the markdown is hard-wrapped at 100
+/// columns, so any phrase this file searches for would otherwise break the moment someone reflowed
+/// a paragraph around it.
+fn flowed(doc: &str) -> String {
+    doc.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// The phrase between `anchor` and the next `terminator` after it, in a [`flowed`] document.
+///
+/// Panics when either marker is gone. A prose claim that was reworded out of the shape this lint
+/// reads is a claim nothing is checking any more, which is the failure mode the whole file exists
+/// to refuse — so it fails loudly rather than matching nothing and passing.
+fn phrase(flowed: &str, anchor: &str, terminator: &str) -> String {
+    let start = flowed.find(anchor).unwrap_or_else(|| {
+        panic!(
+            "{DOC_PATH} no longer contains {anchor:?}. That sentence is pinned to the code; if it \
+             was reworded, teach this lint the new shape rather than leaving the claim unchecked."
+        )
+    }) + anchor.len();
+    let rest = &flowed[start..];
+    let end = rest.find(terminator).unwrap_or_else(|| {
+        panic!("{DOC_PATH}: the phrase after {anchor:?} is never closed by {terminator:?}")
+    });
+    rest[..end].to_owned()
+}
+
+/// The backticked identifiers of `text`, in the order they are written.
+fn backticked(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else { break };
+        out.insert(after[..close].trim().to_owned());
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+/// The English number words this file can spell, indexed by the number they name.
+///
+/// The document counts things in prose ("These six fields"), and a count written by hand is a
+/// count that goes stale the first time the list under it changes.
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+
+fn number_word(count: usize) -> &'static str {
+    NUMBER_WORDS.get(count).copied().unwrap_or_else(|| {
+        panic!(
+            "{DOC_PATH} now has {count} of something this lint spells out in prose, which is past \
+             the {} this file can name — extend NUMBER_WORDS",
+            NUMBER_WORDS.len() - 1
+        )
+    })
 }
 
 /// Column `index` of every row in a pinned block, un-backticked.
@@ -748,15 +818,148 @@ fn parsed_with_inputs(count: usize) -> WorkflowShare {
     parse_workflow_share(&value).expect("a bounded envelope parses")
 }
 
-/// Every ceiling the document quotes, verified against the limit a user actually hits.
+/// What the document's last column says happens to a value that is over a ceiling.
+///
+/// Read out of the table rather than assumed, which is the difference between a lint and a
+/// decoration: while this was hard-coded, flipping `LABEL_MAX_CHARS`'s cell from "**Dropped**, not
+/// truncated" to "Truncated at the ceiling, exactly like prose" left every test in this file green
+/// — the document would have promised a slug survives cut in half, and nothing would have argued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Overflow {
+    /// The value survives, cut to the ceiling.
+    Truncated,
+    /// The value — or the whole collection — goes.
+    Dropped,
+    /// Nothing partial happens: the read or the write fails outright.
+    Refused,
+}
+
+/// The one verb a "what happens at the limit" cell claims.
+///
+/// Markdown emphasis is stripped and a NEGATED verb ("not truncated", "never dropped") is removed
+/// before the search, so a cell may usefully contrast its behaviour with the one it is not — which
+/// the `LABEL_MAX_CHARS` row does, and which is exactly the phrasing a naive `contains` would
+/// misread. Exactly one verb must survive: a cell naming none has said nothing checkable, and a
+/// cell naming two has said two things.
+fn overflow_behaviour(name: &str, cell: &str) -> Overflow {
+    const VERBS: &[(&str, Overflow)] = &[
+        ("truncat", Overflow::Truncated),
+        ("drop", Overflow::Dropped),
+        ("refus", Overflow::Refused),
+    ];
+    let mut text = cell.to_ascii_lowercase().replace(['*', '`'], " ");
+    for negation in ["not ", "never ", "rather than ", "instead of "] {
+        for (stem, _) in VERBS {
+            text = text.replace(&format!("{negation}{stem}"), " ");
+        }
+    }
+    let claimed: BTreeSet<Overflow> = VERBS
+        .iter()
+        .filter(|(stem, _)| text.contains(stem))
+        .map(|(_, behaviour)| *behaviour)
+        .collect();
+    let mut claimed = claimed.into_iter();
+    let (Some(behaviour), None) = (claimed.next(), claimed.next()) else {
+        panic!(
+            "{DOC_PATH}: the `{name}` row's \"What happens at the limit\" cell must say exactly \
+             one of truncated / dropped / refused, and {cell:?} says {} of them. That column is \
+             asserted, not decorative.",
+            VERBS.iter().filter(|(stem, _)| text.contains(stem)).count()
+        )
+    };
+    behaviour
+}
+
+/// Assert an over-ceiling STRING did what the document's last column says it did.
+///
+/// `surviving` is measured in the ceiling's own unit — bytes for prose, characters for a label.
+fn assert_string_overflow(name: &str, behaviour: Overflow, surviving: usize, documented: usize) {
+    match behaviour {
+        Overflow::Truncated => assert_eq!(
+            surviving, documented,
+            "{DOC_PATH} documents `{name}` as TRUNCATED at the ceiling, but an over-long value \
+             came back {surviving} long instead of {documented}"
+        ),
+        Overflow::Dropped => assert_eq!(
+            surviving, 0,
+            "{DOC_PATH} documents `{name}` as DROPPED rather than truncated, but {surviving} of \
+             an over-long value survived"
+        ),
+        Overflow::Refused => panic!(
+            "{DOC_PATH} documents `{name}` as a refusal, but it is a per-value bound that reduces \
+             the value in place — nothing about the envelope is refused"
+        ),
+    }
+}
+
+/// Assert an over-cap COLLECTION did what the document's last column says it did.
+fn assert_collection_overflow(
+    name: &str,
+    behaviour: Overflow,
+    still_present: bool,
+    omitted_gained: bool,
+    omitted_field: &str,
+) {
+    match behaviour {
+        Overflow::Dropped => {
+            assert!(
+                !still_present,
+                "{DOC_PATH} documents `{name}` as dropping the collection whole, but it survived"
+            );
+            assert!(
+                omitted_gained,
+                "{DOC_PATH} documents `{name}` as adding `{omitted_field}` to `omitted`, and it \
+                 did not — a silent drop is the failure the marker exists to prevent"
+            );
+        }
+        Overflow::Truncated => {
+            assert!(
+                still_present,
+                "{DOC_PATH} documents `{name}` as TRUNCATING at the cap, but the over-cap \
+                 collection was dropped whole"
+            );
+            assert!(
+                !omitted_gained,
+                "{DOC_PATH} documents `{name}` as truncating, but `omitted` gained \
+                 `{omitted_field}` — which is what a DROP records"
+            );
+        }
+        Overflow::Refused => panic!(
+            "{DOC_PATH} documents `{name}` as a refusal, but an over-cap collection is reduced, \
+             not refused: the rest of the envelope is still written"
+        ),
+    }
+}
+
+/// Assert a ceiling the document describes as a refusal is documented as one.
+fn assert_refusal(name: &str, behaviour: Overflow) {
+    assert_eq!(
+        behaviour,
+        Overflow::Refused,
+        "{DOC_PATH} documents `{name}` as {behaviour:?}, but it refuses the whole read or write — \
+         nothing partial is kept, so the last column may not promise a survivor"
+    );
+}
+
+/// Every ceiling the document quotes, verified against the limit a user actually hits — both the
+/// number and, from the last column, what overflowing it does.
 ///
 /// Named exhaustively rather than looked up, so a ceiling added to the document that nobody taught
 /// this test about fails instead of being waved through.
-fn verify_ceiling(name: &str, documented: usize) {
+fn verify_ceiling(name: &str, documented: usize, behaviour: Overflow) {
     match name {
-        "WORKFLOW_SHARE_MAX_BYTES" => assert_eq!(documented, WORKFLOW_SHARE_MAX_BYTES),
-        "MAX_WORKFLOW_TEXT_BYTES" => assert_eq!(documented, MAX_WORKFLOW_TEXT_BYTES),
-        "MAX_METADATA_BYTES" => assert_eq!(documented, MAX_METADATA_BYTES),
+        "WORKFLOW_SHARE_MAX_BYTES" => {
+            assert_eq!(documented, WORKFLOW_SHARE_MAX_BYTES);
+            assert_refusal(name, behaviour);
+        }
+        "MAX_WORKFLOW_TEXT_BYTES" => {
+            assert_eq!(documented, MAX_WORKFLOW_TEXT_BYTES);
+            assert_refusal(name, behaviour);
+        }
+        "MAX_METADATA_BYTES" => {
+            assert_eq!(documented, MAX_METADATA_BYTES);
+            assert_refusal(name, behaviour);
+        }
         "PROSE_MAX_BYTES" => {
             let mut payload = payload_fixture();
             payload.insert("prompt".to_owned(), json!("x".repeat(documented)));
@@ -766,11 +969,7 @@ fn verify_ceiling(name: &str, documented: usize) {
                 "a prompt of exactly the documented prose ceiling must survive whole"
             );
             payload.insert("prompt".to_owned(), json!("x".repeat(documented * 2)));
-            assert_eq!(
-                build(&payload).prompt.len(),
-                documented,
-                "prose is documented as TRUNCATED at this many bytes"
-            );
+            assert_string_overflow(name, behaviour, build(&payload).prompt.len(), documented);
         }
         "LABEL_MAX_CHARS" => {
             let mut payload = payload_fixture();
@@ -781,9 +980,11 @@ fn verify_ceiling(name: &str, documented: usize) {
                 "a label of exactly the documented ceiling must survive whole"
             );
             payload.insert("model".to_owned(), json!(label(documented + 1)));
-            assert!(
-                build(&payload).model.is_empty(),
-                "an over-long label is documented as DROPPED, not truncated"
+            assert_string_overflow(
+                name,
+                behaviour,
+                build(&payload).model.chars().count(),
+                documented,
             );
         }
         "MAX_SHARE_LORAS" => {
@@ -794,43 +995,65 @@ fn verify_ceiling(name: &str, documented: usize) {
             assert!(at_cap.omitted.is_empty());
             payload.insert("loras".to_owned(), lora_entries(documented + 1));
             let over = build(&payload);
-            assert!(
-                over.loras.is_empty(),
-                "the list is documented as dropped whole"
+            assert_collection_overflow(
+                name,
+                behaviour,
+                !over.loras.is_empty(),
+                over.omitted.iter().any(|field| field == "loras"),
+                "loras",
             );
-            assert!(over.omitted.iter().any(|field| field == "loras"));
         }
         "MAX_SHARE_INPUTS" => {
             let at_cap = parsed_with_inputs(documented);
             assert_eq!(at_cap.inputs.len(), documented);
             assert!(at_cap.omitted.is_empty());
             let over = parsed_with_inputs(documented + 1);
-            assert!(over.inputs.is_empty());
-            assert!(over.omitted.iter().any(|field| field == "inputs"));
+            assert_collection_overflow(
+                name,
+                behaviour,
+                !over.inputs.is_empty(),
+                over.omitted.iter().any(|field| field == "inputs"),
+                "inputs",
+            );
         }
         "MAX_SHARE_PHASES" => {
             let at_cap = envelope_with_advanced("phases", phase_entries(documented));
             assert!(at_cap.advanced.contains_key("phases"));
             assert!(at_cap.omitted.is_empty());
             let over = envelope_with_advanced("phases", phase_entries(documented + 1));
-            assert!(!over.advanced.contains_key("phases"));
-            assert!(over.omitted.iter().any(|field| field == "advanced.phases"));
+            assert_collection_overflow(
+                name,
+                behaviour,
+                over.advanced.contains_key("phases"),
+                over.omitted.iter().any(|field| field == "advanced.phases"),
+                "advanced.phases",
+            );
         }
         "MAX_SHARE_POSES" => {
             let at_cap = envelope_with_advanced("poses", pose_entries(documented, 2));
             assert!(at_cap.advanced.contains_key("poses"));
             assert!(at_cap.omitted.is_empty());
             let over = envelope_with_advanced("poses", pose_entries(documented + 1, 2));
-            assert!(!over.advanced.contains_key("poses"));
-            assert!(over.omitted.iter().any(|field| field == "advanced.poses"));
+            assert_collection_overflow(
+                name,
+                behaviour,
+                over.advanced.contains_key("poses"),
+                over.omitted.iter().any(|field| field == "advanced.poses"),
+                "advanced.poses",
+            );
         }
         "MAX_SHARE_POSE_SLOTS" => {
             let at_cap = envelope_with_advanced("poses", pose_entries(1, documented));
             assert!(at_cap.advanced.contains_key("poses"));
             assert!(at_cap.omitted.is_empty());
             let over = envelope_with_advanced("poses", pose_entries(1, documented + 1));
-            assert!(!over.advanced.contains_key("poses"));
-            assert!(over.omitted.iter().any(|field| field == "advanced.poses"));
+            assert_collection_overflow(
+                name,
+                behaviour,
+                over.advanced.contains_key("poses"),
+                over.omitted.iter().any(|field| field == "advanced.poses"),
+                "advanced.poses",
+            );
         }
         other => panic!(
             "{DOC_PATH} quotes a ceiling `{other}` that \
@@ -856,10 +1079,9 @@ const VERIFIED_CEILINGS: &[&str] = &[
     "MAX_METADATA_BYTES",
 ];
 
-#[test]
-fn the_documented_ceilings_are_the_real_limits() {
-    let doc = doc();
-    let documented: BTreeMap<String, usize> = pinned_rows(&doc, "ceilings")
+/// The `ceilings` table as `name -> value`, with the quoted numbers parsed.
+fn documented_ceilings(doc: &str) -> BTreeMap<String, usize> {
+    pinned_rows(doc, "ceilings")
         .into_iter()
         .map(|row| {
             let name = code(&row[0]);
@@ -868,6 +1090,29 @@ fn the_documented_ceilings_are_the_real_limits() {
                 panic!("{DOC_PATH}: the `{name}` ceiling is not a number ({raw:?}): {error}")
             });
             (name, value)
+        })
+        .collect()
+}
+
+#[test]
+fn the_documented_ceilings_are_the_real_limits() {
+    let doc = doc();
+    let documented = documented_ceilings(&doc);
+    // The last column, which says what overflowing the ceiling DOES. Read here and passed down, so
+    // the assertion each row gets is the one the document promised rather than one this file
+    // remembers.
+    let behaviours: BTreeMap<String, Overflow> = pinned_rows(&doc, "ceilings")
+        .into_iter()
+        .map(|row| {
+            let name = code(&row[0]);
+            assert_eq!(
+                row.len(),
+                4,
+                "{DOC_PATH}: the `{name}` ceiling row must have a \"What happens at the limit\" \
+                 column"
+            );
+            let behaviour = overflow_behaviour(&name, &row[3]);
+            (name, behaviour)
         })
         .collect();
 
@@ -881,6 +1126,194 @@ fn the_documented_ceilings_are_the_real_limits() {
         "the bounds this lint measures",
     );
     for (name, value) in &documented {
-        verify_ceiling(name, *value);
+        let behaviour = behaviours
+            .get(name)
+            .copied()
+            .expect("every ceiling row was read for its behaviour");
+        verify_ceiling(name, *value, behaviour);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Claims made in prose, outside any pinned block
+// ---------------------------------------------------------------------------
+
+/// The privacy callout restates the prose ceiling in words, above the table that measures it.
+///
+/// A number restated is a number that drifts: changing the callout to "64 KiB" left every other
+/// test in this file green, under a heading promising the user their prompt travels as written. So
+/// the sentence is read back and pinned to the `ceilings` row, which
+/// [`the_documented_ceilings_are_the_real_limits`] measures against the sanitizer.
+#[test]
+fn the_privacy_callout_quotes_the_real_prose_ceiling() {
+    let doc = doc();
+    let bytes = documented_ceilings(&doc)
+        .get("PROSE_MAX_BYTES")
+        .copied()
+        .expect("the `ceilings` table names PROSE_MAX_BYTES");
+    assert_eq!(
+        bytes % 1024,
+        0,
+        "{DOC_PATH}: the prose ceiling is no longer a whole number of KiB, so the callout cannot \
+         quote it as one — reword both together"
+    );
+    let quoted = format!("{} KiB prose ceiling", bytes / 1024);
+    assert!(
+        flowed(&doc).contains(&quoted),
+        "{DOC_PATH}: the privacy callout must say {quoted:?}. It is what a user reads before \
+         deciding to share an image, and the `ceilings` table says the bound is {bytes} bytes."
+    );
+}
+
+/// The callout counts its own fields in prose ("These six fields"), and so does the path bullet
+/// further down ("the six prose fields"). Both are pinned to the row count of the table itself.
+#[test]
+fn the_privacy_callout_counts_its_own_prose_fields() {
+    let doc = doc();
+    let count = pinned_rows(&doc, "prose-fields").len();
+    let word = number_word(count);
+    let flowed = flowed(&doc);
+    for sentence in [
+        format!("These {word} fields are recorded as authored"),
+        format!("the {word} prose fields"),
+    ] {
+        assert!(
+            flowed.contains(&sentence),
+            "{DOC_PATH} must say {sentence:?}: the `prose-fields` table has {count} rows, and a \
+             count written out in prose beside a table is the first thing to go stale"
+        );
+    }
+}
+
+/// The pose coordinate arrays, named in prose twice and pinned to `POSE_FIELDS` both times.
+///
+/// Neither mention is inside a pinned block, and both are a promise about what leaves the machine.
+/// Removing `"face"` from `POSE_FIELDS` while the document kept saying "keypoints / hands / face"
+/// left this file green.
+#[test]
+fn the_doc_names_exactly_the_pose_fields_that_travel() {
+    let doc = doc();
+    let actual: BTreeSet<String> = POSE_FIELDS
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect();
+
+    let bullet = phrase(
+        &flowed(&doc),
+        "A pose selection travels as coordinate arrays (",
+        ")",
+    );
+    assert_same_set(
+        &backticked(&bullet),
+        &actual,
+        "pose bullet in \"What does not travel\"",
+        "`POSE_FIELDS`",
+    );
+
+    let row = pinned_rows(&doc, "advanced-shared")
+        .into_iter()
+        .find(|row| code(&row[0]) == "poses")
+        .expect("the `advanced-shared` table has a `poses` row");
+    let described = phrase(&row[2], "reduced to the ", " coordinate arrays");
+    assert_same_set(
+        &backticked(&described),
+        &actual,
+        "`poses` row of the `advanced-shared` table",
+        "`POSE_FIELDS`",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two registries a contributor has to fill in correctly
+// ---------------------------------------------------------------------------
+
+/// Every `const fn … -> AdvancedKeyRule` constructor in the module, by name.
+///
+/// Parsed rather than listed, so a sixth helper nobody documented fails. The return type is what
+/// identifies one: `workflow_share.rs` has other `const fn`s in principle, and a helper that does
+/// not build a rule is not a helper this section is about.
+fn rule_constructors(source: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for chunk in source.split("const fn ").skip(1) {
+        let Some(open) = chunk.find('(') else {
+            continue;
+        };
+        let name = chunk[..open].trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let Some(body) = chunk.find('{') else {
+            continue;
+        };
+        if chunk[..body].contains("-> AdvancedKeyRule") {
+            out.insert(name.to_owned());
+        }
+    }
+    out
+}
+
+/// The contributor section tells someone which constructor to reach for. While it named only
+/// `allow` and `deny`, following it literally for a key on any non-studio builder produced a rule
+/// tagged `StudioBuilder` and failed three lints with no hint in the document that a tag existed.
+#[test]
+fn the_doc_lists_exactly_the_rule_helpers() {
+    let documented: BTreeSet<String> = pinned_column(&doc(), "rule-helpers", 0)
+        .into_iter()
+        .map(|cell| {
+            cell.split('(')
+                .next()
+                .expect("split yields at least one part")
+                .trim()
+                .to_owned()
+        })
+        .collect();
+    assert_same_set(
+        &documented,
+        &rule_constructors(&read_repo_file(SHARE_SOURCE_PATH)),
+        "rule-helpers",
+        "the rule constructors in `workflow_share.rs`",
+    );
+}
+
+/// The field names of a `struct` declared as `declaration`, up to the line that closes it.
+fn struct_fields(source: &str, declaration: &str) -> BTreeSet<String> {
+    let start = source
+        .find(declaration)
+        .unwrap_or_else(|| panic!("{SHARE_SOURCE_PATH} no longer declares `{declaration}`"))
+        + declaration.len();
+    let mut out = BTreeSet::new();
+    for line in source[start..].lines() {
+        let line = line.trim();
+        if line == "}" {
+            return out;
+        }
+        if line.starts_with("//") || line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let line = line.strip_prefix("pub ").unwrap_or(line);
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let name = line[..colon].trim();
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            out.insert(name.to_owned());
+        }
+    }
+    panic!("{SHARE_SOURCE_PATH}: `{declaration}` is never closed by a line holding only `}}`")
+}
+
+/// A registry entry a contributor is told to add has eight fields, and getting `anchors` or
+/// `minimum_keys` wrong is how a lint reads zero keys and passes. The document listed none of
+/// them, so this pins the list it now gives against the struct itself.
+#[test]
+fn the_doc_lists_exactly_the_builder_registry_fields() {
+    assert_same_set(
+        &pinned_set(&doc(), "builder-fields", 0),
+        &struct_fields(
+            &read_repo_file(SHARE_SOURCE_PATH),
+            "pub struct AdvancedBuilder {",
+        ),
+        "builder-fields",
+        "the fields of `AdvancedBuilder`",
+    );
 }
