@@ -57,6 +57,19 @@ test("comment-only manifest edits produce no calibration cost-model change", asy
   );
 });
 
+test("control coverage follows CONTROL_LANE_MODELS, not backend measurement blocks", async () => {
+  const model = await buildCostModel();
+  assert.ok(model.controlCoverage.declaredControlModels.includes("krea_2_turbo"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("krea_2_turbo|mlx"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("kolors|candle"));
+  assert.ok(model.controlCoverage.emittedControlPairs.includes("z_image|candle"));
+  assert.match(model.controlCoverage.citation, /CONTROL_LANE_MODELS/);
+  assert.doesNotMatch(
+    JSON.stringify(model.controlCoverage),
+    /model\[backend\]\.control|knownOmission|manifestDeclarations/,
+  );
+});
+
 /**
  * A small synthetic matrix with the shape that matters:
  *

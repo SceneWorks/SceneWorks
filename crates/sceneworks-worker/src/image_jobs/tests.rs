@@ -13672,9 +13672,12 @@ fn sc_8253_8278_identity_angle_ab() {
 ///
 /// `WIRED_CANDLE_POSE_FAMILIES` is the right Rust anchor because `base.rs` already documents
 /// `WIRED_MLX_POSE_FAMILIES` as "the MLX twin … and the SAME id set", so one list covers both backends.
+/// The second assertion closes the one-level-up blind spot from sc-16095: declaration alone is not
+/// enough if the generated model omits the Candle backend entirely, because then the per-backend loop
+/// still emits no Candle control cells.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn wired_candle_control_lanes_are_declared_to_the_evidence_matrix() {
+fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() {
     let generator = include_str!("../../../../scripts/generate-memory-matrix.mjs");
     let declared_block = generator
         .split_once("export const CONTROL_LANE_MODELS = [")
@@ -13699,13 +13702,34 @@ fn wired_candle_control_lanes_are_declared_to_the_evidence_matrix() {
         "the candle control lanes the worker wires and the model ids the memory matrix declares a control \
          lane for must be the same set. Undeclared to the matrix: {:?}; declared but not wired: {:?}. A \
          shipping control lane missing from CONTROL_LANE_MODELS generates NO cells, so it reads as a \
-         feature that does not exist rather than one that is unmeasured (sc-16069). What this does NOT \
-         enforce: whether the matrix actually EMITS candle cells for a declared id — that also needs the \
-         entry to advertise a `candle` backend, which `kolors` and `z_image` do not, so their shipping \
-         candle control lanes still produce zero candle cells (same class of invisibility one level up, \
-         tracked on sc-16095).",
+         feature that does not exist rather than one that is unmeasured (sc-16069).",
         wired.difference(&declared).collect::<Vec<_>>(),
         declared.difference(&wired).collect::<Vec<_>>(),
+    );
+
+    let matrix: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../docs/generated/memory-matrix.json"
+    ))
+    .expect("generated memory matrix must be valid JSON");
+    let candle_backends: std::collections::BTreeSet<&str> = matrix["models"]
+        .as_array()
+        .expect("memory matrix models must be an array")
+        .iter()
+        .filter(|model| {
+            model["backends"]
+                .as_array()
+                .is_some_and(|backends| backends.iter().any(|backend| backend == "candle"))
+        })
+        .filter_map(|model| model["id"].as_str())
+        .collect();
+    let omitted: Vec<_> = wired.difference(&candle_backends).copied().collect();
+    assert!(
+        omitted.is_empty(),
+        "wired Candle pose families omitted from the generated matrix's Candle backends: {omitted:?}. \
+         A shipping lane whose manifest entry has no `candle` block produces no Candle cells at all, \
+         including no control cells, so absent evidence is again misreported as an absent feature \
+         (sc-16095). Add measured Candle manifest evidence and a backend-scoped owner; never fabricate \
+         an empty backend block."
     );
 }
 

@@ -1409,11 +1409,20 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     .map((record) => `${record.target.modelId}|${record.backend}`);
   const producible = producibility(cells, { adapterPairs, pairsWithCompleteRecords });
 
-  // Control-overlay undercount. `overlaysFor` in the matrix generator emits `control` only when
-  // `model[backend].control` exists, and the manifest declares it exactly once — so a shipping MLX
-  // control lane produces zero cells. This is a manifest omission, and it moves the denominator.
+  // Control-overlay coverage is capability-declared, not inferred from measurement blocks
+  // (sc-16069). `CONTROL_LANE_MODELS` is the generator's declaration source; every declared model
+  // gets control cells for each backend that actually exists in the generated matrix.
   const controlCells = cells.filter((cell) => cell.overlay === "control");
   const controlPairs = [...new Set(controlCells.map((cell) => `${cell.modelId}|${cell.backend}`))].sort();
+  const declaredControlBlock = bodies.matrixGenerator
+    .split("export const CONTROL_LANE_MODELS = [")[1]
+    ?.split("];")[0];
+  if (declaredControlBlock === undefined) {
+    throw new Error("matrix generator must expose CONTROL_LANE_MODELS");
+  }
+  const declaredControlModels = [...declaredControlBlock.matchAll(/"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
   const cellsPerPairIfControlDeclared = Object.fromEntries(
     [...new Set(cells.map((cell) => `${cell.modelId}|${cell.backend}`))].sort().map((pair) => {
       const inPair = cells.filter((cell) => `${cell.modelId}|${cell.backend}` === pair);
@@ -1422,27 +1431,18 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
       return [pair, tiers * modes * (runs.rungCollapseFactor ?? RUNG_ORDER.length)];
     }),
   );
-  const controlUndercount = {
-    declaredControlPairs: controlPairs,
+  const controlCoverage = {
+    declaredControlModels,
+    emittedControlPairs: controlPairs,
     controlCells: controlCells.length,
-    manifestDeclarations: (bodies.manifest.match(/"control":\s*\{/g) ?? []).length,
     citation:
-      'scripts/generate-memory-matrix.mjs#overlaysFor pushes "control" only when ' +
-      "`model[backend].control` is present",
-    knownOmission: {
-      pair: "krea_2_turbo|mlx",
-      cellsItWouldAdd: cellsPerPairIfControlDeclared["krea_2_turbo|mlx"] ?? null,
-      why:
-        "SceneWorks ships BOTH control lanes — `crates/sceneworks-worker/src/image_jobs/" +
-        "krea_control.rs` is documented in its own header as the MLX twin of " +
-        "`generate_candle_krea_control_stream` in `krea_control_candle.rs` — but the manifest " +
-        "declares `control` only in the candle block, so the MLX control cells do not exist in the " +
-        "matrix at all. That is a manifest omission, not design intent.",
-    },
+      'scripts/generate-memory-matrix.mjs#overlaysFor emits "control" when ' +
+      "`CONTROL_LANE_MODELS.includes(model.id)`",
     perPairCellCost: cellsPerPairIfControlDeclared,
     sensitivityNote:
-      "Each additional (entry, backend) pair that declares `control` adds tiers x modes x rungs " +
-      "cells, so the control count here is a FLOOR on demand rather than a measurement of it.",
+      "Adding a model to CONTROL_LANE_MODELS adds tiers x modes x rungs cells for every backend " +
+      "already in that model's matrix scope; measurement blocks affect evidence state, not whether " +
+      "the capability axis exists.",
   };
 
   // The published sweep domain, derived from the shipped plan rather than asserted.
@@ -1480,7 +1480,7 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     },
     completedBaseline,
     producibility: producible,
-    controlUndercount,
+    controlCoverage,
     cells: census,
     overlayLoadContract: OVERLAY_LOAD_CONTRACT,
     collapsing: {
@@ -1531,7 +1531,7 @@ function markdownTable(header, rows) {
 }
 
 function renderMarkdown(model) {
-  const { cells, runs, fitVersusExhaustive: fit, producibility: prod, controlUndercount } = model;
+  const { cells, runs, fitVersusExhaustive: fit, producibility: prod, controlCoverage } = model;
   const lines = [
     "# Calibration cost model",
     "",
@@ -1642,9 +1642,9 @@ function renderMarkdown(model) {
       Object.entries(cells.byOverlay).map(([overlay, count]) => [`\`${overlay}\``, String(count)]),
     ),
     "",
-    `The overlay axis is **${cells.total - (cells.byOverlay.none ?? 0)}** cells — ${round(((cells.total - (cells.byOverlay.none ?? 0)) / cells.total) * 100, 1)}% of the matrix — and it is not uniformly real. \`lora\` and \`identity\` are genuine dimensions; \`control\` is nominal at ${controlUndercount.controlCells} cells on ${controlUndercount.declaredControlPairs.length} (entry, backend) pair(s).`,
+    `The overlay axis is **${cells.total - (cells.byOverlay.none ?? 0)}** cells — ${round(((cells.total - (cells.byOverlay.none ?? 0)) / cells.total) * 100, 1)}% of the matrix — and it is not uniformly real. \`lora\` and \`identity\` are genuine dimensions; \`control\` is a declared capability axis with ${controlCoverage.controlCells} cells on ${controlCoverage.emittedControlPairs.length} (entry, backend) pair(s).`,
     "",
-    `**The control count is a floor, not demand.** ${controlUndercount.citation}, and the manifest declares it ${controlUndercount.manifestDeclarations} time(s). ${controlUndercount.knownOmission.why} Fixing that one omission adds **${controlUndercount.knownOmission.cellsItWouldAdd}** cells, doubling the control population. ${controlUndercount.sensitivityNote}`,
+    `**Control coverage is declared, not inferred from measurements.** ${controlCoverage.citation}. The declaration currently names ${controlCoverage.declaredControlModels.length} model(s), producing the ${controlCoverage.emittedControlPairs.length} backend pair(s) above. ${controlCoverage.sensitivityNote}`,
     "",
     "## 2. The collapsing rule (derived)",
     "",

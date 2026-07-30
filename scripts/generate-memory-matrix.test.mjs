@@ -170,10 +170,9 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   assert.equal(familyStory("pulid_flux_dev", "candle"), 15839);
 
   // An mlx-only entry has no candle key, so a candle lookup FAILS rather than silently returning the
-  // MLX story. These five sit in families that DID get Candle twins but advertise mlx only, which is
+  // MLX story. These four sit in families that DID get Candle twins but advertise mlx only, which is
   // exactly where a fallback would have looked plausible.
   for (const mlxOnly of [
-    "z_image",
     "lens",
     "boogu_image_edit",
     "flux2_klein_9b_kv",
@@ -190,19 +189,19 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   assert.throws(() => familyStory("chroma1_hd", "candle"), /owns no candle story/);
   assert.throws(() => modelStory("not_a_model", "mlx"), /no owning model story/);
 
-  // The applied split: 33 dual models, 14 dual families, 20 and 6 respectively left unsplit.
+  // The applied split: 35 dual models, 15 dual families, 18 and 5 respectively left unsplit.
   const candleModels = Object.values(MODEL_STORIES).filter((stories) => stories.candle);
   const candleFamilies = Object.values(FAMILY_STORIES).filter((stories) => stories.candle);
-  assert.equal(candleModels.length, 33);
-  assert.equal(Object.keys(MODEL_STORIES).length - candleModels.length, 20);
-  assert.equal(candleFamilies.length, 14);
-  assert.equal(Object.keys(FAMILY_STORIES).length - candleFamilies.length, 6);
+  assert.equal(candleModels.length, 35);
+  assert.equal(Object.keys(MODEL_STORIES).length - candleModels.length, 18);
+  assert.equal(candleFamilies.length, 15);
+  assert.equal(Object.keys(FAMILY_STORIES).length - candleFamilies.length, 5);
 });
 
 test("the ownership tables scope every story to exactly one backend", () => {
-  // 53 MLX + 33 Candle model stories, 20 MLX + 14 Candle family stories, all distinct.
+  // 53 MLX + 35 Candle model stories, 20 MLX + 15 Candle family stories, all distinct.
   const scope = buildStoryBackendScope();
-  assert.equal(scope.size, 120);
+  assert.equal(scope.size, 123);
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
     backend: "candle",
@@ -368,20 +367,20 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
     id,
     backends: stories.candle ? ["mlx", "candle"] : ["mlx"],
   }));
-  assert.deepEqual(assertTwinCoverage(models), { dualModels: 33, dualFamilies: 14 });
+  assert.deepEqual(assertTwinCoverage(models), { dualModels: 35, dualFamilies: 15 });
 
   // A newly dual model with no Candle twin must stop generation, not quietly reuse the MLX story.
   assert.throws(
     () =>
       assertTwinCoverage(
-        models.map((model) => (model.id === "z_image" ? { ...model, backends: ["mlx", "candle"] } : model)),
+        models.map((model) => (model.id === "lens" ? { ...model, backends: ["mlx", "candle"] } : model)),
       ),
-    /z_image: advertises candle but has no Candle twin/,
+    /lens: advertises candle but has no Candle twin/,
   );
   // And an empty Candle twin on an mlx-only entry is equally a defect: it could never be closed.
   assert.throws(
-    () => assertTwinCoverage(models, { ...MODEL_STORIES, z_image: { mlx: 15457, candle: 99999 } }),
-    /z_image: advertises mlx only but carries Candle twin SC-99999/,
+    () => assertTwinCoverage(models, { ...MODEL_STORIES, lens: { mlx: 15462, candle: 99999 } }),
+    /lens: advertises mlx only but carries Candle twin SC-99999/,
   );
   assert.throws(
     () => assertTwinCoverage(models, MODEL_STORIES, { ...FAMILY_STORIES, 15520: { mlx: 15520, candle: 99999 } }),
@@ -394,7 +393,7 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
   // Two dual models sharing one Candle twin would under-count the split silently.
   assert.throws(
     () => assertTwinCoverage(models, { ...MODEL_STORIES, boogu_image: { mlx: 15474, candle: 15910 } }),
-    /33 dual models map onto only 32 distinct Candle model twins/,
+    /35 dual models map onto only 34 distinct Candle model twins/,
   );
 });
 

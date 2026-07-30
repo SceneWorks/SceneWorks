@@ -1489,13 +1489,24 @@
       // residency is higher even at the same resolution. Q4 brings this within tighter Mac
       // budgets via advanced.mlxQuantize.
       "mlx": {
-        "minMemoryGb": 48,
+        "minMemoryGb": 20,
         // q4/ default tier (sc-8670); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
         "quantize": 4,
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
+      },
+      // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024²
+      // with the shipping base and strict-control providers. Base peaks were q4 17.821,
+      // q8 23.256, and bf16 31.981 GB; bf16 strict control raised the family high-water
+      // to 40.573 GB. The resident providers do not stage phases, so there is no honest
+      // sequentialPeakGb row. Packed q4/q8 strict-control loading is owned by sc-16170;
+      // those control cells remain unverified rather than borrowing the base measurements.
+      "candle": {
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 17.9, "q8": 23.3, "bf16": 40.6 },
+        "measured": true
       },
       "ui": {
         // img2img reference-guided t2i (epic 8588 A4.5, sc-10193): base Z-Image is NOT in the worker's
@@ -3933,7 +3944,7 @@
         // GB runtime peak (E8-2, largely activation-bound), so minMemoryGb 64 with headroom. The
         // `base-bf16/` subfolder is the full-precision opt-in; its selection path is wired with worker
         // routing (sc-6399).
-        "minMemoryGb": 64,
+        "minMemoryGb": 29,
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
@@ -6115,6 +6126,17 @@
         "minMemoryGb": 24,
         "quantize": 4,
         "repo": "SceneWorks/kolors-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024².
+      // Base peaks were q4 26.681, q8 30.372, and bf16 55.102 GB. The shipping bf16
+      // providers raised the family high-water to 63.658 GB for strict control and
+      // 61.343 GB for IP-Adapter. These resident providers do not stage phases, so no
+      // sequentialPeakGb row is declared. Packed q4/q8 conditioned loading is owned by
+      // sc-16171; its matrix cells remain unverified rather than borrowing base evidence.
+      "candle": {
+        "minMemoryGb": 64,
+        "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },
+        "measured": true
       },
       "ui": {
         "label": "Kolors",
