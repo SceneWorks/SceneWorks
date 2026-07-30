@@ -13650,3 +13650,402 @@ fn sc_8253_8278_identity_angle_ab() {
         out.display()
     );
 }
+
+/// The candle control lanes the worker wires must be the same set the evidence matrix believes ships
+/// (sc-16069).
+///
+/// ## The blind spot this closes
+///
+/// `scripts/generate-memory-matrix.mjs::overlaysFor()` used to emit the `control` overlay only when
+/// `model[backend].control` existed — but that key is a MEASUREMENT block, and `"control"` appears exactly
+/// once in the whole catalog (inside `krea_2_turbo`'s **candle** block). So a control lane that had never
+/// been measured produced **zero** matrix cells: the shipping MLX Krea control lane
+/// (`mlx-gen-krea::KREA_2_TURBO_CONTROL_ID`, routed by `image_jobs/krea_control.rs`) was invisible to the
+/// very matrix that exists to show what is unmeasured. Absent evidence read as absent feature.
+///
+/// The generator now keys the overlay off a DECLARED lane list (`CONTROL_LANE_MODELS`). A declaration in a
+/// different language from the router is only as good as the guard that ties them together, so this is that
+/// guard: add an `else if …_control_available` arm to `resolve_candle_image_route` and a
+/// `WIRED_CANDLE_POSE_FAMILIES` id without declaring it to the matrix, and this test goes red naming the
+/// missing id. The generator carries the reverse check itself (`assertDeclaredControlLanes` throws when a
+/// measurement block exists for an undeclared lane, i.e. orphaned evidence).
+///
+/// `WIRED_CANDLE_POSE_FAMILIES` is the right Rust anchor because `base.rs` already documents
+/// `WIRED_MLX_POSE_FAMILIES` as "the MLX twin … and the SAME id set", so one list covers both backends.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn wired_candle_control_lanes_are_declared_to_the_evidence_matrix() {
+    let generator = include_str!("../../../../scripts/generate-memory-matrix.mjs");
+    let declared_block = generator
+        .split_once("export const CONTROL_LANE_MODELS = [")
+        .expect(
+            "generate-memory-matrix.mjs must declare CONTROL_LANE_MODELS (sc-16069) — if it was \
+             renamed, update this guard rather than deleting it",
+        )
+        .1
+        .split_once("];")
+        .expect("CONTROL_LANE_MODELS must be a closed array literal")
+        .0;
+    let declared: std::collections::BTreeSet<&str> = declared_block
+        .split('"')
+        // A `"a", "b"` list alternates between separators and values, so the values are the odd indices.
+        .skip(1)
+        .step_by(2)
+        .collect();
+    let wired: std::collections::BTreeSet<&str> =
+        WIRED_CANDLE_POSE_FAMILIES.iter().copied().collect();
+    assert_eq!(
+        declared, wired,
+        "the candle control lanes the worker wires and the model ids the memory matrix declares a control \
+         lane for must be the same set. Undeclared to the matrix: {:?}; declared but not wired: {:?}. A \
+         shipping control lane missing from CONTROL_LANE_MODELS generates NO cells, so it reads as a \
+         feature that does not exist rather than one that is unmeasured (sc-16069). What this does NOT \
+         enforce: whether the matrix actually EMITS candle cells for a declared id — that also needs the \
+         entry to advertise a `candle` backend, which `kolors` and `z_image` do not, so their shipping \
+         candle control lanes still produce zero candle cells (same class of invisibility one level up, \
+         tracked on sc-16095).",
+        wired.difference(&declared).collect::<Vec<_>>(),
+        declared.difference(&wired).collect::<Vec<_>>(),
+    );
+}
+
+/// Every `CandleImageRoute` arm of `resolve_candle_image_route` that overlays a SECOND network on the
+/// base model must be admitted through a memory gate before it allocates — and a NEW conditioning arm
+/// cannot be added ungated (sc-16069, epic 15448).
+///
+/// ## The defect this pins
+///
+/// `resolve_candle_image_route`'s `else if` ladder claims every conditioning route BEFORE the generic
+/// `CandleTxt2Img` arm, deliberately: those lanes share candle txt2img model ids, so without the divert
+/// a pose job would be silently rendered as plain txt2img with the poses dropped. The unintended
+/// consequence was that the divert also routed them around BOTH admission checks — the
+/// `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy` — so eleven
+/// conditioning routes allocated with no pre-flight check at all and died on a reactive CUDA OOM.
+/// Nothing in the type system, the resolver, or CI required a handler to gate; the route was admitted
+/// the moment its `else if` compiled.
+///
+/// ## Why a SOURCE scan, and why it is mutation-proof
+///
+/// The gate keys on the ROUTE, but the property that makes one necessary — a second resident network —
+/// is a property of the PROVIDER, and nothing in the code connects the two. So this guard is the
+/// connection: the two lists below are the single source for that classification, and their union is
+/// checked against the routes the resolver can actually produce. Adding an arm to the ladder without
+/// classifying it fails here with a message naming the route; classifying it as conditioning without
+/// gating its handler fails here too; and deleting a gate call from any gated handler — or the ONE call
+/// site in the shared strict-control driver — fails here as well. A test that still passed with the
+/// gates deleted would be a false green, which is the failure mode this whole guard exists to prevent.
+///
+/// This is the same shape as `WIRED_CANDLE_POSE_FAMILIES` (sc-11171, F-008), which exists because this
+/// exact ladder had already drifted once. Deliberately NOT cfg-gated to the candle build: it is a pure
+/// text scan, so it runs in the Linux parity and macOS suites too, not only `windows-candle`.
+#[test]
+fn every_candle_conditioning_route_is_admitted_through_a_gate() {
+    // A candle route that overlays a second network on the base model, the handler module that owns it,
+    // and the marker proving that handler participates in admission.
+    //
+    // Two marker shapes, because there are two gate seams:
+    //  * `admit_conditioning_paths(` — the lane calls the shared gate itself (the ip-adapter / identity
+    //    lanes, and Krea pose-control, which must gate in its own preamble ahead of its
+    //    `note_loaded_peak`).
+    //  * `fn conditioning_admission(` — the lane declares how it is admitted through the REQUIRED
+    //    `CandleStrictControl` trait method, and the ONE `run_candle_strict_control` call site acts on it
+    //    (the five in-house strict-control lanes). That call site is asserted separately below, so a
+    //    per-handler marker alone cannot carry the test.
+    //
+    // `conditioning_admission` has two arms, and the second (`GatedInPreamble`) tells the shared driver to
+    // stand down — legitimate only for a lane that gates itself earlier, and the obvious place a future
+    // lane could hide. It is therefore bounded below: exactly ONE handler may use it, that handler must
+    // ALSO carry a live `admit_conditioning_paths(` call, and it must name a gate module it really runs.
+    const CONDITIONING: &[(&str, &str, &str, &str)] = &[
+        (
+            "InstantId",
+            "instantid.rs",
+            include_str!("instantid.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "ZimageIdentity",
+            "zimage_identity_candle.rs",
+            include_str!("zimage_identity_candle.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "SdxlIpAdapter",
+            "sdxl_ipadapter.rs",
+            include_str!("sdxl_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "KolorsIpAdapter",
+            "kolors_ipadapter.rs",
+            include_str!("kolors_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "FluxIpAdapter",
+            "flux_ipadapter.rs",
+            include_str!("flux_ipadapter.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "Pulid",
+            "pulid_candle.rs",
+            include_str!("pulid_candle.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "QwenControl",
+            "qwen_control.rs",
+            include_str!("qwen_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "KolorsControl",
+            "kolors_control.rs",
+            include_str!("kolors_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "ZimageControl",
+            "zimage_control.rs",
+            include_str!("zimage_control.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "Flux2Control",
+            "flux2_control_candle.rs",
+            include_str!("flux2_control_candle.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            "Flux1Control",
+            "flux1_control_candle.rs",
+            include_str!("flux1_control_candle.rs"),
+            "fn conditioning_admission(",
+        ),
+        (
+            // Gates in its OWN preamble (it must precede its `note_loaded_peak`), so the marker is the
+            // direct call, not the trait declaration — see `ConditioningAdmission::GatedInPreamble`.
+            "KreaControl",
+            "krea_control_candle.rs",
+            include_str!("krea_control_candle.rs"),
+            "admit_conditioning_paths(",
+        ),
+    ];
+
+    // Routes that overlay NO second network, so the conditioning gate does not apply to them. Each is
+    // listed to make the classification explicit rather than implied by absence.
+    //
+    // **This list asserts only that a route is not a CONDITIONING route — never that it is gated.** The
+    // edit / imported / ComfyUI lanes load a single base model, so the right admission check for them is
+    // the measured per-tier `vram_gate::predicted_peak_gb` + `load_plan` path that `qwen_edit_candle`
+    // runs — and most of them do not run it yet. That is a real but SEPARATE defect (a base-model peak
+    // gate needs per-lane sequential-capability and per-tier measured rows, not this overlay floor); it
+    // is tracked on its own story and is deliberately outside sc-16069, whose scope is the conditioning
+    // table. Do not read a row here as "admitted".
+    const NOT_CONDITIONING: &[&str] = &[
+        // Edit lanes: one base model, reference/source conditioning, no second network.
+        "SdxlEdit",
+        "Flux2Edit",
+        "QwenEdit",
+        "ZimageEdit",
+        "MageEdit",
+        "KreaEdit",
+        // Krea sampling-regime lanes: the same base, a different schedule / phase list.
+        "KreaTurboOnRaw",
+        "KreaMultiPhase",
+        // Imported / in-place external bases: a single user-supplied checkpoint.
+        "KreaImported",
+        "SdxlImported",
+        "ZimageComfyui",
+        "QwenImageComfyui",
+        "Flux2Comfyui",
+        // Bernini still-image companion: a plain base load.
+        "Bernini",
+        // The two reject arms error before any generation, so they never allocate.
+        "PoseReject",
+        "PoseControlBaseMissing",
+        // The generic arm — the one route that DOES reach the shared `generate_candle_stream` gate.
+        "CandleTxt2Img",
+    ];
+
+    // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`
+    // is the production form, so prose mentioning a variant cannot inflate this set.
+    let base = include_str!("base.rs");
+    let resolver = base
+        .split_once("fn resolve_candle_image_route(")
+        .expect("resolve_candle_image_route must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("resolve_candle_image_route must end at a top-level brace")
+        .0;
+    let produced: std::collections::BTreeSet<&str> = resolver
+        .split("Some(CandleImageRoute::")
+        .skip(1)
+        .map(|tail| {
+            let end = tail
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .expect("a variant name is always followed by a delimiter");
+            &tail[..end]
+        })
+        .collect();
+    assert!(
+        produced.len() > 20,
+        "the resolver scan found only {} routes — the source markers have drifted and this guard is no \
+         longer reading the ladder: {produced:?}",
+        produced.len()
+    );
+
+    // 1. The classification is COMPLETE. A new `else if` arm lands in neither list and fails here.
+    let classified: std::collections::BTreeSet<&str> = CONDITIONING
+        .iter()
+        .map(|(route, ..)| *route)
+        .chain(NOT_CONDITIONING.iter().copied())
+        .collect();
+    let unclassified: Vec<&&str> = produced.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "resolve_candle_image_route produces {unclassified:?}, which sc-16069's guard has not \
+         classified. Decide whether the route overlays a SECOND network on the base model: if it does, \
+         add it to CONDITIONING and gate its handler through `admit_conditioning_paths` (or, for a \
+         strict-control lane, `CandleStrictControl::conditioning_admission`); if it does not, add it to \
+         NOT_CONDITIONING. A conditioning route that reaches allocation ungated dies on a reactive \
+         CUDA OOM."
+    );
+
+    // 2. No STALE rows: a classified route the resolver can no longer produce means the guard is
+    //    quietly watching a lane that no longer exists.
+    let stale: Vec<&&str> = classified.difference(&produced).collect();
+    assert!(
+        stale.is_empty(),
+        "{stale:?} are classified by sc-16069's guard but no longer produced by \
+         resolve_candle_image_route — drop the stale rows"
+    );
+
+    // 3. Every conditioning handler participates in admission — on a line of real CODE.
+    //
+    //    The marker must appear on a line whose trimmed start is NOT `//`, or commenting the gate out
+    //    would keep the marker text present and pass. That is not hypothetical: a reviewer mutation
+    //    prefixed `//` to the `admit_conditioning_paths(` call in `sdxl_ipadapter.rs` and the earlier
+    //    version of this test stayed green, because it was a bare `source.contains`. Deleting the call was
+    //    caught; disabling it was not. Doc comments are the common case here — every handler's
+    //    `conditioning_admission` carries a `///` block that names the method.
+    for (route, file, source, marker) in CONDITIONING {
+        let on_code_line = source
+            .lines()
+            .any(|line| line.contains(marker) && !line.trim_start().starts_with("//"));
+        assert!(
+            on_code_line,
+            "candle conditioning route {route} ({file}) has no `{marker}` on a line of live code — it \
+             would allocate with no pre-flight memory check and die on a reactive CUDA OOM (sc-16069). A \
+             commented-out gate is an ungated route."
+        );
+    }
+
+    // 4. The ONE shared strict-control call site still gates. Without this, deleting the single
+    //    `admit_conditioning_overlay` call in `run_candle_strict_control` would leave all six
+    //    `fn conditioning_admission` markers intact and every assertion above would still pass — the
+    //    exact false green this guard exists to prevent.
+    let driver = include_str!("candle_strict_control.rs");
+    assert_eq!(
+        driver.matches("admit_conditioning_overlay(").count(),
+        1,
+        "run_candle_strict_control must gate every strict-control lane exactly once through \
+         `admit_conditioning_overlay` — the `conditioning_admission` declarations are inert \
+         without it (sc-16069)"
+    );
+    let preamble = driver
+        // No trailing `(` — the driver is generic (`<P: CandleStrictControl>`), so the paren does not
+        // follow the name.
+        .split_once("pub(super) async fn run_candle_strict_control")
+        .expect("the shared strict-control driver")
+        .1;
+    assert!(
+        preamble
+            .find("admit_conditioning_overlay(")
+            .expect("the gate call is inside the driver")
+            < preamble
+                .find("start_gen_stream(")
+                .expect("the driver starts a generation stream"),
+        "the conditioning gate must run BEFORE the load stream starts, or it is not a PRE-flight check \
+         (sc-16069)"
+    );
+    // The trait method carries no default, so a new strict-control lane cannot compile without
+    // declaring how it is admitted. Pin that: a `{` after the signature would be a default body, which is
+    // exactly how a new lane would inherit the defect silently.
+    let trait_decl = driver
+        .split_once("fn conditioning_admission(&self) -> ConditioningAdmission")
+        .expect("the trait declares conditioning_admission")
+        .1;
+    assert!(
+        trait_decl.trim_start().starts_with(';'),
+        "CandleStrictControl::conditioning_admission must stay REQUIRED (no default body), so a new \
+         strict-control lane cannot be added ungated (sc-16069)"
+    );
+
+    // 4b. The `GatedInPreamble` arm tells the shared driver to stand down, so it is the obvious place a
+    //     future lane could hide an ungated route. Bound it three ways: exactly ONE conditioning handler
+    //     may use it, that handler must ALSO carry a live gate call of its own (asserted in step 3 via its
+    //     `admit_conditioning_paths(` marker), and it must name a gate module it really runs. Krea
+    //     pose-control is that lane — it gates in its preamble because its check must precede its own
+    //     `note_loaded_peak` (see `ConditioningAdmission::GatedInPreamble`). A SECOND lane claiming it is
+    //     either a second ordering constraint that deserves review, or the hatch being abused.
+    let opting_out: Vec<&str> = CONDITIONING
+        .iter()
+        .filter(|(_, _, source, _)| source.contains("ConditioningAdmission::GatedInPreamble"))
+        .map(|(route, ..)| *route)
+        .collect();
+    assert_eq!(
+        opting_out,
+        vec!["KreaControl"],
+        "exactly one conditioning lane may declare GatedInPreamble (Krea pose-control, whose check must \
+         precede its own note_loaded_peak). Anything else here tells the shared driver to stand down \
+         without review (sc-16069)"
+    );
+    let krea_source = CONDITIONING
+        .iter()
+        .find(|(route, ..)| *route == "KreaControl")
+        .expect("KreaControl row")
+        .2;
+    assert!(
+        krea_source.contains("gate: \"krea_control_fit\""),
+        "the opting-out lane must NAME its gate, and it must be the module that really decides — \
+         `krea_control_fit` (sc-16069)"
+    );
+    // And that named gate must actually run in that lane, not merely be cited.
+    assert!(
+        krea_source.contains("krea_control_fit::fit_ladder_for_entry("),
+        "krea_control_candle.rs must actually walk `krea_control_fit`'s ladder — naming a gate it does \
+         not call would be an admission claim with nothing behind it (sc-16069)"
+    );
+
+    // 5. Each direct-gate lane gates BEFORE it hands off to the load — a gate placed after the allocation
+    //    begins is not a pre-flight check. Most lanes hand off via `start_gen_stream`; Krea pose-control
+    //    hands off via `run_candle_strict_control`, so accept whichever the lane uses and require at least
+    //    one of them (a lane with neither is not driving a load at all and the row is stale).
+    for (route, file, source, marker) in CONDITIONING {
+        if *marker != "admit_conditioning_paths(" {
+            continue;
+        }
+        let gate = source
+            .lines()
+            .position(|line| line.contains(marker) && !line.trim_start().starts_with("//"))
+            .expect("a live gate call, asserted in step 3");
+        let handoff = ["start_gen_stream(", "run_candle_strict_control("]
+            .iter()
+            .filter_map(|needle| {
+                source
+                    .lines()
+                    .position(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+            })
+            .min()
+            .unwrap_or_else(|| {
+                panic!("{file} must hand off to start_gen_stream or run_candle_strict_control")
+            });
+        assert!(
+            gate < handoff,
+            "candle conditioning route {route} ({file}) gates AFTER it hands off to the load — the check \
+             must be PRE-flight (sc-16069)"
+        );
+    }
+}

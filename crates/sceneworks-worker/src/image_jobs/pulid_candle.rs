@@ -1,13 +1,13 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    consume_gen_events, curated_image_menu, drive_gen_items_scored, load_reference_image,
-    non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
+    admit_conditioning_paths, consume_gen_events, curated_image_menu, drive_gen_items_scored,
+    load_reference_image, non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
     read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
     resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream, ApiClient, Image,
     ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths,
     PulidFluxRequest, Settings, Value, WorkerError, WorkerResult,
 };
+use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, DownloadContext};
 use serde_json::json;
 
@@ -385,6 +385,25 @@ pub(super) async fn generate_candle_pulid_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+
+    // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1-dev base held co-resident
+    // with PuLID's whole identity stack: the ID adapter, the EVA-CLIP vision tower, the BiSeNet face
+    // parser, and an opted-in PiD decoder pair. This lane loads through the UNcached `start_gen_stream`
+    // with a bespoke `PulidFluxPaths`, so it reaches neither the `generate_candle_stream` `vram_gate` nor
+    // the `generator_cache` `apply_residency_policy`; before this it allocated unchecked. Gated here,
+    // before the paths are moved into the load closure.
+    {
+        let mut overlays = vec![adapter.as_path(), eva.as_path(), face_dir.as_path()];
+        overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
+        admit_conditioning_paths(
+            settings,
+            "PuLID-FLUX",
+            "face-identity encoder stack",
+            &flux_base,
+            &overlays,
+        )
+        .await?;
+    }
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

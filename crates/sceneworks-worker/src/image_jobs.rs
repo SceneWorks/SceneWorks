@@ -2240,6 +2240,16 @@ use kolors_ipadapter::{generate_candle_kolors_ipadapter_stream, kolors_ipadapter
 mod flux_ipadapter;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use flux_ipadapter::{flux_ipadapter_available, generate_candle_flux_ipadapter_stream};
+// Shared candle conditioning-overlay admission seam (sc-16069, epic 15448): the ONE gate every candle
+// route that overlays a second network on the base (ControlNet / IP-Adapter / identity encoder) calls
+// before it allocates. Those routes are diverted by `resolve_candle_image_route` around BOTH the
+// `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy`, so eleven of
+// them had no pre-flight check at all — no rejection, no warning, reactive CUDA OOM only. Must precede
+// `candle_strict_control` (whose trait references the footprint type) and the conditioning lanes.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioning_gate;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
 // reusing the SAME `STRICT_CONTROL_ENGINES` table + `preprocess_control_entry` (pose/canny/depth) as the

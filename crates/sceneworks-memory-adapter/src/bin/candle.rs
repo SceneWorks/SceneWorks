@@ -929,11 +929,42 @@ fn run(request: &Value) -> Result<Value, String> {
                 Some("loadability") => {
                     *scenario = json!({ "name": "loadability", "result": "passed" });
                 }
+                // sc-16069: the overlay verdict is DERIVED from the target, never hardcoded.
+                //
+                // This arm used to emit `not_applicable` with the fixed reason "ordinary Krea Turbo
+                // text-to-image calibration has no overlay" on every run. That describes this
+                // adapter's one code path, not the target it was handed — so a target that declared
+                // `overlay: "control"` would still have produced a `not_applicable` record, i.e. a
+                // considered-and-excused reading of a scenario nobody considered. `overlay` is one of
+                // only two scenarios the validator lets off `passed`, which makes it the one place
+                // where a stock excuse silently becomes coverage.
+                //
+                // A target this adapter CANNOT execute now fails loudly instead. Running an overlay
+                // render needs the control-branch load path (a second resident network beside the
+                // base) and a control-map fixture; this binary has neither, and `bin/mlx.rs` has no
+                // overlay handling at all. The recorded decision, and what would unblock it, live in
+                // `config/memory-calibration-plan.json` → `overlayCoverage` and in
+                // `docs/memory-strategy-contract.md`.
                 Some("overlay") => {
+                    let overlay = protocol::target_overlay(request)?;
+                    if overlay != "none" {
+                        return Err(format!(
+                            "calibration target declares overlay {overlay:?}, but this adapter can \
+                             only execute a plain text-to-image render: it has no control-branch \
+                             load path and no control-map fixture. Refusing rather than emitting a \
+                             not_applicable that would read as overlay coverage (sc-16069). See \
+                             config/memory-calibration-plan.json → overlayCoverage."
+                        ));
+                    }
                     *scenario = json!({
                         "name": "overlay",
                         "result": "not_applicable",
-                        "reason": "ordinary Krea Turbo text-to-image calibration has no overlay",
+                        "reason": "the calibration target declares overlay \"none\" — this run holds \
+                                   only the Krea 2 Turbo base, so there is no second resident network \
+                                   to measure. No adapter can execute an overlay target yet; the \
+                                   decision and what would unblock it are recorded in \
+                                   config/memory-calibration-plan.json (overlayCoverage) and \
+                                   docs/memory-strategy-contract.md (sc-16069).",
                     });
                 }
                 _ => {}

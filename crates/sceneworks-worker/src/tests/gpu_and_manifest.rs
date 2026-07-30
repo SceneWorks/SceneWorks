@@ -1247,7 +1247,7 @@ fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
 fn krea_control_candle_block_drives_the_fit_ladder() {
     use crate::krea_control_fit::{
         chunk_attn_save_gb, control_branch_tier_for_key, control_evidence_is_current,
-        decode_tile_save_gb, fit_ladder, predicted_control_peak_gb,
+        decode_tile_save_gb, fit_ladder, fit_ladder_for_entry, predicted_control_peak_gb,
         predicted_control_sequential_peak_gb, KreaControlFit,
     };
     use crate::vram_gate::apply_vram_cap;
@@ -1524,6 +1524,46 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             chunk_attention: true,
         }
     );
+
+    // sc-16069: the SHIPPED catalog's unpriced control tiers must produce an EXPLICIT verdict, not the
+    // silent big-card fast path. `vramGbByTier` ships four tiers (q4/q8/bf16/int8-convrot) and the control
+    // block prices three — and `nvfp4` is selectable on a Blackwell host without appearing in either. Any
+    // tier the base can resolve to that the control block does NOT price must come back `Unverified`,
+    // naming itself, on a roomy card AND a starved one (it never rejects on absent evidence).
+    //
+    // Asserted through `fit_ladder_for_entry` — the seam the lane calls — because that is the only place
+    // that can tell "no control block" (no signal) from "no row for THIS tier" (a coverage hole). Read via
+    // the hand-threaded `fit_ladder` above, both look like the same `None`, which is exactly how the hole
+    // stayed invisible.
+    let priced: Vec<&str> = ["q4", "q8", "bf16"]
+        .into_iter()
+        .filter(|tier| predicted_control_peak_gb(entry, tier).is_some())
+        .collect();
+    assert_eq!(
+        priced,
+        vec!["q4", "q8", "bf16"],
+        "the shipped control block must price exactly these three tiers"
+    );
+    for tier in ["int8-convrot", "nvfp4"] {
+        assert!(
+            predicted_control_peak_gb(entry, tier).is_none(),
+            "{tier} is expected unpriced by the shipped control block — if it gained a row, drop it from \
+             this list and pin its ladder instead"
+        );
+        for cap in [96.0, 8.0] {
+            assert_eq!(
+                fit_ladder_for_entry(entry, tier, apply_vram_cap(None, Some(cap))),
+                KreaControlFit::Unverified {
+                    offload_policy: OffloadPolicy::Sequential,
+                    tile_vae_decode: false,
+                    chunk_attention: false,
+                    tier_key: tier.to_owned(),
+                },
+                "{tier} @ {cap} GB: an unpriced tier must be an explicit, named, non-rejecting verdict — \
+                 not the silent zero-adaptation path it used to take (sc-16069)"
+            );
+        }
+    }
 }
 
 /// Live real-hardware validation (sc-11754): the REAL `nvidia-smi` VRAM reading on GPU 0 + the cap →

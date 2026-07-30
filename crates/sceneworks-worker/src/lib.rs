@@ -149,6 +149,14 @@ mod vram_gate;
 // aren't dead code under `-D warnings` on the non-candle / macOS builds.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod krea_control_fit;
+// Candle conditioning-overlay admission gate (sc-16069, epic 15448). Every candle route that overlays a
+// second network on the base — ControlNet / IP-Adapter / identity encoder — is diverted around BOTH the
+// `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy`, so before this
+// eleven of them allocated with no pre-flight check at all. Same candle cfg as `vram_gate` (its consumers,
+// the `image_jobs` conditioning lanes, are under that cfg) so its pub(crate) helpers aren't dead code
+// under `-D warnings` on the non-candle / macOS builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioning_fit;
 use supervisor::*;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;

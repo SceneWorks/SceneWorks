@@ -28,6 +28,16 @@
 //!     overflow. A *speed* cost (~+6%) with byte-identical output; the deepest rung this lane has.
 //!     Gated by the presence of the measured scalar `chunkAttnSaveGb`.
 //!
+//! ## An unpriced TIER is not "no signal" (sc-16069)
+//!
+//! A tier with no `bf16BranchPeakGbByTier` row used to collapse into [`KreaControlFit::Unknown`], which
+//! the lane maps to the big-card fast path with no log — so the gate neither staged, nor tiled, nor
+//! chunked, nor rejected, nor left a trace. [`fit_ladder_for_entry`] now separates the two cases: no
+//! `candle.control` block at all is still `Unknown`, while a block that carries no row for the resolved
+//! tier is [`KreaControlFit::Unverified`] — an explicit, named, logged decision that stages residency and
+//! still never rejects. SC-16069 named `int8-convrot`; the tier actually REACHABLE here is `nvfp4` (see
+//! that variant's note), which is why the fix keys on the missing row rather than on a tier name.
+//!
 //! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ that rung is skipped — the ladder walks
 //! the rungs it *can* measure and, if even (sequential residency + tiling + chunking) won't fit,
 //! rejects-before-OOM at the honest best-case peak **when the peaks rest on current evidence**. While
@@ -166,6 +176,45 @@ pub(crate) enum KreaControlFit {
         needed_gb: f64,
         available_gb: f64,
     },
+    /// The lane HAS a `candle.control` block, but it carries **no peak row for this base tier** — so the
+    /// render cannot be priced at all (sc-16069).
+    ///
+    /// This used to collapse into [`KreaControlFit::Unknown`], which the caller maps to the big-card fast
+    /// path with no log: the gate neither staged residency, nor tiled decode, nor chunked attention, nor
+    /// rejected, nor said anything. An unpriced tier on a lane that *is* otherwise measured is not "no
+    /// signal about the control lane" — it is a specific, nameable coverage hole, and silently taking the
+    /// zero-adaptation path on it is the most permissive choice available.
+    ///
+    /// **The reachable instance is `nvfp4`, not `int8-convrot`.** SC-16069 named `int8-convrot`, whose
+    /// `predicted_control_peak_gb` is indeed `None` — but `krea_control_gate_tier` passes
+    /// `convrot_resolved: false` and `tier_key_from_resolved_dir` only ever yields `bf16`/`q4`/`q8`, so
+    /// that string cannot currently reach this ladder. `nvfp4` can (`requested_tier_key` short-circuits to
+    /// it on an NVFP4 host pick) and has no `bf16Branch*` row either. Keying this on "block present, row
+    /// missing" rather than on a tier NAME covers both, and any future tier added to `vramGbByTier`
+    /// without a matching control row.
+    ///
+    /// The verdict engages **sequential residency only** — the cheapest adaptation, zero quality cost —
+    /// and never rejects, because there is no evidence to reject on. The hard check for this tier is the
+    /// shared [`crate::conditioning_fit`] weights floor, which
+    /// `generate_candle_krea_control_stream` runs in its preamble BEFORE this ladder (it must precede the
+    /// lane's own `note_loaded_peak`; see `ConditioningAdmission::GatedInPreamble`). So an unpriced tier is
+    /// not unguarded — it is guarded by the floor alone, with no measured peak on top.
+    ///
+    /// Staging is the SAME contract this ladder already applies when the Sequential row alone is missing:
+    /// stage anyway and let the runtime decide. The knobs coincide with `Fits { Sequential, false, false }`
+    /// on purpose; only the verdict and its log line differ, exactly as `BestEffort` does — and, like
+    /// `BestEffort`, it records no reclaimable peak ([`incurred_peak_gb`]). Note this DOES change behavior
+    /// for an unpriced tier that previously took the resident fast path: it now stages, a speed-only cost
+    /// (one text re-encode) accepted because an unpriced tier is exactly where a resident load is least
+    /// justified.
+    Unverified {
+        offload_policy: OffloadPolicy,
+        tile_vae_decode: bool,
+        chunk_attention: bool,
+        /// The base tier key that has no control-lane peak row — named in the log so the coverage hole
+        /// is identifiable rather than anonymous.
+        tier_key: String,
+    },
 }
 
 /// The [`Quant`] a control-lane tier KEY names — the `candle.control.*ByTier` / `vramGbByTier` key space
@@ -203,6 +252,22 @@ fn control_tier_gb(manifest_entry: &JsonObject, key: &str, tier_key: &str) -> Op
         .get(key)
         .and_then(|tiers| tiers.get(tier_key))
         .and_then(json_f64)
+}
+
+/// Does this entry declare a `candle.control` block at all?
+///
+/// The discriminator between the ladder's two no-price outcomes (sc-16069): **no block** means the model
+/// has no measured control lane, which is genuinely no signal ⇒ [`KreaControlFit::Unknown`]; **a block
+/// with no row for the resolved tier** means a measured lane with an unpriced tier ⇒
+/// [`KreaControlFit::Unverified`], an explicit decision rather than a silent no-op. Deliberately does NOT
+/// consult `measured` / `supersededBy` — a superseded block is still a block, and
+/// [`control_evidence_is_current`] is the separate question of whether its numbers may harden into a
+/// reject.
+pub(crate) fn control_block_present(manifest_entry: &JsonObject) -> bool {
+    manifest_entry
+        .get("candle")
+        .and_then(|candle| candle.get("control"))
+        .is_some()
 }
 
 /// Is `candle.control`'s evidence CURRENT — i.e. captured for the configuration that actually ships?
@@ -409,6 +474,47 @@ pub(crate) fn fit_ladder(
     }
 }
 
+/// Walk the ladder for one catalog entry at one resolved BASE tier — **the seam the lane calls**
+/// (sc-16069).
+///
+/// This exists so that the check no lane may forget cannot be written anywhere else: only the code that
+/// reads the manifest can tell "this model has no measured control lane" (⇒ [`KreaControlFit::Unknown`],
+/// genuinely no signal) apart from "this measured control lane has no row for the tier we resolved" (⇒
+/// [`KreaControlFit::Unverified`], a specific coverage hole). Before this, the lane hand-threaded six
+/// separate reads into [`fit_ladder`] and a missing row arrived as an indistinguishable `None`, so an
+/// unpriced tier silently took the zero-adaptation big-card path — no staging, no tiling, no chunking, no
+/// reject, no log. Pulling the reads in here also means a lane cannot accidentally pair one tier's peak
+/// with another tier's savings.
+///
+/// The `Unverified` test is deliberately budget-INDEPENDENT: the row is absent whatever the card reports,
+/// so the two-pass evict-reclaim gate can never turn it into anything else (and is told so, in
+/// `krea_control_candle`'s `reclaim_improves`).
+///
+/// Pure: the caller resolves the budget, so the whole decision is unit-testable with no CUDA and no GPU.
+pub(crate) fn fit_ladder_for_entry(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> KreaControlFit {
+    let peak = predicted_control_peak_gb(manifest_entry, tier_key);
+    if peak.is_none() && control_block_present(manifest_entry) {
+        return KreaControlFit::Unverified {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            tier_key: tier_key.to_owned(),
+        };
+    }
+    fit_ladder(
+        peak,
+        predicted_control_sequential_peak_gb(manifest_entry, tier_key),
+        budget,
+        decode_tile_save_gb(manifest_entry, tier_key),
+        chunk_attn_save_gb(manifest_entry),
+        control_evidence_is_current(manifest_entry),
+    )
+}
+
 /// The VRAM peak (GB) a Krea control render actually incurs under `fit`, for the reclaimable high-water
 /// ([`crate::vram_gate::note_loaded_peak`], sc-13960 — the control lane, unlike the txt2img/edit lanes,
 /// recorded NO peak before this, so a repeated control render could not reclaim the first render's
@@ -450,7 +556,8 @@ pub(crate) fn incurred_peak_gb(
     } = fit
     else {
         // Unknown / TooBig — no admitted load. BestEffort — admitted, but above the budget the ladder
-        // saw, so its peak is not a pool a later gate may credit.
+        // saw, so its peak is not a pool a later gate may credit. Unverified — admitted, but the tier has
+        // no priced row at all, so there is no number to credit (sc-16069).
         return None;
     };
     // The base peak the ladder admitted at: the resident whole-model peak, or the staged working set.
@@ -1047,6 +1154,140 @@ mod tests {
                 "incurred peak {p} must not exceed the admitting budget {}",
                 b.free_gb
             );
+        }
+    }
+
+    // ── sc-16069: an UNPRICED tier is an explicit decision, never a silent no-op. ───────────────────
+
+    /// The defect, stated as a test. A `candle.control` block with NO peak row for the resolved tier used
+    /// to arrive at [`fit_ladder`] as an indistinguishable `None` ⇒ [`KreaControlFit::Unknown`] ⇒ the
+    /// caller's big-card fast path, with no staging, no rungs, no reject and no log. It must now be
+    /// [`KreaControlFit::Unverified`], naming the tier.
+    ///
+    /// MUTATION PROOF: restoring the old collapse (dropping the `control_block_present` test from
+    /// [`fit_ladder_for_entry`], or calling [`fit_ladder`] directly from the lane) makes this `Unknown`
+    /// and the test goes red.
+    #[test]
+    fn an_unpriced_tier_on_a_measured_control_lane_is_unverified_not_unknown() {
+        let m = krea_manifest();
+        // `nvfp4` is the tier that can actually REACH this ladder unpriced (`requested_tier_key`
+        // short-circuits to it on an NVFP4 host pick); `int8-convrot` is the tier sc-16069 named. Neither
+        // has a `bf16Branch*` row, and both must produce the same explicit verdict.
+        for tier in ["nvfp4", "int8-convrot", "some-future-tier"] {
+            assert_eq!(
+                predicted_control_peak_gb(&m, tier),
+                None,
+                "{tier} is unpriced"
+            );
+            let fit = fit_ladder_for_entry(&m, tier, Some(budget(96.0)));
+            assert_eq!(
+                fit,
+                KreaControlFit::Unverified {
+                    offload_policy: OffloadPolicy::Sequential,
+                    tile_vae_decode: false,
+                    chunk_attention: false,
+                    tier_key: tier.to_owned(),
+                },
+                "{tier}: an unpriced tier on a measured control lane must be an explicit verdict"
+            );
+            assert_ne!(fit, KreaControlFit::Unknown, "{tier} must not be a no-op");
+        }
+    }
+
+    /// The verdict is budget-INDEPENDENT — the row is absent whatever the card reports. This is what lets
+    /// `krea_control_candle`'s `reclaim_improves` skip a pointless generator evict for it: a second pass
+    /// against a larger budget cannot produce anything different.
+    #[test]
+    fn unverified_does_not_move_with_the_budget() {
+        let m = krea_manifest();
+        let at = |free: Option<f64>| fit_ladder_for_entry(&m, "nvfp4", free.map(budget));
+        let baseline = at(Some(96.0));
+        for free in [Some(0.0), Some(8.0), Some(1024.0), None] {
+            assert_eq!(
+                at(free),
+                baseline,
+                "Unverified must not depend on the budget"
+            );
+        }
+    }
+
+    /// It must never REJECT. There is no evidence to reject on, and refusing a job that would run is the
+    /// failure this lane is least allowed to have — even on a 0 GB budget, where a priced tier would be
+    /// `TooBig`. (The shared `conditioning_fit` weights floor is what refuses a host that cannot hold the
+    /// weights at all; this ladder declining to guess is the honest half.)
+    #[test]
+    fn unverified_never_rejects_even_on_a_starved_card() {
+        let m = krea_manifest();
+        let starved = fit_ladder_for_entry(&m, "nvfp4", Some(budget(0.0)));
+        assert!(matches!(starved, KreaControlFit::Unverified { .. }));
+        // Contrast: the SAME starved card on a PRICED tier with current evidence does reject, so this is
+        // a property of the missing row, not of the budget being ignored everywhere.
+        assert!(matches!(
+            fit_ladder_for_entry(&krea_manifest_measured(), "q4", Some(budget(0.0))),
+            KreaControlFit::TooBig { .. }
+        ));
+    }
+
+    /// NO `candle.control` block at all is still genuinely no signal ⇒ [`KreaControlFit::Unknown`]. The
+    /// two cases must stay distinct: a model with no measured control lane is not the same as a measured
+    /// lane with an unpriced tier, and conflating them is what hid the hole.
+    #[test]
+    fn a_model_with_no_control_block_stays_unknown() {
+        let no_control = obj(json!({ "candle": { "vramGbByTier": { "q4": 26.4 } } }));
+        assert!(!control_block_present(&no_control));
+        assert_eq!(
+            fit_ladder_for_entry(&no_control, "q4", Some(budget(8.0))),
+            KreaControlFit::Unknown
+        );
+        assert!(!control_block_present(&obj(json!({}))));
+        assert_eq!(
+            fit_ladder_for_entry(&obj(json!({})), "q4", Some(budget(8.0))),
+            KreaControlFit::Unknown
+        );
+        // A SUPERSEDED block is still a block — `control_block_present` must not consult `measured`, or
+        // today's `krea_2_turbo` (measured: false) would fall back into the silent `Unknown` path.
+        assert!(control_block_present(&krea_manifest()));
+        assert!(!control_evidence_is_current(&krea_manifest()));
+    }
+
+    /// An `Unverified` admit records NO reclaimable peak: there is no priced number to credit, and
+    /// over-crediting the pool lets a later gate over-admit an OOM.
+    #[test]
+    fn unverified_records_no_reclaimable_peak() {
+        let m = current_evidence(krea_manifest());
+        let fit = fit_ladder_for_entry(&m, "nvfp4", Some(budget(96.0)));
+        assert_eq!(incurred_peak_gb(&fit, &m, "nvfp4"), None);
+    }
+
+    /// The priced path is UNCHANGED by the new seam: `fit_ladder_for_entry` must agree with the hand-read
+    /// `fit_ladder` on every tier that has a row. Pins that pulling the six reads into one place did not
+    /// silently move any existing decision.
+    #[test]
+    fn the_entry_seam_matches_the_hand_read_ladder_on_priced_tiers() {
+        for m in [
+            krea_manifest(),
+            krea_manifest_measured(),
+            krea_manifest_with_chunking(),
+            current_evidence(krea_manifest_with_chunking()),
+        ] {
+            for tier in ["q4", "q8", "bf16"] {
+                for free in [0.0, 20.0, 24.0, 30.0, 35.0, 47.0, 96.0] {
+                    let b = Some(budget(free));
+                    assert_eq!(
+                        fit_ladder_for_entry(&m, tier, b),
+                        // `super::` — the module's real 6-arg ladder, not this test module's 4-arg helper.
+                        super::fit_ladder(
+                            predicted_control_peak_gb(&m, tier),
+                            predicted_control_sequential_peak_gb(&m, tier),
+                            b,
+                            decode_tile_save_gb(&m, tier),
+                            chunk_attn_save_gb(&m),
+                            control_evidence_is_current(&m),
+                        ),
+                        "{tier} @ {free} GB free: the seam must not change a priced decision"
+                    );
+                }
+            }
         }
     }
 

@@ -9,6 +9,7 @@ use super::{
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
 };
+use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
 
 // Candle (Windows/CUDA) Z-Image Fun-ControlNet (strict pose) route (sc-5489, epic 5480) —
@@ -373,6 +374,23 @@ impl CandleStrictControl for ZImageStrictControl {
 
     fn out_height(&self) -> u32 {
         self.height
+    }
+
+    /// The Z-Image base snapshot + the Fun-ControlNet overlay, plus the PiD decoder pair when this
+    /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
+    fn conditioning_admission(&self) -> ConditioningAdmission {
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
+        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+            if self.is_base {
+                "Z-Image"
+            } else {
+                "Z-Image Turbo"
+            },
+            "strict-pose Fun-ControlNet branch",
+            &self.snapshot,
+            &overlays,
+        ))
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {

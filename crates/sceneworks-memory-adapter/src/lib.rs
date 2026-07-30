@@ -166,6 +166,24 @@ pub fn target_geometry(request: &Value) -> Result<(u32, u32), String> {
     Ok((dimension("width")?, dimension("height")?))
 }
 
+/// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
+/// `"control"`, `"identity"` (sc-16069).
+///
+/// An adapter MUST derive its `overlay` scenario verdict from this rather than hardcoding one. The
+/// candle adapter used to emit `not_applicable` with the fixed reason "ordinary Krea Turbo
+/// text-to-image calibration has no overlay" on every run, which is a statement about the adapter's
+/// one code path, not about the target it was handed — so a target that declared an overlay would
+/// still have produced a `not_applicable` record that reads as considered coverage. Reading the target
+/// makes the verdict true by construction, and lets an adapter refuse a target it cannot execute
+/// instead of quietly excusing it.
+pub fn target_overlay(request: &Value) -> Result<String, String> {
+    planned(request)?
+        .pointer("/target/overlay")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "planned.target.overlay must be a string".to_owned())
+}
+
 pub fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()

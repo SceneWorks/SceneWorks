@@ -1,4 +1,12 @@
 {
+  "overlayCoverage": {
+    "decision": "not-measurable-yet",
+    "story": "sc-16069",
+    "reason": "The `overlay` harness scenario stays `not_applicable` because NO calibration adapter can execute an overlay render, not because overlays are out of scope. `crates/sceneworks-memory-adapter/src/bin/candle.rs` drives exactly one path — a plain Krea 2 Turbo text-to-image render — so it now DERIVES its overlay verdict from `planned.target.overlay` and refuses a non-`none` target outright rather than excusing it. `bin/mlx.rs` never overwrites the scenario at all, but it also emits only `gated_fragment` records under a declared blocker (the pinned Qwen public seam exposes no lifecycle injections), so its `overlay` stays `not_run` inside an already-gated record; stamping a `not_applicable` there would add a considered-looking verdict to a run that verifies nothing. Running a real overlay render needs two things neither adapter has: the control-branch load path (a second resident network beside the base) and a control-map fixture to condition on. Every provider target below therefore declares `overlay: \"none\"`, which is a true statement about what the run does.",
+    "whyItMatters": "0 of the 4360 memory-matrix cells with `overlay != \"none\"` carry any historical, current-environment or strategy-parameter verification, so the candle conditioning admission gate (sc-16069) has no measured overlay peak to stand on and ships as an on-disk weights FLOOR instead of a predicted peak. That is the honest limit of the evidence, and it is what this decision records. (The count was 3925 before sc-16069 fixed the `overlaysFor()` blind spot; declaring the shipping control lanes grew the overlay axis to 4360 and left the zero-verification figure unchanged.)",
+    "unblockedBy": "An adapter target that loads a base plus its control branch and renders from a control map. SC-16013 re-measures the Krea control-lane MANIFEST rows (`candle.control.bf16Branch*`), which is the adjacent but distinct artifact — it does not produce harness cells. Adding an `overlay` target here before an adapter can execute it would make the run fail loudly (by design: `bin/candle.rs` errors on a non-`none` overlay target rather than emitting a `not_applicable` that reads as coverage).",
+    "reviewedAgainst": "docs/memory-strategy-contract.md"
+  },
   "providers": [
     {
       "name": "mlx-qwen-vae-decode",

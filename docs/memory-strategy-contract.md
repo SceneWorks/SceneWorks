@@ -298,6 +298,43 @@ user-visible — the `BestEffort` warning is a `tracing` event that reaches no r
 derivation and the per-rung arithmetic live in `crates/sceneworks-worker/src/krea_control_fit.rs`
 ("The remaining cost of reading the rows verbatim"); SC-16013's re-measure collapses the bands to zero.
 
+## Overlay coverage: declared unmeasured, not quietly absent (SC-16069)
+
+An **overlay** is a second network held resident beside the base for one render — a strict-pose
+ControlNet branch, an IP-Adapter, a face-identity encoder. **No overlay cell has ever been measured, and
+that is now a recorded decision rather than a gap you have to notice.**
+
+The state of the evidence, stated plainly:
+
+- Of the memory-matrix cells with `overlay != "none"`, **zero** carry any historical, current-environment
+  or strategy-parameter verification.
+- The `overlay` harness scenario is one of only two the calibration validator lets off `passed` (the other
+  being `not_run` on a gated record), which makes it the one place a stock excuse can silently read as
+  coverage. `bin/candle.rs` therefore **derives** its verdict from `planned.target.overlay` and **refuses**
+  a non-`none` target outright, instead of emitting the fixed "ordinary Krea Turbo text-to-image
+  calibration has no overlay" it used to emit on every run.
+- No adapter can execute an overlay render: doing so needs the control-branch load path and a control-map
+  fixture. The decision, and the exact thing that would unblock it, live in
+  `config/memory-calibration-plan.json` → `overlayCoverage`.
+
+**What this costs, stated plainly.** The candle conditioning admission gate
+(`crates/sceneworks-worker/src/conditioning_fit.rs`) has no measured overlay peak to gate on, so it gates
+on an on-disk weights **FLOOR**: base + overlay bytes + headroom, compared against live free VRAM. That
+direction is the safe one for admission — it cannot refuse a host that can hold the weights, which is the
+never-block-without-evidence posture this contract requires — but it prices no activations, no denoise
+steady state and no decode spike, so a **marginal** conditioning render still reaches the reactive CUDA
+OOM. Inflating the floor with an invented activation factor would manufacture rejections no measurement
+supports, so the floor stays a floor and says so in its own rejection message ("at least ~N GB … that is
+the weights alone"). The principled gate — the overlay's own bytes and transients inside the predicted
+peak — needs both contract vocabulary for a second resident network and at least one measured overlay
+cell.
+
+An unpriced **tier** on an otherwise-measured overlay lane is a distinct hole and is no longer silent: the
+Krea control ladder returns an explicit, logged `Unverified` for it (stages residency, never rejects)
+rather than collapsing into the no-signal `Unknown` that took the zero-adaptation path. The reachable
+instance today is `nvfp4`, not the `int8-convrot` SC-16069 named — the control lane's tier resolver cannot
+currently produce that string.
+
 ## Lifecycle and telemetry
 
 A provider capability declaration is selectable only when cancel and error transitions are safe:
