@@ -647,6 +647,90 @@
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "model.mlx?.minMemoryGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
+              "calibrations": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "abi",
+                    "fingerprint",
+                    "sceneWorksRevision",
+                    "matrixSourceRevision",
+                    "inferenceRevision",
+                    "provider",
+                    "tier",
+                    "mode",
+                    "overlay",
+                    "geometry",
+                    "artifactRepository",
+                    "artifactResolvedRevision",
+                    "artifactVariant",
+                    "resolvedPathFingerprint",
+                    "rung",
+                    "parameters"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "abi": { "const": 1 },
+                    "fingerprint": { "type": "string", "minLength": 1 },
+                    "sceneWorksRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                    "matrixSourceRevision": { "type": "string", "minLength": 1 },
+                    "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                    "provider": { "type": "string", "minLength": 1 },
+                    "tier": { "type": "string", "minLength": 1 },
+                    "mode": { "type": "string", "minLength": 1 },
+                    "overlay": { "type": "string", "minLength": 1 },
+                    "geometry": {
+                      "type": "object",
+                      "required": ["width", "height", "batch", "frames"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "width": { "type": "integer", "minimum": 1 },
+                        "height": { "type": "integer", "minimum": 1 },
+                        "batch": { "type": "integer", "minimum": 1 },
+                        "frames": { "type": "integer", "minimum": 1 }
+                      }
+                    },
+                    "artifactRepository": { "type": "string", "minLength": 1 },
+                    "artifactResolvedRevision": { "type": "string", "minLength": 1 },
+                    "artifactVariant": { "type": "string", "minLength": 1 },
+                    "resolvedPathFingerprint": { "type": "string", "minLength": 1 },
+                    "rung": {
+                      "enum": [
+                        "resident",
+                        "staged_residency",
+                        "bounded_decode",
+                        "bounded_attention",
+                        "bounded_transformer_residency"
+                      ]
+                    },
+                    "parameters": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "decodeTileEdge": { "type": "integer", "minimum": 1 },
+                        "decodeOverlap": { "type": "integer", "minimum": 0 },
+                        "attentionChunkSize": { "type": "integer", "minimum": 1 },
+                        "transformerWindowSize": { "type": "integer", "minimum": 1 },
+                        "transformerWindowComponent": {
+                          "enum": ["dit", "text_encoder", "both"]
+                        }
+                      },
+                      "description": "Exact closed strategy parameters used to select one evidence-contract cell; the Rust reader enforces rung-specific required and forbidden keys."
+                    }
+                  }
+                },
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+                    "anchor": "MlxCalibrationBinding::from_manifest"
+                  }
+                ],
+                "description": "Optional exact per-cell MLX calibration bindings. Multiple tiers and request cells are allowed; absence deliberately keeps legacy admission, while duplicate selectors and malformed opt-ins fail closed."
+              },
               "repo": {
                 "type": "string",
                 "description": "Turnkey MLX repo downloaded as-is (no conversion). Omitted when requiresConversion is true."

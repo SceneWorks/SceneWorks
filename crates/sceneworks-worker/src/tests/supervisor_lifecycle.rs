@@ -708,6 +708,12 @@ async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
         "job-2",
         &["q4/model.safetensors".to_owned(), "config.json".to_owned()],
         Some("abc123"),
+        crate::imports::DownloadArtifactReceipt {
+            resolved_tier: Some("q4"),
+            tree_stamp: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        },
     )
     .await
     .expect("receipt writes");
@@ -719,9 +725,14 @@ async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
     assert_eq!(receipt["schemaVersion"], 2);
     assert_eq!(receipt["repo"], "owner/model");
     assert_eq!(receipt["variant"], "q4");
+    assert_eq!(receipt["resolvedTier"], "q4");
     assert_eq!(receipt["manifestFiles"], json!(["q4/*.safetensors", "config.json"]));
     assert_eq!(receipt["resolvedFiles"], json!(["q4/model.safetensors", "config.json"]));
     assert_eq!(receipt["snapshotRevision"], "abc123");
+    assert_eq!(
+        receipt["artifactTreeStamp"],
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
 }
 
 #[tokio::test]
@@ -732,16 +743,69 @@ async fn receipt_writer_preserves_primary_and_corequisite_default_entries() {
     let mut dependency = serde_json::Map::new();
     dependency.insert("modelId".to_owned(), json!("base-model"));
 
-    write_model_download_receipt(temp.path(), &primary, "owner/primary", "job-primary", &["model.safetensors".to_owned()], Some("rev-primary")).await.unwrap();
-    write_model_download_receipt(temp.path(), &dependency, "owner/corequisite", "job-corequisite", &["encoder.safetensors".to_owned()], Some("rev-corequisite")).await.unwrap();
+    write_model_download_receipt(
+        temp.path(),
+        &primary,
+        "owner/primary",
+        "job-primary",
+        &["model.safetensors".to_owned()],
+        Some("rev-primary"),
+        crate::imports::DownloadArtifactReceipt::default(),
+    )
+    .await
+    .unwrap();
+    write_model_download_receipt(
+        temp.path(),
+        &dependency,
+        "owner/corequisite",
+        "job-corequisite",
+        &["encoder.safetensors".to_owned()],
+        Some("rev-corequisite"),
+        crate::imports::DownloadArtifactReceipt::default(),
+    )
+    .await
+    .unwrap();
 
     let mut sibling_model = primary.clone();
     sibling_model.insert("modelId".to_owned(), json!("other-model"));
-    write_model_download_receipt(temp.path(), &sibling_model, "owner/primary", "job-other", &["other.safetensors".to_owned()], Some("rev-other")).await.unwrap();
+    write_model_download_receipt(
+        temp.path(),
+        &sibling_model,
+        "owner/primary",
+        "job-other",
+        &["other.safetensors".to_owned()],
+        Some("rev-other"),
+        crate::imports::DownloadArtifactReceipt::default(),
+    )
+    .await
+    .unwrap();
     let mut sibling_variant = primary.clone();
     sibling_variant.insert("variant".to_owned(), json!("q4"));
-    write_model_download_receipt(temp.path(), &sibling_variant, "owner/primary", "job-q4", &["q4/model.safetensors".to_owned()], Some("rev-q4")).await.unwrap();
-    write_model_download_receipt(temp.path(), &primary, "owner/primary", "job-primary-new", &["replacement.safetensors".to_owned()], Some("rev-primary-new")).await.unwrap();
+    write_model_download_receipt(
+        temp.path(),
+        &sibling_variant,
+        "owner/primary",
+        "job-q4",
+        &["q4/model.safetensors".to_owned()],
+        Some("rev-q4"),
+        crate::imports::DownloadArtifactReceipt {
+            resolved_tier: Some("q4"),
+            tree_stamp: None,
+        },
+    )
+    .await
+    .unwrap();
+    write_model_download_receipt(
+        temp.path(),
+        &primary,
+        "owner/primary",
+        "job-primary-new",
+        &["replacement.safetensors".to_owned()],
+        Some("rev-primary-new"),
+        crate::imports::DownloadArtifactReceipt::default(),
+    )
+    .await
+    .unwrap();
 
     let marker: serde_json::Value = serde_json::from_slice(&tokio::fs::read(temp.path().join(INSTALL_MARKER)).await.unwrap()).unwrap();
     let receipts = marker["receipts"].as_array().unwrap();
