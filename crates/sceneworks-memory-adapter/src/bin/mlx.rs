@@ -258,6 +258,32 @@ mod tests {
             .unwrap_err()
             .contains("cannot resolve a nonzero wired ceiling"));
     }
+
+    #[test]
+    fn overall_memory_and_prediction_cover_every_componentwise_phase_peak() {
+        let conditioning = PhaseMemory {
+            active: 8,
+            cache: 1,
+        };
+        let denoise = PhaseMemory {
+            active: 16,
+            cache: 15,
+        };
+        let decode = PhaseMemory {
+            active: 19,
+            cache: 0,
+        };
+        let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+        assert_eq!(
+            overall,
+            PhaseMemory {
+                active: 19,
+                cache: 15,
+            }
+        );
+        assert_eq!(overall.allocator_bytes(), 34);
+        assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
+    }
 }
 
 fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, String> {
@@ -524,13 +550,24 @@ fn one_image(output: GenerationOutput) -> Result<Image, String> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PhaseMemory {
     active: u64,
     cache: u64,
 }
 
 impl PhaseMemory {
+    fn allocator_bytes(self) -> u64 {
+        self.active.saturating_add(self.cache)
+    }
+
+    fn overall(phases: &[Self]) -> Self {
+        Self {
+            active: phases.iter().map(|phase| phase.active).max().unwrap_or(0),
+            cache: phases.iter().map(|phase| phase.cache).max().unwrap_or(0),
+        }
+    }
+
     fn capture() -> Self {
         Self {
             active: get_peak_memory() as u64,
@@ -539,7 +576,7 @@ impl PhaseMemory {
     }
 
     fn json(self) -> Value {
-        let allocator = self.active.saturating_add(self.cache);
+        let allocator = self.allocator_bytes();
         json!({
             "activeBytes": self.active,
             "allocatorBytes": allocator,
@@ -811,16 +848,14 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     let conditioning = conditioning.get();
     let denoise = denoise.get();
     let phases = [conditioning, denoise, decode];
-    let overall = PhaseMemory {
-        active: phases.iter().map(|phase| phase.active).max().unwrap_or(0),
-        cache: phases.iter().map(|phase| phase.cache).max().unwrap_or(0),
-    };
+    let overall = PhaseMemory::overall(&phases);
     let predicted_conditioning = predicted_ceiling(conditioning.active + conditioning.cache);
     let predicted_denoise = predicted_ceiling(denoise.active + denoise.cache);
     let predicted_decode = predicted_ceiling(decode.active + decode.cache);
-    let predicted_overall = predicted_conditioning
-        .max(predicted_denoise)
-        .max(predicted_decode);
+    // The harness defines `overall` as a conservative componentwise high-water envelope: every
+    // overall metric must cover the corresponding peak from every physical phase. Predict from that
+    // same envelope so exact-fit admission can never sit below the published observed overall.
+    let predicted_overall = predicted_ceiling(overall.allocator_bytes());
     let mutation_bias = 0.05_f64;
     let mutated_maximum = maximum_error + mutation_bias;
     let mutated_mean = mean_error + mutation_bias;
@@ -893,7 +928,7 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
                 ("conditioningActivePeak", "bytes", conditioning.active),
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
-                ("overallAllocatorEnvelope", "bytes", overall.active.saturating_add(overall.cache)),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("lifecycleWarmControlPeak", "bytes", lifecycle_control_peak),
                 ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle_max_recovery_peak),
             ],
