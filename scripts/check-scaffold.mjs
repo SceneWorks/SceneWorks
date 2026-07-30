@@ -166,12 +166,18 @@ async function assertDesktopLinuxReleaseWorkflow() {
   }
 }
 
+// Every config schema whose draft + `$id` conventions are pinned. `tier-integrity` is not a *manifest*
+// schema (its config lives at config/tier-integrity.jsonc, outside config/manifests/), but the
+// conventions asserted below are repo-wide, and leaving it off this list is exactly why it drifted to
+// draft-07 with a `sceneworks.dev` id while every sibling requires 2020-12 / `sceneworks.local`
+// (sc-15799 review). `scripts/check-tier-integrity.mjs` applies it to the ledger.
 const manifestSchemaPaths = [
   "packages/schemas/model-manifest.schema.json",
   "packages/schemas/lora-manifest.schema.json",
   "packages/schemas/recipe-preset.schema.json",
   "packages/schemas/styles.schema.json",
   "packages/schemas/control-overlays.schema.json",
+  "packages/schemas/tier-integrity.schema.json",
 ];
 
 const manifestPaths = [

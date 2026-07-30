@@ -38,9 +38,12 @@ says otherwise.** (SC-15799.)
 
 Choosing q8 or q4 *is* a memory decision. If a user picks q4 because bf16 does not fit, carrying any
 component at bf16 defeats the choice they made. This is a rule about the catalog, not a per-entry
-observation: it applies to every entry, on every hosted tier, on both backends.
+observation: the **rule** binds every entry, on every hosted tier, on both backends. What the rule
+binds is not the same as what the catalog observes — see point 4: the *residency* a declared tier
+produces is a per-backend fact, so "it holds on both backends" is a statement about the obligation, not
+a claim that the two lanes hold the same component at the same precision.
 
-Three things follow, and they are not negotiable individually:
+Four things follow, and they are not negotiable individually:
 
 1. **The packing tier is not a memory lever.** A component's precision is decided by the tier the user
    selected, before any budget is read, and it is identical on a 16 GB card and a 96 GB one. Packing
@@ -66,6 +69,19 @@ Three things follow, and they are not negotiable individually:
    *model* was not a ratchet: it handed every amnestied entry a free slot for every component it had not
    yet declared. A grandfathered pair with no matching row is also an error, so promoting a row to
    `measured` must delete its amnesty line rather than leave the slot open.
+4. **The same declared tier can yield different residency on different backends, and that is a
+   tier-integrity fact in its own right — not a footnote to one.** The two ports make dtype decisions
+   independently, so "this entry is q4" does not fix what any given component is resident at until the
+   lane is named. SenseNova-U1's vision conv kernels and `fm_head` are bf16 under `mlx-gen-sensenova` but
+   **f32** under `candle-gen-sensenova`, which widens every dense leaf it multiplies against an f32
+   activation; the `mage_flow*` `transformerHead` q8 floor exists only in `mlx-gen-mage`, so a q4 candle
+   render there really is uniformly q4. It follows that `residentTier` is a per-lane quantity, that the
+   ledger's row identity is **(model, component, backend lane)** rather than (model, component), and that
+   a component whose lanes disagree is declared as one row per lane — declaring a single value would
+   either over-declare one lane or under-declare the other, and under-declaring is the direction that
+   hides an above-tier residency. The lane is validated, cross-checked against the lanes the catalog
+   entry actually has, and published as a column of the generated audit; a per-backend claim that the
+   audit does not show is a claim nobody can review.
 
 The exceptions divide by *cause*, and the causes have different fixes. A **packing exception** is a
 deliberate quality decision (a precision-sensitive decoder, a control residual that drifts) and needs a
@@ -119,6 +135,20 @@ in total) and under-predicted a live CUDA admission path by ~5 GB one-directiona
 not produce a hard reject, since an upper bound cannot rule a job out. And it may not be recorded as a
 reclaimable high-water, since over-stating a pool lets the next gate over-admit. `measured: false` is a
 field the code reads, not a note to a future human.
+
+**Reading an upper bound verbatim is the safe direction, not the free one — so quantify what it costs.**
+"Over-predicting adapts a card early" is a disclosure only if *how* early is written down. For the Krea
+control lane the answer is: **zero reject bands** (the only entry with a `candle.control` block has
+superseded evidence, so a hard reject is unreachable) and a bounded set of **premature rung engagement**
+bands, which cost render *speed* and nothing else. On a q4 base the gate stages instead of staying
+resident across `[34.9, 38.2)` GB free, tiles its VAE decode unnecessarily across `[31.2, 34.5)`
+(+26% decode), chunks attention unnecessarily across `[24.5, 27.8)` (~+6% render), and returns
+`BestEffort`-with-warn where a clean `Fits` held across `[22.07, 25.37)`; on a q8 base (which has no
+tiling rung) the bands are `[44.1, 47.4)`, `[39.17, 41.6)` and `[35.87, 39.17)`; on a bf16 base the
+over-prediction is zero and so is every band, because the branch is already at tier. None of it is
+user-visible — the `BestEffort` warning is a `tracing` event that reaches no response, record or UI. The
+derivation and the per-rung arithmetic live in `crates/sceneworks-worker/src/krea_control_fit.rs`
+("The remaining cost of reading the rows verbatim"); SC-16013's re-measure collapses the bands to zero.
 
 ## Lifecycle and telemetry
 

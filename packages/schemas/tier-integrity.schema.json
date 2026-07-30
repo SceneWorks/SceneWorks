@@ -1,8 +1,8 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://sceneworks.dev/schemas/tier-integrity.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/tier-integrity.schema.json",
   "title": "Tier-integrity exception ledger",
-  "description": "Schema for config/tier-integrity.jsonc (sc-15799) — the declared above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity; scripts/check-tier-integrity.mjs enforces this schema's INTENT plus the cross-checks a JSON Schema cannot express (that the model is a real catalog entry, that residentTier is strictly above every tier in appliesToTiers, that appliesToTiers names only hosted tiers, and the per-(model, component) unmeasured ratchet). This file exists so the ledger has the same schema coverage as its siblings memory-calibration and memory-matrix; the checker, not this schema, is the gate.",
+  "description": "Schema for config/tier-integrity.jsonc (sc-15799) — the declared above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity. scripts/check-tier-integrity.mjs APPLIES this schema to the ledger on every run (its `schemaErrors` walks the subset used here) and adds the cross-checks a JSON Schema cannot express: that the model is a real catalog entry, that residentTier is strictly above every tier in appliesToTiers, that appliesToTiers names only hosted tiers, that a declared `backends` lane is one the catalog entry actually has a block for, that no two rows claim the same (model, component, lane), and the per-(model, component) unmeasured ratchet. NOTE (sc-15799 review): this file was originally IDE-only and unenforced, which is how it drifted to draft-07 with a sceneworks.dev $id while every sibling schema requires draft 2020-12 and a sceneworks.local id — scripts/check-scaffold.mjs now pins both conventions for this schema alongside the manifest schemas. Its load-bearing contribution is additionalProperties:false: before it was applied, a misspelled key such as `backend` for `backends` was silently ignored.",
   "type": "object",
   "additionalProperties": false,
   "required": ["exceptions"],
@@ -31,7 +31,7 @@
         "component": {
           "type": "string",
           "enum": ["textEncoder", "vae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
-          "description": "Which component is resident above tier. One row per (model, component): the checker rejects a duplicate pair, and the unmeasured ratchet is keyed on exactly this pair."
+          "description": "Which component is resident above tier. The row uniqueness key is (model, component, BACKEND LANE) — a component whose residency genuinely differs per lane is split into one row per lane, and the checker rejects two rows that claim the same lane for the same pair. The unmeasured ratchet is keyed on (model, component) alone, so splitting a row per lane does not widen the amnesty."
         },
         "residentTier": {
           "type": "string",
@@ -48,7 +48,7 @@
           "type": "array",
           "minItems": 1,
           "items": { "type": "string", "enum": ["mlx", "candle"] },
-          "description": "Which lanes carry this residency. OMIT for both. Declare it when the lanes genuinely differ — the mage transformerHead floor, for example, exists only in mlx-gen-mage; candle-gen-mage has no floor symbol at all, so a q4 render there really is uniformly q4."
+          "description": "Which lanes carry this residency. OMIT for both. Declare it when the lanes genuinely differ — the mage transformerHead floor, for example, exists only in mlx-gen-mage; candle-gen-mage has no floor symbol at all, so a q4 render there really is uniformly q4. THE SAME DECLARED TIER CAN YIELD DIFFERENT RESIDENCY PER BACKEND, so residentTier is a per-lane fact: sensenova_u1_8b's vision conv kernels and fm_head are bf16 under mlx-gen-sensenova but f32 under candle-gen-sensenova, which widens every dense leaf it multiplies against an f32 activation (candle-gen-sensenova/src/quant.rs::get_f32, sc-14249). Such a component is declared as one row per lane. Enforced, not advisory: the checker validates the lane names, requires each declared lane to be one the catalog entry actually has a block for, keys row uniqueness on it, and publishes it as a column in docs/generated/tier-integrity.md."
         },
         "cause": {
           "type": "string",

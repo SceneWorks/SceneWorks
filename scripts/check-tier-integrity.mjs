@@ -40,6 +40,19 @@
  *     must still appear in `crates/sceneworks-worker/src/mlx_fit_gate.rs`, whose doc table and hardcoded
  *     test constants are the other two copies. A repack that moved one and not the others used to turn
  *     that lane red for a reason unrelated to the invariant.
+ *  7. `backends` is LOAD-BEARING, not a comment (sc-15799 review). The same declared tier can yield
+ *     different residency on the two lanes — `sensenova_u1_8b::visionTower` is bf16 under mlx-gen and
+ *     f32 under candle-gen, because the candle port widens the conv kernels — so the uniqueness key is
+ *     **(model, component, LANE)**, not (model, component): a component whose residency genuinely
+ *     differs per backend is split into one row per lane, and two rows may never claim the same lane.
+ *     Lane names are validated, an explicitly declared lane must be one the catalog entry actually has
+ *     a block for (a "candle only" row on an mlx-only entry describes a lane that does not exist), and
+ *     the lane is PUBLISHED in the generated markdown so a per-backend claim is visible to a reader.
+ *     Before this, `backends` was a defaulted passthrough that nothing validated and the audit dropped.
+ *  8. The ledger validates against its own JSON Schema (`packages/schemas/tier-integrity.schema.json`),
+ *     so an unknown or misspelled key is an error rather than a silently ignored field. The schema was
+ *     unenforced when it was written, which is how it drifted to draft-07 while every sibling requires
+ *     2020-12; `scripts/check-scaffold.mjs` now pins its conventions and this script applies it.
  *
  * Usage:
  *   node scripts/check-tier-integrity.mjs            # regenerate docs/generated/tier-integrity.*
@@ -56,6 +69,7 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEDGER = "config/tier-integrity.jsonc";
+const SCHEMA = "packages/schemas/tier-integrity.schema.json";
 const MANIFEST = "config/manifests/builtin.models.jsonc";
 const MLX_FIT_GATE = "crates/sceneworks-worker/src/mlx_fit_gate.rs";
 const OUTPUT_JSON = "docs/generated/tier-integrity.json";
@@ -80,6 +94,18 @@ const COMPONENTS = new Set([
 ]);
 
 const CAUSES = new Set(["packing-exception", "backend-capability", "structural"]);
+
+/**
+ * The two generation lanes a row may claim in `backends`. Omitting `backends` claims BOTH.
+ *
+ * This is not decoration. The SAME declared tier can produce DIFFERENT residency per lane, because the
+ * two ports make independent dtype decisions: `sensenova_u1_8b`'s vision conv kernels and `fm_head` are
+ * bf16 under `mlx-gen-sensenova` but **f32** under `candle-gen-sensenova`, which widens every dense leaf
+ * it multiplies against an f32 activation (`candle-gen-sensenova/src/quant.rs::get_f32`, sc-14249). A
+ * ledger that can only say one tier per component either over-declares one lane or under-declares the
+ * other, so the uniqueness key is (model, component, LANE) — see [`validate`].
+ */
+const BACKENDS = ["mlx", "candle"];
 
 /**
  * `model::component` pairs GRANDFATHERED with an `unmeasured` cost by sc-15799 — the audit found the FACT
@@ -184,10 +210,76 @@ function hostedTiers(entry) {
 }
 
 /**
- * Validate the ledger against the catalog and the worker. Returns `{ errors, rows, unverifiedTiers }`;
- * pure so `--self-test` can drive it with mutated inputs.
+ * Minimal JSON-Schema check for the subset `packages/schemas/tier-integrity.schema.json` actually uses:
+ * `type`, `enum`, `required`, `properties`, `additionalProperties: false`, `items`, `minItems`,
+ * `minLength`, `exclusiveMinimum` and local `$ref` into `$defs`. Returns a list of `path: problem`
+ * strings.
+ *
+ * Hand-rolled on purpose: this repo has **no** npm dependencies (`package.json` declares neither
+ * `dependencies` nor `devDependencies`), so pulling in ajv to enforce one 100-line schema would be a
+ * worse trade than 40 lines that cover it exactly. The schema was written for sc-15799 but nothing ever
+ * applied it — which is how it drifted to draft-07 and a `sceneworks.dev` `$id` while every sibling
+ * requires 2020-12 / `sceneworks.local`. Its real value is `additionalProperties: false`: a misspelled
+ * key (`backend` for `backends`, `residentTiers` for `residentTier`) was silently ignored before, and a
+ * silently ignored `backends` is exactly the class of defect the sc-15799 review found.
  */
-export function validate({ ledger, manifest, mlxFitGate }) {
+function schemaErrors(schema, value, root = schema, at = "$") {
+  const out = [];
+  if (!schema || typeof schema !== "object") return out;
+  if (typeof schema.$ref === "string") {
+    const target = schema.$ref
+      .replace(/^#\//, "")
+      .split("/")
+      .reduce((node, part) => (node ?? {})[part], root);
+    return schemaErrors(target, value, root, at);
+  }
+  const isArray = Array.isArray(value);
+  const actual = isArray ? "array" : value === null ? "null" : typeof value;
+  if (schema.type && schema.type !== actual) {
+    out.push(`${at}: expected ${schema.type}, got ${actual}`);
+    return out;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    out.push(`${at}: ${JSON.stringify(value)} is not one of ${JSON.stringify(schema.enum)}`);
+  }
+  if (schema.type === "string" && typeof schema.minLength === "number" && value.length < schema.minLength) {
+    out.push(`${at}: string shorter than minLength ${schema.minLength}`);
+  }
+  if (schema.type === "number" && typeof schema.exclusiveMinimum === "number" && !(value > schema.exclusiveMinimum)) {
+    out.push(`${at}: ${value} must be > ${schema.exclusiveMinimum}`);
+  }
+  if (isArray) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) {
+      out.push(`${at}: fewer than minItems ${schema.minItems}`);
+    }
+    if (schema.items) {
+      value.forEach((item, index) => out.push(...schemaErrors(schema.items, item, root, `${at}[${index}]`)));
+    }
+  }
+  if (actual === "object") {
+    for (const key of schema.required ?? []) {
+      if (!(key in value)) out.push(`${at}: missing required property "${key}"`);
+    }
+    const properties = schema.properties ?? {};
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) {
+        if (!(key in properties)) {
+          out.push(`${at}: unknown property "${key}" (additionalProperties is false)`);
+        }
+      }
+    }
+    for (const [key, subSchema] of Object.entries(properties)) {
+      if (key in value) out.push(...schemaErrors(subSchema, value[key], root, `${at}.${key}`));
+    }
+  }
+  return out;
+}
+
+/**
+ * Validate the ledger against its schema, the catalog and the worker. Returns
+ * `{ errors, rows, unverifiedTiers }`; pure so `--self-test` can drive it with mutated inputs.
+ */
+export function validate({ ledger, manifest, mlxFitGate, schema }) {
   const errors = [];
   const rows = [];
   const unverifiedTiers = [];
@@ -201,7 +293,23 @@ export function validate({ ledger, manifest, mlxFitGate }) {
     );
   }
 
-  const seen = new Set();
+  // (0) The ledger's own schema, which nothing applied before the sc-15799 review.
+  if (!schema) {
+    errors.push(
+      `${SCHEMA} was not supplied to validate(). The schema is part of the gate, not IDE decoration — ` +
+        `skipping it would make a misspelled key a silent no-op again.`,
+    );
+  } else {
+    for (const problem of schemaErrors(schema, ledger)) {
+      errors.push(`${LEDGER} violates ${SCHEMA} — ${problem}`);
+    }
+  }
+
+  // Lanes already claimed per (model, component). The uniqueness key includes the LANE, so a component
+  // whose residency differs per backend can be told truthfully as two rows — but an OVERLAP is still a
+  // double declaration, which is why this tracks claimed lanes rather than comparing key strings (a
+  // naive `model::component::backends` key would let a both-lanes row and an mlx-only row coexist).
+  const claimedLanes = new Map();
   for (const row of exceptions) {
     const where = `${row.model ?? "?"}/${row.component ?? "?"}`;
     const entry = byId.get(row.model);
@@ -210,10 +318,56 @@ export function validate({ ledger, manifest, mlxFitGate }) {
       continue;
     }
     const key = `${row.model}::${row.component}`;
-    if (seen.has(key)) {
-      errors.push(`${where}: declared twice. Merge the rows — one component, one exception.`);
+
+    // `backends`: which lanes this row speaks for. Validated, cross-checked and published (sc-15799
+    // review) — it used to be a defaulted passthrough that nothing read.
+    let lanes = BACKENDS;
+    if (row.backends !== undefined) {
+      if (!Array.isArray(row.backends) || row.backends.length === 0) {
+        errors.push(
+          `${where}: \`backends\`, when present, must name at least one lane (${BACKENDS.join(" / ")}). ` +
+            `Omit the key entirely to claim both.`,
+        );
+      } else {
+        const unknown = row.backends.filter((lane) => !BACKENDS.includes(lane));
+        if (unknown.length > 0) {
+          errors.push(
+            `${where}: unknown backend(s) ${unknown.map((lane) => `"${lane}"`).join(", ")} in ` +
+              `\`backends\`. Known: ${BACKENDS.join(", ")}.`,
+          );
+        }
+        lanes = row.backends.filter((lane) => BACKENDS.includes(lane));
+        // CROSS-CHECK: an explicit per-lane claim must be about a lane the entry actually has. A row
+        // that says "candle" for an entry with no `candle` block is describing residency on a lane that
+        // does not exist for it — undetectable while `backends` was inert.
+        for (const lane of lanes) {
+          if (!entry[lane]) {
+            errors.push(
+              `${where}: declares \`backends\` including "${lane}", but catalog entry "${row.model}" ` +
+                `has no \`${lane}\` block, so it does not host that lane. A per-backend claim about a ` +
+                `lane the entry does not have describes nothing — fix the lane, or drop the key to ` +
+                `claim both.`,
+            );
+          }
+        }
+      }
     }
-    seen.add(key);
+
+    const alreadyClaimed = claimedLanes.get(key);
+    if (alreadyClaimed) {
+      const overlap = lanes.filter((lane) => alreadyClaimed.has(lane));
+      if (overlap.length > 0) {
+        errors.push(
+          `${where}: declared twice for ${overlap.map((lane) => `"${lane}"`).join(", ")}. The ` +
+            `uniqueness key is (model, component, LANE): a component whose residency genuinely differs ` +
+            `per backend is SPLIT into one row per lane, but two rows may never claim the same lane. ` +
+            `(A row with no \`backends\` claims BOTH lanes.) Merge them, or narrow their \`backends\`.`,
+        );
+      }
+      for (const lane of lanes) alreadyClaimed.add(lane);
+    } else {
+      claimedLanes.set(key, new Set(lanes));
+    }
 
     if (!COMPONENTS.has(row.component)) {
       errors.push(
@@ -295,7 +449,7 @@ export function validate({ ledger, manifest, mlxFitGate }) {
       component: row.component,
       residentTier: row.residentTier,
       appliesToTiers: applies,
-      backends: row.backends ?? ["mlx", "candle"],
+      backends: lanes,
       cause: row.cause,
       reason: row.reason,
       evidenceState: evidence.state,
@@ -413,8 +567,13 @@ export function validate({ ledger, manifest, mlxFitGate }) {
     }
   }
 
+  // Sorted on the full uniqueness key, LANE included — two rows can now share (model, component), so
+  // without the third term the generated audit's row order would depend on ledger order.
   rows.sort(
-    (a, b) => a.model.localeCompare(b.model) || a.component.localeCompare(b.component),
+    (a, b) =>
+      a.model.localeCompare(b.model) ||
+      a.component.localeCompare(b.component) ||
+      a.backends.join(",").localeCompare(b.backends.join(",")),
   );
   return { errors, rows, unverifiedTiers: [...new Set(unverifiedTiers)].sort() };
 }
@@ -468,8 +627,16 @@ function renderMarkdown({ rows, unverifiedTiers }) {
     "against a committed constant, and errors on a grandfathered pair whose row is gone. sc-16015 owns",
     "emptying it.",
     "",
-    "| model | component | resident at | above tier on | cause | cost (GB) | evidence |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "**The same declared tier can yield different residency per backend**, so the `backends` column is",
+    "part of each row's identity, not a footnote. The two ports make independent dtype decisions: the",
+    "SenseNova-U1 vision conv kernels and `fm_head` are bf16 under `mlx-gen-sensenova` but **f32** under",
+    "`candle-gen-sensenova`, which widens every dense leaf it multiplies against an f32 activation; the",
+    "`mage_flow*` `transformerHead` q8 floor exists only in `mlx-gen-mage`, so a q4 candle render there",
+    "really is uniformly q4. Such a component is declared as one row PER LANE. A row listing both lanes",
+    "claims the residency holds identically on both.",
+    "",
+    "| model | component | backends | resident at | above tier on | cause | cost (GB) | evidence |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
   for (const row of rows) {
     const cost =
@@ -477,7 +644,7 @@ function renderMarkdown({ rows, unverifiedTiers }) {
         ? row.costGb.toFixed(3).replace(/\.?0+$/, "")
         : `_unmeasured_ (${row.owedBy ?? "no owner"})`;
     lines.push(
-      `| \`${row.model}\` | ${row.component} | ${row.residentTier} | ${row.appliesToTiers.join(", ")} | ${row.cause} | ${cost} | ${row.source ?? ""} |`,
+      `| \`${row.model}\` | ${row.component} | ${row.backends.join(" + ")} | ${row.residentTier} | ${row.appliesToTiers.join(", ")} | ${row.cause} | ${cost} | ${row.source ?? ""} |`,
     );
   }
   lines.push("", "## Why each cause is a different problem", "");
@@ -507,15 +674,17 @@ function renderMarkdown({ rows, unverifiedTiers }) {
 }
 
 async function readInputs() {
-  const [ledgerBody, manifestBody, mlxFitGate] = await Promise.all([
+  const [ledgerBody, manifestBody, mlxFitGate, schemaBody] = await Promise.all([
     readFile(path.join(ROOT, LEDGER), "utf8"),
     readFile(path.join(ROOT, MANIFEST), "utf8"),
     readFile(path.join(ROOT, MLX_FIT_GATE), "utf8"),
+    readFile(path.join(ROOT, SCHEMA), "utf8"),
   ]);
   return {
     ledger: parseJsonc(ledgerBody),
     manifest: parseJsonc(manifestBody),
     mlxFitGate,
+    schema: JSON.parse(schemaBody),
   };
 }
 
@@ -584,12 +753,19 @@ async function selfTest() {
   }
 
   // 3b. The RATCHET, per component: an ALREADY-AMNESTIED model adding an unmeasured row for a component
-  //     it does not already declare. Keyed per model, this passed with `errors: 0` — `sdxl` held amnesty
-  //     it never used, and 31 ids x the components they had not declared left ~155 open slots.
+  //     it does not already declare. Keyed per MODEL, this passed with `errors: 0` — 31 amnestied ids x
+  //     the components they had not declared left ~155 open slots.
+  //
+  //     The victim must be a model that genuinely HOLDS amnesty for a DIFFERENT component, or this
+  //     mutation is just mutation 3 again. `boogu_image` is amnestied for `vae` and has no `textEncoder`
+  //     row, so `boogu_image::textEncoder` is exactly the "already-amnestied, new component" case. (This
+  //     used `sdxl`, which holds NO amnesty pair at all — so despite its label it only ever exercised
+  //     the non-amnestied path, and reverting the ratchet to per-MODEL keying would not have failed it.
+  //     Found by the sc-15799 review.)
   {
     const ledger = clone();
     ledger.exceptions.push({
-      model: "sdxl",
+      model: "boogu_image",
       component: "textEncoder",
       residentTier: "bf16",
       appliesToTiers: ["q4", "q8"],
@@ -600,7 +776,7 @@ async function selfTest() {
     expect(
       "per-component ratchet",
       validate({ ...inputs, ledger }).errors,
-      'sdxl::textEncoder" is not one of them',
+      'boogu_image::textEncoder" is not one of them',
     );
   }
 
@@ -657,6 +833,38 @@ async function selfTest() {
     );
   }
 
+  // 7. `backends` LANE OVERLAP — the uniqueness key is (model, component, lane), so a component may be
+  //    split per lane, but two rows may never claim the same lane. Duplicating an mlx-only mage row
+  //    verbatim must fail: a naive `model::component::backends` string key would have let it through.
+  {
+    const ledger = clone();
+    const mageRow = ledger.exceptions.find(
+      (item) => item.model === "mage_flow_base" && item.component === "transformerHead",
+    );
+    ledger.exceptions.push(JSON.parse(JSON.stringify(mageRow)));
+    expect("lane overlap", validate({ ...inputs, ledger }).errors, 'declared twice for "mlx"');
+  }
+
+  // 7b. A row whose declared lane the ENTRY DOES NOT HAVE. `sana_1600m` is mlx-only (no `candle` block),
+  //     so claiming its dense VAE on candle describes residency on a lane that does not exist for it.
+  //     Nothing caught this while `backends` was a defaulted passthrough.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) => item.model === "sana_1600m" && item.component === "vae",
+    );
+    row.backends = ["candle"];
+    expect("wrong lane", validate({ ...inputs, ledger }).errors, "has no `candle` block");
+  }
+
+  // 8. The ledger's own SCHEMA is applied. A misspelled key (`backend` for `backends`) used to be a
+  //    silent no-op — which is precisely how an inert `backends` field survived review.
+  {
+    const ledger = clone();
+    ledger.exceptions[0] = { ...ledger.exceptions[0], backend: ["mlx"] };
+    expect("schema unknown key", validate({ ...inputs, ledger }).errors, 'unknown property "backend"');
+  }
+
   if (failures.length > 0) {
     console.error("check-tier-integrity self-test FAILED:");
     for (const failure of failures) console.error(`  - ${failure}`);
@@ -664,7 +872,7 @@ async function selfTest() {
     return;
   }
   console.log(
-    `check-tier-integrity self-test passed (9 mutations, ${baseline.rows.length} declared exceptions, ` +
+    `check-tier-integrity self-test passed (12 mutations, ${baseline.rows.length} declared exceptions, ` +
       `${GRANDFATHERED_UNMEASURED.size} grandfathered pairs).`,
   );
 }

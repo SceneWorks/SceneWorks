@@ -4826,8 +4826,20 @@
           // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
           // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
           // byte-identical within every tier; q4/q8 used one denoise step (the working set is step-count
-          // invariant), bf16 used the production 8 steps. SUPERSEDED for q4/q8 by the branch repack — read
-          // only through the branch-packing correction, never as a current measurement.
+          // invariant), bf16 used the production 8 steps. SUPERSEDED for q4/q8 by the branch repack: read
+          // VERBATIM as an UPPER BOUND, never as a current measurement. (An earlier revision of this
+          // comment said "read only through the branch-packing correction" — that instruction is
+          // RETRACTED and contradicted the verbatim/no-correction rule stated ~45 lines above. There is
+          // no correction; a lighter branch can only lower the peak, which is what makes the row a sound
+          // bound. What reading it verbatim costs is quantified per rung in
+          // `crates/sceneworks-worker/src/krea_control_fit.rs`.)
+          //
+          // GAP (sc-16013): there is no `int8-convrot` key here even though `branchTierByBaseTier` above
+          // now declares that tier explicitly. `krea_control_fit::predicted_control_peak_gb` therefore
+          // returns `None` on an int8-convrot base, so the control fit gate is INERT on that tier — it
+          // neither stages, tiles, chunks nor rejects, and the reactive CUDA-OOM backstop is the only
+          // protection. Pre-existing (the tier was implied before sc-15799 made it explicit) and pinned
+          // by a unit test, but the re-measure must cover int8-convrot so the gate stops no-opping there.
           "bf16BranchPeakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
           "bf16BranchSequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
           // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free

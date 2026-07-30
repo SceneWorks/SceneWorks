@@ -25,15 +25,17 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function realInputs() {
-  const [ledger, manifest, mlxFitGate] = await Promise.all([
+  const [ledger, manifest, mlxFitGate, schema] = await Promise.all([
     readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
     readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
     readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8"),
+    readFile(path.join(ROOT, "packages/schemas/tier-integrity.schema.json"), "utf8"),
   ]);
   return {
     ledger: JSON.parse(stripJsoncComments(ledger)),
     manifest: JSON.parse(stripJsoncComments(manifest)),
     mlxFitGate,
+    schema: JSON.parse(schema),
   };
 }
 
@@ -77,11 +79,28 @@ test("the amnesty set is exactly the ledger's unmeasured rows", async () => {
   );
 });
 
+/**
+ * The victim MUST be a model that already holds amnesty for a DIFFERENT component, or this is just
+ * "a brand-new model cannot add an unmeasured row" wearing a different label. `boogu_image` is
+ * amnestied for `vae` and declares no `textEncoder`, so it is the real case.
+ *
+ * This used `sdxl`, which holds NO amnesty pair at all — so despite its name it only exercised the
+ * non-amnestied path, and the per-component keying it claimed to test could have been reverted to
+ * per-model keying with this test still green. Found by the sc-15799 review.
+ */
 test("an already-amnestied model cannot add an unmeasured row for a new component", async () => {
   const inputs = await realInputs();
+  assert.ok(
+    GRANDFATHERED_UNMEASURED.has("boogu_image::vae"),
+    "the victim must genuinely hold amnesty for another component, or the mutation is vacuous",
+  );
+  assert.ok(
+    !GRANDFATHERED_UNMEASURED.has("boogu_image::textEncoder"),
+    "…and must NOT already hold amnesty for the component being added",
+  );
   const ledger = clone(inputs.ledger);
   ledger.exceptions.push({
-    model: "sdxl",
+    model: "boogu_image",
     component: "textEncoder",
     residentTier: "bf16",
     appliesToTiers: ["q4", "q8"],
@@ -91,7 +110,7 @@ test("an already-amnestied model cannot add an unmeasured row for a new componen
   });
   const { errors } = validate({ ...inputs, ledger });
   assert.ok(
-    errors.some((error) => error.includes('sdxl::textEncoder" is not one of them')),
+    errors.some((error) => error.includes('boogu_image::textEncoder" is not one of them')),
     `expected the per-component ratchet to fire, got: ${errors.join(" | ")}`,
   );
 });
@@ -178,10 +197,101 @@ test("every SenseNova-U1 entry declares its dense heads", async () => {
     for (const id of ids) {
       assert.ok(
         declared.has(id),
-        `${id} keeps its ${component} dense bf16 in every tier per both lanes' quant.rs, so it needs a row`,
+        `${id} keeps its ${component} dense in every tier per both lanes' quant.rs, so it needs a row`,
       );
     }
   }
+});
+
+/**
+ * The SenseNova dense heads are held at DIFFERENT precisions by the two lanes, so a single both-lanes
+ * row is necessarily wrong in one direction. mlx-gen holds them at the checkpoint's bf16 store dtype;
+ * candle-gen widens the two vision conv kernels (`vision.rs:38-47`) and `fm_head` (`fm.rs:15-25`) to
+ * **f32** via `quant::get_f32` (sc-14249).
+ *
+ * The first revision declared `residentTier: "bf16"` with `backends` omitted — i.e. bf16 on BOTH lanes —
+ * which under-declared candle. This pins the split so a merge back to one row fails here.
+ */
+test("SenseNova dense heads are declared per lane: candle f32, mlx bf16", async () => {
+  const { ledger } = await realInputs();
+  const senseNova = ledger.exceptions.filter((row) => row.model.startsWith("sensenova_u1"));
+  const byLane = (model, component, lane) =>
+    senseNova.filter(
+      (row) =>
+        row.model === model &&
+        row.component === component &&
+        Array.isArray(row.backends) &&
+        row.backends.length === 1 &&
+        row.backends[0] === lane,
+    );
+  const ids = [...new Set(senseNova.map((row) => row.model))];
+  assert.equal(ids.length, 6, "all six SenseNova-U1 entries must be declared");
+  for (const id of ids) {
+    for (const component of ["transformerHead", "visionTower"]) {
+      const candle = byLane(id, component, "candle");
+      const mlx = byLane(id, component, "mlx");
+      assert.equal(candle.length, 1, `${id}/${component}: exactly one candle-lane row`);
+      assert.equal(mlx.length, 1, `${id}/${component}: exactly one mlx-lane row`);
+      assert.equal(
+        candle[0].residentTier,
+        "f32",
+        `${id}/${component}: candle-gen-sensenova widens this to f32 (get_f32, sc-14249), so declaring ` +
+          `bf16 under-declares the candle lane`,
+      );
+      assert.equal(
+        mlx[0].residentTier,
+        "bf16",
+        `${id}/${component}: mlx-gen holds this at the bf16 store dtype, so declaring f32 over-declares ` +
+          `the mlx lane`,
+      );
+    }
+  }
+});
+
+test("a declared backends lane must be one the catalog entry actually has", async () => {
+  const { ledger, manifest } = await realInputs();
+  const byId = new Map(manifest.models.map((entry) => [entry.id, entry]));
+  for (const row of ledger.exceptions) {
+    if (!Array.isArray(row.backends)) continue;
+    for (const lane of row.backends) {
+      assert.ok(
+        byId.get(row.model)?.[lane],
+        `${row.model}/${row.component} claims the "${lane}" lane, but the catalog entry has no ` +
+          `\`${lane}\` block — a per-backend claim about a lane the entry does not host describes nothing`,
+      );
+    }
+  }
+});
+
+test("no two rows claim the same (model, component, lane)", async () => {
+  const { ledger } = await realInputs();
+  const claimed = new Map();
+  for (const row of ledger.exceptions) {
+    const key = `${row.model}::${row.component}`;
+    const lanes = Array.isArray(row.backends) ? row.backends : ["mlx", "candle"];
+    const already = claimed.get(key) ?? new Set();
+    for (const lane of lanes) {
+      assert.ok(
+        !already.has(lane),
+        `${key} is declared twice for the "${lane}" lane — the uniqueness key is (model, component, lane)`,
+      );
+      already.add(lane);
+    }
+    claimed.set(key, already);
+  }
+});
+
+test("the generated audit publishes the backends column", async () => {
+  const markdown = await readFile(path.join(ROOT, "docs/generated/tier-integrity.md"), "utf8");
+  assert.match(
+    markdown,
+    /\| model \| component \| backends \|/,
+    "the only per-backend claims in the ledger must be visible in the published audit; the first " +
+      "revision's renderMarkdown dropped the column, making an mlx-only row shape-indistinguishable " +
+      "from a both-lanes one",
+  );
+  assert.match(markdown, /\| candle \|/, "a candle-only row must render its lane");
+  assert.match(markdown, /\| mlx \|/, "an mlx-only row must render its lane");
 });
 
 test("the retracted branchPackSaveGb key is gone from the catalog", async () => {

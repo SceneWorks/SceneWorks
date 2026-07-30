@@ -505,12 +505,15 @@ in the manifest: *"every component is packed at the chosen tier."*
 `mempolicy`'s own doc describes it as *"pack the control branch **to the base quant tier** at load
 time."* That is the invariant, implemented as an escalation step. Reading it against the numbers:
 
-- q8 is measured **near-lossless** and saves **8.4 GiB**. There is no quality argument for defaulting
-  to bf16 when the user asked for q8.
+- q8 is measured **near-lossless** and saves **~3.3 GB** on the weight side (the branch's projections
+  are 3.30 B params ≈ 6.6 GB bf16 against ~3.3 GB packed at q8). There is no quality argument for
+  defaulting to bf16 when the user asked for q8. (This bullet first said 8.4 GiB, from the
+  `branchPackSaveGb` figure the SC-15799 review retracted — 8.4 exceeds the entire branch, so it was
+  never a weight-side quantity. See the retraction note further down.)
 - It is load-time-only — *"it cannot be re-packed mid-render"* — which is what an install-time
   artifact choice looks like, not a runtime lever.
 - It sits **last** in the escalation order, so a constrained machine engages residency and decode
-  tiling first to claw back single-digit GiB while 8.4 GiB of unrequested precision sits in the
+  tiling first to claw back single-digit GiB while ~3.3 GB of unrequested precision sits in the
   branch the entire time.
 
 Qwen already publishes its ControlNet per tier (q4 0.99 GB / q8 1.87 GB / bf16 3.51 GB), so the

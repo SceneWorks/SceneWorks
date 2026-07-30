@@ -1197,7 +1197,9 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
     // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
     // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
-    // need a `mlx.denseTextEncoderTier` declaration. The SANA descriptor now advertises supported_quants
+    // NOT need a `mlx.denseTextEncoderTier` declaration (only `flux2_klein_9b` / `_kv` carry that flag;
+    // the "NOT" was dropped by a rename, which left this block contradicting its own UNLIKE clause two
+    // lines above). The SANA descriptor now advertises supported_quants
     // Q4/Q8 (mlx-gen #654), so `supports_quant()` is true and they flow through the same
     // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
     "sana_1600m",

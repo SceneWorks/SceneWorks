@@ -69,6 +69,43 @@
 //! Neither loss is a *reject* today: with `candle.control.measured == false` the ladder's floor is
 //! [`KreaControlFit::BestEffort`], not [`KreaControlFit::TooBig`].
 //!
+//! ### The remaining cost of reading the rows verbatim: PREMATURE RUNG ENGAGEMENT (speed only)
+//!
+//! Reading a superseded upper bound verbatim ([`predicted_control_peak_gb`]) is the safe direction, but
+//! it is not free, and the price was previously disclosed only as "over-predicting adapts a card early".
+//! Here is how early. There are **zero reject bands**: `krea_2_turbo` is the only catalog entry with a
+//! `candle.control` block, and while its evidence is superseded [`control_evidence_is_current`] makes
+//! [`KreaControlFit::TooBig`] unreachable, so no job is refused that would have run. The entire residual
+//! cost is engaging a *speed*-costing rung on a card that did not need it.
+//!
+//! Every band below is `[true, predicted)` free-VRAM in GB, and re-derives from the catalog:
+//! `predicted = bf16Branch*Row + HEADROOM_GB(2.0)`, `true = row − 3.3 + 2.0` (the bf16 → q8 weight-side
+//! branch delta: 6.6 GB bf16 → ~3.3 GB packed), then minus `decodeTileSaveGb` (q4: 6.7) and
+//! `chunkAttnSaveGb` (2.43) as each rung engages.
+//!
+//! * **q4 base** (rows 36.2 resident / 32.5 sequential)
+//!   - `[34.9, 38.2)` — staged instead of resident: Qwen3-VL is encoded and dropped, so a re-encode is
+//!     paid on a card where the resident fast path fit.
+//!   - `[31.2, 34.5)` — VAE-decode tiling engaged unnecessarily: **+26% decode** (0.56 → 0.71 s).
+//!   - `[24.5, 27.8)` — attention chunking engaged unnecessarily: **~+6% render**.
+//!   - `[22.07, 25.37)` — [`KreaControlFit::BestEffort`]-with-warn where a clean [`KreaControlFit::Fits`]
+//!     was true. The KNOBS are identical, so this costs nothing at render time; only the verdict differs.
+//!     (This overlaps the chunking band in `[24.5, 25.37)`, where the gate both over-engages and
+//!     mis-labels.)
+//! * **q8 base** (rows 45.4 resident / 39.6 sequential; **no tiling rung** — `decodeTileSaveGb` is keyed
+//!   to q4 only, where the decode spike is the render peak)
+//!   - `[44.1, 47.4)` — staged instead of resident.
+//!   - `[39.17, 41.6)` — attention chunking engaged unnecessarily (~+6% render).
+//!   - `[35.87, 39.17)` — `BestEffort` instead of `Fits`, same knobs.
+//! * **bf16 base** — **zero over-prediction, zero band.** The branch is already bf16 at this tier
+//!   ([`control_branch_tier_for_key`] is the identity here), so the row describes the shipping
+//!   configuration exactly and every rung engages exactly when it is needed.
+//!
+//! **None of this is user-visible today.** The bands cost render time, not correctness or capability, and
+//! the `BestEffort` warning is a `tracing` event only — it reaches no API response, job record or UI
+//! surface. sc-16013's re-measure collapses every band to zero by replacing the `bf16Branch*` rows with
+//! rows captured against the branch that actually ships.
+//!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
 
