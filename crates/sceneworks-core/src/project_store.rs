@@ -47,6 +47,15 @@ use crate::training_store::{
     TrainingDatasetCaptionSidecarsInput, TrainingDatasetCreateInput, TrainingDatasetMutationResult,
     TrainingDatasetStore, TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
+use crate::workflow_share::WorkflowShare;
+
+/// Key inside an imported asset's top-level `extra` that carries the sanitized workflow envelope
+/// the uploaded file had embedded (sc-15949).
+///
+/// Named `imported` on purpose. It says where the recipe came from — a file someone else's install
+/// wrote — and keeps it distinguishable from this asset's own `recipe`, which for an upload is the
+/// `mode: "upload"` stub and stays that way. sc-15952 reads this to offer "Use this recipe".
+pub const IMPORTED_WORKFLOW_KEY: &str = "importedWorkflow";
 
 pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/images",
@@ -858,6 +867,10 @@ impl ProjectStore {
             &content_type,
             &upload.filename,
             &upload_dir,
+            // A dataset item is not an asset: it has no `extra` slot, and no reader offers its
+            // recipe back. So this lane opts out of the sc-15949 chunk scan rather than walking the
+            // metadata of every image in a bulk dataset import for an answer nobody reads.
+            WorkflowScan::Skip,
         )?;
         let content_type = normalized.content_type.clone();
 
@@ -1878,6 +1891,9 @@ impl ProjectStore {
             &content_type,
             &upload.filename,
             &upload_dir,
+            // sc-15949: a shared image may carry the sanitized recipe that made it. Read it from
+            // the bytes the user handed us, before any transcode can strip it.
+            WorkflowScan::Read,
         )?;
         let content_type = normalized.content_type.clone();
 
@@ -1958,9 +1974,43 @@ impl ProjectStore {
         });
         // Provenance (e.g. the Image Editor edit chain) rides the same top-level
         // `extra` slot generated assets use, so the Library/lineage UI can read it.
-        if let Some(provenance) = &upload.provenance {
-            if let Some(object) = asset.as_object_mut() {
-                object.insert("extra".to_owned(), provenance.clone());
+        //
+        // sc-15949 shares that slot: an imported image that carried a workflow chunk records the
+        // parsed, sanitized envelope under `extra.importedWorkflow`. The RECORD stays honest — the
+        // stub recipe above is untouched and `recipe.mode` is still `"upload"`, because this image
+        // WAS uploaded and was not generated here. sc-15952 offers the envelope as "Use this
+        // recipe"; nothing here fabricates a `text_to_image` mode, a seed we did not run, or a
+        // generation set that never existed.
+        if let Some(object) = asset.as_object_mut() {
+            match &upload.provenance {
+                // A provenance that is not an object stays exactly what it is today: the whole
+                // `extra` value. Merging is not possible, and quietly reshaping a caller's explicit
+                // blob to make room for a field it did not ask for is the wrong trade.
+                Some(provenance) if !provenance.is_object() => {
+                    object.insert("extra".to_owned(), provenance.clone());
+                }
+                _ => {
+                    let mut extra = upload
+                        .provenance
+                        .as_ref()
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Inserted LAST, so `extra.importedWorkflow` is always the envelope this import
+                    // read and sanitized, and never free JSON a caller put under that key in
+                    // `provenance`.
+                    if let Some(workflow) = normalized
+                        .workflow
+                        .as_ref()
+                        .and_then(|share| serde_json::to_value(share).ok())
+                    {
+                        extra.insert(IMPORTED_WORKFLOW_KEY.to_owned(), workflow);
+                    }
+                    // Still nothing to record: leave the key absent, exactly as before.
+                    if !extra.is_empty() {
+                        object.insert("extra".to_owned(), Value::Object(extra));
+                    }
+                }
             }
         }
         let sidecar_path = media_path.with_extension("sceneworks.json");
@@ -4943,6 +4993,24 @@ struct NormalizedUpload {
     content_type: String,
     extension: String,
     transcoded_temp: Option<PathBuf>,
+    /// The sanitized workflow envelope the upload carried in a PNG text chunk, when a
+    /// [`WorkflowScan::Read`] caller asked and one was found (sc-15949).
+    ///
+    /// Read from the ORIGINAL upload bytes, so it survives a transcode that re-encodes them.
+    workflow: Option<WorkflowShare>,
+}
+
+/// Whether an upload's metadata is searched for an embedded workflow envelope (sc-15949).
+///
+/// A parameter rather than an unconditional scan, so the cost is paid only where the answer is
+/// used. `import_asset` records what it finds under `extra.importedWorkflow`; the training-dataset
+/// lane has no recipe slot and no reader for one, so it opts out and pays nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowScan {
+    /// Look for a `sceneworks:workflow` chunk, before any transcode.
+    Read,
+    /// Do not look.
+    Skip,
 }
 
 /// Normalize a valid-but-unsupported image upload (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
@@ -4950,17 +5018,23 @@ struct NormalizedUpload {
 /// it can read (sc-6143). The format is sniffed by content, never the extension, so a `.png` that is
 /// really AVIF is still handled. Already-supported formats (png/jpeg/webp) and non-image uploads
 /// pass through untouched — no temp file, no re-encode, no quality loss.
+///
+/// `scan` also makes this the one place an incoming image is searched for an embedded workflow
+/// (sc-15949), because this is the one place that knows what is about to happen to the bytes; see
+/// the comment at the scan itself for why the ordering is load-bearing in both directions.
 fn normalize_image_upload(
     source_path: &Path,
     content_type: &str,
     filename: &str,
     work_dir: &Path,
+    scan: WorkflowScan,
 ) -> ProjectStoreResult<NormalizedUpload> {
     let passthrough = || NormalizedUpload {
         source_path: source_path.to_path_buf(),
         content_type: content_type.to_owned(),
         extension: upload_extension(filename, content_type),
         transcoded_temp: None,
+        workflow: None,
     };
     if !content_type.starts_with("image/") {
         return Ok(passthrough());
@@ -4968,6 +5042,25 @@ fn normalize_image_upload(
     let Some(kind) = crate::media_convert::sniff_image_kind_at(source_path) else {
         // Unrecognized magic (e.g. SVG) — leave it as-is; we can't transcode what we can't sniff.
         return Ok(passthrough());
+    };
+    // sc-15949: the chunk scan goes HERE, and the position is the decision.
+    //
+    // BEFORE the natively-supported branch below, because that branch is a `return`: a PNG — the
+    // one format that carries our chunk — would otherwise never be looked at.
+    //
+    // BEFORE the transcode further down, because `sips`/`ffmpeg` re-encode from pixels and drop
+    // every ancillary chunk by definition. A scan afterwards could only ever report an absence, so
+    // a workflow found here is carried forward on `NormalizedUpload` even though the stored bytes
+    // end up re-encoded.
+    //
+    // And it scans CHUNKS, not pixels. `read_workflow_chunk_file` stops at the first IDAT, and when
+    // that finds nothing it walks the remaining framing with no output buffer, which `png` answers
+    // by consuming the IDAT payload instead of inflating it. So this function's whole point — a
+    // natively-decodable upload is stored byte-for-byte, with no decode anywhere on the path —
+    // still holds.
+    let workflow = match scan {
+        WorkflowScan::Read => read_upload_workflow(source_path),
+        WorkflowScan::Skip => None,
     };
     if kind.is_natively_supported() {
         // Already decodable: keep the bytes (no re-encode) but record the format we actually
@@ -4978,6 +5071,7 @@ fn normalize_image_upload(
             content_type: mime.to_owned(),
             extension: format!(".{extension}"),
             transcoded_temp: None,
+            workflow,
         });
     }
     let temp_png = work_dir.join(format!("upload-transcode-{}.png", random_hex(8)?));
@@ -4993,7 +5087,37 @@ fn normalize_image_upload(
         content_type: "image/png".to_owned(),
         extension: ".png".to_owned(),
         transcoded_temp: Some(temp_png),
+        workflow,
     })
+}
+
+/// Look for a SceneWorks workflow envelope in an upload's PNG metadata, degrading EVERY failure to
+/// "no workflow found" (sc-15949).
+///
+/// This file came from a stranger, and it is the epic's main attack surface. The guards are
+/// [`crate::workflow_png::read_workflow_chunk_file`]'s and are not re-implemented here: a bounded
+/// metadata budget, a 1 MiB cap on the decompressed text so a zip bomb costs a megabyte, a refusal
+/// of duplicate chunks and lying chunk lengths, and — the important one — a single parse path
+/// through the sc-15946 allow-list, so the envelope is reduced at value granularity on the way IN
+/// exactly as it was on the way out. Nothing here deserializes an `ImageJobRequest`, or anything
+/// else, from the file.
+///
+/// Every error becomes `None`, deliberately and with no exception. The user asked to import an
+/// image, and they get their image: a hostile or malformed chunk costs them the recipe field and
+/// nothing else. `NotPng` is not even unusual — it is what every JPEG and WebP upload returns — so
+/// the typed error is logged at debug rather than surfaced.
+fn read_upload_workflow(source_path: &Path) -> Option<WorkflowShare> {
+    match crate::workflow_png::read_workflow_chunk_file(source_path) {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::debug!(
+                path = %source_path.display(),
+                %error,
+                "upload carries no readable workflow chunk; importing it as a plain asset"
+            );
+            None
+        }
+    }
 }
 
 /// Move a (possibly transcoded) upload into place, cleaning up the transcode temp on a move failure
@@ -5658,13 +5782,14 @@ mod tests {
         connect_project_db, ensure_project_db_ready, fail_next_asset_index_db_mutation,
         fail_next_asset_sidecar_remove, find_timeline_file, guess_mime_from_filename,
         index_timeline, install_ensure_ready_before_lock_hook, is_safe_relative_path,
-        is_safe_upload_extension, normalize_asset_tags, read_json, read_registry_payload,
-        sniff_image_format, upload_extension, upscale_lineage_group, write_json,
-        AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput, CharacterLookInput,
-        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
+        read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
+        write_json, AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput,
+        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
+        WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY,
+        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY,
+        MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
+        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -9339,6 +9464,837 @@ mod tests {
             .expect("source still present");
         assert_eq!(source_after["lineage"]["sourceAssetId"], Value::Null);
         assert!(source_after.get("extra").is_none());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-15949: the embedded workflow on asset import
+    // -----------------------------------------------------------------------------------------
+    //
+    // The reader and its adversarial corpus are sc-15947's and live in `workflow_png`; nothing
+    // below re-tests them. What is under test here is the IMPORT boundary: that a found envelope
+    // lands in `extra.importedWorkflow` without the record pretending the image was generated
+    // here, that an absent chunk changes nothing, that a hostile one costs the user only that
+    // field, and that the scan walks chunks rather than pixels.
+
+    /// A small deterministic image. Nine by seven so the row stride is not a power of two.
+    fn workflow_rgb_fixture() -> image::RgbImage {
+        image::RgbImage::from_fn(9, 7, |x, y| {
+            image::Rgb([
+                u8::try_from(x * 20).expect("fits"),
+                u8::try_from(y * 30).expect("fits"),
+                u8::try_from((x + y) * 10).expect("fits"),
+            ])
+        })
+    }
+
+    /// A sanitized envelope, built through the real parser so the fixture is exactly what the
+    /// contract admits — not a hand-rolled struct that could carry something `parse` would refuse.
+    fn workflow_fixture(prompt: &str) -> crate::workflow_share::WorkflowShare {
+        crate::workflow_share::parse_workflow_share_json(
+            &json!({
+                "sceneworksWorkflow": "image",
+                "schemaVersion": 1,
+                "producer": {
+                    "name": "SceneWorks",
+                    "url": "https://github.com/SceneWorks/SceneWorks",
+                    "version": "0.8.1",
+                },
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "prompt": prompt,
+                "negativePrompt": "text, watermark",
+                "seed": 880_412,
+                "width": 9,
+                "height": 7,
+                "advanced": { "steps": 8, "sampler": "euler" },
+            })
+            .to_string(),
+        )
+        .expect("the fixture envelope parses")
+    }
+
+    /// A PNG as SceneWorks writes one, through the real sc-15947 writer: `Some` embeds the chunk,
+    /// `None` is the byte-identical opt-out.
+    fn sceneworks_png(share: Option<&crate::workflow_share::WorkflowShare>) -> Vec<u8> {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("generated.png");
+        crate::workflow_png::write_workflow_chunk(&workflow_rgb_fixture(), &path, share)
+            .expect("the fixture PNG writes");
+        std::fs::read(&path).expect("the fixture PNG reads back")
+    }
+
+    /// Byte offset one past IHDR: signature + (length + type + 13 bytes + CRC). Where our writer
+    /// puts the chunk, and where the hand-built fixtures below splice theirs.
+    const AFTER_IHDR: usize = 8 + 4 + 4 + 13 + 4;
+
+    /// Bitwise CRC-32, so a hand-framed chunk (or a patched IHDR/IDAT) is well formed rather than
+    /// "passing" because the decoder threw it out on a checksum.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFF_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = if crc & 1 == 1 { 0xEDB8_8320 } else { 0 };
+                crc = (crc >> 1) ^ mask;
+            }
+        }
+        !crc
+    }
+
+    /// A framed PNG chunk. `declared_len` overrides the length field so a chunk can lie about how
+    /// much data follows it.
+    fn framed_chunk(kind: &[u8; 4], data: &[u8], declared_len: Option<u32>) -> Vec<u8> {
+        let length = declared_len.unwrap_or_else(|| u32::try_from(data.len()).expect("fits u32"));
+        let mut checked = kind.to_vec();
+        checked.extend_from_slice(data);
+        let mut out = length.to_be_bytes().to_vec();
+        out.extend_from_slice(&checked);
+        out.extend_from_slice(&crc32(&checked).to_be_bytes());
+        out
+    }
+
+    /// The `iTXt` data layout: keyword NUL flag method language NUL translated NUL text.
+    fn itxt_data(keyword: &str, compressed: bool, text: &[u8]) -> Vec<u8> {
+        let mut data = keyword.as_bytes().to_vec();
+        data.push(0);
+        data.push(u8::from(compressed));
+        data.push(0);
+        data.push(0);
+        data.push(0);
+        data.extend_from_slice(text);
+        data
+    }
+
+    /// One `iTXt` chunk framed by `png` itself, under any keyword, compressed or not.
+    fn framed_itxt(keyword: &str, text: &str, compressed: bool) -> Vec<u8> {
+        use png::text_metadata::{EncodableTextChunk, ITXtChunk};
+
+        let mut chunk = ITXtChunk::new(keyword, text);
+        chunk.compressed = compressed;
+        let mut out = Vec::new();
+        chunk.encode(&mut out).expect("the chunk encodes");
+        out
+    }
+
+    fn splice_after_ihdr(png: &[u8], chunk: &[u8]) -> Vec<u8> {
+        let mut out = png[..AFTER_IHDR].to_vec();
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(&png[AFTER_IHDR..]);
+        out
+    }
+
+    /// Offset of a chunk header of type `kind`, found by walking the framing.
+    fn chunk_offset(png: &[u8], kind: &[u8; 4]) -> usize {
+        let mut cursor = 8;
+        loop {
+            assert!(
+                cursor + 8 <= png.len(),
+                "walked off the end looking for kind"
+            );
+            if &png[cursor + 4..cursor + 8] == kind.as_slice() {
+                return cursor;
+            }
+            let length = usize::try_from(u32::from_be_bytes(
+                png[cursor..cursor + 4].try_into().expect("a length field"),
+            ))
+            .expect("a chunk length fits usize");
+            cursor += 12 + length;
+        }
+    }
+
+    /// Replace the first IDAT's payload with bytes that are not a zlib stream, re-framing the CRC
+    /// so the file stays structurally perfect and ONLY the compressed pixel data is unreadable.
+    ///
+    /// The whole point of the no-decode assertion: a file no decoder can get pixels out of, which
+    /// the import must nonetheless read a recipe from and store verbatim.
+    fn break_the_pixel_stream(png: &[u8]) -> Vec<u8> {
+        let idat = chunk_offset(png, b"IDAT");
+        let length = usize::try_from(u32::from_be_bytes(
+            png[idat..idat + 4].try_into().expect("a length field"),
+        ))
+        .expect("fits usize");
+        // 0x00 0x00 fails zlib's header check (CMF/FLG must be divisible by 31), so inflate
+        // refuses immediately rather than allocating anything.
+        let garbage = vec![0_u8; length];
+        let mut out = png[..idat].to_vec();
+        out.extend_from_slice(&framed_chunk(b"IDAT", &garbage, None));
+        out.extend_from_slice(&png[idat + 12 + length..]);
+        out
+    }
+
+    /// Import `bytes` as `name` into `project_id`, staging them the way the API's multipart handler
+    /// does (a temp file the store consumes).
+    fn import_bytes(
+        store: &ProjectStore,
+        project_id: &str,
+        staging: &Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<Value, ProjectStoreError> {
+        let source = staging.join(format!(
+            "{}-{name}",
+            crate::store_util::random_hex(6).expect("hex")
+        ));
+        std::fs::write(&source, bytes).expect("staged upload writes");
+        store.import_asset(
+            project_id,
+            UploadAsset {
+                filename: name.to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+    }
+
+    /// The stub recipe `import_asset` synthesizes for an upload, as it must stay. sc-15949 records
+    /// a found envelope BESIDE this, never inside it.
+    fn assert_upload_stub_recipe(asset: &Value, filename: &str) {
+        assert_eq!(
+            asset["recipe"]["mode"],
+            json!("upload"),
+            "an uploaded image was uploaded, not generated here"
+        );
+        assert_eq!(asset["recipe"]["model"], json!("manual-import"));
+        assert_eq!(asset["recipe"]["adapter"], json!("api-upload"));
+        assert_eq!(asset["recipe"]["prompt"], json!(filename));
+        assert_eq!(asset["recipe"]["negativePrompt"], json!(""));
+        assert_eq!(asset["recipe"]["seed"], json!(0));
+        assert_eq!(asset["recipe"]["loras"], json!([]));
+        assert_eq!(asset["recipe"]["stylePreset"], json!("none"));
+        assert_eq!(asset["recipe"]["normalizedSettings"], json!({}));
+        assert_eq!(asset["origin"], json!("upload"));
+        // No generation set and no job: nothing here ran.
+        assert_eq!(asset["generationSetId"], Value::Null);
+        assert_eq!(asset["lineage"]["jobId"], Value::Null);
+    }
+
+    #[test]
+    fn import_asset_records_an_embedded_workflow_without_faking_a_generation() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Shared").expect("project creates");
+        let staging = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir");
+
+        let share = workflow_fixture("a lighthouse in heavy fog");
+        let bytes = sceneworks_png(Some(&share));
+        let asset = import_bytes(&store, &project.id, &staging, "shared.png", &bytes)
+            .expect("a SceneWorks PNG imports");
+
+        // The envelope is recorded, whole, exactly as the reader sanitized it.
+        assert_eq!(
+            asset["extra"][IMPORTED_WORKFLOW_KEY],
+            serde_json::to_value(&share).expect("the envelope serializes"),
+            "the parsed envelope must land in extra.importedWorkflow"
+        );
+        // …and the record stays honest. The envelope says `text_to_image`; the ASSET does not.
+        assert_eq!(
+            asset["extra"][IMPORTED_WORKFLOW_KEY]["mode"],
+            json!("text_to_image")
+        );
+        assert_upload_stub_recipe(&asset, "shared.png");
+        // Nothing was hoisted out of the envelope into the asset's own record: not the seed we
+        // never ran, not the model, not the prompt.
+        assert_ne!(asset["recipe"]["seed"], json!(880_412));
+        assert_ne!(asset["recipe"]["model"], json!("z_image_turbo"));
+        assert_ne!(
+            asset["recipe"]["prompt"],
+            json!("a lighthouse in heavy fog")
+        );
+        // The stored bytes are the user's file, untouched (sc-6143's passthrough).
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let stored = project_path.join(asset["file"]["path"].as_str().expect("path"));
+        assert_eq!(std::fs::read(&stored).expect("read stored"), bytes);
+
+        // `assets.asset_json` is `serde_json::to_string(asset)` over the whole sidecar, so the
+        // field rides the existing envelope blob with no schema migration. Proven through the
+        // index rather than asserted from the source: read the column back.
+        let asset_id = asset["id"].as_str().expect("id").to_owned();
+        let indexed: String = Connection::open(project_path.join("project.db"))
+            .expect("opens project.db")
+            .query_row(
+                "select asset_json from assets where id = ?1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .expect("the row is indexed");
+        let indexed: Value = serde_json::from_str(&indexed).expect("asset_json is JSON");
+        assert_eq!(
+            indexed["extra"][IMPORTED_WORKFLOW_KEY], asset["extra"][IMPORTED_WORKFLOW_KEY],
+            "asset_json must round-trip the new field"
+        );
+
+        // And it survives a full index rebuild from disk — the sidecar is the source of truth, so
+        // hydration must not be the thing that was carrying it.
+        store.reindex_project(&project.id).expect("reindex runs");
+        let after = store
+            .get_asset(&project.id, &asset_id)
+            .expect("the asset survives reindex");
+        assert_eq!(
+            after["extra"][IMPORTED_WORKFLOW_KEY], asset["extra"][IMPORTED_WORKFLOW_KEY],
+            "the imported workflow must survive an index rebuild"
+        );
+        assert_eq!(after["recipe"]["mode"], json!("upload"));
+    }
+
+    #[test]
+    fn import_asset_without_a_workflow_chunk_behaves_exactly_as_before() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Plain").expect("project creates");
+        let staging = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir");
+
+        // The opt-out write path: a real PNG with no chunk at all.
+        let plain = sceneworks_png(None);
+        let asset = import_bytes(&store, &project.id, &staging, "plain.png", &plain)
+            .expect("a plain PNG imports");
+        assert!(
+            asset.get("extra").is_none(),
+            "no chunk must mean no new fields at all, got {:?}",
+            asset.get("extra")
+        );
+        assert_upload_stub_recipe(&asset, "plain.png");
+
+        // And with provenance, `extra` is still the provenance blob and nothing else.
+        let provenance = json!({ "editor": "image_editor", "edits": [{ "op": "crop" }] });
+        let source = staging.join("edited.png");
+        std::fs::write(&source, &plain).expect("staged upload writes");
+        let edited = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "edited.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: Some(provenance.clone()),
+                },
+            )
+            .expect("imports");
+        assert_eq!(edited["extra"], provenance);
+        assert!(edited["extra"].get(IMPORTED_WORKFLOW_KEY).is_none());
+    }
+
+    #[test]
+    fn import_asset_merges_a_workflow_beside_the_editor_provenance() {
+        // The two writers of `extra` have to coexist: an Image Editor save of a shared image
+        // carries an edit chain AND a chunk. Neither may evict the other.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Both").expect("project creates");
+
+        let share = workflow_fixture("a lighthouse");
+        let source = temp_dir.path().join("both.png");
+        std::fs::write(&source, sceneworks_png(Some(&share))).expect("staged upload writes");
+        let provenance = json!({
+            "editor": "image_editor",
+            "edits": [{ "op": "crop" }],
+            // A caller-supplied value under OUR key must not win: the field is defined as what the
+            // import parsed and sanitized, so a client cannot inject a recipe through provenance.
+            IMPORTED_WORKFLOW_KEY: { "sceneworksWorkflow": "image", "prompt": "injected" },
+        });
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "both.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: Some(provenance),
+                },
+            )
+            .expect("imports");
+
+        assert_eq!(asset["extra"]["editor"], json!("image_editor"));
+        assert_eq!(asset["extra"]["edits"], json!([{ "op": "crop" }]));
+        assert_eq!(
+            asset["extra"][IMPORTED_WORKFLOW_KEY],
+            serde_json::to_value(&share).expect("serializes"),
+            "the import's own sanitized envelope must win over one supplied in provenance"
+        );
+    }
+
+    #[test]
+    fn a_hostile_or_malformed_chunk_still_imports_as_a_plain_asset() {
+        // The corpus is sc-15947's, reframed at this boundary: every one of these is a file a
+        // stranger could hand us, and every one must produce a successful plain import. A bad chunk
+        // costs the user the recipe field and NOTHING else — not the upload, not the bytes.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Hostile").expect("project creates");
+        let staging = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir");
+
+        let plain = sceneworks_png(None);
+        let good = sceneworks_png(Some(&workflow_fixture("a lighthouse")));
+        let envelope = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "a lighthouse",
+        })
+        .to_string();
+
+        let mut corpus: Vec<(String, Vec<u8>)> = vec![
+            // Two chunks under our keyword: which recipe made the image is ambiguous, so neither.
+            (
+                "duplicate chunks".to_owned(),
+                splice_after_ihdr(
+                    &good,
+                    &framed_itxt(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, &envelope, true),
+                ),
+            ),
+            // A zip bomb: 8 MiB of NUL in a chunk of a few hundred bytes.
+            (
+                "zip bomb".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_itxt(
+                        crate::workflow_png::WORKFLOW_CHUNK_KEYWORD,
+                        &"\0".repeat(8 * 1024 * 1024),
+                        true,
+                    ),
+                ),
+            ),
+            // Uncompressed text past the 1 MiB cap, so it is the text cap that has to catch it.
+            (
+                "text over the cap".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_itxt(
+                        crate::workflow_png::WORKFLOW_CHUNK_KEYWORD,
+                        &"A".repeat(crate::workflow_png::MAX_WORKFLOW_TEXT_BYTES + 1),
+                        false,
+                    ),
+                ),
+            ),
+            // A chunk header claiming the largest length a PNG may declare, in a small file.
+            (
+                "lying chunk length".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_chunk(
+                        b"iTXt",
+                        &itxt_data(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, false, b"{}"),
+                        Some(0x7FFF_FFFF),
+                    ),
+                ),
+            ),
+            // Text that decodes fine and is not an envelope.
+            (
+                "not JSON".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_itxt(
+                        crate::workflow_png::WORKFLOW_CHUNK_KEYWORD,
+                        "steps: 28, sampler: euler",
+                        true,
+                    ),
+                ),
+            ),
+            (
+                "JSON of the wrong shape".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_itxt(
+                        crate::workflow_png::WORKFLOW_CHUNK_KEYWORD,
+                        "[1, 2, 3]",
+                        true,
+                    ),
+                ),
+            ),
+            (
+                "a schema version from the future".to_owned(),
+                splice_after_ihdr(
+                    &plain,
+                    &framed_itxt(
+                        crate::workflow_png::WORKFLOW_CHUNK_KEYWORD,
+                        &envelope.replace("\"schemaVersion\":1", "\"schemaVersion\":9999"),
+                        true,
+                    ),
+                ),
+            ),
+            // A ComfyUI / Automatic1111 export: text chunks, none of them ours.
+            (
+                "a foreign writer's chunks".to_owned(),
+                splice_after_ihdr(&plain, &framed_itxt("parameters", "steps: 28", true)),
+            ),
+        ];
+        // A file whose pixels are gone but whose chunk is intact, and the same with no chunk.
+        corpus.push((
+            "broken pixels, good chunk".to_owned(),
+            break_the_pixel_stream(&good),
+        ));
+        corpus.push((
+            "broken pixels, no chunk".to_owned(),
+            break_the_pixel_stream(&plain),
+        ));
+        // Truncations of a file that DOES carry a workflow. A partial chunk must never yield a
+        // partial envelope; a cut past the chunk legitimately still reads it.
+        for cut in (AFTER_IHDR..good.len()).step_by(11) {
+            corpus.push((format!("truncated at {cut}"), good[..cut].to_vec()));
+        }
+        // And a bit flipped in each region of the same file.
+        for offset in (8..good.len()).step_by(23) {
+            let mut corrupt = good.clone();
+            corrupt[offset] ^= 0xFF;
+            corpus.push((format!("bit flipped at {offset}"), corrupt));
+        }
+
+        let intact = serde_json::to_value(workflow_fixture("a lighthouse")).expect("serializes");
+        for (label, bytes) in corpus {
+            let asset = import_bytes(&store, &project.id, &staging, "hostile.png", &bytes)
+                .unwrap_or_else(|error| panic!("{label}: the upload must still succeed ({error})"));
+            // The user got their image, byte for byte.
+            let project_path = store.find_project_path(&project.id).expect("project path");
+            let stored = project_path.join(asset["file"]["path"].as_str().expect("path"));
+            assert_eq!(
+                std::fs::read(&stored).expect("read stored"),
+                bytes,
+                "{label}: the stored bytes must be the file the user handed us"
+            );
+            assert_upload_stub_recipe(&asset, "hostile.png");
+            // And either no workflow at all, or the intact one — never a partial or malformed
+            // envelope pieced out of a damaged file.
+            match asset.get("extra") {
+                None => {}
+                Some(extra) => {
+                    let recorded = &extra[IMPORTED_WORKFLOW_KEY];
+                    assert_eq!(
+                        recorded, &intact,
+                        "{label}: a damaged file produced a workflow that is not the intact one"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn path_shaped_values_in_a_hostile_chunk_do_not_survive_the_import() {
+        // The trust boundary, at this boundary. Every classified string in the envelope below is a
+        // location: absolute POSIX and Windows paths, a UNC share, `file://`, `~/`, and a traversal
+        // dressed up as a Hugging Face repo id. None of them may reach `extra.importedWorkflow` —
+        // sc-15952 turns `loras[].repo` into a cache path and renders the rest.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Paths").expect("project creates");
+
+        let hostile = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": {
+                "name": "/opt/sceneworks/bin",
+                "url": "file:///D:/Users/Michael/secret.html",
+                "version": "0.8.1-dirty-Michael",
+            },
+            "mode": "/etc/passwd",
+            "model": "C:\\Users\\Michael\\models\\z_image",
+            "prompt": "a lighthouse",
+            "styleId": "file%3A%2F%2FD%3A%2Fsecret",
+            "stylePreset": "\\\\fileserver\\share\\styles\\noir",
+            "fitMode": "~/models/fit",
+            "upscale": { "enabled": true, "engine": "/usr/local/bin/realesrgan" },
+            "loras": [
+                { "name": "D:\\loras\\private.safetensors", "repo": "../../../../etc/passwd" },
+                { "name": "Ghibli watercolor", "repo": "acme/ghibli", "weight": 0.8 },
+            ],
+            "inputs": [
+                { "kind": "source/../../etc", "count": 1 },
+                { "kind": "source", "count": 1, "controlMode": "/dev/null" },
+            ],
+            "advanced": {
+                "sampler": "C:\\Windows\\System32\\euler",
+                "steps": 8,
+            },
+        })
+        .to_string();
+        let bytes = splice_after_ihdr(
+            &sceneworks_png(None),
+            &framed_itxt(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, &hostile, true),
+        );
+        let source = temp_dir.path().join("hostile.png");
+        std::fs::write(&source, &bytes).expect("staged upload writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "hostile.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("a hostile chunk must not fail the upload");
+        let recorded = &asset["extra"][IMPORTED_WORKFLOW_KEY];
+
+        // Reduced to empty rather than echoed: these are the fields sc-15952 shows as provenance.
+        assert_eq!(recorded["producer"]["name"], json!(""));
+        assert_eq!(recorded["producer"]["url"], json!(""));
+        assert_eq!(recorded["producer"]["version"], json!(""));
+        assert_eq!(recorded["mode"], json!(""));
+        assert_eq!(recorded["model"], json!(""));
+        // Optional labels are dropped outright, key and all.
+        for dropped in ["styleId", "stylePreset", "fitMode"] {
+            assert!(
+                recorded.get(dropped).is_none(),
+                "{dropped} was path-shaped and must not have survived: {:?}",
+                recorded.get(dropped)
+            );
+        }
+        assert_eq!(recorded["upscale"]["enabled"], json!(true));
+        assert!(recorded["upscale"].get("engine").is_none());
+        // The traversal LoRA is dropped entirely (name and repo both refused, nothing left to
+        // say); the legitimate one beside it survives, so this is not passing by dropping all.
+        assert_eq!(
+            recorded["loras"],
+            json!([{ "name": "Ghibli watercolor", "repo": "acme/ghibli", "weight": 0.8 }])
+        );
+        // A kind outside the closed vocabulary is dropped; a path in `controlMode` is stripped.
+        assert_eq!(
+            recorded["inputs"],
+            json!([{ "kind": "source", "count": 1 }])
+        );
+        // The `advanced` allow-list is shape-checked as well as key-checked.
+        assert_eq!(recorded["advanced"], json!({ "steps": 8 }));
+
+        // Nothing path-shaped anywhere in the recorded envelope — asserted over the whole tree
+        // rather than field by field, so a field added later cannot quietly open a hole. The
+        // authored PROSE fields are exempt by the sc-15946 contract (a prompt that names a
+        // directory is the user's own text and mangling it would be the worse failure), so the
+        // sweep skips them by KEY, exactly as the sanitizer does.
+        fn assert_no_locations(value: &Value, path: &str) {
+            match value {
+                Value::String(text) => assert!(
+                    !crate::workflow_share::is_path_shaped(text),
+                    "{path} survived as a location: {text:?}"
+                ),
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        assert_no_locations(item, &format!("{path}[{index}]"));
+                    }
+                }
+                Value::Object(map) => {
+                    for (key, item) in map {
+                        if matches!(
+                            key.as_str(),
+                            "prompt"
+                                | "negativePrompt"
+                                | "stylePrompt"
+                                | "intent"
+                                | "runtimePrompt"
+                                | "systemMessage"
+                        ) {
+                            continue;
+                        }
+                        assert_no_locations(item, &format!("{path}.{key}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_no_locations(recorded, "importedWorkflow");
+        // The record itself is still an upload.
+        assert_upload_stub_recipe(&asset, "hostile.png");
+    }
+
+    #[test]
+    fn the_workflow_scan_reads_chunks_and_never_the_pixels() {
+        // The regression this guards is a quiet one: making the scan work by decoding the image.
+        // `normalize_image_upload` exists to store a natively-supported upload WITHOUT a decode,
+        // and a chunk walk that inflated the pixel stream would turn every upload into one.
+        //
+        // Proven by contradiction on a file whose pixels CANNOT be decoded: framing and CRCs are
+        // perfect, the workflow chunk is intact, and the IDAT payload is not a zlib stream at all.
+        // Any decode on this path would fail. The import succeeds and reads the recipe, so nothing
+        // decoded.
+        //
+        // Measured alongside it, on `soft_render_rgb`-shaped PNGs in release, so the throughput
+        // claim is a number rather than a hope:
+        //
+        // |          | scan, chunk found | scan, no chunk | plain file read | FULL DECODE |
+        // |----------|-------------------|----------------|-----------------|-------------|
+        // | 1024²    |             81 µs |         144 µs |           36 µs |     4.31 ms |
+        // | 2048²    |             47 µs |         292 µs |          104 µs |    13.36 ms |
+        //
+        // A SceneWorks image answers in pass one and stops at the first IDAT, so its cost barely
+        // moves with the pixel count. The miss — every foreign PNG — walks the tail framing and CRCs
+        // the bytes on their way past: ~3x a plain read of the same file, and 2-3% of what decoding
+        // it would cost. That is the difference between a metadata walk and the decode-everything
+        // path this test exists to keep us out of.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("NoDecode").expect("project creates");
+        let staging = temp_dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging dir");
+
+        let share = workflow_fixture("a lighthouse");
+        let undecodable = break_the_pixel_stream(&sceneworks_png(Some(&share)));
+
+        // First: the file really is undecodable, so the assertion below has teeth.
+        let probe = staging.join("probe.png");
+        std::fs::write(&probe, &undecodable).expect("writes");
+        assert!(
+            image::open(&probe).is_err(),
+            "the fixture must be undecodable or it proves nothing about decoding"
+        );
+
+        // The scan alone finds the workflow in it.
+        assert_eq!(
+            crate::workflow_png::read_workflow_chunk_file(&probe),
+            Ok(Some(share.clone())),
+            "the chunk walk must not need the pixels"
+        );
+
+        // And so does the import, which stores the bytes verbatim.
+        let asset = import_bytes(
+            &store,
+            &project.id,
+            &staging,
+            "undecodable.png",
+            &undecodable,
+        )
+        .expect("an undecodable-but-well-framed PNG still imports");
+        assert_eq!(
+            asset["extra"][IMPORTED_WORKFLOW_KEY],
+            serde_json::to_value(&share).expect("serializes")
+        );
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let stored = project_path.join(asset["file"]["path"].as_str().expect("path"));
+        assert_eq!(std::fs::read(&stored).expect("read stored"), undecodable);
+        // Dimensions stay unread, as they are today: nothing opened the image to fill them in.
+        assert_eq!(asset["file"]["width"], Value::Null);
+        assert_eq!(asset["file"]["height"], Value::Null);
+    }
+
+    #[test]
+    fn the_scan_precedes_both_the_passthrough_and_the_transcode() {
+        // The ordering AC, pinned where it is visible. A transcode re-encodes from pixels and drops
+        // every ancillary chunk (the test below proves that on real bytes), so a scan placed after
+        // it could only ever report an absence — and a scan placed after the natively-supported
+        // `return` would never run for a PNG at all. Both are one moved line away, and neither is
+        // observable end to end today: the sc-15947 reader is PNG-only, so no format that TAKES the
+        // transcode branch can carry our chunk in the first place. Source structure is where the
+        // guarantee lives, so that is what this asserts — the same technique
+        // `the_reader_has_exactly_one_parse_path` uses in `tests/workflow_png.rs`.
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("project_store.rs"),
+        )
+        .expect("reads this module");
+        let body = source
+            .split("fn normalize_image_upload(")
+            .nth(1)
+            .expect("the function is here")
+            .split("\nfn ")
+            .next()
+            .expect("the function ends");
+        let code: String = body
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        let scan = code
+            .find("read_upload_workflow(source_path)")
+            .expect("normalize_image_upload no longer scans the ORIGINAL upload for a workflow");
+        let passthrough = code
+            .find("kind.is_natively_supported()")
+            .expect("the natively-supported branch moved");
+        let transcode = code
+            .find("transcode_to_png(")
+            .expect("the transcode call moved");
+        assert!(
+            scan < passthrough,
+            "the chunk scan must run BEFORE the natively-supported passthrough returns, or a PNG \
+             — the only format that carries our chunk — is never looked at"
+        );
+        assert!(
+            scan < transcode,
+            "the chunk scan must run BEFORE the transcode, which re-encodes from pixels and drops \
+             every ancillary chunk"
+        );
+    }
+
+    #[test]
+    fn a_transcode_destroys_the_chunk_so_only_a_pre_transcode_scan_can_find_it() {
+        // The premise the ordering rests on, measured on real bytes with the real transcoder rather
+        // than asserted from the AVIF/HEIC docs. Skipped where no transcoder is installed (CI
+        // Linux/Windows images do not all carry ffmpeg); macOS always has `sips`.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let share = workflow_fixture("a lighthouse");
+        let embedded = temp_dir.path().join("embedded.png");
+        std::fs::write(&embedded, sceneworks_png(Some(&share))).expect("writes");
+        assert_eq!(
+            crate::workflow_png::read_workflow_chunk_file(&embedded),
+            Ok(Some(share)),
+            "the pre-transcode file carries the workflow"
+        );
+
+        let transcoded = temp_dir.path().join("transcoded.png");
+        if let Err(error) = crate::media_convert::transcode_to_png(&embedded, &transcoded) {
+            println!(
+                "sc-15949: no image transcoder reachable on this host ({error}); skipping the \
+                 metadata-loss assertion"
+            );
+            return;
+        }
+        println!("sc-15949: the real transcoder ran; asserting the chunk did not survive it");
+        assert_eq!(
+            crate::workflow_png::read_workflow_chunk_file(&transcoded),
+            Ok(None),
+            "a transcode re-encodes from pixels, so the chunk cannot survive it — which is why the \
+             scan has to happen first"
+        );
+    }
+
+    #[test]
+    fn the_training_dataset_lane_opts_out_of_the_scan() {
+        // A dataset item has no `extra` and no reader for a recipe, so it must not pay for a
+        // metadata walk per image on a bulk import. Asserted on `normalize_image_upload` directly,
+        // since the opt-out is invisible in the dataset record by definition.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let source = temp_dir.path().join("embedded.png");
+        std::fs::write(
+            &source,
+            sceneworks_png(Some(&workflow_fixture("a lighthouse"))),
+        )
+        .expect("writes");
+
+        let read = normalize_image_upload(
+            &source,
+            "image/png",
+            "embedded.png",
+            temp_dir.path(),
+            WorkflowScan::Read,
+        )
+        .expect("normalizes");
+        assert!(read.workflow.is_some(), "the reading lane finds the chunk");
+
+        let skipped = normalize_image_upload(
+            &source,
+            "image/png",
+            "embedded.png",
+            temp_dir.path(),
+            WorkflowScan::Skip,
+        )
+        .expect("normalizes");
+        assert!(
+            skipped.workflow.is_none(),
+            "Skip must not scan, even when the file does carry a workflow"
+        );
+        // Both lanes agree on everything else — the scan is the only difference.
+        assert_eq!(read.content_type, skipped.content_type);
+        assert_eq!(read.extension, skipped.extension);
+        assert_eq!(read.source_path, skipped.source_path);
     }
 
     /// sc-13517: the saved-voice id→clip hop end-to-end, cheaply. A saved voice's stored
