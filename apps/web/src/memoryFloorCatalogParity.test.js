@@ -870,6 +870,59 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect([...reached].sort()).toEqual(["z_image_edit|macos"]);
   });
 
+  it("reads z_image_edit's four install-sets off the MANIFEST, and agrees with the picker", () => {
+    // The round-4 headline, driven entirely from `builtin.models.jsonc` — no transcribed expectation. The
+    // module's own estimator supplies the number, `tierFits`/`suggestTier` supply the cross-check, and the
+    // only literal is the ORDERING claim (that the label rises as heavier tiers join the set).
+    const model = manifestModels.find((entry) => entry.id === "z_image_edit");
+    expect(model, "z_image_edit must still be in the manifest").toBeTruthy();
+    // The precondition that made this the blocker: no blanket on the MLX lane to catch the partial ceiling.
+    expect(blanketFloorGb(model, "mlx")).toBeNull();
+
+    const options = { backend: "mlx", convRotEligible: true, nvfp4Eligible: true };
+    const labelFor = (installed) => {
+      const entry = { ...catalogEntry(model, "macos", installed), installState: "installed" };
+      return { entry, shown: shownGb(needsLabel(entry, options)) };
+    };
+    // Each tier's requirement, derived from the module's own estimator rather than written down.
+    const hostFor = (entry, tier) =>
+      hostGbForPeakGb(
+        variantFootprintBytes(entry.variants.find((v) => v.variant === tier)).bytes / BYTES_PER_GB,
+        "mlx",
+      );
+
+    const sets = [["q4"], ["q4", "q8"], ["q4", "bf16"], ["q4", "q8", "bf16"]];
+    const shownBySet = sets.map((installed) => {
+      const { entry, shown } = labelFor(installed);
+      // The label equals the host the HEAVIEST installed tier demands — the whole set, not a subset.
+      const required = Math.max(...installed.map((tier) => hostFor(entry, tier)));
+      expect(shown, `[${installed.join(",")}] must quote its heaviest installed tier`).toBe(required);
+      // ...and the picker agrees at that host, in both directions.
+      for (const tier of installed) {
+        const variant = entry.variants.find((v) => v.variant === tier);
+        expect(tierFits(variant, shown), `[${installed.join(",")}] tierFits(${tier})`).toBe(true);
+      }
+      const heaviest = installed.reduce((a, b) => (hostFor(entry, a) >= hostFor(entry, b) ? a : b));
+      expect(tierFits(entry.variants.find((v) => v.variant === heaviest), shown - 1)).toBe(false);
+      // `suggestTier` must not have to degrade below what is installed.
+      expect(
+        hostFor(entry, suggestTier(entry, shown)),
+        `[${installed.join(",")}] suggestTier must not degrade below the installed set`,
+      ).toBeGreaterThanOrEqual(hostFor(entry, heaviest));
+      return shown;
+    });
+
+    // q4 alone is MEASURED, so it is unchanged by the fill; the rest rise strictly as heavier tiers join,
+    // and {q4,q8,bf16} lands on the same figure as {q4,bf16} because bf16 dominates.
+    const [q4, q4q8, q4bf16, all] = shownBySet;
+    expect(q4).toBeLessThan(q4q8);
+    expect(q4q8).toBeLessThan(q4bf16);
+    expect(all).toBe(q4bf16);
+    // The pre-fix answer was q4's figure for ALL FOUR. Pinned as an inequality so it cannot silently return.
+    expect(q4q8).not.toBe(q4);
+    expect(q4bf16).not.toBe(q4);
+  });
+
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
     // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 13; five
     // of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers pinned so the
