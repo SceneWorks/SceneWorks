@@ -528,8 +528,14 @@ pub(super) async fn generate_candle_krea_control_stream(
     // Tier integrity (sc-15799): the control branch's tier is derived from the resolved BASE tier, NOT
     // from the fit ladder, so it is decided here — before any budget is read — and holds on every path
     // below, `Unknown` included. A branch that only packs when VRAM is tight is precisely the defect this
-    // removes: it left 8.4 GB of precision a q8 render never requested resident on every roomy card.
+    // removes: it left ~3.3 GB of precision a q8 render never requested resident on every roomy card
+    // (the branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8).
     let branch_tier = crate::krea_control_fit::control_branch_tier_for_key(tier);
+    // Is the `candle.control` block's evidence current, or superseded by the branch repack? `false`
+    // today (sc-16013 owes the re-measure), which stops the ladder turning a stale UPPER BOUND into a
+    // hard reject — see `krea_control_fit::fit_ladder`.
+    let evidence_is_current =
+        crate::krea_control_fit::control_evidence_is_current(&request.model_manifest_entry);
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -547,17 +553,23 @@ pub(super) async fn generate_candle_krea_control_stream(
                 budget,
                 decode_tile_save,
                 chunk_attn_save,
+                evidence_is_current,
             )
         },
-        // Two rejects differing only in their reported free number are the same non-outcome — a reclaim
-        // that still won't fit must NOT trigger a pointless evict. Any other change is a strict
-        // improvement, worth evicting the warm txt2img cache for.
+        // Two non-fits differing only in their reported free number are the same non-outcome — a reclaim
+        // that still won't fit must NOT trigger a pointless evict. `BestEffort` is the superseded-evidence
+        // form of the same non-outcome (it always carries every measured rung, so only its numbers can
+        // move), so it is paired here too. Any other change is a strict improvement, worth evicting the
+        // warm txt2img cache for.
         |raw, reclaimed| {
             !matches!(
                 (raw, reclaimed),
                 (
                     crate::krea_control_fit::KreaControlFit::TooBig { .. },
                     crate::krea_control_fit::KreaControlFit::TooBig { .. }
+                ) | (
+                    crate::krea_control_fit::KreaControlFit::BestEffort { .. },
+                    crate::krea_control_fit::KreaControlFit::BestEffort { .. }
                 )
             ) && raw != reclaimed
         },
@@ -595,7 +607,33 @@ pub(super) async fn generate_candle_krea_control_stream(
             );
             (offload_policy, tile, chunk)
         }
-        // Won't fit even at the deepest rung ⇒ reject before the reactive CUDA OOM.
+        // Won't fit at the deepest rung, but the peaks are SUPERSEDED upper bounds (sc-15799): rejecting
+        // could refuse a job that runs, so engage every speed-only rung and let the reactive CUDA-OOM
+        // backstop decide. sc-16013's re-measure restores the hard reject.
+        crate::krea_control_fit::KreaControlFit::BestEffort {
+            offload_policy,
+            tile_vae_decode: tile,
+            chunk_attention: chunk,
+            needed_gb,
+            available_gb,
+        } => {
+            tracing::warn!(
+                model = %request.model,
+                tier,
+                offload_policy = ?offload_policy,
+                tile_vae_decode = tile,
+                chunk_attention = chunk,
+                branch_tier = ?branch_tier,
+                needed_gb,
+                available_gb,
+                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM at every rung, but the \
+                 control-lane peaks are superseded by the sc-15799 branch repack (sc-16013 owes the \
+                 re-measure). Admitting best-effort with every speed-only rung engaged rather than \
+                 rejecting a job a stale upper bound cannot rule out."
+            );
+            (offload_policy, tile, chunk)
+        }
+        // Won't fit even at the deepest rung, on CURRENT evidence ⇒ reject before the reactive CUDA OOM.
         crate::krea_control_fit::KreaControlFit::TooBig {
             needed_gb,
             available_gb,

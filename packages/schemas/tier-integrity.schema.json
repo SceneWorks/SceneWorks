@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sceneworks.dev/schemas/tier-integrity.schema.json",
+  "title": "Tier-integrity exception ledger",
+  "description": "Schema for config/tier-integrity.jsonc (sc-15799) — the declared above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity; scripts/check-tier-integrity.mjs enforces this schema's INTENT plus the cross-checks a JSON Schema cannot express (that the model is a real catalog entry, that residentTier is strictly above every tier in appliesToTiers, that appliesToTiers names only hosted tiers, and the per-(model, component) unmeasured ratchet). This file exists so the ledger has the same schema coverage as its siblings memory-calibration and memory-matrix; the checker, not this schema, is the gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["exceptions"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Relative path to this schema."
+    },
+    "exceptions": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Every above-tier residency in the catalog that meets the declaration threshold stated in the ledger's own header. An EMPTY array is not the same as a conformant catalog — it means the audit was lost, and the checker rejects it.",
+      "items": { "$ref": "#/$defs/exception" }
+    }
+  },
+  "$defs": {
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "component", "residentTier", "appliesToTiers", "cause", "reason", "evidence"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Catalog entry id in config/manifests/builtin.models.jsonc. The checker rejects an id that has no entry."
+        },
+        "component": {
+          "type": "string",
+          "enum": ["textEncoder", "vae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
+          "description": "Which component is resident above tier. One row per (model, component): the checker rejects a duplicate pair, and the unmeasured ratchet is keyed on exactly this pair."
+        },
+        "residentTier": {
+          "type": "string",
+          "enum": ["f32", "bf16", "q8"],
+          "description": "The precision the component is ACTUALLY resident at. Must be strictly above every tier in appliesToTiers on the fidelity ladder f32 > bf16 > q8 > q4 = nvfp4 (int8-convrot ranks with q8) — an 'exception' at or below the selected tier is a mistake, not an exception, and the checker says so."
+        },
+        "appliesToTiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["q4", "q8", "bf16", "nvfp4", "int8-convrot"] },
+          "description": "The SELECTED tiers on which this component is above tier. Never includes a tier at or below residentTier, and — where the entry publishes per-tier download variants — never a tier the entry does not host, since an exception for a tier nobody can select is dead."
+        },
+        "backends": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "enum": ["mlx", "candle"] },
+          "description": "Which lanes carry this residency. OMIT for both. Declare it when the lanes genuinely differ — the mage transformerHead floor, for example, exists only in mlx-gen-mage; candle-gen-mage has no floor symbol at all, so a q4 render there really is uniformly q4."
+        },
+        "cause": {
+          "type": "string",
+          "enum": ["packing-exception", "backend-capability", "structural"],
+          "description": "packing-exception: a deliberate quality DECISION — the component is not packed because packing it measurably hurts. backend-capability: the backend cannot serve the on-disk format and upcasts; packing cannot fix it, so it needs a compute path or a re-host. structural: there is nothing quantizable at all (all-conv stacks, leaves the loader folds away). The distinction is load-bearing, not cosmetic: a `structural` row is written out of what a measurement story could ever fix, so labelling a choice `structural` hides it."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 20,
+          "description": "One sentence, in the terms the provider itself uses."
+        },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["measured", "unmeasured"],
+          "description": "measured: costGb (or costBytes) is a real in-tree number. unmeasured: no isolated component cost exists in the tree yet. UNMEASURED IS RATIONED — legal only for the (model, component) pairs enumerated in scripts/check-tier-integrity.mjs's GRANDFATHERED_UNMEASURED, whose size is pinned by GRANDFATHERED_UNMEASURED_COUNT so any change is a reviewed two-place edit. That list lives in the checker, not here, so editing this file cannot widen the amnesty."
+        },
+        "costGb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The isolated cost of holding this component above tier, in GB. Required (and positive) when state is measured — an exception whose cost nobody knows is undeclared in the only way that matters."
+        },
+        "costBytes": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Alternative to costGb when the in-tree number is a byte count."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "file:line (or file plus a quoted phrase) where the FACT is recorded in-tree — and the number too, when measured. Required on every row, measured or not: an undeclared cost is tolerable while it is owed, an uncited fact is not."
+        },
+        "owedBy": {
+          "type": "string",
+          "description": "The Shortcut story that owes the measurement. Required when state is unmeasured."
+        },
+        "note": {
+          "type": "string",
+          "description": "Anything a future reader needs that the one-sentence reason cannot hold: why a number was NOT borrowed from a nearby total, what a re-cause changed and why, which sibling finding would let the row move to another cause."
+        }
+      }
+    }
+  }
+}

@@ -19,8 +19,14 @@
  *     download variants — only tiers that are actually hosted.
  *  2. Every exception carries EVIDENCE: `measured` needs a number and a source; `unmeasured` needs a
  *     source for the fact and a story that owes the measurement.
- *  3. The RATCHET. `unmeasured` is legal only for the entries grandfathered below. A NEW model cannot
- *     ship an above-tier component without a measured cost, and the grandfather list can only shrink.
+ *  3. The RATCHET, keyed per **(model, component)**. `unmeasured` is legal only for the exact pairs
+ *     grandfathered below. A NEW model cannot ship an above-tier component without a measured cost, and
+ *     neither can an already-amnestied model add an unmeasured row for a component it does not already
+ *     declare. Keying on the model alone left ~155 free slots: any of the 31 amnestied ids could add an
+ *     unmeasured row for any component it had not yet used, and two ids held amnesty they never used at
+ *     all. The set's SIZE is asserted against a committed constant, so any growth is a visible two-place
+ *     edit, and a grandfathered key with no matching ledger row is an ERROR — so a promotion to
+ *     `measured` (or a deleted row) must delete its amnesty line rather than leaving a live slot behind.
  *     This is what makes AC "a check prevents a new model shipping a component above its tier without a
  *     declared exception" have teeth without pretending the existing debt was measured.
  *  4. `mlx.denseTextEncoderTier` — the one above-tier mechanism the RUNTIME reads — must be declared in
@@ -76,48 +82,87 @@ const COMPONENTS = new Set([
 const CAUSES = new Set(["packing-exception", "backend-capability", "structural"]);
 
 /**
- * Entries GRANDFATHERED with an `unmeasured` cost by sc-15799 — the audit found the FACT of an
- * above-tier component in-tree but no isolated cost for it, and estimating one from a per-tier total
+ * `model::component` pairs GRANDFATHERED with an `unmeasured` cost by sc-15799 — the audit found the FACT
+ * of an above-tier component in-tree but no isolated cost for it, and estimating one from a per-tier total
  * would be inventing evidence.
  *
- * This list lives HERE and not in the ledger on purpose: editing the ledger must not be able to widen
- * the amnesty. It may only ever SHRINK — sc-16015 empties it, and each promotion to `measured` removes
- * a line. A model NOT on this list may not declare an unmeasured exception at all, which is the ratchet
- * that stops the debt growing while the existing debt stays visible instead of being papered over.
+ * This list lives HERE and not in the ledger on purpose: editing the ledger must not be able to widen the
+ * amnesty. It is keyed per (model, component), not per model: keying per model handed every amnestied id a
+ * free slot for every component it did not already declare, which is not a ratchet — `sdxl` +
+ * `textEncoder` sailed through with `evidence.source: "nowhere in particular"`.
+ *
+ * It SHRINKS as each row is promoted to `measured` (sc-16015 empties it). It may grow only for an entry
+ * the original audit MISSED — a pre-existing above-tier residency, never a new one — and only as a visible
+ * two-place edit, because [`GRANDFATHERED_UNMEASURED_COUNT`] pins the size. A pair NOT on this list may
+ * not declare an unmeasured exception at all.
  */
-const GRANDFATHERED_UNMEASURED = new Set([
-  "anima_aesthetic",
-  "anima_base",
-  "anima_turbo",
-  "boogu_image",
-  "boogu_image_edit",
-  "boogu_image_turbo",
-  "chroma1_base",
-  "chroma1_flash",
-  "chroma1_hd",
-  "flux2_dev",
-  "flux2_klein_9b",
-  "flux2_klein_9b_kv",
-  "ideogram_4",
-  "ideogram_4_turbo",
-  "illustrious_xl_v1",
-  "illustrious_xl_v2",
-  "kolors",
-  "krea_2_turbo",
-  "lens",
-  "lens_turbo",
-  "qwen_image",
-  "qwen_image_edit_2511",
-  "qwen_image_edit_2511_lightning",
-  "realvisxl",
-  "realvisxl_lightning",
-  "sana_1600m",
-  "sana_sprint_1600m",
-  "sd3_5_large",
-  "sd3_5_large_turbo",
-  "sd3_5_medium",
-  "sdxl",
+export const GRANDFATHERED_UNMEASURED = new Set([
+  "anima_aesthetic::textEncoder",
+  "anima_aesthetic::vae",
+  "anima_base::textEncoder",
+  "anima_base::vae",
+  "anima_turbo::textEncoder",
+  "anima_turbo::vae",
+  "boogu_image::vae",
+  "boogu_image_edit::vae",
+  "boogu_image_turbo::vae",
+  "chroma1_base::textEncoder",
+  "chroma1_base::vae",
+  "chroma1_flash::textEncoder",
+  "chroma1_flash::vae",
+  "chroma1_hd::textEncoder",
+  "chroma1_hd::vae",
+  "flux2_dev::vae",
+  "flux2_klein_9b::textEncoder",
+  "flux2_klein_9b::vae",
+  "flux2_klein_9b_kv::textEncoder",
+  "flux2_klein_9b_kv::vae",
+  "ideogram_4::vae",
+  "ideogram_4_turbo::vae",
+  "illustrious_xl_v1::vae",
+  "illustrious_xl_v2::vae",
+  "kolors::vae",
+  "krea_2_raw::vae",
+  "krea_2_turbo::vae",
+  "lens::textEncoder",
+  "lens::vae",
+  "lens_turbo::vae",
+  "qwen_image::textEncoder",
+  "qwen_image::vae",
+  "qwen_image_edit_2511_lightning::textEncoder",
+  "realvisxl::vae",
+  "realvisxl_lightning::vae",
+  "sana_1600m::vae",
+  "sana_sprint_1600m::vae",
+  "sd3_5_large::textEncoder",
+  "sd3_5_large::vae",
+  "sd3_5_large_turbo::textEncoder",
+  "sd3_5_large_turbo::vae",
+  "sd3_5_medium::textEncoder",
+  "sd3_5_medium::vae",
+  "sensenova_u1_8b::transformerHead",
+  "sensenova_u1_8b::visionTower",
+  "sensenova_u1_8b_fast::transformerHead",
+  "sensenova_u1_8b_fast::visionTower",
+  "sensenova_u1_8b_infographic_v2::transformerHead",
+  "sensenova_u1_8b_infographic_v2::visionTower",
+  "sensenova_u1_8b_infographic_v2_fast::transformerHead",
+  "sensenova_u1_8b_infographic_v2_fast::visionTower",
+  "sensenova_u1_8b_infographic_v3::transformerHead",
+  "sensenova_u1_8b_infographic_v3::visionTower",
+  "sensenova_u1_8b_infographic_v3_fast::transformerHead",
+  "sensenova_u1_8b_infographic_v3_fast::visionTower",
 ]);
+
+/**
+ * The COMMITTED size of [`GRANDFATHERED_UNMEASURED`]. Asserted, so adding an amnesty line is a two-place
+ * edit a reviewer cannot miss, and so the set cannot quietly grow to cover a row someone added. Nothing
+ * else pinned the list's size before, which made "it may only ever SHRINK" advisory prose.
+ *
+ * 43 at sc-15799 (the audit's own 42 unmeasured rows) + 13 the sc-15799 review found the audit had MISSED
+ * (`krea_2_raw::vae` and the twelve SenseNova-U1 rows) = 55. sc-16015 drives it to 0.
+ */
+export const GRANDFATHERED_UNMEASURED_COUNT = 55;
 
 /**
  * The lens-turbo backend-capability numbers, which exist in THREE places: this ledger, the
@@ -231,13 +276,14 @@ export function validate({ ledger, manifest, mlxFitGate }) {
       if (!evidence.owedBy) {
         errors.push(`${where}: an unmeasured exception must name the story that owes the measurement.`);
       }
-      if (!GRANDFATHERED_UNMEASURED.has(row.model)) {
+      if (!GRANDFATHERED_UNMEASURED.has(key)) {
         errors.push(
-          `${where}: UNMEASURED exceptions are only permitted for the entries grandfathered by ` +
-            `sc-15799. "${row.model}" is not one of them, so this component must ship a MEASURED ` +
-            `cost — a new model may not add above-tier residency on trust. (If this is a genuine ` +
-            `pre-existing entry the audit missed, that is a finding: measure it rather than widening ` +
-            `the amnesty list.)`,
+          `${where}: UNMEASURED exceptions are only permitted for the (model, component) PAIRS ` +
+            `grandfathered by sc-15799. "${key}" is not one of them, so this component must ship a ` +
+            `MEASURED cost — neither a new model nor an already-amnestied one may add above-tier ` +
+            `residency on trust for a component it does not already declare. (If this is a genuine ` +
+            `pre-existing residency the audit missed, that is a finding: measure it, or add the pair ` +
+            `AND bump GRANDFATHERED_UNMEASURED_COUNT so the growth is reviewed.)`,
         );
       }
     } else {
@@ -258,6 +304,31 @@ export function validate({ ledger, manifest, mlxFitGate }) {
       owedBy: evidence.owedBy ?? null,
       note: evidence.note ?? null,
     });
+  }
+
+  // (3b) The amnesty list must not outlive the debt. Every grandfathered pair needs a live UNMEASURED
+  // ledger row: once a row is promoted to `measured` (or deleted), its amnesty line is a free slot
+  // somebody could later fill without review, so removing it is part of the promotion.
+  const unmeasuredKeys = new Set(
+    exceptions
+      .filter((row) => (row.evidence ?? {}).state === "unmeasured")
+      .map((row) => `${row.model}::${row.component}`),
+  );
+  for (const grandfathered of [...GRANDFATHERED_UNMEASURED].sort()) {
+    if (!unmeasuredKeys.has(grandfathered)) {
+      errors.push(
+        `GRANDFATHERED_UNMEASURED still amnesties "${grandfathered}", but ${LEDGER} has no unmeasured ` +
+          `exception for it. A promotion to \`measured\` (or a deleted row) must delete its amnesty ` +
+          `line — otherwise the slot stays open for an unreviewed row. The list may only shrink.`,
+      );
+    }
+  }
+  if (GRANDFATHERED_UNMEASURED.size !== GRANDFATHERED_UNMEASURED_COUNT) {
+    errors.push(
+      `GRANDFATHERED_UNMEASURED has ${GRANDFATHERED_UNMEASURED.size} entries but ` +
+        `GRANDFATHERED_UNMEASURED_COUNT is ${GRANDFATHERED_UNMEASURED_COUNT}. The size is committed on ` +
+        `purpose: changing the amnesty must be a visible two-place edit, not a one-line addition.`,
+    );
   }
 
   // (4) The runtime-visible mechanism must be declared in BOTH places.
@@ -313,6 +384,21 @@ export function validate({ ledger, manifest, mlxFitGate }) {
     }
     if (!declared && Object.entries(map).some(([b, t]) => FIDELITY[t] > FIDELITY[b])) {
       errors.push(`${entry.id}: control branch sits above a base tier with no declared exception.`);
+    }
+    // COVERAGE. The loop above iterates DECLARED keys, so a hosted tier variant missing from the map is
+    // silently unchecked — the branch could sit above it with nothing noticing. Require the map to name
+    // every tier the entry actually hosts.
+    const hostedForBranch = hostedTiers(entry);
+    if (hostedForBranch) {
+      for (const tier of [...hostedForBranch].sort()) {
+        if (!(tier in map)) {
+          errors.push(
+            `${entry.id}: branchTierByBaseTier does not cover the hosted tier variant "${tier}". The ` +
+              `checker only inspects declared keys, so an omitted tier is an UNCHECKED branch tier. ` +
+              `Declare what the branch does on "${tier}" (int8-convrot follows to q8, like q8).`,
+          );
+        }
+      }
     }
   }
 
@@ -493,6 +579,42 @@ async function selfTest() {
     expect("ratchet", validate({ ...inputs, ledger }).errors, "not one of them");
   }
 
+  // 3b. The RATCHET, per component: an ALREADY-AMNESTIED model adding an unmeasured row for a component
+  //     it does not already declare. Keyed per model, this passed with `errors: 0` — `sdxl` held amnesty
+  //     it never used, and 31 ids x the components they had not declared left ~155 open slots.
+  {
+    const ledger = clone();
+    ledger.exceptions.push({
+      model: "sdxl",
+      component: "textEncoder",
+      residentTier: "bf16",
+      appliesToTiers: ["q4", "q8"],
+      cause: "packing-exception",
+      reason: "An amnestied entry quietly adding a component the audit never declared for it.",
+      evidence: { state: "unmeasured", source: "nowhere in particular", owedBy: "sc-99999" },
+    });
+    expect(
+      "per-component ratchet",
+      validate({ ...inputs, ledger }).errors,
+      'sdxl::textEncoder" is not one of them',
+    );
+  }
+
+  // 3c. An amnesty line that outlived its row: promoting a row to `measured` must delete its line, or the
+  //     slot stays open for an unreviewed addition.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) => item.model === "krea_2_raw" && item.component === "vae",
+    );
+    row.evidence = { state: "measured", costGb: 0.5, source: "somewhere real" };
+    expect(
+      "orphaned amnesty line",
+      validate({ ...inputs, ledger }).errors,
+      'still amnesties "krea_2_raw::vae"',
+    );
+  }
+
   // 4. A "measured" row with no number.
   {
     const ledger = clone();
@@ -507,6 +629,19 @@ async function selfTest() {
     const ledger = clone();
     ledger.exceptions[0] = { ...ledger.exceptions[0], residentTier: "q4", appliesToTiers: ["q8"] };
     expect("not actually above tier", validate({ ...inputs, ledger }).errors, "is NOT above");
+  }
+
+  // 5b. A hosted tier variant missing from branchTierByBaseTier — an UNCHECKED branch tier, because the
+  //     agreement loop above only walks declared keys.
+  {
+    const manifest = JSON.parse(JSON.stringify(inputs.manifest));
+    const victim = manifest.models.find((entry) => entry.id === "krea_2_turbo");
+    delete victim.candle.control.branchTierByBaseTier["int8-convrot"];
+    expect(
+      "branchTierByBaseTier coverage",
+      validate({ ...inputs, manifest }).errors,
+      'does not cover the hosted tier variant "int8-convrot"',
+    );
   }
 
   // 6. The lens-turbo anti-drift binding.
@@ -525,7 +660,8 @@ async function selfTest() {
     return;
   }
   console.log(
-    `check-tier-integrity self-test passed (6 mutations, ${baseline.rows.length} declared exceptions).`,
+    `check-tier-integrity self-test passed (9 mutations, ${baseline.rows.length} declared exceptions, ` +
+      `${GRANDFATHERED_UNMEASURED.size} grandfathered pairs).`,
   );
 }
 

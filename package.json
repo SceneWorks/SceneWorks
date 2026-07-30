@@ -8,7 +8,7 @@
     "dev": "docker compose up --build",
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
-    "check": "npm run check:memory-calibration && npm run check:memory-matrix && npm run check:tier-integrity && node scripts/check-scaffold.mjs && node scripts/check-runpod-publish-workflow.mjs && node scripts/check-runpod-template.mjs && node --test scripts/validate-runpod-proxy.test.mjs scripts/docker-smoke-relevance.test.mjs scripts/generate-memory-matrix.test.mjs scripts/split-memory-strategy-stories.test.mjs scripts/memory-calibration-harness.test.mjs scripts/platform-review-contracts.test.mjs scripts/lib/jsonc.test.mjs scripts/scan-inference-provenance.test.mjs",
+    "check": "npm run check:memory-calibration && npm run check:memory-matrix && npm run check:tier-integrity && node scripts/check-scaffold.mjs && node scripts/check-runpod-publish-workflow.mjs && node scripts/check-runpod-template.mjs && node --test scripts/check-tier-integrity.test.mjs scripts/validate-runpod-proxy.test.mjs scripts/docker-smoke-relevance.test.mjs scripts/generate-memory-matrix.test.mjs scripts/split-memory-strategy-stories.test.mjs scripts/memory-calibration-harness.test.mjs scripts/platform-review-contracts.test.mjs scripts/lib/jsonc.test.mjs scripts/scan-inference-provenance.test.mjs",
     "generate:memory-matrix": "node scripts/generate-memory-matrix.mjs",
     "check:memory-matrix": "node scripts/generate-memory-matrix.mjs --check",
     "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json",

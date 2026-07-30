@@ -47,16 +47,25 @@ Three things follow, and they are not negotiable individually:
    something to the tier the user already asked for is not a concession to a tight budget, so it must
    never sit in an escalation ladder. `gen_core::tier_integrity` is the executable rule;
    `gen_core::mempolicy` no longer has a `BranchQuant` lever.
-2. **Every above-tier residency is declared.** `config/tier-integrity.jsonc` is the complete ledger:
-   per entry, per component, the precision it is actually resident at, the selected tiers on which that
-   is above tier, why, and what it costs. `scripts/check-tier-integrity.mjs` validates it on the
-   `parity` lane and generates the audit table at
+2. **Every above-tier residency is declared.** `config/tier-integrity.jsonc` is the ledger: per entry,
+   per component, the precision it is actually resident at, the selected tiers on which that is above
+   tier, why, and what it costs. `scripts/check-tier-integrity.mjs` validates it in `npm run check`
+   (and with it the `parity` lane) and generates the audit table at
    [`docs/generated/tier-integrity.md`](generated/tier-integrity.md). A declaration is not optional
    paperwork — an exception the shared decision cannot see is the defect, not the residency itself.
+   The ledger is complete **against a stated threshold**, which its own header spells out (named
+   components at any size, in; per-channel norm/modulation vectors, out). It does not claim
+   completeness in the abstract: the first revision did, and a review then found three omissions whose
+   costs were already in the tree. If you find an above-tier component on the declare side of that
+   threshold with no row, that is an omission — file it.
 3. **An undeclared or unmeasured exception is a defect.** A declared one carries the measurement that
    justifies it. Where the catalog has above-tier residency whose isolated cost is not yet measured, the
-   row says so and names the story that owes it; the checker permits that **only** for the entries
-   grandfathered when the ledger was created, so a new model cannot add one.
+   row says so and names the story that owes it; the checker permits that **only** for the exact
+   `(model, component)` pairs grandfathered when the ledger was created, and pins the set's size against
+   a committed constant so any change is a two-place edit a reviewer has to see. Keying the amnesty per
+   *model* was not a ratchet: it handed every amnestied entry a free slot for every component it had not
+   yet declared. A grandfathered pair with no matching row is also an error, so promoting a row to
+   `measured` must delete its amnesty line rather than leave the slot open.
 
 The exceptions divide by *cause*, and the causes have different fixes. A **packing exception** is a
 deliberate quality decision (a precision-sensitive decoder, a control residual that drifts) and needs a
@@ -74,12 +83,42 @@ tier, and **q4 floors its branch at q8** — the one declared, measured exceptio
 residual measures "pose-locked; non-pose details drift" and the residual is the thing the user asked
 for. That floor is the rule working, not a hole in it.
 
+### What tier integrity gives up
+
+The rule costs something, and a rule whose cost is unstated is a rule nobody can weigh. Removing the
+Krea branch-quant rung removed two configurations that used to fit:
+
+- **A q4 base could pack its branch to q4** — *at* the selected tier, so tier integrity never forbade it.
+  It is refused on QUALITY grounds instead (the measured drift), which is the declared exception above and
+  is recorded with its cost in the ledger.
+- **A q8 base could pack its branch to q4** — one tier **below** the selection. Tier integrity permits
+  below-tier residency outright; only *above*-tier needs an exception. That rung went because it was a
+  *rung*, not because the invariant required it. On the shipped rows it admitted a q8 control job down to
+  **~28.97 GB** free where the tier-integral configuration needs **~30.77 GB**. That ~1.8 GB band is a
+  real capability traded away so that no render silently substitutes precision the user did not select.
+  (Both figures come from the retracted `candle.control.branchPackSaveGb`; on the corrected weight-side
+  accounting — the branch is 6.6 GB bf16, ~3.3 GB at q8, ~1.7 GB at q4 — a q4 branch buys ~1.6 GB, so the
+  true band is slightly narrower. SC-16013's re-measure pins it.)
+
+Neither is a *reject* today: while `candle.control.measured` is `false` the control fit ladder's floor is
+a best-effort admit, because a reject computed from a superseded upper bound can refuse a job that would
+actually run — and refusing a job that fits is the failure an admission gate is least allowed to have.
+
 **Repacking invalidates measurements.** A component's resident precision is an input to every peak
 measured against it, so changing it makes those peaks stale even though every provenance field still
 looks valid. Evidence captured before a repack must be renamed or fingerprint-bumped so it cannot read
 as green — SC-15799 renamed the Krea control-lane rows to `bf16Branch*` and set
 `candle.control.measured: false` for exactly this reason. **Tier integrity therefore precedes
 calibration**: calibrating first means paying for those measurements twice.
+
+**And renaming is not enough on its own — the reader has to honour the flag.** A superseded row may be
+read as an **upper bound** and nothing more. It may not be "corrected" into the shipping configuration by
+subtracting some other number, because a correction is a new measurement wearing a stale one's clothes;
+SC-15799's first revision subtracted `branchPackSaveGb` (8.4 GB, against a control branch that is 6.6 GB
+in total) and under-predicted a live CUDA admission path by ~5 GB one-directionally toward an OOM. It may
+not produce a hard reject, since an upper bound cannot rule a job out. And it may not be recorded as a
+reclaimable high-water, since over-stating a pool lets the next gate over-admit. `measured: false` is a
+field the code reads, not a note to a future human.
 
 ## Lifecycle and telemetry
 

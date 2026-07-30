@@ -3564,7 +3564,9 @@
         },
         {
           // q8 packed tier (sc-9642): the SAME `SceneWorks/ideogram-4-mlx` turnkey's `q8/` subdir (both
-          // DiTs + dense TE/VAE), installable on ALL platforms — candle packed-detects it exactly like q4
+          // DiTs + the T5 text encoder packed; the VAE dense — `candle-gen-ideogram/src/quant.rs` packs
+          // the TE, so an earlier "dense TE/VAE" here was wrong), installable on ALL platforms — candle
+          // packed-detects it exactly like q4
           // (sc-9412), so off-Mac gets the real q4/q8 A-B picker instead of q4-only. Higher fidelity than
           // q4 at ~2x the size / VRAM (see candle.minMemoryGb). The bundled `q8/turbo_lora.safetensors`
           // rides the glob but is inert for the base (non-turbo) model. Size excludes the ~0.85 GB LoRA,
@@ -4769,27 +4771,57 @@
         // on an RTX PRO 6000 (Blackwell sm_120).
         //
         // ── sc-15799 (TIER INTEGRITY): THIS WHOLE BLOCK IS SUPERSEDED EVIDENCE. ───────────────────────
-        // Every peak below was captured with a **bf16** control branch. The branch now packs to the tier
-        // the base tier implies (`branchTierByBaseTier`), so on q4 and q8 those rows describe a
-        // configuration that NO LONGER SHIPS. `measured` is therefore FALSE and no calibration record may
-        // read these as current evidence: the control lane owes a re-measure on CUDA hardware (sc-16013).
+        // Every peak below was captured with a **bf16** control branch — the branch's projections are
+        // 3.30 B params ≈ **6.6 GB** bf16 (candle-gen-krea/src/control.rs), against ~3.3 GB resident at q8
+        // and ~1.7 GB at q4. The branch now packs to the tier the base tier implies
+        // (`branchTierByBaseTier`), so on q4 and q8 those rows describe a configuration that NO LONGER
+        // SHIPS. `measured` is therefore FALSE and no calibration record may read these as current
+        // evidence: the control lane owes a re-measure on CUDA hardware (sc-16013).
         // The rows are RENAMED (`bf16Branch*`) rather than deleted because they remain a sound UPPER BOUND
-        // on the packed configuration — a lighter branch can only lower the peak — and the worker derives
-        // its admission estimate as `row − branchPackSaveGb[branch tier]`, which is exactly the arithmetic
-        // the shipped ladder already performed when its branch-quant rung engaged. That keeps a
-        // constrained card protected without letting a stale row masquerade as a measurement.
+        // on the packed configuration — a lighter branch can only lower the peak — and the worker reads
+        // them **VERBATIM** as that bound, applying NO correction. Over-predicting adapts a card early;
+        // under-predicting admits an OOM, so the bound is the only safe reading.
+        //
+        // RETRACTED (sc-15799 review): a `branchPackSaveGb` key here published "measured WEIGHT-side"
+        // reductions of q8 −8.4 / q4 −10.2 GB and the worker subtracted them from the rows above. Both
+        // exceed the ENTIRE 6.6 GB branch, so neither can be a weight-side quantity under any reading, and
+        // subtracting them under-predicted the true q4/q8 host by ~5 GB — one-directionally toward an OOM
+        // on a live CUDA admission path (q4 resident predicted 29.8 against a true ~34.9). The key is
+        // deleted and nothing corrects these rows. The real weight-side deltas are bf16→q8 = 3.3 GB and
+        // bf16→q4 = 4.9 GB; what candle-gen #483's 8.4/10.2 actually measured is unreconciled and
+        // sc-16013 owns re-establishing it.
         "control": {
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
           // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.
           //   q8 → q8   : the branch follows the selected tier exactly.
           //   q4 → q8   : the one DECLARED, MEASURED exception. Packing the branch to q4 measures
-          //               "pose-locked; non-pose details drift" (candle-gen #483, sc-11743), and the
-          //               control residual is the thing the user asked for, so it floors at q8. Costs
-          //               ~1.8 GB of the 10.2 GB a q4 branch would have saved. Declared with its evidence
-          //               in `config/tier-integrity.jsonc`.
+          //               "pose-locked; non-pose details drift" (candle-gen #483, sc-11743) — a QUALITY
+          //               finding, which is the whole basis of the exception — and the control residual is
+          //               the thing the user asked for, so it floors at q8. Costs ~1.6 GB (the branch is
+          //               ~3.3 GB at q8 against ~1.7 GB at q4). Declared with its evidence in
+          //               `config/tier-integrity.jsonc`. (An earlier revision said ~1.8 GB, derived from
+          //               the retracted 8.4/10.2 figures above.)
           //   bf16 → bf16: already at tier; nothing to pack.
-          "branchTierByBaseTier": { "q4": "q8", "q8": "q8", "bf16": "bf16" },
+          //
+          // WHAT THIS MAP GIVES UP, on the q8 tier, stated because nothing else in the tree does: the
+          // deleted rung could pack a q8 base's branch to q4 — one tier BELOW the selection, which tier
+          // integrity permits (only ABOVE-tier residency needs an exception). It went because it was a
+          // *rung*, not because the invariant required it. On the shipped rows that rung admitted a q8
+          // control job down to ~28.97 GB free (39.6 staged + 2.0 headroom − 2.43 chunking − 10.2
+          // branch-to-q4) where the tier-integral configuration needs ~30.77 GB; that ~1.8 GB band is a
+          // real capability given up so that no render silently substitutes precision the user did not
+          // select. Both figures come from the retracted branchPackSaveGb; on the corrected weight-side
+          // accounting a q4 branch buys ~1.6 GB, so the true band is slightly narrower. It is not a
+          // *reject* today — with `measured: false` the ladder's floor is a best-effort admit.
+          //
+          // COVERAGE: every tier this entry HOSTS must appear as a key here, and
+          // `scripts/check-tier-integrity.mjs` enforces that (the checker iterates declared keys, so an
+          // undeclared hosted tier would be silently unchecked). `int8-convrot` (sc-9300) is an int8
+          // regime, so its branch follows to q8 exactly like q8 does —
+          // `gen_core::tier_integrity::control_branch_tier` already returns Q8 for it via
+          // `quant_for_tier_key`, and declaring it makes that visible rather than implied.
+          "branchTierByBaseTier": { "q4": "q8", "q8": "q8", "bf16": "bf16", "int8-convrot": "q8" },
           // Trusted two-process rendered-device probe (sc-12176), 1024², **bf16 control branch**, no deeper
           // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
           // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
@@ -4818,15 +4850,10 @@
           // tier-keyed): the activation peak is bf16 regardless of the base weight tier, so the saving is
           // tier-independent — and for the same reason it is unaffected by the branch repack.
           "chunkAttnSaveGb": 2.43,
-          // The measured WEIGHT-side delta of packing the bf16 branch to q8/q4 (candle-gen #483, sc-11743;
-          // dense base holds the rest fixed to isolate the branch): q8 −8.4 (near-lossless), q4 −10.2
-          // (pose-locked; non-pose details drift). Formerly `branchQuantSaveGb`, read as a RUNG's budget.
-          // It is now the correction that turns the superseded `bf16Branch*` rows into the configuration
-          // that ships, plus the evidence behind the q4 → q8 floor above. Renamed so no stale reader can
-          // keep spending it as a lever.
-          "branchPackSaveGb": { "q8": 8.4, "q4": 10.2 },
           // FALSE since sc-15799: the peaks above were captured against a branch tier that no longer
-          // ships. Re-measure owed by sc-16013 (needs CUDA hardware).
+          // ships. Re-measure owed by sc-16013 (needs CUDA hardware). The worker READS this flag
+          // (`krea_control_fit::control_evidence_is_current`): while it is false the fit ladder will not
+          // turn these rows into a hard reject, and records no reclaimable high-water from them.
           "measured": false,
           "supersededBy": "sc-15799"
         }

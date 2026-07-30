@@ -7,10 +7,31 @@
 //     exception says otherwise.
 //
 // Choosing q8 or q4 *is* a memory decision. If a user picks q4 because bf16 does not fit, carrying any
-// component at bf16 defeats the choice they made. This file is the catalog's complete answer to "which
-// components sit above the selected tier, on which tiers, and at what cost" — the audit sc-15799
-// demanded. `scripts/check-tier-integrity.mjs` validates it, generates `docs/generated/tier-integrity.md`
-// from it, and fails the `parity` lane on drift.
+// component at bf16 defeats the choice they made. This file is the catalog's answer to "which components
+// sit above the selected tier, on which tiers, and at what cost" — the audit sc-15799 demanded.
+// `scripts/check-tier-integrity.mjs` validates it, generates `docs/generated/tier-integrity.md` from it,
+// and fails `npm run check` (and with it the parity lane) on drift.
+//
+// IS IT COMPLETE? It is complete AGAINST THE THRESHOLD BELOW, which is not the same thing as complete.
+// The first revision of this file claimed completeness outright; a review then found three omissions
+// whose costs were already sitting in the tree (5 mage `transformerHead` rows, `krea_2_raw`'s VAE, and
+// all twelve SenseNova-U1 rows). That is what an unstated threshold buys you, so here it is.
+//
+// THE THRESHOLD — what must be declared, and what must not.
+//   DECLARE: any component this ledger's vocabulary names (textEncoder / vae / visionTower /
+//     controlBranch / identityAdapters / transformerHead) that a provider holds above the selected tier,
+//     AT ANY SIZE. Size is deliberately not a filter: `mage_flow_base` / `transformerHead` is 0.009 GB
+//     and is declared, because the point of the row is that a "q4" render is partly q8 — not that it is
+//     big. A component is declarable if some packing path in the tree could in principle target it: a
+//     stack of `[out, in]` Linears, or a conv stack a provider packs elsewhere.
+//   DO NOT DECLARE: per-channel and per-token VECTORS — RMSNorm / LayerNorm / QK-norm scales, modulation
+//     and bias vectors, timestep and noise-scale embedders. No packer in the tree targets these at any
+//     tier for any model, so they are not above-tier CHOICES; declaring them would add a near-identical
+//     row to every entry in the catalog and drown the rows that record a decision.
+//   ALSO OUT OF SCOPE: activation transients and workspace (this is a residency ledger, not a peak
+//     ledger), and BELOW-tier residency, which the invariant permits outright — it is one-directional.
+// A reader who finds an above-tier component on the DECLARE side with no row here has found an omission,
+// not an exercise of judgment. File it.
 //
 // WHAT THE AUDIT FOUND, stated plainly: above-tier residency is NOT rare. On a q4 or q8 tier the great
 // majority of image entries keep a VAE, a text encoder, or both resident at bf16 or f32. The story that
@@ -61,9 +82,9 @@
       "reason": "Packing the pose-control branch to q4 measures \"pose-locked; non-pose details drift\" — the control residual is precision-sensitive (RMS-clamped at τ) and is the thing the user actually asked for, so a q4 base floors its branch at q8 instead of following the tier down.",
       "evidence": {
         "state": "measured",
-        "costGb": 1.8,
-        "source": "config/manifests/builtin.models.jsonc `candle.control.branchPackSaveGb` (q8 −8.4, q4 −10.2 GB; the floor forgoes the 1.8 GB difference)",
-        "note": "The q8 case is NOT an exception: on a q8 base the branch follows the tier exactly, which is why sc-15799 deleted the branch-quant lever outright rather than keeping its q8 rung."
+        "costGb": 1.6,
+        "source": "crates/media/candle-gen/candle-gen-krea/src/control.rs `ControlBranch::from_checkpoint_quantized` — \"the ~6.6 GB dense branch never lands in VRAM, and the resident footprint is ~1.7 GB at q4 / ~3.3 GB at q8\"; the q8 floor forgoes the 3.3 − 1.7 = 1.6 GB difference.",
+        "note": "The q8 case is NOT an exception: on a q8 base the branch follows the tier exactly, which is why sc-15799 deleted the branch-quant lever outright rather than keeping its q8 rung. RETRACTION (sc-15799 review): this row first cited `candle.control.branchPackSaveGb` (q8 −8.4 / q4 −10.2 GB) for a costGb of 1.8. Both figures exceed the ENTIRE 6.6 GB branch, so neither can be a weight-side quantity; the manifest key is deleted, the worker no longer applies it as a correction, and the cost above comes from the branch's own published shapes. sc-16013 owns re-establishing what candle-gen #483 actually measured. NOTE ALSO what the deleted lever gave up on the q8 tier: it could pack a q8 base's branch to q4, one tier BELOW the selection, which tier integrity permits — see the capability-loss note on `candle.control.branchTierByBaseTier` in the manifest and the \"What tier integrity gives up\" section of docs/memory-strategy-contract.md."
       }
     },
 
@@ -464,12 +485,27 @@
       "component": "vae",
       "residentTier": "f32",
       "appliesToTiers": ["q4", "q8"],
-      "cause": "structural",
-      "reason": "The Qwen-Image VAE (AutoencoderKLQwenImage) runs f32 and stays dense in every tier.",
+      "cause": "packing-exception",
+      "reason": "The Krea snapshot assembler copies `vae/` through unchanged at every tier, so the published AutoencoderKLQwenImage is never offered to the packer and stays dense f32.",
       "evidence": {
         "state": "unmeasured",
-        "source": "crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — \"the VAE stays dense\"; the f32 VAE is part of the measured RESIDENT_OVERHEAD_GIB floor in mlx-gen-krea/src/memory.rs",
-        "owedBy": "sc-16015"
+        "source": "crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — \"the VAE stays dense (the published `vae/` is f32)\"; crates/media/mlx-gen/mlx-gen-krea/src/convert.rs `assemble_quantized_snapshot` copies `vae/` with no `bits` branch",
+        "owedBy": "sc-16015",
+        "note": "RE-CAUSED by the sc-15799 review: \"the VAE stays dense\" supports a packing decision, not a structural impossibility. WHY f32 HERE AND bf16 ON `qwen_image`, for the SAME AutoencoderKLQwenImage: the dtype is the PUBLISHED artifact's, not the architecture's — the Krea turnkey hosts `vae/` in F32 and the loader keeps it, while the qwen_image snapshot hosts it bf16. Both rows are correct and the difference is a hosting fact, so sc-16015 should surface it as a 2x gap between two otherwise identical decoders. The isolated size is NOT borrowable from mlx-gen-krea/src/memory.rs: `RESIDENT_OVERHEAD_GIB = 5.5` bundles the VAE with the DiT's non-block params and the Metal allocator floor, and that file explicitly disowns \"the old ~0.4 GiB VAE-only guess\"."
+      }
+    },
+    {
+      "model": "krea_2_raw",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "Krea 2 Raw hosts q4/q8/bf16 and renders through the SAME mlx-gen-krea pipeline as Turbo, which copies `vae/` through unchanged at every tier — so the published f32 AutoencoderKLQwenImage is never offered to the packer here either.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-krea/src/model.rs — Raw \"shares `load_variant` + the whole KreaPipeline\"; crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — \"the VAE stays dense (the published `vae/` is f32)\"",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review: the audit declared krea_2_turbo/vae and missed its sibling, which hosts the same three tiers through the same loader. Amnestied as a pre-existing residency the audit MISSED, not as a new one — see GRANDFATHERED_UNMEASURED_COUNT in the checker, which makes that growth a reviewed two-place edit."
       }
     },
     {
@@ -725,12 +761,13 @@
       "component": "vae",
       "residentTier": "bf16",
       "appliesToTiers": ["q4", "q8"],
-      "cause": "structural",
-      "reason": "Anima's tiers pack ONLY the DiT; the Qwen-Image VAE is all-conv and stays dense bf16 in every tier.",
+      "cause": "packing-exception",
+      "reason": "Anima's tiers pack ONLY the DiT, so the VAE is never offered to the packer — the same policy choice that keeps this entry's text encoder dense.",
       "evidence": {
         "state": "unmeasured",
         "source": "crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"",
-        "owedBy": "sc-16015"
+        "owedBy": "sc-16015",
+        "note": "RE-CAUSED by the sc-15799 review. It was `structural` on a citation that states a packing POLICY — and the SAME citation backs this entry's textEncoder row as `packing-exception`, so the two could not both be right. Mislabelling a choice as structural writes it out of what sc-16015 could ever fix. The Qwen-Image VAE may ALSO be structurally unquantizable (see `qwen_image` / `vae`, which cites the all-conv finding directly); if that inheritance is established for the Anima fork, this row can move back to `structural` citing THAT finding rather than this one."
       }
     },
     {
@@ -738,12 +775,13 @@
       "component": "vae",
       "residentTier": "bf16",
       "appliesToTiers": ["q4", "q8"],
-      "cause": "structural",
-      "reason": "Same Anima policy: DiT-only pack, all-conv VAE dense.",
+      "cause": "packing-exception",
+      "reason": "Same Anima policy as the base entry: the tiers pack ONLY the DiT, so the VAE is never offered to the packer.",
       "evidence": {
         "state": "unmeasured",
-        "source": "crates/media/candle-gen/candle-gen-anima/src/transformer.rs",
-        "owedBy": "sc-16015"
+        "source": "crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"",
+        "owedBy": "sc-16015",
+        "note": "RE-CAUSED by the sc-15799 review, for the same reason as `anima_base` / `vae`."
       }
     },
     {
@@ -751,12 +789,13 @@
       "component": "vae",
       "residentTier": "bf16",
       "appliesToTiers": ["q4", "q8"],
-      "cause": "structural",
-      "reason": "Same Anima policy: DiT-only pack, all-conv VAE dense.",
+      "cause": "packing-exception",
+      "reason": "Same Anima policy as the base entry: the tiers pack ONLY the DiT, so the VAE is never offered to the packer.",
       "evidence": {
         "state": "unmeasured",
-        "source": "crates/media/candle-gen/candle-gen-anima/src/transformer.rs",
-        "owedBy": "sc-16015"
+        "source": "crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"",
+        "owedBy": "sc-16015",
+        "note": "RE-CAUSED by the sc-15799 review, for the same reason as `anima_base` / `vae`."
       }
     },
 
@@ -786,12 +825,89 @@
       "component": "transformerHead",
       "residentTier": "q8",
       "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
       "cause": "packing-exception",
-      "reason": "An 8-bit floor on the DiT's `norm_out.linear` (the final modulation projection), which q4 cannot serve without visible degradation.",
+      "reason": "An 8-bit floor on the DiT's `norm_out.linear` (the final modulation projection), which q4 cannot serve without visible degradation — a uniformly-Q4 head is what made the Q4 tier render a repeating tiled texture (sc-15071).",
       "evidence": {
         "state": "measured",
         "costGb": 0.009,
-        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8`; the manifest's per-tier DiT footprints record q4 2.317 → 2.326 GB."
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\". The manifest's per-tier DiT footprints record q4 2.317 → 2.326 GB.",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      }
+    },
+    {
+      "model": "mage_flow",
+      "component": "transformerHead",
+      "residentTier": "q8",
+      "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
+      "cause": "packing-exception",
+      "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry: it routes through the same MageTransformer, and `floor_bits` takes no model argument. Declared per entry because the DiT artifact is per entry, unlike the shared text encoder.",
+      "evidence": {
+        "state": "measured",
+        "costGb": 0.009,
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      }
+    },
+    {
+      "model": "mage_flow_turbo",
+      "component": "transformerHead",
+      "residentTier": "q8",
+      "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
+      "cause": "packing-exception",
+      "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry — the distilled DiT is packed by the same seam.",
+      "evidence": {
+        "state": "measured",
+        "costGb": 0.009,
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      }
+    },
+    {
+      "model": "mage_flow_edit_base",
+      "component": "transformerHead",
+      "residentTier": "q8",
+      "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
+      "cause": "packing-exception",
+      "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry — the edit DiT is packed by the same seam.",
+      "evidence": {
+        "state": "measured",
+        "costGb": 0.009,
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      }
+    },
+    {
+      "model": "mage_flow_edit",
+      "component": "transformerHead",
+      "residentTier": "q8",
+      "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
+      "cause": "packing-exception",
+      "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry.",
+      "evidence": {
+        "state": "measured",
+        "costGb": 0.009,
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      }
+    },
+    {
+      "model": "mage_flow_edit_turbo",
+      "component": "transformerHead",
+      "residentTier": "q8",
+      "appliesToTiers": ["q4"],
+      "backends": ["mlx"],
+      "cause": "packing-exception",
+      "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry.",
+      "evidence": {
+        "state": "measured",
+        "costGb": 0.009,
+        "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+        "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
       }
     },
     {
@@ -857,6 +973,179 @@
         "state": "measured",
         "costGb": 1.9,
         "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `LM_LAYER_MIN_BITS = 8`"
+      }
+    },
+
+    // ── SenseNova-U1: a unified model whose dense heads the first audit missed ────────────────────────
+    // All six entries host q4/q8/bf16, and BOTH lanes state that the token embedding, `lm_head`, the
+    // flow-matching head and the vision embedders stay dense in every tier. There is no separate VAE or
+    // text encoder to declare on this family, which is exactly how it fell through the first pass.
+    {
+      "model": "sensenova_u1_8b",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the base entry) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the base entry).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_fast",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the distilled sibling) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_fast",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the distilled sibling).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v2",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the infographic-v2 fine-tune) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v2",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the infographic-v2 fine-tune).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v2_fast",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the distilled infographic-v2 fine-tune) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v2_fast",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the distilled infographic-v2 fine-tune).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v3",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the infographic-v3 fine-tune) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v3",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the infographic-v3 fine-tune).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v3_fast",
+      "component": "transformerHead",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The Qwen3 backbone is packed but the token embedding, `lm_head` and the flow-matching `fm_head` stay dense bf16 in every tier (the distilled infographic-v3 fine-tune) — the tier author's split, which the packer follows rather than overrides.",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/candle-gen/candle-gen-sensenova/src/quant.rs — \"Everything else stays dense bf16 in every tier: the token embedding, `lm_head`, the RMSNorm vectors, the FM head, the timestep/noise-scale embedders and the vision embedders\"; crates/media/mlx-gen/mlx-gen-sensenova/src/convert.rs — \"a 2-D dense target (`embed_tokens` / `lm_head` / `fm_head`) is never packed\".",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
+      }
+    },
+    {
+      "model": "sensenova_u1_8b_infographic_v3_fast",
+      "component": "visionTower",
+      "residentTier": "bf16",
+      "appliesToTiers": ["q4", "q8"],
+      "cause": "packing-exception",
+      "reason": "The two Conv vision embedders (the understanding-path patch-embed and the generation-path embedder) stay dense bf16 in every tier (the distilled infographic-v3 fine-tune).",
+      "evidence": {
+        "state": "unmeasured",
+        "source": "crates/media/mlx-gen/mlx-gen-sensenova/src/quant.rs — \"Everything else stays dense in every tier: ... the two Conv vision embedders ...\"; the candle sibling states the same for \"the vision embedders\" at candle-gen-sensenova/src/quant.rs.",
+        "owedBy": "sc-16015",
+        "note": "ADDED by the sc-15799 review, which found all six SenseNova-U1 entries undeclared. ADJUDICATION: U1 is a unified MoT model with \"no separate VAE or text encoder\", so the ledger's diffusion vocabulary does not map cleanly — but that is a naming problem, not a reason to omit. The dense matmul targets ARE declarable under this file's threshold (they are `[out, in]` Linears a packer could take, and the packer deliberately skips them), so they are declared: `transformerHead` for `embed_tokens` / `lm_head` / `fm_head`, `visionTower` for the two Conv vision embedders. The dense RMSNorms, QK-norms and timestep/noise-scale embedders are NOT declared — they are per-channel vectors, which the threshold excludes for every model. UNMEASURED because no isolated figure exists: the tree records only whole-model numbers (~70.5 GB peak on candle, ~11 GB packed-q4 on MLX) and the packed set (\"588 triples, the ~16.2 B parameters\"), and deriving a component split from vocab_size x hidden_size would be inventing evidence. Amnestied as a pre-existing residency the audit MISSED."
       }
     },
 
