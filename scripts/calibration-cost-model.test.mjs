@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   COLLAPSING_AXES,
   DEFAULT_PARAMETERS,
+  NA_SELECTION_RULE,
+  OVERLAY_LOAD_CONTRACT,
   PRODUCIBILITY_GATES,
   cellCensus,
   collapseToRuns,
+  fitSensitivity,
   fitVersusExhaustive,
   kreaFitPrecedent,
   naSensitivity,
   producibility,
+  rankUncertainties,
 } from "./calibration-cost-model.mjs";
 
 const RUNGS = [
@@ -344,10 +349,11 @@ test("mutation: reordering the overlay gate after the adapter gate changes the a
 });
 
 /**
- * The overlay axis: records do NOT collapse, model loads DO. Both halves asserted, because the
- * honest answer to "does the 3,925 evaporate?" is "on one axis only".
+ * The overlay axis. Records do NOT collapse. The overlay-amortised LOAD count is still computed,
+ * because SC-16072 needs the price tag — but it prices a capability the shipped load contract does
+ * not offer, and the verdict must say so rather than calling it "collapsible".
  */
-test("overlay multiplies records but not model loads", () => {
+test("overlay multiplies records; the amortised load count is a price tag, not an available collapse", () => {
   const withoutOverlays = collapseToRuns(syntheticCells({ overlays: ["none"] }), DEFAULT_PARAMETERS);
   const withOverlays = collapseToRuns(
     syntheticCells({ overlays: ["none", "lora", "identity"] }),
@@ -368,7 +374,475 @@ test("overlay multiplies records but not model loads", () => {
   assert.equal(withoutOverlays.overlayLoadCollapseFactor, 1);
 
   const overlayAxis = COLLAPSING_AXES.find((axis) => axis.axis === "overlay");
-  assert.equal(overlayAxis.verdict, "not collapsed for records; collapsible for model loads");
+  assert.equal(
+    overlayAxis.verdict,
+    "NOT collapsed for records; NOT collapsible for model loads in the shipped contract",
+  );
+});
+
+/**
+ * MAJOR 2, pinned. The load-axis collapse was previously asserted ("DOES collapse", "mostly yes",
+ * "legitimate for a LoRA a warm generator can swap") against the evidence in this repository. The
+ * decisive argument is not "the feature is missing" but "the feature would perturb the measurement":
+ * a resident adapter inflates the `none` baseline this campaign exists to measure. If any of these
+ * four legs is dropped from the artifact, the old comfortable reading becomes available again.
+ */
+test("the overlay load-axis collapse is recorded as unavailable in the shipped load contract", () => {
+  assert.equal(OVERLAY_LOAD_CONTRACT.verdict, "unavailable in the shipped load contract");
+
+  // Adapters are fixed at construction, and changing them forces a cold reload by design.
+  assert.match(OVERLAY_LOAD_CONTRACT.adaptersAreLoadTime, /resolve_adapters/);
+  assert.match(OVERLAY_LOAD_CONTRACT.adaptersAreLoadTime, /LoadSpec::adapters/);
+
+  // The negative claim that makes the collapse impossible rather than merely unimplemented.
+  assert.match(OVERLAY_LOAD_CONTRACT.noRuntimeSwapApi, /no detach \/ unload/);
+
+  // Adapters void the measured ladder — the origin of this matrix's 6 Structurally N/A cells.
+  assert.match(OVERLAY_LOAD_CONTRACT.adaptersDisableARung, /Structurally N\/A/);
+
+  // THE DECISIVE LEG. Without this the collapse looks like a missing feature rather than a
+  // measurement error, which is exactly the misreading that shipped.
+  assert.match(OVERLAY_LOAD_CONTRACT.baselinePerturbation, /DECISIVE/);
+  assert.match(OVERLAY_LOAD_CONTRACT.baselinePerturbation, /resident/);
+  assert.match(OVERLAY_LOAD_CONTRACT.baselinePerturbation, /inflated by the adapter's own bytes/);
+
+  // The column is retained, so the artifact must say why it is retained.
+  assert.match(OVERLAY_LOAD_CONTRACT.whyTheColumnIsStillReported, /NOT an achievable/);
+
+  // And the axis prose must not reintroduce the collapse claim.
+  const overlayAxis = COLLAPSING_AXES.find((axis) => axis.axis === "overlay");
+  assert.doesNotMatch(overlayAxis.rule, /DOES collapse/);
+  assert.match(overlayAxis.rule, /perturbs the/);
+});
+
+/**
+ * MAJOR 4, pinned. The rung collapse was cited to four sources, none of which establishes that one
+ * load can measure five rung peaks: two docs lines describe PHASES at one strategy and pixel parity
+ * across two strategies, `execute_parity_request` samples no memory at all, and one manifest record
+ * is not evidence of one process. The verdict must be UNPROVEN, and the backend asymmetry in
+ * measurement contamination must be recorded because it is what makes SC-16059 more than scheduling.
+ */
+test("the rung axis is UNPROVEN, with its citations downgraded and the MLX/Candle asymmetry recorded", () => {
+  const rung = COLLAPSING_AXES.find((axis) => axis.axis === "rung");
+
+  assert.equal(rung.verdict, "not collapsed by the harness; UNPROVEN in principle");
+  assert.match(rung.factor, /CEILING/);
+
+  // The claim itself must be stated as open rather than as physics.
+  assert.match(rung.rule, /OPEN/);
+  assert.doesNotMatch(rung.rule, /The PHYSICS does not/);
+
+  // Citations split into what IS established (schema) and what is NOT (physics).
+  assert.match(rung.citation, /SCHEMA SIDE \(established\)/);
+  assert.match(rung.citation, /PHYSICS SIDE \(does NOT establish the collapse\)/);
+  // Phases are not rungs.
+  assert.match(rung.citation, /phases are not rungs/);
+  // The parity path measures pixels, not memory.
+  assert.match(rung.citation, /returns an Image and never touches the VramProbe/);
+  // "exclusive" means exclusive hardware, not one process.
+  assert.match(rung.citation, /exclusive HARDWARE/);
+  // The manifest cannot even express the fifth rung's peak.
+  assert.match(rung.citation, /cannot express a `resident` peak/);
+
+  // The asymmetry: Candle asserts no caching allocator; MLX has a live cache and its own footprint
+  // harness mandates one tier per process because clear_cache() cannot free live weights.
+  assert.match(rung.caveat, /cudaCachingAllocatorPresent = 0/);
+  assert.match(rung.caveat, /MLX has NO equivalent structural guarantee/);
+  assert.match(rung.caveat, /ONE TIER PER\s+PROCESS/);
+  assert.match(rung.caveat, /cannot release LIVE weight arrays/);
+});
+
+/**
+ * MAJOR 3, pinned. The old remediation said "capture one `complete` record end to end on either
+ * backend and time it. One run collapses this uncertainty entirely" — which contradicts section 0 of
+ * the same document, where zero cells are producible and no adapter has ever emitted a `complete`
+ * record. A planner reads that as cheap when it is the epic's most expensive item.
+ */
+test("the perRunSeconds remediation no longer contradicts section 0, and names the cheap alternative", () => {
+  const uncertainties = rankUncertainties(
+    producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+      adapterPairs: ["alpha|mlx"],
+      pairsWithCompleteRecords: [],
+    }),
+  );
+  const perRun = uncertainties.find((item) => item.input === "perRunSeconds");
+  assert.ok(perRun, "perRunSeconds must still be reported as an uncertainty");
+
+  // The contradiction must be gone AND explicitly disowned, so it cannot be reinstated quietly.
+  assert.doesNotMatch(perRun.howToResolve, /One run\s+collapses this uncertainty entirely/);
+  assert.match(perRun.howToResolve, /NOT by 'capturing one `complete` record'/);
+  assert.match(perRun.howToResolve, /most expensive item in the epic/);
+
+  // And the genuinely cheap alternative must be named: the gated MLX adapter already runs 8 real
+  // invocations in CI today, so per-scenario timing needs no new campaign.
+  assert.match(perRun.howToResolve, /gated MLX\s+adapter/);
+  assert.match(perRun.howToResolve, /8 real provider invocations/);
+
+  // It is a multiplier, not a cell gate, so it must carry no blocking count.
+  assert.equal(perRun.gate, undefined);
+});
+
+/**
+ * MAJOR 1 — CO-BLOCKING, pinned.
+ *
+ * The ordered partition charges every cell to the FIRST gate that blocks it, which is a partition but
+ * not a measure of remediation value. On this fixture 10 of the 15 overlay cells are ALSO blocked by
+ * `adapter-gated` and the other 5 by `no-provider-adapter`, so overlay support alone frees NOTHING.
+ * The multiset is what makes that visible, and the real matrix has the same shape (3,835 of 3,919
+ * overlay cells co-blocked by having no adapter at all).
+ */
+test("producibility emits blockers-per-cell as an order-independent multiset", () => {
+  const cells = syntheticCells({ overlays: ["none", "lora"] });
+  const result = producibility(cells, {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+
+  assert.deepEqual(
+    result.blockersPerCell.map((entry) => [entry.description, entry.cells]),
+    [
+      ["adapter-gated", 10],
+      ["adapter-gated + overlay-declined", 10],
+      ["no-provider-adapter + overlay-declined", 5],
+      ["no-provider-adapter", 4],
+      ["(exempt — no run needed)", 1],
+    ],
+  );
+
+  // The multiset must still account for every cell exactly once, like the partition does.
+  assert.equal(
+    result.blockersPerCell.reduce((sum, entry) => sum + entry.cells, 0),
+    cells.length,
+  );
+
+  // Backend splits must survive into the multiset, since the two hardware pools do not substitute.
+  const byDescription = Object.fromEntries(result.blockersPerCell.map((entry) => [entry.description, entry]));
+  assert.deepEqual(
+    { mlx: byDescription["adapter-gated + overlay-declined"].mlx, candle: byDescription["adapter-gated + overlay-declined"].candle },
+    { mlx: 10, candle: 0 },
+  );
+});
+
+test("independently-blocking counts show the overlay gate frees no cell on its own", () => {
+  const result = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+  const byId = Object.fromEntries(result.independentBlocking.map((entry) => [entry.id, entry]));
+
+  // THE LOAD-BEARING NUMBER: the overlay gate touches 15 cells and is the sole blocker of zero.
+  assert.equal(byId["overlay-declined"].cellsTouched, 15);
+  assert.equal(byId["overlay-declined"].soleBlockerCells, 0);
+  assert.equal(byId["overlay-declined"].coBlockedCells, 15);
+  assert.equal(byId["overlay-declined"].coBlockedShare, 1);
+  assert.deepEqual(byId["overlay-declined"].coBlockedWith, {
+    "adapter-gated": 10,
+    "no-provider-adapter": 5,
+  });
+
+  assert.equal(byId["adapter-gated"].soleBlockerCells, 10);
+  assert.equal(byId["no-provider-adapter"].soleBlockerCells, 4);
+
+  // Emitted in descending sole-blocker order, which is the ranking basis.
+  assert.deepEqual(result.blockerRanking.ranking, [
+    "adapter-gated",
+    "no-provider-adapter",
+    "overlay-declined",
+  ]);
+
+  // The four figures the finding is built from.
+  assert.equal(result.blockerRanking.overlayChargedByFirstMatch, 15);
+  assert.equal(result.blockerRanking.overlayAlsoBlockedByAdapterCoverage, 15);
+  assert.equal(result.blockerRanking.overlayIndependentlyBlocking, 0);
+  assert.equal(result.blockerRanking.overlayBindingAfterAdapterCoverage, 10);
+});
+
+test("gate-order sensitivity is emitted as numbers, not merely disclosed in prose", () => {
+  const result = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+
+  assert.deepEqual(result.gateOrderSensitivity.shippedOrder, {
+    "adapter-gated": 10,
+    "no-provider-adapter": 4,
+    "no-run-needed": 1,
+    "overlay-declined": 15,
+  });
+  assert.deepEqual(result.gateOrderSensitivity.adapterCoverageFirst, {
+    "adapter-gated": 10,
+    "no-provider-adapter": 9,
+    "no-run-needed": 1,
+    "overlay-declined": 10,
+  });
+
+  // Both orders must partition the matrix exactly — that is what makes the comparison fair.
+  for (const order of [result.gateOrderSensitivity.shippedOrder, result.gateOrderSensitivity.adapterCoverageFirst]) {
+    assert.equal(
+      Object.values(order).reduce((sum, count) => sum + count, 0),
+      30,
+    );
+  }
+});
+
+/**
+ * MAJOR 1 — THE RE-RANKING, pinned.
+ *
+ * Ranked by cells a gate is the ONLY thing wrong with. The invariant is asserted rather than the
+ * literal order, so the rule survives fixture changes; the `no-provider-adapter`-dominant case below
+ * is the one that reproduces the real matrix's shape.
+ */
+test("uncertainties are ranked by independently-blocking cells, so overlay ranks last of the code gates", () => {
+  const result = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+  const ranked = rankUncertainties(result);
+  const codeGated = ranked.filter((item) => item.gate);
+
+  // Non-increasing in the ranking basis.
+  for (let index = 1; index < codeGated.length; index += 1) {
+    assert.ok(
+      codeGated[index - 1].independentlyBlockingCells >= codeGated[index].independentlyBlockingCells,
+      `code gates must be ordered by independently-blocking cells: ${codeGated[index - 1].gate} then ${codeGated[index].gate}`,
+    );
+  }
+
+  // Overlay is last among the code gates precisely because it independently blocks nothing.
+  assert.equal(codeGated.at(-1).gate, "overlay-declined");
+  assert.equal(codeGated.at(-1).independentlyBlockingCells, 0);
+
+  // The overlay entry must carry the demotion and must not reclaim the "largest bucket" framing.
+  const overlay = ranked.find((item) => item.gate === "overlay-declined");
+  assert.match(overlay.why, /DEMOTED/);
+  assert.doesNotMatch(overlay.why, /largest single bucket/);
+  assert.match(overlay.howToResolve, /sequenced AFTER catalog adapter coverage/);
+});
+
+test("when most entries have no adapter — the real matrix's shape — provider-adapter coverage ranks #1", () => {
+  // No adapter anywhere: `no-provider-adapter` becomes the dominant independent blocker, exactly as
+  // it is in the generated artifact (2,610 sole-blocked of 6,445 touched).
+  const result = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+    adapterPairs: [],
+    pairsWithCompleteRecords: [],
+  });
+  const ranked = rankUncertainties(result);
+
+  assert.equal(ranked[0].gate, "no-provider-adapter");
+  assert.equal(ranked[0].independentlyBlockingCells, 14);
+  assert.equal(ranked[0].cellsTouched, 29);
+  // perRunSeconds sits directly behind the top code gate: it multiplies whatever that gate unlocks.
+  assert.equal(ranked[1].input, "perRunSeconds");
+  // Overlay still frees nothing on its own.
+  assert.equal(
+    ranked.find((item) => item.gate === "overlay-declined").independentlyBlockingCells,
+    0,
+  );
+});
+
+/**
+ * MUTATION PROOF for the CO-BLOCKING count.
+ *
+ * The error this guards is treating the first-match bucket as the blocker set — i.e. crediting the
+ * overlay gate with cells that would not move if overlay support shipped. Reimplement that mistake
+ * and prove it disagrees.
+ */
+test("mutation: counting the first-match bucket as the blocker set overstates overlay by 15 cells", () => {
+  const cells = syntheticCells({ overlays: ["none", "lora"] });
+  const result = producibility(cells, {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+
+  // The perturbed rule: "a cell's blockers are just the gate it was charged to."
+  const firstMatchOnly = result.partition.find((gate) => gate.id === "overlay-declined").cells;
+  const trueIndependent = result.independentBlocking.find((entry) => entry.id === "overlay-declined")
+    .soleBlockerCells;
+
+  assert.equal(firstMatchOnly, 15, "the fixture must actually charge overlay a nonzero bucket");
+  assert.notEqual(
+    firstMatchOnly,
+    trueIndependent,
+    "co-blocking must be quantified — the first-match bucket is not the number of cells overlay work frees",
+  );
+  assert.equal(firstMatchOnly - trueIndependent, 15);
+
+  // And the co-blocked cells must be attributed, not just counted, or the ranking cannot be derived.
+  assert.equal(
+    result.blockersPerCell
+      .filter((entry) => entry.blockers.includes("overlay-declined") && entry.blockers.length > 1)
+      .reduce((sum, entry) => sum + entry.cells, 0),
+    15,
+  );
+});
+
+/**
+ * MUTATION PROOF for the RE-RANKING.
+ *
+ * Ranking by first-match bucket size is the shipped mistake this PR corrects: it puts overlay #1.
+ * Ranking by independent blocking puts it last. Prove the two orders differ, so a regression to the
+ * bucket-size rule cannot pass.
+ */
+test("mutation: ranking by first-match bucket size puts overlay first and contradicts the shipped ranking", () => {
+  const result = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: [],
+  });
+
+  const byBucketSize = result.partition
+    .filter((gate) => gate.blockedBy !== "nothing; the epic exempts these" && gate.cells > 0)
+    .filter((gate) => gate.id !== "producible-today")
+    .sort((left, right) => right.cells - left.cells)
+    .map((gate) => gate.id);
+  const byIndependentBlocking = result.blockerRanking.ranking;
+
+  // The perturbed rule must actually differ on this fixture, and it must differ AT THE TOP.
+  assert.equal(byBucketSize[0], "overlay-declined", "bucket-size ranking must put overlay first");
+  assert.notEqual(
+    byIndependentBlocking[0],
+    byBucketSize[0],
+    "the ranking basis is load-bearing — bucket size and independent blocking must disagree on #1",
+  );
+  assert.equal(byIndependentBlocking.at(-1), "overlay-declined");
+
+  // ...and the shipped uncertainty list must follow the independent-blocking order, not bucket size.
+  const ranked = rankUncertainties(result).filter((item) => item.gate);
+  assert.notEqual(ranked[0].gate, "overlay-declined");
+  assert.deepEqual(ranked.map((item) => item.gate), byIndependentBlocking);
+});
+
+/**
+ * Minor 5. These three parameters were the only unswept ones in the file, contrary to its own policy,
+ * and they move the exact-geometry/fit ratio by ~3x. The DIRECTION of the inversion is what the
+ * document concludes from, so that must be shown to hold across the whole grid.
+ */
+test("the fit ratio is swept over its three previously-fixed parameters and the inversion holds everywhere", () => {
+  const cells = syntheticCells();
+  const sensitivity = fitSensitivity(cells);
+
+  // 3 geometry points x 2 sharing modes x 3 validation fractions.
+  assert.equal(sensitivity.rows.length, 18);
+  assert.ok(sensitivity.defaultRow, "the default parameter combination must appear in the grid");
+  assert.equal(sensitivity.defaultRow.geometryPointsPerFit, DEFAULT_PARAMETERS.geometryPointsPerFit);
+  assert.equal(sensitivity.defaultRow.slopeSharedAcrossTiers, DEFAULT_PARAMETERS.slopeSharedAcrossTiers);
+
+  // The ratio genuinely moves — otherwise the sweep would be decoration.
+  const [low, high] = sensitivity.exactGeometryOverFitRange;
+  assert.ok(high > low, "the unswept parameters must actually move the ratio");
+  assert.ok(high / low > 2, "the movement must be large enough to matter to a planner");
+
+  // ...and the DIRECTION does not: fitting costs more than the per-cell campaign everywhere.
+  assert.equal(sensitivity.inversionHoldsEverywhere, true);
+  assert.ok(sensitivity.fitOverPerCellRange[0] > 1);
+});
+
+/**
+ * Minor 6. The justification for `slopeSharedAcrossTiers: false` must not rest on the never-fitted
+ * q8/bf16 decode zeros, which is circular. It now rests on absence of evidence.
+ */
+test("the slope-sharing default is justified on absence of evidence, not on the never-fitted zeros", () => {
+  const source = readFileSync(new URL("./calibration-cost-model.mjs", import.meta.url), "utf8");
+  const comment = source.slice(
+    source.indexOf("// Whether the geometry slope may be shared across tiers"),
+    source.indexOf("slopeSharedAcrossTiers: false"),
+  );
+
+  assert.match(comment, /ABSENCE OF EVIDENCE/);
+  assert.match(comment, /CIRCULAR/);
+  // The informative comparison, recorded with the real numbers from the manifest.
+  assert.match(comment, /7\.98 \(q4\) \/ 7\.98 \(q8\) \/ 7\.90 \(bf16\)/);
+  assert.match(comment, /0\.59 \(q4\) \/ 1\.18 \(q8\) \/ 0\.22 \(bf16\)/);
+  assert.match(comment, /unestablished, not disproven/);
+});
+
+/**
+ * Minor 7. The old comment claimed the arbitrary N/A selection was "arbitrary in a way the output
+ * says out loud"; grep of both generated artifacts returned zero hits. It must now actually be
+ * emitted, and the per-backend split of a projection must be marked as partly a selection artifact.
+ */
+test("the N/A projection's selection rule is emitted into the model, not just described in source", () => {
+  assert.match(NA_SELECTION_RULE, /ASCENDING CELL ID/);
+  assert.match(NA_SELECTION_RULE, /ARBITRARY/);
+  assert.match(NA_SELECTION_RULE, /partly an artifact of this rule/);
+
+  const scenarios = naSensitivity(syntheticCells());
+  const current = scenarios.find((scenario) => scenario.name === "current");
+  const projection = scenarios.find((scenario) => scenario.name === "rung4-all");
+
+  // The `current` row is a fact, so its split is never an artifact.
+  assert.equal(current.kind, "fact");
+  assert.equal(current.backendSplitIsSelectionArtifact, false);
+  assert.deepEqual(current.exemptedByBackend, { mlx: 0, candle: 0 });
+
+  // Every projection row must report both its actual and its proportional split so the gap is visible.
+  for (const scenario of scenarios.filter((item) => item.kind !== "fact")) {
+    assert.ok(scenario.exemptedByBackend, `${scenario.name} must report its actual split`);
+    assert.ok(
+      scenario.exemptedByBackendIfProportional,
+      `${scenario.name} must report the proportional comparison`,
+    );
+  }
+  assert.ok(projection.exemptedByBackend.mlx + projection.exemptedByBackend.candle > 0);
+});
+
+/**
+ * Minor 9. The gate's own doc comment claims slopes "fitted from real renders at multiple
+ * resolutions", which is false for the two tiers carrying one geometry point each. Recorded in the
+ * artifact rather than left as a passing remark.
+ */
+test("the Krea slope-provenance contradiction is recorded against the tiers it is false for", () => {
+  const precedent = kreaFitPrecedent({
+    models: [
+      {
+        id: "krea_2_turbo",
+        candle: {
+          turboFit: {
+            evidenceRecords: [
+              { tier: "q4", width: 768, height: 768 },
+              { tier: "q4", width: 1024, height: 1024 },
+              { tier: "q8", width: 1024, height: 1024 },
+            ],
+            phaseCurvesByTier: {
+              q4: { threeStage: { denoise: { fixedGb: 7.15, perMpxGb: 7.98 }, decode: { fixedGb: 5.04, perMpxGb: 10.03 } } },
+              q8: { threeStage: { denoise: { fixedGb: 13.76, perMpxGb: 7.98 }, decode: { fixedGb: 16.62, perMpxGb: 0 } } },
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  const contradiction = precedent.slopeProvenanceContradiction;
+  assert.ok(contradiction, "an under-determined tier must produce a recorded contradiction");
+  assert.match(contradiction.claim, /fitted from real renders at multiple\s+resolutions/);
+  assert.match(contradiction.claim, /vram_gate\.rs:460-463/);
+  assert.match(contradiction.reality, /true for q4 only/);
+  assert.match(contradiction.reality, /q8/);
+  // The nuance matters: the manifest's prose DOES claim both geometries, so this is a comment that
+  // over-promises relative to the machine-readable records the gate consumes.
+  assert.match(contradiction.nuance, /machine-readable/);
+  assert.match(contradiction.nuance, /one geometry cell for q8/);
+
+  // A fully-determined precedent must NOT manufacture a contradiction.
+  const determined = kreaFitPrecedent({
+    models: [
+      {
+        id: "krea_2_turbo",
+        candle: {
+          turboFit: {
+            evidenceRecords: [
+              { tier: "q4", width: 768, height: 768 },
+              { tier: "q4", width: 1024, height: 1024 },
+            ],
+            phaseCurvesByTier: {
+              q4: { threeStage: { denoise: { fixedGb: 7.15, perMpxGb: 7.98 } } },
+            },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(determined.slopeProvenanceContradiction, null);
 });
 
 test("fit-versus-exhaustive is sensitive to the geometry points parameter, not hardcoded", () => {

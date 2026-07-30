@@ -26,6 +26,39 @@
 - `no-provider-adapter`: config/memory-calibration-plan.json (the shipped plan's provider targets)
 - `adapter-gated`: docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); docs/memory-calibration-harness.md documents both adapters as returning `gated` records today
 
+### Blockers per cell — the partition above is ORDERED, so it hides co-blocking
+
+A cell is charged to the FIRST gate that blocks it, which makes the table above a partition but **not** a measure of how much work each gate represents. Most blocked cells are blocked by more than one thing at once. This is the order-independent view:
+
+| Blockers on the cell (multiset) | Cells | MLX | Candle |
+| --- | --- | --- | --- |
+| `no-provider-adapter` + `overlay-declined` | 3835 | 2575 | 1260 |
+| `no-provider-adapter` | 2610 | 1700 | 910 |
+| `adapter-gated` + `overlay-declined` | 84 | 30 | 54 |
+| `adapter-gated` | 60 | 30 | 30 |
+| (exempt — no run needed) | 6 | 0 | 6 |
+
+| Blocker | Cells touched | Sole blocker (fixing it alone frees these) | Co-blocked |
+| --- | --- | --- | --- |
+| `no-provider-adapter` | 6445 | 2610 | 3835 |
+| `adapter-gated` | 144 | 60 | 84 |
+| `overlay-declined` | 3919 | 0 | 3919 |
+
+**`overlay-declined` is charged 3919 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 3835 of them (97.9%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 84 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 84 while `no-provider-adapter` rises to 6445. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2610 cells and it touches 6445. Scoping overlay support in both adapters is still necessary, but on its own it moves 84 cells, not 3919.**
+
+Gate order is load-bearing and is therefore reported both ways rather than only disclosed in prose:
+
+| Gate | Charged (shipped order: overlay first) | Charged (adapter coverage first) |
+| --- | --- | --- |
+| `adapter-gated` | 60 | 60 |
+| `no-provider-adapter` | 2610 | 6445 |
+| `no-run-needed` | 6 | 6 |
+| `overlay-declined` | 3919 | 84 |
+
+> The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'.
+
+Remediation priority below is ranked by **soleBlockerCells — cells this gate is the ONLY thing wrong with**, not by bucket size: `no-provider-adapter` > `adapter-gated` > `overlay-declined`.
+
 There is also no completed-work baseline to subtract. Every run count in this document is the WHOLE POPULATION, not a remainder. Zero calibration records exist on either backend, zero cells are `Verified`, and both the evidence bundle and the matrix summary agree on that independently.
 
 The wall-clock sweep in section 5 is therefore an answer to "what would this cost once it is runnable", not "when will this be done".
@@ -66,8 +99,8 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 | --- | --- | --- |
 | `geometry` | collapsed | already applied by the matrix generator |
 | `strategyParameters` | collapsed | one record retires every passed sweep point |
-| `rung` | not collapsed by the harness; collapsible in principle | 5 (every session key spans exactly 5 rungs) |
-| `overlay` | not collapsed for records; collapsible for model loads | 2.47 (1,319 overlay-keyed session keys over 534 overlay-amortised ones) |
+| `rung` | not collapsed by the harness; UNPROVEN in principle | 5 (every session key spans exactly 5 rungs) — a CEILING, not a demonstrated saving |
+| `overlay` | NOT collapsed for records; NOT collapsible for model loads in the shipped contract | 1 today (the 2.47 load ratio prices a capability that does not exist) |
 | `cell` | NOT collapsed | 1 (cells map 1:1 to certifying records) |
 
 **`geometry` — collapsed.** A cell carries a geometry ENVELOPE, not a geometry. One record binds the whole envelope: `calibrationBinding` accepts any record whose `width x height` appears in `cell.geometryEnvelope.resolutions`, and only rejects batch/frames != 1.
@@ -82,17 +115,17 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 
 > Caveat: Realised only ACROSS resumed invocations. `runProviderPlan` computes its skip set once from `--resume` and then spawns the provider command once per planned case, without feeding incoming records back into the skip set — so within a single invocation an N-point sweep still costs N process spawns.
 
-**`rung` — not collapsed by the harness; collapsible in principle.** A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key. So the schema forces one record per rung. The PHYSICS does not: the shipped Krea evidence records carry `observedPeaksGb` for all four constrained rungs from a single capture, and the Candle adapter is documented as running Resident -> BoundedTransformerResidency -> Resident on 'one loaded generator'.
+**`rung` — not collapsed by the harness; UNPROVEN in principle.** A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key. So the schema forces one record per rung. Whether the PHYSICS also forces it is OPEN: nothing in this repository measures five rung peaks from one load, and the sources previously cited for it do not establish it. The 5x is therefore the size of a prize nobody has shown is collectable, not a saving being left on the table.
 
-> Citation: scripts/memory-calibration-harness.mjs#recordId + #validateRecord (rung is in the identity); scripts/generate-memory-matrix.mjs (record->cell match includes `rung`); config/manifests/builtin.models.jsonc#krea_2_turbo/candle/turboFit/evidenceRecords (one record, four rung peaks); docs/memory-calibration-harness.md (Candle adapter, 'one loaded generator')
+> Citation: SCHEMA SIDE (established): scripts/memory-calibration-harness.mjs#recordId + #validateRecord (rung is in the identity); scripts/generate-memory-matrix.mjs (record->cell match includes `rung`). PHYSICS SIDE (does NOT establish the collapse): docs/memory-calibration-harness.md 'one loaded generator' covers four memory PHASES (conditioning, denoise, decode, overall) at ONE strategy — phases are not rungs; its warm-repeat A->B->A and crates/sceneworks-memory-adapter/src/bin/candle.rs#execute_parity_request compare PIXEL output across two strategies and sample no memory at all (the function returns an Image and never touches the VramProbe); and the Krea turboFit evidence records say only "exclusive rendered-device phase peaks at 768x768 and 1024x1024" in verification.method — 'exclusive' means exclusive HARDWARE, and no field in the record schema names a process, load or session, so one record cannot evidence one process. Those peaks also cover FOUR rungs, not five: packages/schemas/model-manifest.schema.json caps `observedPeaksGb` at threeStage/tiledVae/chunkedAttention/streamedBlocks with additionalProperties false, so the manifest cannot express a `resident` peak — the one rung that is the irreducible floor.
 
-> Caveat: The harness spawns a FRESH process per planned case, so today the model load is paid once per rung. Capturing this 5x needs either a warm provider daemon behind the argv command or a runner that batches a target's rungs into one invocation. Neither exists.
+> Caveat: The harness spawns a FRESH process per planned case, so today the model load is paid once per rung. Capturing this 5x needs either a warm provider daemon behind the argv command or a runner that batches a target's rungs into one invocation. Neither exists — AND neither is purely scheduling work, because reusing a process risks CONTAMINATING the measurement, asymmetrically across backends. CANDLE has partial protection: the adapter enforces a 64 MiB post-fault cleanup-growth tolerance and asserts `cudaCachingAllocatorPresent = 0`, so freed device bytes return to the device rather than into an allocator cache (though that constant is a hardcoded diagnostic, not a probe of live allocator state). MLX has NO equivalent structural guarantee: a buffer cache is present and is itself measured and published, and the adapter must call `clear_cache()` + `reset_peak_memory()` explicitly between measurements. That is not sufficient — `clear_cache()` reclaims only allocator-cache buffers and cannot release LIVE weight arrays, which is precisely the residue a multi-rung campaign accumulates, because rungs 1 and 4 change residency. SceneWorks' own MLX footprint harness (crates/sceneworks-worker/src/footprint_measure.rs) therefore mandates ONE TIER PER PROCESS and enforces it with a runtime assert, having found that process-global counters let a heavier earlier measurement leak into a lighter later one. A rung-batching runner must prove it beats that, on both backends. Tracked as SC-16059.
 
-**`overlay` — not collapsed for records; collapsible for model loads.** 3,925 of the 6,595 cells carry a non-`none` overlay, so this axis is 59.5% of the matrix. It does NOT collapse on the record axis: `overlay` is part of the cell key and of `record.target`, and `validateComplete` requires the `overlay` scenario to actually pass (or carry a justified `not_applicable` reason) — a `none` record cannot certify a `lora` cell. It DOES collapse on the model-load axis for any overlay a warm generator can attach and detach without reloading the base weights.
+**`overlay` — NOT collapsed for records; NOT collapsible for model loads in the shipped contract.** 3,925 of the 6,595 cells carry a non-`none` overlay, so this axis is 59.5% of the matrix. It does NOT collapse on the record axis: `overlay` is part of the cell key and of `record.target`, and `validateComplete` requires the `overlay` scenario to actually pass (or carry a justified `not_applicable` reason) — a `none` record cannot certify a `lora` cell. Nor does it collapse on the model-load axis: adapters are resolved at LOAD time into `LoadSpec::adapters`, no API anywhere in `crates/` detaches or swaps an adapter on a loaded generator, and carrying adapters makes `vram_gate.rs` disable streamed blocks outright. Decisively, even a toggleable LoRA stays RESIDENT, so a `none` peak measured on an adapter-loaded generator is inflated by the adapter's own bytes — the collapse perturbs the very quantity being measured.
 
-> Citation: docs/generated/memory-matrix.json (overlay distribution); scripts/memory-calibration-harness.mjs#validateRecord (target.overlay is required) and #validateComplete (the overlay scenario must pass or be justified)
+> Citation: docs/generated/memory-matrix.json (overlay distribution); scripts/memory-calibration-harness.mjs#validateRecord (target.overlay is required) and #validateComplete (the overlay scenario must pass or be justified); crates/sceneworks-worker/src/image_jobs/base.rs#resolve_adapters -> `LoadSpec::adapters` and crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs (adapters are load-time); crates/sceneworks-worker/src/vram_gate.rs (adapters disable streamed blocks); absence of any detach/unload/swap adapter API across `crates/`
 
-> Caveat: The load-side collapse is NOT uniform and is not asserted here. A LoRA is cheap to swap; an identity overlay (InstantID / PuLID) materialises extra encoder weights and is not free. Which overlays are load-cheap is a provider fact this artifact cannot establish, so both keyings are reported. The 3,925 records do not evaporate under either.
+> Caveat: The overlay-amortised load count is still REPORTED, because SC-16072 has to know what the capability would be worth before deciding to build it. It is a price tag, not a campaign shape: it assumes a runtime attach/detach operation that does not exist, and if it were built naively it would produce inflated `none` baselines rather than a cheaper campaign. An `identity` overlay (InstantID / PuLID) additionally materialises extra encoder weights, so even a real swap API would not make this axis uniformly free. The 3,925 records do not evaporate under any of it.
 
 **`cell` — NOT collapsed.** No record can certify two cells. The matrix matches a record to a cell on the full (modelId, provider, backend, tier, mode, overlay, rung) key, and a `complete` record must additionally carry its own measured negative mutation — so the negative case is INSIDE the positive record rather than being a second record.
 
@@ -106,9 +139,18 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 | --- | --- | --- | --- |
 | Certifying records (1 per cell) | 6589 | 4335 | 2254 |
 | Warm sessions (model loads, 5 rungs each) | 1319 | 867 | 452 |
-| Warm sessions with overlays also amortised into one load | 534 | 346 | 188 |
+| Warm sessions, overlays also amortised — **NOT AVAILABLE in the shipped load contract; a price tag, not a plan** | 534 | 346 | 188 |
 
-**Does the overlay axis evaporate?** On the record axis, no: each of the 3925 non-`none` cells needs its own record, because `overlay` is in the cell key and `validateComplete` requires the overlay scenario to actually pass. On the model-load axis, mostly yes — dropping overlay from the session key takes loads from 1319 to **534**, a further **2.47x**. That collapse is legitimate for a LoRA a warm generator can swap and **not** legitimate for an identity overlay that materialises extra encoder weights, so it is reported rather than claimed.
+**Does the overlay axis evaporate? No — on either axis.** On the record axis, each of the 3925 non-`none` cells needs its own record, because `overlay` is in the cell key and `validateComplete` requires the overlay scenario to actually pass.
+
+On the model-load axis the answer is **unavailable in the shipped load contract**. Dropping overlay from the session key would take loads from 1319 to 534 — a further 2.47x — but that figure **prices a capability the shipped code does not offer**, and an earlier version of this document wrongly reported it as "mostly yes". Four findings, the last decisive:
+
+1. **Adapters are load-time.** crates/sceneworks-worker/src/image_jobs/base.rs#resolve_adapters (base.rs:2585) feeds `LoadSpec::adapters` through `spec.with_adapters` (base.rs:2664-2666), so a generator's adapter set is fixed when it is constructed; crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs:74-81 documents per-phase adapter refs as INDICES into that load-time stack, and crates/sceneworks-worker/src/generator_cache.rs folds the adapter set into `GeneratorCacheKey` so changing it forces a cold reload by design.
+2. **No runtime swap API exists.** no detach / unload / remove / clear / disable / swap / unfuse API for an adapter on a loaded generator exists anywhere in `crates/`, and the `gen_core::Generator` trait exposes no such method, so the call is not expressible — the load-axis collapse assumes an operation that is not implemented (SceneWorks' only adapter-facing generator call is the read-only `adapter_apply_reports()`).
+3. **Adapters void the measured ladder.** carrying adapters voids the ENTIRE measured Krea ladder, not just the streamed-blocks rung: `allow_streamed_blocks = adapter_count == 0` (base.rs:5737) sets `overlay: Some("adapter")` on the request scope (vram_gate.rs:609) while every evidence cell carries `overlay: None` (vram_gate.rs:829-830), so memory_strategy.rs:194-200 marks every candidate OutOfEnvelope and the job drops to the older sequential gate. This is the origin of the 6 `Structurally N/A` cells here — all krea_2_turbo/candle x {q4,q8,bf16} x {lora,control} at bounded_transformer_residency, which scripts/generate-memory-matrix.mjs cites to `base.rs#allow_streamed_blocks`, reason "load-time adapters are incompatible with streamed transformer blocks".
+4. **The collapse perturbs the measurement.** DECISIVE: a toggleable LoRA still leaves its weights resident, so a `none` scenario measured on an adapter-loaded generator is inflated by the adapter's own bytes. The collapse perturbs the exact quantity this campaign exists to measure, so sharing the load and measuring an unperturbed `none` peak cannot both be done.
+
+> SC-16072 needs to know what the capability would be worth before deciding whether to build it. The overlay-amortised column is that price tag and nothing more — it is NOT an achievable campaign shape, and every surface that prints it says so.
 
 Excluded: 6 cells already classified `Structurally N/A`, which the epic exempts from measurement. Nothing else is excluded — `Missing` cells still need a run, they just need an implementation first.
 
@@ -120,13 +162,17 @@ SC-15969 (the per-family rung-4 applicability survey) has not run, so the final 
 
 Irreducible floor: the **1319** `resident` cells. Rung 0 is the unoptimised baseline every model has by definition, so it can never be Structurally N/A. No survey outcome can remove these cells from the campaign.
 
-| Scenario | Kind | Records | MLX | Candle | Warm sessions |
-| --- | --- | --- | --- | --- | --- |
-| `current` | fact | 6589 | 4335 | 2254 | 1319 |
-| `rung4-half` | projection | 5932 | 3873 | 2059 | 1319 |
-| `rung4-all` | projection | 5276 | 3468 | 1808 | 1319 |
-| `rungs-2-3-4-half` | projection | 4612 | 2949 | 1663 | 1319 |
-| `everything-but-baseline` | bound | 1319 | 867 | 452 | 1319 |
+| Scenario | Kind | Records | MLX | Candle | Warm sessions | Exempted MLX/Candle | ...if proportional |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `current` | fact | 6589 | 4335 | 2254 | 1319 | 0/0 | — |
+| `rung4-half` | projection | 5932 | 3873 | 2059 | 1319 | 462/195 | 434/223 ⚠ |
+| `rung4-all` | projection | 5276 | 3468 | 1808 | 1319 | 867/446 | 867/446 |
+| `rungs-2-3-4-half` | projection | 4612 | 2949 | 1663 | 1319 | 1386/591 | 1301/675 ⚠ |
+| `everything-but-baseline` | bound | 1319 | 867 | 452 | 1319 | 3468/1802 | 3468/1802 |
+
+> **How cells are selected, and why the projection rows' backend columns are not findings.** Projected exemptions are applied to NAMED cells, not to a count, so the session arithmetic stays exact rather than becoming a division. Within each rung the exempted cells are the first N by ASCENDING CELL ID. That is deterministic but ARBITRARY: cell ids lead with the model id, so an alphabetical prefix does not split evenly across backends. Consequently the MLX/Candle columns of a PROJECTION row are partly an artifact of this rule. Only the `current` row's split is a fact. Each projection row therefore also reports what its split would be under proportional allocation, so the size of the artifact is visible instead of implied.
+
+Rows marked ⚠ have a per-backend split that differs from proportional allocation — that gap is the selection rule showing through, not a property of the projection. Only the `current` row's split is a fact.
 
 **The warm-session column does not move.** A session survives as long as any one of its rungs still needs measuring, and the resident baseline always does — so reclassifying rungs as `Structurally N/A` removes records but removes no model loads. If model load dominates the per-run cost, SC-15969's outcome changes the campaign's duration by far less than the record column suggests.
 
@@ -177,27 +223,88 @@ Worked precedent: **4** measurement records produced 36 curves (72 coefficients)
 
 - `exhaustive-exact-geometry`: Measure every advertised resolution. This is what the manifest's own evidenceRecords comment demands: 'exact request envelopes, not permission to interpolate'.
 - `exhaustive-per-cell`: One measurement per cell at one geometry, relying on the binding logic accepting any resolution inside the envelope. Cheaper, but it certifies an envelope from a point.
-- `fit-then-validate`: Measure 2 geometry points per (entry, backend, mode, overlay, tier) to determine the affine curve, then spot-check a sample against the prediction. Covers every geometry in the envelope, including ones never rendered.
+- `fit-then-validate`: Measure 2 geometry points per (entry, backend, mode, overlay, tier) to determine the affine curve, then spot-check a sample against the prediction. Covers every geometry in the envelope that is at or below the tier's `maxMeasuredPixels`, including ones never rendered — but ONLY up to that bound. Above it the curve is not consulted at all: `krea_rung_phase_peaks` returns `None` and `krea_turbo_fit_with_runtime` returns `Unverified { OutOfEnvelope }` (vram_gate.rs:481-485 and :578-583), and the manifest says why in its own words — "do not extrapolate these curves into unvalidated attention shapes". So a fit does not buy coverage of the whole envelope; it buys coverage of the measured sub-envelope. Note this is UNKNOWN, not `Reject`: the job is not refused, the measured ladder is simply declined and the older sequential gate decides (vram_gate.rs:548-549 draws that distinction explicitly).
 
 Ratios: exact-geometry / fit = **3.04x**; exact-geometry / per-cell = 6.23x; fit / per-cell = 2.05x.
 
 **Fitting does NOT beat the per-cell campaign on run count — it costs more, because the matrix already collapsed geometry and a curve needs a second geometry point the per-cell campaign never takes. Fitting wins only against the policy the manifest actually states (no interpolation), where it is the difference between a campaign that covers every advertised resolution and one that does not. The decision is therefore about which geometry policy is true, not about which strategy is cheaper.**
 
+### Sensitivity of the fit ratio to its three previously-unswept parameters
+
+`geometryPointsPerFit`, `slopeSharedAcrossTiers` and `validationSampleFraction` were the only parameters in this model that were fixed rather than swept, which contradicted its own stated policy. Swept here. The exact-geometry/fit ratio ranges **1.47x–4.61x** across the grid, so the headline `3.04x` is one point on a surface.
+
+| geometry points | slope shared | validation sample | Fit loads | Validation loads | Total loads | exact/fit | fit/per-cell |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | false | 0 | 2638 | 0 | 2638 | 3.12x | 2x |
+| 2 | false | 0.05 | 2638 | 66 | 2704 | 3.04x | 2.05x |
+| 2 | false | 0.25 | 2638 | 330 | 2968 | 2.77x | 2.25x |
+| 2 | true | 0 | 1783 | 0 | 1783 | 4.61x | 1.35x |
+| 2 | true | 0.05 | 1783 | 66 | 1849 | 4.45x | 1.4x |
+| 2 | true | 0.25 | 1783 | 330 | 2113 | 3.89x | 1.6x |
+| 3 | false | 0 | 3957 | 0 | 3957 | 2.08x | 3x |
+| 3 | false | 0.05 | 3957 | 66 | 4023 | 2.04x | 3.05x |
+| 3 | false | 0.25 | 3957 | 330 | 4287 | 1.92x | 3.25x |
+| 3 | true | 0 | 2247 | 0 | 2247 | 3.66x | 1.7x |
+| 3 | true | 0.05 | 2247 | 66 | 2313 | 3.55x | 1.75x |
+| 3 | true | 0.25 | 2247 | 330 | 2577 | 3.19x | 1.95x |
+| 4 | false | 0 | 5276 | 0 | 5276 | 1.56x | 4x |
+| 4 | false | 0.05 | 5276 | 66 | 5342 | 1.54x | 4.05x |
+| 4 | false | 0.25 | 5276 | 330 | 5606 | 1.47x | 4.25x |
+| 4 | true | 0 | 2711 | 0 | 2711 | 3.03x | 2.06x |
+| 4 | true | 0.05 | 2711 | 66 | 2777 | 2.96x | 2.11x |
+| 4 | true | 0.25 | 2711 | 330 | 3041 | 2.7x | 2.31x |
+
+> These three parameters were previously fixed and unswept while the file's own policy says an unknowable value must be exposed and swept. They move the exact-geometry/fit ratio across the range above — a factor of about 3.1 — so the single headline ratio is a point on a surface, not a constant. What does NOT move is the DIRECTION: fit/per-cell exceeds 1 at every grid point, so fitting costs more than the per-cell campaign under every combination tested. The finding is robust; its magnitude is not.
+
+**The inversion is robust:** fit/per-cell stays in 1.35x–4.25x, above 1 at every grid point, so "fitting costs more than the per-cell campaign" does not depend on the defaults. Only the magnitude does.
+
+### The gate's slope-provenance comment overstates its own evidence
+
+**Claim:** crates/sceneworks-worker/src/vram_gate.rs:460-463 documents the slope as "the geometry-dependent activation slope, fitted from real renders at multiple resolutions".
+
+**Reality:** that is true for q4 only. Tiers bf16, q8 carry ONE geometry point each in the same manifest block the gate reads, so their slopes cannot have been fitted from multiple resolutions — they are either carried over from q4 or left at zero. Both show up in the data: the threeStage/tiledVae denoise slopes are 7.98 / 7.98 / 7.90 across q4/q8/bf16 (evidently shared, not independently fitted), while 4 of 8 geometry-sensitive curves on each of bf16 and q8 ship a zero slope versus 1 of 8 on q4.
+
+> Nuance: the manifest's PROSE comment does quote 768x768 and 1024x1024 raw samples for all three tiers, so the sentence is not invented — but the machine-readable `evidenceRecords` the gate actually consumes contain one geometry cell for q8 and one for bf16. The defect is a comment that reassures the reader about evidence the artifact does not carry, which is exactly how a single-point slope gets trusted as a fitted one.
+
+> Consequence: any consumer budgeting or trusting per-tier slopes from this precedent should treat q8 and bf16 as unfitted. Recorded on SC-16060 (geometry policy) alongside the binding-vs-manifest contradiction.
+
 ## 7. Biggest uncertainties
 
-**`how much provider-adapter work the overlay axis needs`** — It is the largest single bucket in the producibility partition and it gates 59.5% of the matrix. Neither adapter can emit a truthful overlay scenario today, and the cost of making them able to is code, not machine time — so it does not appear anywhere in the wall-clock sweep. Until it is scoped, the schedule is unknowable regardless of how precisely the run count is derived.
+Ranked by **soleBlockerCells — cells this gate is the ONLY thing wrong with**, not by first-match bucket size. An earlier version of this document ranked the overlay gap #1 because it is the largest bucket in the ordered partition; 3919 of those cells are also blocked by having no adapter at all, so that ranking pointed remediation at work that moves 84 cells rather than 3919.
 
-> Resolve by: Scope overlay support in both adapters, then re-run this model — the producibility partition will move its `overlay-declined` cells to a later gate. Tracked as SC-16072; the related control-declaration omission is SC-16073.
+### 1. how much provider-adapter work the CATALOG COVERAGE gap needs — gate `no-provider-adapter`, **2610** cells independently blocked (6445 touched)
 
-**`perRunSeconds`** — It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The only measured anchor covers a VAE decode seam producing `gated` records, so it does not bound a `complete` record from below in any useful way.
+This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2610 cells and it touches 6445 — 3919 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6445 cells.
 
-> Resolve by: Capture one `complete` record end to end on either backend and time it. One run collapses this uncertainty entirely.
+> Resolve by: Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.
 
-**`whether the harness can amortise a model load across a target's rungs`** — It is a clean 5x on the whole campaign and it is currently NOT realised: the runner spawns a fresh process per planned case.
+### 2. perRunSeconds — not cell-gated; a pure multiplier on every reported hour
 
-> Resolve by: Either batch a target's rungs into one provider invocation, or run the provider as a warm daemon behind the argv command. Tracked as SC-16059.
+It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The only measured anchor covers a VAE decode seam producing `gated` records, so it does not bound a `complete` record from below in any useful way.
 
-**`which geometry policy is true`** — The binding logic accepts any resolution inside the envelope; the manifest says exactly the opposite. The two policies differ by the geometry collapse factor across the whole campaign.
+> Resolve by: NOT by 'capturing one `complete` record', which is how this was previously phrased. That is the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker string still lists predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is gated on the two code uncertainties above and cannot be scheduled ahead of them. THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX adapter, which already executes 8 real provider invocations today. That needs no new measurement campaign and no `complete` record — it converts an existing green CI step into a per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of a `complete` record that are already implemented. Do that first; treat the end-to-end `complete` record as the thing being scheduled, not the thing that unblocks scheduling.
 
-> Resolve by: Decide it explicitly and make the losing side fail closed, rather than leaving two contradictory policies in the same pipeline. Tracked as SC-16060.
+### 3. what a `complete` record actually requires from an existing adapter — gate `adapter-gated`, **60** cells independently blocked (144 touched)
+
+60 cells are blocked ONLY by this, and 144 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.
+
+> Resolve by: Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.
+
+### 4. how much provider-adapter work the OVERLAY axis needs — gate `overlay-declined`, **0** cells independently blocked (3919 touched)
+
+DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 3919 cells (59.5% of the matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 3919 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 84 cells, not 3919. It remains necessary work — 3,925 cells cannot be certified without it — but it is not where the schedule is decided.
+
+> Resolve by: Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a 2.47x load saving. The related control-declaration omission is SC-16073.
+
+### 5. whether the harness can amortise a model load across a target's rungs — not cell-gated
+
+A potential 5x on the whole campaign, currently NOT realised: the runner spawns a fresh process per planned case. Unlike the overlay load collapse this one is not ruled out by the load contract — but it is NOT established either. Nothing in the repository measures five rung peaks from one load, and the manifest cannot even express a `resident` peak alongside the other four. It is also not purely scheduling work: reusing a process risks contaminating the measurement, and the two backends have asymmetric protection (Candle asserts no caching allocator; MLX has a live buffer cache and its own footprint harness mandates one tier per process). See the `rung` axis for the full evidence review.
+
+> Resolve by: Either batch a target's rungs into one provider invocation, or run the provider as a warm daemon behind the argv command — and in either case demonstrate that a rung measured in a reused process matches the fresh-process measurement within a stated tolerance, ON BOTH BACKENDS, before believing the 5x. Tracked as SC-16059.
+
+### 6. which geometry policy is true — not cell-gated
+
+The binding logic accepts any resolution inside the envelope; the manifest says exactly the opposite. The two policies differ by the geometry collapse factor across the whole campaign. Compounding it, the gate's own doc comment claims slopes 'fitted from real renders at multiple resolutions' while 2 of the 3 shipped tiers carry a single geometry point.
+
+> Resolve by: Decide it explicitly and make the losing side fail closed, rather than leaving two contradictory policies in the same pipeline; and correct the slope-provenance comment so a single-point slope cannot be read as a fitted one. Tracked as SC-16060.
 
