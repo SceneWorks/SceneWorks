@@ -2109,6 +2109,7 @@ pub(crate) struct ResolvedArtifactProvenance {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) struct ResolvedWeights {
     pub(crate) path: PathBuf,
     pub(crate) provenance: Option<ResolvedArtifactProvenance>,
@@ -2129,6 +2130,7 @@ struct AppManagedArtifactReceipt {
     tree_stamp: String,
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn resolved_artifact_fingerprint(
     repository: &str,
     revision: &str,
