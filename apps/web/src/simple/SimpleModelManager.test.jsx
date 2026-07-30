@@ -7,20 +7,30 @@ import { mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { MEMORY_HEADROOM_FRACTION, tierFits } from "../tierSuggestion.js";
 
 // sc-15400: the Simple Model Manager row showed `needs ${mlx.minMemoryGb} GB` unconditionally. That
-// blanket integer is a SINGLE per-model value, so it has to admit the model's heaviest INSTALLABLE tier
-// — z_image declares 48 while its measured q4 tier peaks at 19.42 GiB, and krea_realtime_14b declares 64
-// against a 27.90 GiB q4. The advanced Models screen already dodges this by SUPPRESSING the badge for
-// variant-matrix models (`hasTierMatrix`); Simple has no per-tier panel to defer to, so it instead shows
-// the number for the tier actually in play.
+// blanket integer OVER-states for a user who only installed a lighter tier — z_image declares 48 while
+// its measured q4 tier peaks at 19.42 GiB, and krea_realtime_14b declares 64 against a 27.90 GiB q4. The
+// advanced Models screen already dodges this by SUPPRESSING the badge for variant-matrix models
+// (`hasTierMatrix`); Simple has no per-tier panel to defer to, so it instead shows the number for the
+// tier actually in play.
+//
+// The blanket is NOT a ceiling over the tiers, though: the schema and `vram_gate.rs:180` both say it is
+// the DEFAULT (lightest) tier's peak plus headroom, which heavier tiers may exceed. So it is a FLOOR the
+// per-tier figure is maxed against, never a substitute for a heavier installed tier's requirement.
 //
 // Asserted through the REAL component and the REAL AppContext, so what's checked is the string the user
 // reads in the row, not a helper's return value.
 //
-// TWO PROPERTIES THE NUMBER MUST HOLD, both asserted below against their SOURCE rather than a
-// transcribed literal, because both failed silently under a green suite once already:
-//   * HEADROOM — the displayed host size must satisfy the app's own `tierFits` budget. Quoting the raw
-//     measured peak names a host the app itself will not run the tier on.
+// THREE PROPERTIES THE NUMBER MUST HOLD, asserted below against their SOURCE rather than a transcribed
+// literal, because the first two failed silently under a green suite once already:
+//   * HEADROOM, PER LANE — MLX budgets `peak <= host × 0.9` (`tierFits`); candle's own gate admits at
+//     `peak + 2` (`vram_gate.rs` HEADROOM_GB). Quoting the raw peak under-states; quoting the MLX form on
+//     candle over-states against the gate that actually rejects.
 //   * LANE — the candle rows must never quote MLX-measured evidence, in either direction.
+//   * COMPOSITION — the fallback must not undercut an installed tier's own evidence.
+//
+// These are literal-driven by design: they pin the WORDING and the per-case wiring. The composition is
+// swept exhaustively against the real manifest in memoryFloorCatalogParity.test.js, which drives this
+// component's own `needsLabel` over every (model, OS, installed-subset) the catalog can produce.
 
 // Real catalog numbers from config/manifests/builtin.models.jsonc.
 const Z_IMAGE_Q4_BYTES = 20852069456; // 19.42 GiB — z_image's ONLY measured tier
@@ -288,7 +298,12 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
       type: "image",
       installState,
       mlx: { minMemoryGb: 60 },
-      candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 }, measured: true },
+      // `measured: false` is what the manifest ACTUALLY ships for this entry. An earlier version of this
+      // fixture said `true` and the PR body called 37.3 "a measured VRAM requirement"; per the schema the
+      // flag means "false when ESTIMATED (scaled from weight size + a measured sibling)", and it covers
+      // `minMemoryGb` and `vramGbByTier` together. So neither number here is a measurement, and the row
+      // reports the higher of the two (see the estimated-lane rule in tierSuggestion.js).
+      candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 }, measured: false },
       hasVariantMatrix: true,
       variants: [
         variant("q4", installState === "installed" ? "installed" : "missing", LENS_TURBO_Q4_BYTES),
@@ -300,22 +315,80 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
 
   it("reads candle.vramGbByTier on a CUDA host, NOT the MLX footprint", async () => {
     const model = lensTurbo();
-    // MLX lane: the measured 30.50 GiB footprint ⇒ 34.
+    // MLX lane: the measured 30.50 GiB footprint ⇒ ceil(30.50 / 0.9) = 34.
     await render(root, { models: [model], macCapabilities: { macGatingActive: true } });
     expect(metaText(container)).toEqual(["needs 34 GB"]);
 
-    // candle lane: the measured 37.3 GB VRAM row ⇒ 42. Strictly HIGHER than the MLX answer, which is
-    // exactly why borrowing the MLX number would under-warn a Windows/Linux user.
+    // candle lane: the estimated q4 row of 37.3 needs ceil(37.3 + 2) = 40 by the candle gate's own
+    // additive criterion, which the curated (also estimated) blanket of 44 floors ⇒ 44. Strictly HIGHER
+    // than the MLX answer either way, which is why borrowing the MLX number would under-warn here.
     await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
-    expect(metaText(container)).toEqual(["needs 42 GB"]);
+    expect(metaText(container)).toEqual(["needs 44 GB"]);
     expect(container.textContent).not.toContain("34 GB");
   });
 
   it("uses the candle ladder for the uninstalled 'from' floor too", async () => {
     const model = lensTurbo({ installState: "missing" });
     await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
-    // Cheapest candle tier is q4 at 37.3 ⇒ 42; the MLX answer would have been 34.
-    expect(metaText(container)).toEqual(["from 42 GB"]);
+    // Cheapest candle tier is q4 at 37.3 ⇒ 40, floored at the estimated-lane blanket 44; MLX said 34.
+    expect(metaText(container)).toEqual(["from 44 GB"]);
+  });
+
+  it("floors the label at the blanket when an installed tier has NO candle row", async () => {
+    // BLOCKER 1's shape, as `flux_dev` ships it: measured q4/q8 rows, a bf16 tier with no row at all, and
+    // a blanket of 24 that is the LIGHTEST tier's peak plus headroom (schema `candle.minMemoryGb`;
+    // vram_gate.rs:180 "minMemoryGb is the WRONG floor"). Falling back to the blanket ALONE reported 24
+    // against a measured q8 of 31.8 — an under-statement. The answer is the max of the two bases.
+    const model = {
+      id: "flux_dev",
+      name: "FLUX.1 dev",
+      type: "image",
+      installState: "installed",
+      candle: { minMemoryGb: 24, vramGbByTier: { q4: 21.3, q8: 31.8 }, measured: true },
+      hasVariantMatrix: true,
+      variants: [
+        variant("q4", "installed", null),
+        variant("q8", "installed", null),
+        variant("bf16", "installed", null),
+      ],
+    };
+    await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
+    // ceil(31.8 + 2) = 34, not the blanket 24.
+    expect(metaText(container)).toEqual(["needs 34 GB"]);
+    expect(container.textContent).not.toContain("24 GB");
+  });
+
+  it("ignores a candle-only tier the host cannot serve", async () => {
+    // MINOR 5. `krea_2_turbo`'s shape: an `int8-convrot` download WITH a measured row. The tier is only
+    // offered when a live worker advertises `int8_convrot` (sc-9300), so on a host where none does, its
+    // 34.7 row must not set this row's number — the user will never be able to select it.
+    const model = {
+      id: "krea_2_turbo",
+      name: "Krea 2 Turbo",
+      type: "image",
+      installState: "installed",
+      candle: {
+        minMemoryGb: 32,
+        vramGbByTier: { q4: 25.7, q8: 35.2, bf16: 47.2, "int8-convrot": 34.7 },
+        measured: true,
+      },
+      hasVariantMatrix: true,
+      variants: [variant("int8-convrot", "installed", null)],
+    };
+
+    // No worker advertises the capability ⇒ the tier is invisible, so the row falls back to the blanket.
+    await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
+    expect(metaText(container)).toEqual(["needs 32 GB"]);
+
+    // A worker that DOES advertise it ⇒ the tier's own measured row, ceil(34.7 + 2) = 37. This is the
+    // number the pre-fix code could not produce at all: keying the candle map off `tierQuantize` dropped
+    // the row, so the whole install set collapsed to the blanket 32.
+    await render(root, {
+      models: [model],
+      macCapabilities: { macGatingActive: false },
+      visibleWorkers: [{ status: "online", capabilities: ["int8_convrot"] }],
+    });
+    expect(metaText(container)).toEqual(["needs 37 GB"]);
   });
 
   it("says NOTHING on a CUDA host with no candle evidence, rather than borrowing the MLX floor", async () => {

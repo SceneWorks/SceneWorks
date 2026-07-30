@@ -128,6 +128,18 @@ export function isSelectableTier(tier) {
   return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier);
 }
 
+// Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
+// worker can serve them; every bits-based tier is unaffected. Both flags default true, which keeps a
+// caller that knows nothing about worker capabilities behaving exactly as before.
+//
+// Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
+// and (sc-15400) `tierSuggestion`'s per-tier memory floor, which must not size a host against a tier
+// that host cannot serve.
+export function tierHostEligible(tier, options = {}) {
+  const { convRotEligible = true, nvfp4Eligible = true } = options;
+  return (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+}
+
 // The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is
 // a known quant tier (bf16/q8/q4) OR one of the candle-only tiers (INT8-ConvRot, NVFP4)
 // (`isSelectableTier` — the "default" pseudo-variant of a single-variant model is excluded) AND its
@@ -161,11 +173,7 @@ function sortByTierOrder(a, b) {
 }
 
 export function installedTiers(model, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true } = options;
-  // Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
-  // worker can serve them; every bits-based tier is unaffected.
-  const hostEligible = (tier) =>
-    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  const hostEligible = (tier) => tierHostEligible(tier, options);
   // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
@@ -247,9 +255,7 @@ function tierStateLookup(model) {
 //    than regressing to an empty picker.
 // Returns [] when the model exposes no tier information at all.
 export function allPossibleTiers(model, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true } = options;
-  const hostEligible = (tier) =>
-    (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  const hostEligible = (tier) => tierHostEligible(tier, options);
   if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
     return model.variants
       .filter(

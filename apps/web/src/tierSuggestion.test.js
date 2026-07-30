@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  CANDLE_HEADROOM_GB,
   DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
   TRANSIENT_HEADROOM_BYTES,
   blanketFloorGb,
   cheapestDeclaredTierPeakGb,
+  declaredFloorHostGb,
   declaredTiers,
   hostGbForPeakGb,
+  installedFloorHostGb,
   installedTierPeakGb,
+  laneEvidenceEstimated,
   suggestTier,
   tierFits,
   variantFootprintBytes,
@@ -272,10 +276,11 @@ describe("suggestTier — real SANA-Sprint footprints (epic 10721 Auto default)"
 // remove them today) and the exact headroom arithmetic.
 // ---------------------------------------------------------------------------------------------------
 describe("per-tier memory floor: headroom conversion", () => {
-  it("converts a raw peak into the smallest host that satisfies the fit criterion", () => {
+  it("converts a raw peak into the smallest host that satisfies the MLX fit criterion", () => {
     // lens_turbo q4: 30.50 GiB measured. 31 GB does NOT fit it (31 × 0.9 = 27.9), 34 does.
     const peak = 32749818036 / GB;
     expect(hostGbForPeakGb(peak)).toBe(34);
+    expect(hostGbForPeakGb(peak, "mlx")).toBe(34);
     expect(peak).toBeLessThanOrEqual(34 * MEMORY_HEADROOM_FRACTION);
     expect(peak).toBeGreaterThan(33 * MEMORY_HEADROOM_FRACTION);
     // The pre-review behavior, kept explicit so the regression is named: ceil(peak) UNDER-states.
@@ -283,12 +288,33 @@ describe("per-tier memory floor: headroom conversion", () => {
     expect(peak).toBeGreaterThan(31 * MEMORY_HEADROOM_FRACTION);
   });
 
+  it("uses the CANDLE lane's additive criterion on candle, not the MLX fraction", () => {
+    // MAJOR 3. `vram_gate.rs` admits a candle load at `candle.vramGbByTier[tier] + HEADROOM_GB` (2.0);
+    // it explicitly does NOT apply the unified-memory fraction. Dividing instead over-states against the
+    // gate that actually rejects the load.
+    expect(CANDLE_HEADROOM_GB).toBe(2);
+    // flux2_dev bf16, the worst shipped case: 143 under the fractional form, 130 under the gate's own.
+    expect(hostGbForPeakGb(128, "candle")).toBe(130);
+    expect(hostGbForPeakGb(128, "mlx")).toBe(143);
+    // qwen_image bf16 and its lightning edit sibling.
+    expect(hostGbForPeakGb(82.5, "candle")).toBe(85);
+    expect(hostGbForPeakGb(87.4, "candle")).toBe(90);
+    // Tight: one GB below never clears the gate's budget.
+    for (const peak of [128, 82.5, 87.4, 34.7]) {
+      const shown = hostGbForPeakGb(peak, "candle");
+      expect(shown).toBeGreaterThanOrEqual(peak + CANDLE_HEADROOM_GB);
+      expect(shown - 1).toBeLessThan(peak + CANDLE_HEADROOM_GB);
+    }
+  });
+
   it("returns null for a missing or nonsensical peak rather than 0 or NaN", () => {
-    expect(hostGbForPeakGb(null)).toBeNull();
-    expect(hostGbForPeakGb(undefined)).toBeNull();
-    expect(hostGbForPeakGb(0)).toBeNull();
-    expect(hostGbForPeakGb(-5)).toBeNull();
-    expect(hostGbForPeakGb(Number.NaN)).toBeNull();
+    for (const backend of ["mlx", "candle"]) {
+      expect(hostGbForPeakGb(null, backend)).toBeNull();
+      expect(hostGbForPeakGb(undefined, backend)).toBeNull();
+      expect(hostGbForPeakGb(0, backend)).toBeNull();
+      expect(hostGbForPeakGb(-5, backend)).toBeNull();
+      expect(hostGbForPeakGb(Number.NaN, backend)).toBeNull();
+    }
   });
 });
 
@@ -338,15 +364,163 @@ describe("per-tier memory floor: the lane selects the evidence", () => {
     expect(cheapestDeclaredTierPeakGb(model, { backend: "candle" })).toBeNull();
   });
 
-  it("ignores non-tier keys in candle.vramGbByTier", () => {
-    // The manifest also stores int8-convrot rows there; only real bits-based tiers are generation tiers.
+  it("reads the CANDLE-ONLY tier rows, which are real selectable tiers", () => {
+    // krea_2_turbo's shape. `int8-convrot` has no `mlxQuantize` (it selects via `advanced.convRot`), so
+    // keying this map off `tierQuantize` dropped its measured row while `installedTiers` still returned
+    // the tier — collapsing the whole measured ceiling to null and falling back to the blanket. The map
+    // is keyed off `isSelectableTier` for exactly that reason.
     const model = {
-      candle: { vramGbByTier: { q4: 25.7, "int8-convrot": 34.7 } },
+      candle: {
+        minMemoryGb: 32,
+        vramGbByTier: { q4: 25.7, q8: 35.2, "int8-convrot": 34.7 },
+        measured: true,
+      },
+      hasVariantMatrix: true,
+      variants: [{ variant: "int8-convrot", installState: "installed", footprint: null }],
+    };
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(34.7);
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(37);
+    // ...and the cheapest declared floor still sees the bits tiers alongside it.
+    expect(cheapestDeclaredTierPeakGb(model, { backend: "candle" })).toBe(25.7);
+  });
+
+  it("drops a candle-only tier this host cannot serve, from BOTH the ceiling and the floor", () => {
+    // sc-9300 / sc-11042: the tier is hidden when no live worker advertises the capability, so it must
+    // not set a memory number the user can never act on either.
+    const model = {
+      candle: { minMemoryGb: 32, vramGbByTier: { "int8-convrot": 34.7, nvfp4: 31.5 }, measured: true },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "int8-convrot", installState: "installed", footprint: null },
+        { variant: "nvfp4", installState: "installed", footprint: null },
+      ],
+    };
+    const ineligible = { backend: "candle", convRotEligible: false, nvfp4Eligible: false };
+    expect(installedTierPeakGb(model, ineligible)).toBeNull();
+    expect(cheapestDeclaredTierPeakGb(model, ineligible)).toBeNull();
+    // With no eligible installed tier there is no per-tier answer at all — the blanket stands.
+    expect(installedFloorHostGb(model, ineligible)).toBeNull();
+    // Eligible host: both rows count, ceiling is the larger.
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(34.7);
+  });
+
+  it("degrades a candle-only tier with NO row to the q8 row, never to minMemoryGb (sc-11042)", () => {
+    // `vram_gate::predicted_peak_gb`'s documented rule: minMemoryGb is the DEFAULT (lightest) tier's peak,
+    // so landing there UNDER-predicts. The q8 row over-predicts, which is safe.
+    const model = {
+      candle: { minMemoryGb: 32, vramGbByTier: { q4: 25.7, q8: 35.2 }, measured: true },
+      hasVariantMatrix: true,
+      variants: [{ variant: "nvfp4", installState: "installed", footprint: null }],
+    };
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(35.2);
+    // NOT the blanket 32, which would be the permissive answer.
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(38);
+
+    // No q8 row either ⇒ nothing to degrade to, so the blanket stands (mirroring the Rust's last resort).
+    const noQ8 = { ...model, candle: { ...model.candle, vramGbByTier: { q4: 25.7 } } };
+    expect(installedTierPeakGb(noQ8, { backend: "candle" })).toBeNull();
+    expect(installedFloorHostGb(noQ8, { backend: "candle" })).toBe(32);
+  });
+});
+
+describe("per-tier memory floor: the blanket is a FLOOR, not a ceiling", () => {
+  // BLOCKER 1. `candle.minMemoryGb` is "the measured overall-peak of the DEFAULT (lightest, typically q4)
+  // hosted tier, plus headroom ... heavier hosted tiers (q8 / bf16) can exceed this value" (schema), and
+  // `vram_gate.rs:180` says landing on it is "the WRONG floor". So an install set with ONE unmeasured tier
+  // must not report the blanket alone.
+  function fluxDev() {
+    return {
+      id: "flux_dev",
+      candle: { minMemoryGb: 24, vramGbByTier: { q4: 21.3, q8: 31.8 }, measured: true },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: null },
+        { variant: "q8", installState: "installed", footprint: null },
+        { variant: "bf16", installState: "installed", footprint: null },
+      ],
+    };
+  }
+
+  it("takes the max of the blanket and the measured tiers when coverage is incomplete", () => {
+    const model = fluxDev();
+    // bf16 has no row, so the strict ceiling is unknown...
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBeNull();
+    // ...but the measured q8 of 31.8 still needs a 34 GB host, which is ABOVE the blanket 24.
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(34);
+    expect(blanketFloorGb(model, "candle")).toBe(24);
+  });
+
+  it("still reports the blanket when it is the HIGHER of the two", () => {
+    // sd3_5_medium's shape: q8 unrowed, and the blanket 36 already covers the measured bf16 of 33
+    // (33 + 2 = 35). The max must not lower the curated number either.
+    const model = {
+      candle: { minMemoryGb: 36, vramGbByTier: { q4: 28.5, bf16: 33 }, measured: false },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: null },
+        { variant: "q8", installState: "installed", footprint: null },
+        { variant: "bf16", installState: "installed", footprint: null },
+      ],
+    };
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(36);
+  });
+
+  it("reports the per-tier figure ALONE when every installed tier is measured", () => {
+    // The point of the story: no blanket max when the evidence is complete, or krea_realtime_14b's q4
+    // user would still be told 64.
+    const model = fluxDev();
+    model.variants = model.variants.filter((v) => v.variant !== "bf16");
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(34);
+    model.variants = model.variants.filter((v) => v.variant === "q4");
+    // ceil(21.3 + 2) = 24 here, which coincides with the blanket — so use q4 alone on a model whose
+    // blanket is higher to prove the figure is not being floored.
+    expect(installedFloorHostGb(model, { backend: "candle" })).toBe(24);
+    const heavierBlanket = {
+      candle: { minMemoryGb: 48, vramGbByTier: { q4: 21.3 }, measured: true },
       hasVariantMatrix: true,
       variants: [{ variant: "q4", installState: "installed", footprint: null }],
     };
-    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(25.7);
-    expect(cheapestDeclaredTierPeakGb(model, { backend: "candle" })).toBe(25.7);
+    expect(installedFloorHostGb(heavierBlanket, { backend: "candle" })).toBe(24);
+  });
+});
+
+describe("per-tier memory floor: an ESTIMATED candle lane is floored at its blanket", () => {
+  // MAJOR 4. `candle.measured === false` means the per-tier rows AND the blanket are both estimates
+  // (the flag covers them together), so neither may lower the other.
+  function lensTurbo(measured) {
+    return {
+      candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42, bf16: 52 }, measured },
+      hasVariantMatrix: true,
+      variants: [{ variant: "q4", installState: "installed", footprint: null }],
+    };
+  }
+
+  it("takes the max when the lane says ESTIMATED", () => {
+    expect(laneEvidenceEstimated(lensTurbo(false), "candle")).toBe(true);
+    // ceil(37.3 + 2) = 40, floored at the curated 44.
+    expect(installedFloorHostGb(lensTurbo(false), { backend: "candle" })).toBe(44);
+    expect(declaredFloorHostGb(lensTurbo(false), { backend: "candle" })).toBe(44);
+  });
+
+  it("takes the per-tier figure alone when the lane says MEASURED", () => {
+    expect(laneEvidenceEstimated(lensTurbo(true), "candle")).toBe(false);
+    expect(installedFloorHostGb(lensTurbo(true), { backend: "candle" })).toBe(40);
+  });
+
+  it("has no MLX counterpart: the footprint harness measures by construction", () => {
+    // There is no `mlx.measured` field, so the flag must never be consulted on the MLX lane — otherwise a
+    // model that declares `candle.measured: false` would have its MLX answer floored by an MLX blanket.
+    const model = {
+      mlx: { minMemoryGb: 60 },
+      candle: { minMemoryGb: 44, measured: false },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 32749818036 } },
+      ],
+    };
+    expect(laneEvidenceEstimated(model, "mlx")).toBe(false);
+    // ceil(30.50 / 0.9) = 34, NOT floored at the MLX blanket 60.
+    expect(installedFloorHostGb(model, { backend: "mlx" })).toBe(34);
   });
 });
 
