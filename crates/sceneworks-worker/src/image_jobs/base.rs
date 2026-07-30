@@ -936,6 +936,24 @@ const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024p
 const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
     "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+// Keep the explicit optional branch: the manifest audit recognizes this shape and proves every
+// production modelPath reader preserves the normal repo-resolution fallback.
+#[allow(clippy::question_mark)]
+fn model_path_override(request: &ImageRequest) -> Option<String> {
+    let Some(raw_path) = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return None;
+    };
+    Some(raw_path.to_owned())
+}
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -945,15 +963,7 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-    {
+    if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
@@ -1161,15 +1171,8 @@ fn resolved_mlx_artifact_provenance(
     weights_dir: &Path,
     effective_tier: Option<&'static str>,
 ) -> WorkerResult<Option<crate::model_jobs::ResolvedArtifactProvenance>> {
-    if let Some(model_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let managed_root = resolve_app_managed_model_dir(settings, model_path, "Image modelPath")?;
+    if let Some(path) = model_path_override(request) {
+        let managed_root = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
         let resolved_weights_dir = std::fs::canonicalize(weights_dir)?;
         if !resolved_weights_dir.starts_with(&managed_root) {
             return Ok(None);
