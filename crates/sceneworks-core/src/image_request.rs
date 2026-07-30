@@ -24,7 +24,7 @@
 
 use serde_json::Value;
 
-use crate::contracts::{ImageUpscaleRequest, JsonObject};
+use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
     array_or_empty, clamped_u32, declared_resolution, int_array, nonempty_string_or,
     object_or_empty, optional_i64, optional_id, string_list, string_or,
@@ -161,6 +161,8 @@ pub struct ImageRequest {
     /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
     /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
     pub upscale: ImageUpscaleRequest,
+    /// Optional A1111-style two-pass high-resolution refinement. Disabled when omitted.
+    pub hires_fix: HiresFixRequest,
 }
 
 impl ImageRequest {
@@ -209,6 +211,7 @@ impl ImageRequest {
             model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
             upscale: parse_upscale(payload),
+            hires_fix: parse_hires_fix(payload),
         }
     }
 }
@@ -219,6 +222,16 @@ impl ImageRequest {
 fn parse_upscale(payload: &JsonObject) -> ImageUpscaleRequest {
     payload
         .get("upscale")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+/// Parse the optional `hiresFix` object. As with `upscale`, malformed data falls back to the
+/// disabled default so older and hand-authored payloads remain compatibility-safe.
+fn parse_hires_fix(payload: &JsonObject) -> HiresFixRequest {
+    payload
+        .get("hiresFix")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
@@ -264,6 +277,7 @@ mod tests {
         assert!(request.advanced.is_empty());
         // No `upscale` object ⇒ the disabled default (the Image Studio toggle is off).
         assert!(request.upscale.is_disabled());
+        assert!(request.hires_fix.is_disabled());
     }
 
     #[test]
@@ -282,6 +296,30 @@ mod tests {
             "projectId": "p", "upscale": "yes please"
         })));
         assert!(bad.upscale.is_disabled());
+    }
+
+    #[test]
+    fn parses_hires_fix_request_and_malformed_payload_defaults_off() {
+        let request = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p",
+            "hiresFix": {
+                "enabled": true,
+                "steps": 18,
+                "denoisingStrength": 0.6,
+                "upscaleBy": 2.5,
+                "cfgScale": 5.5
+            }
+        })));
+        assert!(request.hires_fix.enabled);
+        assert_eq!(request.hires_fix.steps, 18);
+        assert_eq!(request.hires_fix.effective_denoising_strength(), 0.6);
+        assert_eq!(request.hires_fix.effective_upscale_by(), 2.5);
+        assert_eq!(request.hires_fix.cfg_scale, Some(5.5));
+
+        let bad = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "hiresFix": "yes please"
+        })));
+        assert!(bad.hires_fix.is_disabled());
     }
 
     #[test]

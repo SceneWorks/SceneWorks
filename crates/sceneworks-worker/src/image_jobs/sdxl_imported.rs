@@ -249,6 +249,8 @@ async fn generate_sdxl_imported_stream(
     let negative_prompt = (!request.negative_prompt.trim().is_empty())
         .then(|| request.negative_prompt.clone());
     let (width, height) = (request.width, request.height);
+    let hires_fix = resolve_hires_fix_plan(request, steps, Some(guidance), None);
+    let enhance = PromptEnhance::default();
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -265,6 +267,12 @@ async fn generate_sdxl_imported_stream(
         "importedCheckpoint".to_owned(),
         Value::String(request.model.clone()),
     );
+    if request.hires_fix.enabled {
+        raw_settings.insert(
+            "hiresFix".to_owned(),
+            serde_json::to_value(&request.hires_fix).expect("HiresFixRequest is serializable"),
+        );
+    }
 
     let mut spec = LoadSpec::new(WeightsSource::File(file.clone())).with_adapters(adapters);
     if let Some(pid) = pid_weights {
@@ -297,6 +305,35 @@ async fn generate_sdxl_imported_stream(
             drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
+                }
+                if let Some(hires_fix) = hires_fix {
+                    let (out_width, out_height, pixels) = generate_one_with_hires(
+                        model.as_ref(),
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        Some(guidance),
+                        negative_prompt.clone(),
+                        None,
+                        &[],
+                        None,
+                        None,
+                        sampler.as_deref(),
+                        scheduler.as_deref(),
+                        scheduler_shift,
+                        guidance_method.as_deref(),
+                        use_pid,
+                        None,
+                        None,
+                        None,
+                        &enhance,
+                        Some(hires_fix),
+                        &cancel,
+                        on_progress,
+                    )?;
+                    return Ok(Some((seed, out_width, out_height, pixels)));
                 }
                 let request = GenerationRequest {
                     prompt,

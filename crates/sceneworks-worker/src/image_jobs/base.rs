@@ -2853,6 +2853,12 @@ fn mlx_raw_settings(
         "mlxQuantize".to_owned(),
         quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
     );
+    if request.hires_fix.enabled {
+        raw.insert(
+            "hiresFix".to_owned(),
+            serde_json::to_value(&request.hires_fix).expect("HiresFixRequest is serializable"),
+        );
+    }
     raw
 }
 
@@ -3563,6 +3569,190 @@ fn generate_one(
             "generator returned non-image output".to_owned(),
         )),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HiresFixPlan {
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: Option<f32>,
+    true_cfg: Option<f32>,
+    provider_reference_strength: f32,
+}
+
+fn resolve_hires_fix_plan(
+    request: &ImageRequest,
+    first_pass_steps: u32,
+    first_pass_guidance: Option<f32>,
+    first_pass_true_cfg: Option<f32>,
+) -> Option<HiresFixPlan> {
+    if request.hires_fix.is_disabled() {
+        return None;
+    }
+    let upscale_by = request.hires_fix.effective_upscale_by();
+    let denoising_strength = request.hires_fix.effective_denoising_strength();
+    let family = resolve_family(request);
+    // SDXL and Ideogram expose conventional denoising strength (higher means more regeneration).
+    // The other current img2img providers expose reference fidelity (higher means preserve more),
+    // so translate the user-facing A1111 denoising value at this boundary.
+    let provider_reference_strength = if matches!(family.as_str(), "sdxl" | "ideogram") {
+        denoising_strength
+    } else {
+        1.0 - denoising_strength
+    };
+    let cfg = request
+        .hires_fix
+        .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
+    Some(HiresFixPlan {
+        width: hires_fix_target_dimension(request.width, upscale_by),
+        height: hires_fix_target_dimension(request.height, upscale_by),
+        steps: request.hires_fix.effective_steps(first_pass_steps),
+        guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
+        true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
+        provider_reference_strength,
+    })
+}
+
+/// Run the normal first pass followed by an optional high-resolution img2img refinement while
+/// keeping progress monotonic across both denoise schedules.
+#[allow(clippy::too_many_arguments)]
+fn generate_one_with_hires(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    hires_fix: Option<HiresFixPlan>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let Some(hires) = hires_fix else {
+        return generate_one(
+            generator,
+            prompt,
+            width,
+            height,
+            seed,
+            steps,
+            guidance,
+            negative_prompt,
+            reference,
+            multi_references,
+            edit_mask,
+            true_cfg,
+            sampler,
+            scheduler,
+            scheduler_shift,
+            guidance_method,
+            use_pid,
+            text_style_gain,
+            memory,
+            memory_strategy_context,
+            enhance,
+            cancel,
+            on_progress,
+        );
+    };
+
+    let combined_steps = steps.saturating_add(hires.steps);
+    let mut first_progress = |progress| match progress {
+        Progress::Step { current, .. } => on_progress(Progress::Step {
+            current,
+            total: combined_steps,
+        }),
+        // The first decode is an internal hand-off. The user-visible decode is the final one.
+        Progress::Decoding => {}
+        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+    };
+    let (base_width, base_height, base_pixels) = generate_one(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt.clone(),
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        cancel,
+        &mut first_progress,
+    )?;
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Engine("generation cancelled".to_owned()));
+    }
+    let high_res_reference = fit_engine_image(
+        Image {
+            width: base_width,
+            height: base_height,
+            pixels: base_pixels,
+        },
+        hires.width,
+        hires.height,
+        "stretch",
+    )?;
+    let reference = (high_res_reference, hires.provider_reference_strength);
+    let mut second_progress = |progress| match progress {
+        Progress::Step { current, .. } => on_progress(Progress::Step {
+            current: steps.saturating_add(current),
+            total: combined_steps,
+        }),
+        Progress::Decoding => on_progress(Progress::Decoding),
+        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+    };
+    generate_one(
+        generator,
+        prompt,
+        hires.width,
+        hires.height,
+        seed,
+        hires.steps,
+        hires.guidance,
+        negative_prompt,
+        Some(&reference),
+        &[],
+        None,
+        hires.true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        false,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        cancel,
+        &mut second_progress,
+    )
 }
 
 /// Within-image step fraction mapped into the 0.10..0.95 generation band.
@@ -4784,6 +4974,7 @@ async fn generate_stream(
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
     let true_cfg = flux_true_cfg.or(model_true_cfg);
+    let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
 
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is
     // out-of-distribution and stochastically renders the "Image blocked by safety filter"
@@ -4874,13 +5065,13 @@ async fn generate_stream(
         memory_overlays.push("pid".to_owned());
     }
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
-        width,
-        height,
+        width: hires_fix.map_or(width, |plan| plan.width),
+        height: hires_fix.map_or(height, |plan| plan.height),
         count: request.count,
         mode: request.mode.clone(),
         overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         adapter_count,
-        has_reference: has_request_reference,
+        has_reference: has_request_reference || hires_fix.is_some(),
         use_pid,
         has_phases: false,
     };
@@ -4961,7 +5152,7 @@ async fn generate_stream(
                     .process_limit_bytes
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                    generate_one(
+                    generate_one_with_hires(
                         generator,
                         &prompt,
                         width,
@@ -4983,6 +5174,7 @@ async fn generate_stream(
                         Some(memory_evaluation.memory),
                         Some(&memory_evaluation.context),
                         &enhance,
+                        hires_fix,
                         &cancel,
                         on_progress,
                     )
@@ -5701,6 +5893,7 @@ async fn generate_candle_stream(
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     let true_cfg = resolve_true_cfg(request, &model);
+    let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
     let negative_prompt = resolve_negative_prompt(request, &model);
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
@@ -6620,7 +6813,7 @@ async fn generate_candle_stream(
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                    generate_one(
+                    generate_one_with_hires(
                         generator,
                         &prompt,
                         width,
@@ -6656,6 +6849,7 @@ async fn generate_candle_stream(
                         generation_memory,
                         memory_strategy_context.as_ref(),
                         &enhance,
+                        hires_fix,
                         &cancel,
                         on_progress,
                     )

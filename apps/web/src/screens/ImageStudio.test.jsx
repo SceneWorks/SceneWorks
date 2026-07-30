@@ -1194,6 +1194,39 @@ describe("ImageStudio model picker capability gating", () => {
     expect(pid().disabled).toBe(true);
   });
 
+  it("shows Hires.fix settings for img2img models and keeps it exclusive with Upscale", async () => {
+    const HIRES_MODEL = {
+      ...Z_IMAGE,
+      id: "krea_2_turbo",
+      name: "Krea 2 Turbo",
+      family: "krea_2",
+      ui: { img2img: true },
+      image: { supportsGuidance: false, supportsNegativePrompt: false },
+    };
+    await render(baseContext({ imageModels: [HIRES_MODEL], models: [HIRES_MODEL] }));
+    await openAdvanced(container);
+    await act(async () => {});
+
+    const hires = () => container.querySelector('.hires-fix-toggle input[type="checkbox"]');
+    const upscale = () => container.querySelector('.upscale-toggle input[type="checkbox"]');
+    expect(hires()).toBeTruthy();
+    expect(hires().disabled).toBe(false);
+    expect(field(container, "Hires Steps")).toBeFalsy();
+
+    await act(async () => hires().click());
+    expect(field(container, "Hires Steps").value).toBe("0");
+    expect(field(container, "Denoising Strength").value).toBe("0.7");
+    expect(field(container, "Upscale by").value).toBe("2");
+    expect(field(container, "Hires CFG Scale").placeholder).toBe("Inherit");
+    expect(field(container, "Hires CFG Scale").disabled).toBe(true);
+    expect(upscale().checked).toBe(false);
+
+    await act(async () => upscale().click());
+    expect(upscale().checked).toBe(true);
+    expect(hires().checked).toBe(false);
+    expect(field(container, "Hires Steps")).toBeFalsy();
+  });
+
   it("still sends the resolved tier's mlxQuantize when only one tier is installed (sc-12090)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
