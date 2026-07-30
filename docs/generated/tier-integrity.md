@@ -11,10 +11,14 @@ Normative statement: [`docs/memory-strategy-contract.md`](../memory-strategy-con
 Declared exceptions: **79** — 24 measured, 55 unmeasured.
 
 Above-tier residency is not rare. On a q4 or q8 tier the great majority of image entries keep a
-VAE, a text encoder, or both resident at bf16 or f32. Every one is declared below with the in-tree
+VAE, a text encoder, or both resident at bf16 or f32. Every component that meets the declaration
+THRESHOLD stated in `config/tier-integrity.jsonc`'s header is declared below with the in-tree
 citation for the fact; the unmeasured rows have no isolated component cost in the tree yet and name
-the story that owes it. `scripts/check-tier-integrity.mjs` refuses an unmeasured exception from any
-entry not grandfathered by sc-15799, so this debt is bounded and can only shrink.
+the story that owes it. `scripts/check-tier-integrity.mjs` refuses an unmeasured exception for any
+`(model, component)` PAIR not grandfathered by sc-15799 — per pair, not per model, so an amnestied
+entry cannot add one for a component it does not already declare — pins the amnesty set's SIZE
+against a committed constant, and errors on a grandfathered pair whose row is gone. sc-16015 owns
+emptying it.
 
 | model | component | resident at | above tier on | cause | cost (GB) | evidence |
 | --- | --- | --- | --- | --- | --- | --- |
