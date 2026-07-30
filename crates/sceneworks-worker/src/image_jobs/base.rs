@@ -4619,7 +4619,12 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
-    let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec(engine_id, &spec);
+    let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+    );
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
     let mut memory_overlays = Vec::new();
@@ -4725,6 +4730,12 @@ async fn generate_stream(
                     load_policy,
                     request_external_committed_bytes,
                 )?;
+                // Exact promoted MLX evidence may tighten the soft process limit for this request.
+                // The RAII guard restores the process-global/user limit after all retries and never
+                // touches the wired limit (#1947).
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one(
                         generator,

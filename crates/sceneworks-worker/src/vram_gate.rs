@@ -36,7 +36,10 @@ pub(crate) const CUDA_VRAM_CAP_ENV: &str = "SCENEWORKS_CUDA_VRAM_CAP_GB";
 /// Fixed transient/runtime headroom (GB) added on top of a per-tier MEASURED peak (`candle.vramGbByTier`)
 /// to cover allocator slack + activation spikes not captured by the steady peak. Not added on top of
 /// `candle.minMemoryGb`, which the manifest already pads over the measured peak (sc-9094).
-const HEADROOM_GB: f64 = 2.0;
+/// Candle/CUDA's dedicated-VRAM allocator/context slack. This aliases the backend-neutral typed
+/// policy so the generic gate, control gate, Mochi, and the web mirror cannot assign independent
+/// meanings or values to the same dedicated pool.
+pub(crate) const HEADROOM_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 
 /// A live (or capped) VRAM budget for the selected GPU, in GB.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1108,7 +1111,7 @@ pub(crate) fn load_plan(
 ///
 /// Budgets against `free_gb` (what is allocatable now), like [`fit_decision`] and unlike the MLX gate,
 /// which has only a unified `total_gb`. Reserves [`HEADROOM_GB`] rather than the MLX gate's
-/// `OS_RESERVE_GB`: the OS does not draw from discrete VRAM, so the term covers allocator slack and
+/// the MLX unified reserve: the OS does not draw from discrete VRAM, so the term covers allocator slack and
 /// CUDA context overhead instead. The two constants agree at 2.0 today but mean different things.
 ///
 /// Pure (no GPU probe, no env) so the whole decision is unit-testable without CUDA; the caller resolves
@@ -1256,7 +1259,7 @@ pub(crate) fn svd_fit_error(
 //     actually loaded. The floor stays the fallback for a Wan tier that was never measured.
 //  2. **There is no host paging on CUDA.** Weights that do not fit VRAM cannot be demand-paged the way
 //     MLX's unified pool swaps, so Σweights is a genuine LOWER BOUND on the job's need. This is the
-//     asymmetry that makes the weights floor safe HERE but not on MLX: `mlx_fit_gate::weights_fit_floor`
+//     asymmetry that makes the weights floor safe HERE but not on MLX's legacy transition override
 //     exists to stop a pageable transient from wall-rejecting a small Mac (sc-12179), and that whole
 //     class of false reject cannot arise on a discrete card.
 //  3. Therefore rejecting when the weights alone overflow can never wall-reject a machine that would
@@ -1484,7 +1487,7 @@ fn video_peak_too_big_error(
 /// this engine holds for the whole run, plus [`HEADROOM_GB`].
 ///
 /// [`HEADROOM_GB`] is the CUDA reserve — allocator slack + CUDA context overhead — not MLX's
-/// `OS_RESERVE_GB` (the OS does not draw from discrete VRAM). The two agree at 2.0 today but mean
+/// unified reserve (the OS does not draw from discrete VRAM). The two may agree numerically but mean
 /// different things; this is the same split `fit_gate::mochi_needed_gb` takes its `reserve_gb`
 /// parameter for (sc-12306).
 ///
@@ -2970,7 +2973,7 @@ mod tests {
                 .is_some(),
             "weights alone fit 29 GB but weights + 2 GB of allocator/context reserve do not"
         );
-        // And the reserve is the CUDA one, not MLX's OS_RESERVE_GB: they agree at 2.0 today, so pin the
+        // And the reserve is the CUDA allocator one, not MLX's foreign-demand reserve, so pin the
         // arithmetic rather than the constant's name.
         assert_eq!(
             video_weights_needed_gb(WAN_A14B_CANDLE_Q4_BYTES),

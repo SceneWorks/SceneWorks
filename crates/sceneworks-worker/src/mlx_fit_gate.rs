@@ -38,6 +38,11 @@ use gen_core::{
     MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
     OffloadPolicy, WeightsSource,
 };
+use sceneworks_core::memory_calibration::{
+    Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
+    EvidenceVerdict, Geometry as CalibrationGeometry, StaleEvidenceReason, StrategyRung,
+};
+use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
@@ -52,24 +57,36 @@ const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
 #[derive(Clone, Debug)]
 pub(crate) struct MlxRequestPlan {
     engine_id: &'static str,
+    model_id: String,
     tier: MemoryNumericTier,
     asset_bytes: u64,
     activation_headroom_bytes: u64,
+    calibration: Option<MlxCalibrationBinding>,
 }
 
 impl MlxRequestPlan {
-    pub(crate) fn for_spec(engine_id: &'static str, spec: &LoadSpec) -> Self {
+    pub(crate) fn for_spec_and_manifest(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+    ) -> Self {
         let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
         Self {
             engine_id,
+            model_id: model_id.to_owned(),
             tier: MemoryNumericTier {
                 precision: spec.precision,
                 quant: spec.quantize,
             },
             asset_bytes,
-            // The historical generic headroom includes the 2 GiB OS reserve. Request budgeting
-            // carries that reserve separately, so leave only the activation allowance here.
-            activation_headroom_bytes: gib_to_bytes((headroom_gb - OS_RESERVE_GB).max(0.0)),
+            // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
+            // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
+            // the activation allowance here. Exact evidence supplies its own measured envelope.
+            activation_headroom_bytes: gib_to_bytes(
+                (headroom_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+            ),
+            calibration: manifest.and_then(MlxCalibrationBinding::from_manifest),
         }
     }
 
@@ -83,6 +100,83 @@ impl MlxRequestPlan {
                 .clamp(0.0, u64::MAX as f64) as u64,
         )
     }
+}
+
+#[derive(Clone, Debug)]
+struct MlxCalibrationBinding {
+    query: CalibrationBinding,
+    provider: String,
+    tier: String,
+    rung: StrategyRung,
+    parameters: JsonObject<String, Value>,
+}
+
+impl MlxCalibrationBinding {
+    /// Read the optional generic MLX calibration identity. No current catalog row has this block:
+    /// calibration stories opt in one model only after promoting exact evidence into the packaged
+    /// bundle. Missing or malformed bindings stay on the legacy path and never manufacture coverage.
+    fn from_manifest(manifest: &JsonObject<String, Value>) -> Option<Self> {
+        let calibration = manifest.get("mlx")?.get("calibration")?;
+        let text = |name| calibration.get(name)?.as_str().map(str::to_owned);
+        let rung = match calibration.get("rung")?.as_str()? {
+            "resident" => StrategyRung::Resident,
+            "staged_residency" => StrategyRung::StagedResidency,
+            "bounded_decode" => StrategyRung::BoundedDecode,
+            "bounded_attention" => StrategyRung::BoundedAttention,
+            "bounded_transformer_residency" => StrategyRung::BoundedTransformerResidency,
+            _ => return None,
+        };
+        Some(Self {
+            query: CalibrationBinding {
+                abi: u32::try_from(calibration.get("abi")?.as_u64()?).ok()?,
+                fingerprint: text("fingerprint")?,
+                scene_works_revision: text("sceneWorksRevision")?,
+                matrix_source_revision: text("matrixSourceRevision")?,
+                inference_revision: text("inferenceRevision")?,
+                artifact_repository: text("artifactRepository")?,
+                artifact_resolved_revision: text("artifactResolvedRevision")?,
+                artifact_variant: text("artifactVariant")?,
+                resolved_path_fingerprint: text("resolvedPathFingerprint")?,
+            },
+            provider: text("provider")?,
+            tier: text("tier")?,
+            rung,
+            parameters: calibration.get("parameters")?.as_object()?.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionPath {
+    Evidence,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyAdmissionReason {
+    PackagedEmpty,
+    NoBinding,
+    NoRecord,
+    OutOfEnvelope,
+    StaleFingerprint,
+    StaleIdentity,
+    StaleBundle,
+}
+
+#[derive(Clone, Debug)]
+struct AdmissionRoute {
+    path: AdmissionPath,
+    fallback_reason: Option<LegacyAdmissionReason>,
+    evidence: Option<MemoryEvidence>,
+    evidence_revision: Option<String>,
+    process_limit_bytes: Option<u64>,
+}
+
+fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) -> MemoryBudget {
+    if let Some(process_limit_bytes) = admission.process_limit_bytes {
+        budget.reserved_headroom_bytes = budget.total_bytes.saturating_sub(process_limit_bytes);
+    }
+    budget
 }
 
 /// Exact request axes that must be reconsidered for both cold and warm cache runs.
@@ -105,6 +199,9 @@ pub(crate) struct MlxRequestInputs {
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
     pub context: MemoryRunContext,
+    /// Request-scoped soft MLX ceiling derived from an exact verified cell. Legacy cells keep the
+    /// process-global #1947 fallback. Applying this never changes the wired limit.
+    pub process_limit_bytes: Option<u64>,
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -197,6 +294,195 @@ fn resident_evidence(
     (selection, evidence)
 }
 
+fn stale_fallback_reason(reason: StaleEvidenceReason) -> LegacyAdmissionReason {
+    if reason == StaleEvidenceReason::CalibrationFingerprint {
+        LegacyAdmissionReason::StaleFingerprint
+    } else {
+        LegacyAdmissionReason::StaleIdentity
+    }
+}
+
+fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
+    match rung {
+        StrategyRung::Resident => MemoryStrategy::Resident,
+        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
+        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
+        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
+        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
+    }
+}
+
+fn evidence_parameters(
+    parameters: &JsonObject<String, Value>,
+) -> gen_core::MemoryStrategyParameters {
+    let value = |key: &str| {
+        parameters
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    gen_core::MemoryStrategyParameters {
+        decode_tile_edge: value("decodeTileEdge"),
+        decode_overlap: value("decodeOverlap"),
+        attention_chunk_size: value("attentionChunkSize"),
+        transformer_window_size: value("transformerWindowSize"),
+        ..Default::default()
+    }
+}
+
+/// Apply Decision 2 at the request seam: exact verified cells fail closed; every non-covering state
+/// returns to the established legacy selector. The route is returned so tests and telemetry can
+/// distinguish a normal empty-bundle transition from drift or an out-of-envelope request.
+fn packaged_admission_route(
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> WorkerResult<AdmissionRoute> {
+    let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "packaged memory-calibration evidence is invalid: {error}"
+        ))
+    })?;
+    let bundle = match loaded {
+        BundleLoad::Ready(bundle) => bundle,
+        BundleLoad::Stale(_) => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::StaleBundle),
+                evidence: None,
+                evidence_revision: None,
+                process_limit_bytes: None,
+            });
+        }
+    };
+    evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
+}
+
+fn evidence_admission_route(
+    bundle: &EvidenceBundle,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> WorkerResult<AdmissionRoute> {
+    if bundle.records.is_empty() {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::PackagedEmpty),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    }
+    let Some(binding) = &plan.calibration else {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::NoBinding),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    };
+    let query = EvidenceQuery {
+        backend: CalibrationBackend::Mlx,
+        model_id: plan.model_id.clone(),
+        provider: binding.provider.clone(),
+        tier: binding.tier.clone(),
+        mode: mode_key.to_owned(),
+        overlay: inputs.overlay.clone().unwrap_or_else(|| "none".to_owned()),
+        geometry: CalibrationGeometry {
+            width: inputs.width,
+            height: inputs.height,
+            batch: inputs.count.max(1),
+            frames: 1,
+        },
+        rung: binding.rung,
+        parameters: binding.parameters.clone(),
+        calibration: binding.query.clone(),
+    };
+    match bundle.evidence_for(&query) {
+        EvidenceVerdict::Verified(record) => {
+            let envelope = record.mlx_admission_envelope().ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{} has a verified MLX evidence cell without a complete MLX admission envelope",
+                    plan.model_id
+                ))
+            })?;
+            let safely_available = budget
+                .total_bytes
+                .saturating_sub(envelope.foreign_reserve_bytes);
+            if envelope.peak_bytes > safely_available {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{} request {}x{} count {} needs {:.2} GiB from verified MLX evidence, but \
+                     {:.2} GiB remains after measured foreign unified-memory demand",
+                    plan.model_id,
+                    inputs.width,
+                    inputs.height,
+                    inputs.count.max(1),
+                    envelope.peak_bytes as f64 / BYTES_PER_GIB,
+                    safely_available as f64 / BYTES_PER_GIB,
+                )));
+            }
+            Ok(AdmissionRoute {
+                path: AdmissionPath::Evidence,
+                fallback_reason: None,
+                evidence: Some(MemoryEvidence {
+                    key: MemoryEvidenceKey {
+                        resolved_route: plan.engine_id.to_owned(),
+                        backend: "mlx".to_owned(),
+                        tier: plan.tier,
+                        mode: mode_key.to_owned(),
+                        overlay: inputs.overlay.clone(),
+                        geometry: MemoryGeometry {
+                            width: inputs.width,
+                            height: inputs.height,
+                            batch: inputs.count.max(1),
+                            frames: 1,
+                        },
+                        strategy: evidence_strategy(binding.rung),
+                        parameters: evidence_parameters(&binding.parameters),
+                    },
+                    conformance: MemoryConformanceState::Verified,
+                    dimensions: MemoryEvidenceDimensions::VERIFIED,
+                    calibration_abi: binding.query.abi,
+                    calibration_fingerprint: binding.query.fingerprint.clone(),
+                    sceneworks_revision: binding.query.scene_works_revision.clone(),
+                    inference_revision: binding.query.inference_revision.clone(),
+                    harness_version: record.harness_version.clone(),
+                    predicted_peak_bytes: envelope.peak_bytes,
+                    observed_peak_bytes: Some(envelope.observed_non_reclaimable_wired_bytes),
+                    parity: MemoryParityContract::Exact,
+                    parity_result: MemoryParityResult::Passed,
+                }),
+                evidence_revision: Some(record.id.clone()),
+                process_limit_bytes: Some(safely_available),
+            })
+        }
+        EvidenceVerdict::Unknown => Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::NoRecord),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        }),
+        EvidenceVerdict::OutOfEnvelope => Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::OutOfEnvelope),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        }),
+        EvidenceVerdict::Stale(reason) => Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(stale_fallback_reason(reason)),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        }),
+    }
+}
+
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
 /// accepted explicitly; absent exact verified cells, only the resident baseline can be admitted.
 #[allow(clippy::too_many_arguments)]
@@ -251,6 +537,40 @@ fn evaluate_request_with_budget(
         .calibration
         .as_ref()
         .map_or(0, |identity| identity.abi);
+    let mut admission = packaged_admission_route(plan, inputs, mode_key, budget)?;
+    if admission.path == AdmissionPath::Evidence
+        && !matches!(
+            (&plan.calibration, contract.calibration.as_ref()),
+            (Some(binding), Some(identity))
+                if identity.abi == binding.query.abi
+                    && identity.fingerprint == binding.query.fingerprint
+        )
+    {
+        admission = AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+            evidence: None,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        };
+    }
+    // The selector and provider request context must use the same evidence-derived foreign demand
+    // as the fail-closed precheck and the request-scoped MLX ceiling. Otherwise a covered request
+    // with existing committed memory could be admitted against the legacy 2 GiB reserve even though
+    // its record captured a larger non-process share.
+    let budget = budget_for_admission(budget, &admission);
+    tracing::info!(
+        event = "mlx_memory_admission_path",
+        route = plan.engine_id,
+        model = plan.model_id,
+        path = ?admission.path,
+        fallback_reason = ?admission.fallback_reason,
+        evidence_revision = admission.evidence_revision.as_deref().unwrap_or("none"),
+        width = inputs.width,
+        height = inputs.height,
+        count = inputs.count.max(1),
+        "selected MLX memory-admission path"
+    );
     if plan.engine_id.starts_with("mage_flow")
         && !matches!(
             contract.calibration.as_ref(),
@@ -292,15 +612,26 @@ fn evaluate_request_with_budget(
         predicted_peak_bytes,
         calibration_fingerprint,
     );
-    let mut selections = Vec::with_capacity(1 + additional_evidence.len());
+    let packaged_evidence = admission.evidence.as_ref();
+    let mut selections = Vec::with_capacity(
+        1 + usize::from(packaged_evidence.is_some()) + additional_evidence.len(),
+    );
     selections.push(resident_selection);
+    selections.extend(packaged_evidence.map(|evidence| MemorySelection {
+        strategy: evidence.key.strategy,
+        parameters: evidence.key.parameters,
+        tier: evidence.key.tier,
+    }));
     selections.extend(additional_evidence.iter().map(|evidence| MemorySelection {
         strategy: evidence.key.strategy,
         parameters: evidence.key.parameters,
         tier: evidence.key.tier,
     }));
-    let mut evidence = Vec::with_capacity(1 + additional_evidence.len());
+    let mut evidence = Vec::with_capacity(
+        1 + usize::from(packaged_evidence.is_some()) + additional_evidence.len(),
+    );
     evidence.push(&resident);
+    evidence.extend(packaged_evidence);
     evidence.extend(additional_evidence);
     let candidates = selections
         .iter()
@@ -310,6 +641,20 @@ fn evaluate_request_with_budget(
             evidence,
         })
         .collect::<Vec<_>>();
+    let expected_scene_works_revision = plan
+        .calibration
+        .as_ref()
+        .filter(|_| admission.path == AdmissionPath::Evidence)
+        .map_or(REQUEST_EVIDENCE_REVISION, |binding| {
+            binding.query.scene_works_revision.as_str()
+        });
+    let expected_inference_revision = plan
+        .calibration
+        .as_ref()
+        .filter(|_| admission.path == AdmissionPath::Evidence)
+        .map_or(INFERENCE_CONTRACT_REVISION, |binding| {
+            binding.query.inference_revision.as_str()
+        });
     let selection = crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: plan.engine_id,
@@ -318,8 +663,8 @@ fn evaluate_request_with_budget(
             mode: mode_key,
             overlay: inputs.overlay.as_deref(),
             geometry,
-            expected_sceneworks_revision: REQUEST_EVIDENCE_REVISION,
-            expected_inference_revision: INFERENCE_CONTRACT_REVISION,
+            expected_sceneworks_revision: expected_scene_works_revision,
+            expected_inference_revision,
         },
         contract,
         Some(Budget {
@@ -385,6 +730,7 @@ fn evaluate_request_with_budget(
     );
     Ok(MlxRequestEvaluation {
         memory: memory_for_selection(contract, selection),
+        process_limit_bytes: admission.process_limit_bytes,
         context: MemoryRunContext {
             selection,
             calibration_abi,
@@ -398,7 +744,9 @@ fn evaluate_request_with_budget(
             budget,
             predicted_peak_bytes,
             cache_state,
-            evidence_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+            evidence_revision: admission
+                .evidence_revision
+                .unwrap_or_else(|| REQUEST_EVIDENCE_REVISION.to_owned()),
         },
     })
 }
@@ -423,7 +771,8 @@ fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
                 )
             })?
             .total_gb;
-        (gib_to_bytes(total_gib), gib_to_bytes(OS_RESERVE_GB))
+        let reserve = crate::fit_gate::legacy_unified_reserve(total_gib);
+        (gib_to_bytes(total_gib), gib_to_bytes(reserve.gb))
     };
     Ok(MemoryBudget {
         total_bytes,
@@ -569,24 +918,6 @@ const HEADROOM_GB: f64 = 18.0;
 /// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
 /// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
 const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
-
-/// Reserve (GiB) kept free for macOS + the SceneWorks app + other apps when the WEIGHTS-FIT FLOOR
-/// (sc-12179, GitHub #1544) admits a model whose predicted PEAK exceeds the budget. Deliberately
-/// small: it guards the OS from outright starvation (which would destabilize the whole machine), NOT
-/// the pageable activation transient (which degrades to swap, not a wired SIGKILL). A FLAT constant
-/// (not a fraction of RAM) on purpose — the OS floor is roughly absolute, so it must not scale up to
-/// tens of GiB on a large machine and lock a big Mac out of its own memory.
-///
-/// 2 GiB is anchored on the 0.7.3 baseline: z-image-turbo q4 (5.49 GiB on disk, largest single
-/// component 3.38 GiB) ran on an 8 GB Mac with roughly this much left for the OS + paged transient.
-/// It leaves ~6 GiB of weight budget on an 8 GB Mac — comfortably admitting that baseline and the
-/// other small tiers — while still rejecting a model whose weights alone can't be held resident.
-/// See [`weights_fit_floor`] and the `z_image_turbo_q4_admits_on_an_8gb_mac` baseline test.
-///
-/// Shared with [`crate::generator_cache::resolve_gpu_memory_limit`], which reserves the same floor
-/// when it derives the default MLX process memory limit — the admission floor and the runtime
-/// ceiling must agree, or the gate admits a tier the runtime then refuses to hold.
-pub(crate) const OS_RESERVE_GB: f64 = 2.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
@@ -847,7 +1178,7 @@ fn sysctl_total_unified_memory_bytes() -> Option<u64> {
 //     materializes the whole clip — sc-12291), so the peak grows LINEARLY IN CLIP LENGTH. A 7-frame
 //     and a 151-frame request differ by ~55 GiB on the same model. A constant cannot express that.
 //
-//  2. Mochi's `supports_sequential_offload: false` ⇒ `weights_fit_floor` admits on WEIGHTS ALONE
+//  2. Mochi's `supports_sequential_offload: false` ⇒ the legacy admission override admits on WEIGHTS ALONE
 //     (18.73 GiB fits almost any Mac), so the generic gate would happily admit a 151-frame job that
 //     then needs ~79 GiB. The floor is correct for its own purpose (sc-12179: never wall-reject a
 //     machine that used to work) but it is precisely what makes the generic gate unable to protect
@@ -867,21 +1198,27 @@ fn sysctl_total_unified_memory_bytes() -> Option<u64> {
 // All three points above hold verbatim for the candle lane, which grew the same gate in sc-12306 —
 // except (3), where a CUDA OOM is catchable rather than a SIGKILL, so the pre-flight buys an
 // actionable message and minutes of un-wasted denoise rather than process survival. What remains here
-// is MLX-SPECIFIC: the unified-memory budget probe, the `OS_RESERVE_GB` reserve, and the Mac-worded
+// is MLX-SPECIFIC: the unified-memory budget probe, the typed legacy/evidence reserve, and the Mac-worded
 // message. The shared ARITHMETIC lives in `crate::fit_gate` (`mochi_decode_peak_gb` /
 // `mochi_needed_gb`); the candle half is `vram_gate::mochi_fit_error`. The on-disk scan
 // (`mochi_resident_bytes`) is shared too — the hosted tier layout is one repo serving both lanes.
 
 /// Predicted whole-generation peak (GiB) for an MLX Mochi request, in UNIFIED memory: the shared
-/// backend-neutral arithmetic ([`crate::fit_gate::mochi_needed_gb`]) reserving [`OS_RESERVE_GB`],
+/// backend-neutral arithmetic ([`crate::fit_gate::mochi_needed_gb`]) with the caller's unified reserve,
 /// because on unified memory the OS draws from the same pool the model does.
 ///
 /// The formula itself moved to [`crate::fit_gate`] when the candle video lane needed the identical
 /// arithmetic (sc-12306) — every term in it is a fact about the MODEL (tensor shapes × the f32 dtype
 /// both decoders pin), so duplicating it per lane would let the two gates disagree about one model.
 /// The RESERVE is what stays lane-specific; see that function's note.
-fn mochi_needed_gb(weight_bytes: u64, frames: u32, width: u32, height: u32) -> Option<f64> {
-    crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, OS_RESERVE_GB)
+fn mochi_needed_gb(
+    weight_bytes: u64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    reserve_gb: f64,
+) -> Option<f64> {
+    crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, reserve_gb)
 }
 
 /// The pure Mochi admission decision: `Some(error)` when the predicted peak overflows the budget,
@@ -895,10 +1232,9 @@ pub(crate) fn mochi_fit_error(
     height: u32,
     budget: Option<MlxMemoryBudget>,
 ) -> Option<WorkerError> {
-    let (needed_gb, budget) = (
-        mochi_needed_gb(weight_bytes, frames, width, height)?,
-        budget?,
-    );
+    let budget = budget?;
+    let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
+    let needed_gb = mochi_needed_gb(weight_bytes, frames, width, height, reserve.gb)?;
     (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
         mochi_too_big_error(
             model_label,
@@ -1046,21 +1382,19 @@ fn decide_residency_with_headroom(
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
-    let base = decide_residency_by_peak_with_headroom(
+    let peak = decide_residency_by_peak_with_headroom(
         total_bytes,
         te_bytes,
         budget,
         sequential_capable,
         headroom_gb,
     );
-    // Weights-fit floor (sc-12179): a would-be reject is downgraded to a (best-effort) load when the
-    // resident weights actually fit — the peak predictor's pageable transient must not categorically
-    // exclude a small Mac. Any non-reject outcome stands as-is.
-    match base {
+    match peak {
         ResidencyOutcome::Reject { .. } => {
-            weights_fit_floor(total_bytes, te_bytes, budget, sequential_capable).unwrap_or(base)
+            legacy_admission_override(total_bytes, te_bytes, budget, sequential_capable)
+                .unwrap_or(peak)
         }
-        resident_or_sequential => resident_or_sequential,
+        admitted => admitted,
     }
 }
 
@@ -1069,7 +1403,7 @@ fn decide_residency_with_headroom(
 /// — against the budget. This is the right signal for SELECTING Resident vs Sequential and for the
 /// rejection message's `needed`/`staged` numbers, but it rejects too aggressively on small Macs
 /// because the flat headroom bundles a pageable 1024² activation transient (sc-12179); the caller
-/// folds in [`weights_fit_floor`] before honoring a reject.
+/// folds in the Decision 2 legacy override before honoring a reject.
 #[cfg(test)]
 fn decide_residency_by_peak(
     total_bytes: u64,
@@ -1234,40 +1568,6 @@ fn generic_mlx_shared_observation(
     )
 }
 
-/// Weights-fit floor (sc-12179, GitHub #1544): a machine that can hold the model's RESIDENT WEIGHTS
-/// can still run it — paging the activation transient if needed — exactly as it did before this
-/// fit-gate existed. [`predicted_peak_gb`] adds a flat [`HEADROOM_GB`] that bundles a worst-case
-/// 1024² activation transient (~14 GiB); that transient is PAGEABLE (degrades to swap, not a wired
-/// SIGKILL) and resolution-bound, so on small Macs `Σweights + 18` exceeds total RAM for EVERY model
-/// and [`decide_residency_by_peak`] categorically rejects — even a tiny model that generated fine on
-/// 0.7.3. This floor converts that reject into a load whenever the wired weights fit
-/// `budget − OS_RESERVE_GB`: [`ResidencyOutcome::Sequential`] (wired bounded to the largest single
-/// component) when the provider stages, else [`ResidencyOutcome::Resident`] (best-effort). Returns
-/// `None` when the weights themselves won't fit — a genuine reject-before-SIGKILL that stands, and
-/// when there is no budget signal (the gate never blocks without one).
-///
-/// TRADE-OFF (see sc-12179 / sc-11924): this makes the gate strictly more permissive, so a
-/// transient-heavy bf16 tier on a mid-size Mac can now reach a Metal-OOM/SIGKILL where it previously
-/// pre-rejected. That is the pre-fit-gate behavior and the correct default — a machine that ran a
-/// model must not be newly wall-rejected. The honest fix for those tiers is in-memory (materialized)
-/// component sizing (sc-11924), not a blanket over-reservation that excludes every 8/16 GB Mac.
-fn weights_fit_floor(
-    total_bytes: u64,
-    te_bytes: u64,
-    budget: Option<MlxMemoryBudget>,
-    sequential_capable: bool,
-) -> Option<ResidencyOutcome> {
-    let ceiling_gb = budget?.total_gb - OS_RESERVE_GB;
-    if sequential_capable {
-        // Staged: peak wired residency is the largest single component (text encoders dropped first).
-        (staged_weights_gb(total_bytes, te_bytes) <= ceiling_gb)
-            .then_some(ResidencyOutcome::Sequential)
-    } else {
-        // Can't stage: the whole model is held resident; admit if the weights fit best-effort.
-        (total_bytes as f64 / BYTES_PER_GIB <= ceiling_gb).then_some(ResidencyOutcome::Resident)
-    }
-}
-
 /// The largest single component's on-disk weight bytes (GiB) — the wired residency the `Sequential`
 /// schedule holds at peak (text encoder(s) dropped before the DiT loads). WEIGHTS ONLY, no activation
 /// headroom — contrast [`predicted_sequential_peak_gb`], which adds [`HEADROOM_GB`] for the peak
@@ -1275,6 +1575,29 @@ fn weights_fit_floor(
 fn staged_weights_gb(total_bytes: u64, te_bytes: u64) -> f64 {
     let rest_bytes = total_bytes.saturating_sub(te_bytes);
     te_bytes.max(rest_bytes) as f64 / BYTES_PER_GIB
+}
+
+/// Decision 1 / Decision 2 transition override.
+///
+/// This deliberately replaces the old `weights_fit_floor` symbol while preserving its outcome for
+/// requests which have no exact verified evidence. The settled transition rule requires those cells
+/// to remain byte-for-byte legacy, including the 8 GiB q4 guard, until that cell's calibration story
+/// opts it into evidence. Verified cells never call this function and genuinely fail closed above.
+fn legacy_admission_override(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MlxMemoryBudget>,
+    sequential_capable: bool,
+) -> Option<ResidencyOutcome> {
+    let budget = budget?;
+    let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
+    let ceiling_gb = budget.total_gb - reserve.gb;
+    if sequential_capable {
+        (staged_weights_gb(total_bytes, te_bytes) <= ceiling_gb)
+            .then_some(ResidencyOutcome::Sequential)
+    } else {
+        (total_bytes as f64 / BYTES_PER_GIB <= ceiling_gb).then_some(ResidencyOutcome::Resident)
+    }
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
@@ -1355,7 +1678,7 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
     // hosted once in a shared mirror — so an unstaged sum scored a q4 edit install at 2.17 GiB
     // against a real 6.52 GiB, which both under-quoted the over-budget message and let the
-    // `weights_fit_floor` admit tiers that do not fit. A component resolved to a path INSIDE the
+    // the legacy override admit tiers that do not fit. A component resolved to a path INSIDE the
     // weights dir is skipped, because the scan already counted it.
     for source in spec.components.values() {
         let inside = match source {
@@ -1465,7 +1788,7 @@ fn too_big_error(
 // This gate is the training analogue of the generation `apply_residency_policy` admission check, and
 // it REUSES this module's machinery per sc-14056: `sum_safetensors_bytes` for the dense DiT bytes,
 // `resolve_budget` + the `sysctl hw.memsize` probe (+ `SCENEWORKS_MLX_MEMORY_CAP_ENV` emulation) for
-// the platform-aware unified-memory budget, and `OS_RESERVE_GB` for the OS floor. It is a pre-flight
+// the platform-aware unified-memory budget, and the typed legacy unified reserve. It is a pre-flight
 // admission check (an MLX overcommit SIGKILLs the process — it cannot be caught after the fact, the
 // same reason the generation gate and the Mochi gate are pre-flight), so a full-tune this machine
 // cannot hold is refused up front with an actionable message rather than an uncatchable mid-run kill.
@@ -1551,7 +1874,7 @@ fn full_finetune_peak_gb(
     let state = dit_gb * state_multiplier;
     let attention = tokens * tokens * FULL_FINETUNE_ATTN_BYTES_PER_TOKEN_PAIR / BYTES_PER_GIB;
     let feature = tokens * FULL_FINETUNE_FEATURE_BYTES_PER_TOKEN / BYTES_PER_GIB;
-    Some(state + attention + feature + OS_RESERVE_GB)
+    Some(state + attention + feature + crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
 }
 
 /// The pure full-fine-tune admission decision: `Some(message)` when the predicted peak overflows the
@@ -1694,12 +2017,14 @@ mod tests {
     fn request_plan() -> MlxRequestPlan {
         MlxRequestPlan {
             engine_id: "mage_flow",
+            model_id: "mage_flow".to_owned(),
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: None,
         }
     }
 
@@ -1732,6 +2057,225 @@ mod tests {
             use_pid: false,
             has_phases: false,
         }
+    }
+
+    fn fixture_bundle() -> EvidenceBundle {
+        match sceneworks_core::memory_calibration::load_bundle(include_str!(
+            "../tests/fixtures/mlx-memory-calibration.json"
+        ))
+        .expect("valid MLX calibration fixture")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
+        }
+    }
+
+    fn fixture_plan() -> MlxRequestPlan {
+        MlxRequestPlan {
+            engine_id: "fixture_model",
+            model_id: "fixture_model".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            asset_bytes: gib_to_bytes(3.0),
+            activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: Some(MlxCalibrationBinding {
+                query: CalibrationBinding {
+                    abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                    fingerprint: "fixture-formula-v2".to_owned(),
+                    scene_works_revision: "a".repeat(40),
+                    matrix_source_revision: "source-tree:1111111".to_owned(),
+                    inference_revision: "b".repeat(40),
+                    artifact_repository: "SceneWorks/fixture".to_owned(),
+                    artifact_resolved_revision: "c".repeat(40),
+                    artifact_variant: "packed-q4".to_owned(),
+                    resolved_path_fingerprint: "fixture@resolved:packed-q4".to_owned(),
+                },
+                provider: "fixture_provider".to_owned(),
+                tier: "q4".to_owned(),
+                rung: StrategyRung::BoundedDecode,
+                parameters: JsonObject::from_iter([
+                    ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+                    ("decodeOverlap".to_owned(), serde_json::json!(128)),
+                ]),
+            }),
+        }
+    }
+
+    fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
+        MlxRequestInputs {
+            width,
+            height,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+        }
+    }
+
+    fn fixture_budget(total_gib: f64) -> MemoryBudget {
+        MemoryBudget {
+            total_bytes: gib_to_bytes(total_gib),
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn decision_two_transition_paths_are_explicit_and_fail_closed_only_when_covered() {
+        let bundle = fixture_bundle();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut uncalibrated = fixture_plan();
+        uncalibrated.calibration = None;
+        let route = evidence_admission_route(
+            &bundle,
+            &uncalibrated,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("an uncalibrated model uses legacy");
+        assert_eq!(route.path, AdmissionPath::Legacy);
+        assert_eq!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::NoBinding)
+        );
+
+        let uncovered = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &fixture_inputs(768, 768),
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("an uncovered geometry uses legacy");
+        assert_eq!(uncovered.path, AdmissionPath::Legacy);
+        assert_eq!(
+            uncovered.fallback_reason,
+            Some(LegacyAdmissionReason::OutOfEnvelope)
+        );
+
+        let mut drifted = fixture_plan();
+        drifted
+            .calibration
+            .as_mut()
+            .expect("binding")
+            .query
+            .fingerprint = "different".to_owned();
+        let drifted = evidence_admission_route(
+            &bundle,
+            &drifted,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("fingerprint drift uses legacy");
+        assert_eq!(drifted.path, AdmissionPath::Legacy);
+        assert_eq!(
+            drifted.fallback_reason,
+            Some(LegacyAdmissionReason::StaleFingerprint)
+        );
+
+        let covered = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("the exact covered cell fits its captured safe envelope");
+        assert_eq!(covered.path, AdmissionPath::Evidence);
+        assert_eq!(
+            covered.process_limit_bytes,
+            Some(gib_to_bytes(5.0)),
+            "the same measured reserve drives request containment and admission"
+        );
+        assert_eq!(
+            budget_for_admission(fixture_budget(8.0), &covered).reserved_headroom_bytes,
+            gib_to_bytes(3.0),
+            "the selector and provider context must charge the evidence-derived reserve, not the \
+             2 GiB legacy fallback"
+        );
+        let evidence = covered.evidence.expect("verified selector evidence");
+        assert_eq!(evidence.predicted_peak_bytes, gib_to_bytes(5.0));
+        assert_eq!(
+            evidence.observed_peak_bytes,
+            Some(gib_to_bytes(4.0)),
+            "observed telemetry remains the measured counter rather than the predicted maximum"
+        );
+
+        let unfit = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &inputs,
+            "text_to_image",
+            fixture_budget(6.0),
+        )
+        .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
+        assert!(unfit.to_string().contains("verified MLX evidence"));
+    }
+
+    #[test]
+    fn target_tier_and_artifact_variant_are_independent_identity_mutations() {
+        let bundle = fixture_bundle();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut wrong_tier = fixture_plan();
+        wrong_tier.calibration.as_mut().expect("binding").tier = "q8".to_owned();
+        let wrong_tier = evidence_admission_route(
+            &bundle,
+            &wrong_tier,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("target-tier mismatch falls back");
+        assert_eq!(
+            wrong_tier.fallback_reason,
+            Some(LegacyAdmissionReason::NoRecord)
+        );
+
+        let mut wrong_artifact = fixture_plan();
+        wrong_artifact
+            .calibration
+            .as_mut()
+            .expect("binding")
+            .query
+            .artifact_variant = "q4".to_owned();
+        let wrong_artifact = evidence_admission_route(
+            &bundle,
+            &wrong_artifact,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("artifact mismatch falls back as drift");
+        assert_eq!(
+            wrong_artifact.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+    }
+
+    #[test]
+    fn packaged_empty_bundle_is_a_normal_legacy_reason_not_drift() {
+        let route = packaged_admission_route(
+            &fixture_plan(),
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("the promoted empty bundle is valid");
+        assert_eq!(route.path, AdmissionPath::Legacy);
+        assert_eq!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::PackagedEmpty)
+        );
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
@@ -1933,9 +2477,11 @@ mod tests {
     fn legacy_provider_credits_only_the_known_generator_assets_on_a_warm_run() {
         let plan = MlxRequestPlan {
             engine_id: "flux_dev",
+            model_id: "flux_dev".to_owned(),
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: None,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),
@@ -2465,7 +3011,7 @@ mod tests {
     /// Mage-Flow's per-tier dir holds the DiT alone; the text encoder and VAE are bit-identical
     /// across the six variants and staged from a shared mirror. Scanning only `spec.weights` scored a
     /// q4 edit install at the DiT's bytes, so the over-budget message quoted a peak derived from a
-    /// third of the tier, and the permissive `weights_fit_floor` admitted budgets the tier does not
+    /// third of the tier, and the permissive legacy override admitted budgets the tier does not
     /// fit. The pre-fix number is asserted alongside the fixed one — a test that only checked the new
     /// total could pass on a spec that stages nothing.
     #[test]
@@ -2535,7 +3081,7 @@ mod tests {
     /// The epic-14034 acceptance run found emulated caps of **both 6 GB and 7 GB admitting** a q4
     /// edit job. That was not the memory model being wrong; it was this gate seeing 2.17 GiB of
     /// weights (the DiT alone) where the tier installs 6.52 GiB, so the permissive weights-fit floor
-    /// (`Σstaged ≤ budget − OS_RESERVE_GB`) cleared caps the tier cannot hold.
+    /// (`Σstaged ≤ budget − legacy reserve`) cleared caps the tier cannot hold.
     ///
     /// Bytes are the manifest's `estimatedSizeBytes` for `mage_flow_edit` q4:
     /// DiT 2,326,294,167 + shared TE 4,331,077,508 + shared VAE 345,053,168 = 7,002,424,843
@@ -2569,7 +3115,7 @@ mod tests {
             "a 6 GB Mac cannot hold a tier whose measured peak is 7.87 GB"
         );
         // 7 GB: the staged schedule's wired high-water is the text encoder (4.03 GiB), which fits
-        // 7 − OS_RESERVE_GB. Admitting here is the sc-12179 floor working as designed — a machine
+        // 7 − the legacy reserve. Admitting here is the transition override working as designed — a machine
         // that can hold the weights runs, paging the activation transient.
         assert_eq!(
             decide_residency(total, TE, budget(7.0), true),
@@ -2826,8 +3372,8 @@ mod tests {
     }
 
     // The PEAK layer (`decide_residency_by_peak`) still selects Resident / Sequential / Reject exactly
-    // as the pre-sc-12179 gate did — the weights-fit floor is layered on TOP of this in
-    // `decide_residency` (exercised separately below), so this proves the peak selection is intact.
+    // as the pre-sc-12179 gate did — the Decision 2 legacy override is layered on top only for
+    // unverified cells, so this proves the peak selection is intact.
     #[test]
     fn decide_residency_by_peak_picks_resident_sequential_or_reject_by_budget() {
         let gib = 1024 * 1024 * 1024_u64;
@@ -2894,11 +3440,10 @@ mod tests {
         ));
     }
 
-    /// The weights-fit floor (sc-12179, GitHub #1544): a would-be peak-layer REJECT becomes a
-    /// best-effort load whenever the resident weights fit `budget − OS_RESERVE_GB` (2 GiB). This is the
-    /// regression fix — an 8 GB Mac categorically rejected EVERY model because `Σweights + 18 > 8`.
+    /// Decision 1: replacing `weights_fit_floor` must preserve the settled Decision 2 legacy result.
+    /// The renamed transition override uses the typed 2 GiB legacy reserve only for unverified cells.
     #[test]
-    fn weights_fit_floor_admits_small_model_on_a_small_mac() {
+    fn legacy_admission_override_preserves_small_mac_behavior() {
         let gib = 1024 * 1024 * 1024_u64;
 
         // SANA-class small model on an 8 GB Mac: total 2 GiB (TE 1, rest 1). Peak = 2+18 = 20 ≫ 8 and
@@ -2909,7 +3454,7 @@ mod tests {
             decide_residency_by_peak(total, te, budget, true),
             ResidencyOutcome::Reject { .. }
         ));
-        // ...but the staged weights (1 GiB) fit 8 − 2 = 6, so the floor runs it Sequential instead of
+        // ...but the staged weights (1 GiB) fit 8 − 2 = 6, so legacy runs it Sequential instead of
         // walling off the machine. This is exactly the model that generated fine on 0.7.3.
         assert_eq!(
             decide_residency(total, te, budget, true),
@@ -2922,28 +3467,28 @@ mod tests {
         );
 
         // A genuinely-too-big model on 8 GB still rejects: 40 GiB weights (staged max-component 30) can
-        // NOT be held resident under any policy ⇒ the floor returns None and the reject stands.
+        // NOT be held resident under any policy ⇒ the override returns None and the reject stands.
         let (big_total, big_te) = (40 * gib, 10 * gib);
         assert!(matches!(
             decide_residency(big_total, big_te, budget, true),
             ResidencyOutcome::Reject { .. }
         ));
 
-        // The floor never fabricates a decision without a budget signal.
+        // The override never fabricates a decision without a budget signal.
         assert_eq!(
             decide_residency(total, te, None, true),
             ResidencyOutcome::Resident
         );
     }
 
-    /// The 0.7.3 baseline, from REAL on-disk bytes (GitHub #1544): z-image-turbo q4 — the model the
-    /// reporter confirmed generated fine on an 8 GB Mac — must be admitted, not rejected. Measured
+    /// Decision 1's existing 8 GiB policy guard: until an exact cell opts into evidence, the settled
+    /// transition keeps this real on-disk q4 footprint on legacy. This is a policy outcome only, not
+    /// a model calibration or implementation claim. Measured
     /// tier layout: total 5.49 GiB (text_encoder 2.11, transformer 3.23, vae 0.15), so the largest
     /// single component the Sequential schedule ever holds wired is ~3.38 GiB. Against an 8 GB budget
-    /// (OS_RESERVE 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin. If this ever flips to
-    /// Reject, the gate has regressed the exact case #1544 was filed about.
+    /// (legacy reserve 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin.
     #[test]
-    fn z_image_turbo_q4_admits_on_an_8gb_mac() {
+    fn unverified_q4_8gb_guard_remains_on_the_legacy_transition() {
         // Bytes rounded from the measured tier (…/z-image-turbo-mlx/…/q4), following HF-cache symlinks.
         let mib = 1024 * 1024_u64;
         let total = 5624 * mib; // ~5.49 GiB whole model
@@ -3122,7 +3667,7 @@ mod tests {
     /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
     /// of the seam — the staged working set is only real when the text-encoder split is measured. Post
     /// sc-12179 the flip runs through the weights-fit floor: the measured TE lowers the staged WEIGHTS
-    /// (the wired residency), which is what the floor admits against `budget − OS_RESERVE_GB`.
+    /// (the wired residency), which is what legacy admits against `budget − reserve`.
     #[test]
     fn footprint_text_encoder_flips_reject_to_sequential() {
         let gib = 1024 * 1024 * 1024_u64;
@@ -3163,7 +3708,7 @@ mod tests {
     // The pure decode arithmetic (`mochi_decode_peak_gb`: linearity in frames + pixels, the f32
     // anchor) is pinned in `crate::fit_gate`'s tests alongside the formula, which moved there in
     // sc-12306 when the candle video lane grew the same gate. What stays here is what is genuinely
-    // MLX: the unified-memory budget shape, the `OS_RESERVE_GB` reserve, and the Mac-worded message.
+    // MLX: the unified-memory budget shape, the typed unified reserve, and the Mac-worded message.
 
     /// THE gate behavior: on ONE fixed machine, a short Mochi clip is admitted and a long one is
     /// rejected. A frame-blind gate (the plausible wrong implementation — reusing `predicted_peak_gb`
@@ -3237,7 +3782,14 @@ mod tests {
         let mac_64 = Some(MlxMemoryBudget { total_gb: 64.0 });
         // Weights unmeasurable (empty/missing dir ⇒ 0 bytes) ⇒ admit.
         assert!(mochi_fit_error("mochi_1", 0, 151, 848, 480, mac_64).is_none());
-        assert!(mochi_needed_gb(0, 151, 848, 480).is_none());
+        assert!(mochi_needed_gb(
+            0,
+            151,
+            848,
+            480,
+            crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB
+        )
+        .is_none());
         // No budget (off-Mac / probe failed) ⇒ admit.
         assert!(mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, None).is_none());
     }

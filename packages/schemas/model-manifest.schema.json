@@ -647,6 +647,59 @@
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "model.mlx?.minMemoryGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
+              "calibration": {
+                "type": "object",
+                "required": [
+                  "abi",
+                  "fingerprint",
+                  "sceneWorksRevision",
+                  "matrixSourceRevision",
+                  "inferenceRevision",
+                  "provider",
+                  "tier",
+                  "artifactRepository",
+                  "artifactResolvedRevision",
+                  "artifactVariant",
+                  "resolvedPathFingerprint",
+                  "rung",
+                  "parameters"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "abi": { "const": 1 },
+                  "fingerprint": { "type": "string", "minLength": 1 },
+                  "sceneWorksRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "matrixSourceRevision": { "type": "string", "minLength": 1 },
+                  "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "provider": { "type": "string", "minLength": 1 },
+                  "tier": { "type": "string", "minLength": 1 },
+                  "artifactRepository": { "type": "string", "minLength": 1 },
+                  "artifactResolvedRevision": { "type": "string", "minLength": 1 },
+                  "artifactVariant": { "type": "string", "minLength": 1 },
+                  "resolvedPathFingerprint": { "type": "string", "minLength": 1 },
+                  "rung": {
+                    "enum": [
+                      "resident",
+                      "staged_residency",
+                      "bounded_decode",
+                      "bounded_attention",
+                      "bounded_transformer_residency"
+                    ]
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "description": "Exact strategy parameters used to select one evidence-contract cell."
+                  }
+                },
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+                    "anchor": "MlxCalibrationBinding::from_manifest"
+                  }
+                ],
+                "description": "Optional exact identity for per-cell MLX calibration. Absence deliberately keeps the legacy admission path; presence never authorizes interpolation."
+              },
               "repo": {
                 "type": "string",
                 "description": "Turnkey MLX repo downloaded as-is (no conversion). Omitted when requiresConversion is true."

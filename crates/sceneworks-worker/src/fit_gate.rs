@@ -27,6 +27,55 @@ pub(crate) enum FitDecision {
     },
 }
 
+/// Backward-compatible reserve for the uncalibrated MLX path. Exact verified cells do not use this
+/// number: their foreign demand is derived from captured MLX/wired limits. Keeping the old 2 GiB
+/// fallback is Decision 2's promise that no-record/out-of-envelope/stale requests take legacy rather
+/// than silently adopting a new policy during the calibration transition.
+pub(crate) const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
+
+/// Dedicated-VRAM allocator/context slack. The operating system does not consume this pool, so this
+/// is different in kind from MLX's foreign resident demand even when historical numbers happened to
+/// be similar.
+#[cfg_attr(
+    any(target_os = "macos", not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemoryReserveKind {
+    UnifiedForeignResident,
+    #[cfg_attr(
+        any(target_os = "macos", not(feature = "backend-candle")),
+        allow(dead_code)
+    )]
+    DedicatedVramAllocator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MemoryReserve {
+    pub kind: MemoryReserveKind,
+    pub gb: f64,
+}
+
+pub(crate) fn legacy_unified_reserve(_total_gb: f64) -> MemoryReserve {
+    MemoryReserve {
+        kind: MemoryReserveKind::UnifiedForeignResident,
+        gb: LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
+    }
+}
+
+#[cfg_attr(
+    any(target_os = "macos", not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) const fn dedicated_vram_reserve() -> MemoryReserve {
+    MemoryReserve {
+        kind: MemoryReserveKind::DedicatedVramAllocator,
+        gb: DEDICATED_VRAM_ALLOCATOR_SLACK_GB,
+    }
+}
+
 /// Select sequential residency when a resident load is too large and the provider advertises that
 /// capability. Every other decision is preserved unchanged.
 pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
@@ -142,7 +191,7 @@ pub(crate) fn mochi_decode_peak_gb(frames: u32, width: u32, height: u32) -> f64 
 /// whole run, so nothing drops) + the frame-dependent decode peak + `reserve_gb`.
 ///
 /// **`reserve_gb` is passed in, not baked, because the two lanes reserve for DIFFERENT reasons and the
-/// terms only coincidentally agree at 2.0 today.** MLX passes `OS_RESERVE_GB`: on unified memory the OS
+/// terms only coincidentally agree at 2.0 today.** MLX passes its typed unified reserve: on unified memory the OS
 /// draws from the same pool the model does, so the reserve keeps the machine alive. candle passes
 /// `vram_gate::HEADROOM_GB`: the OS does NOT draw from discrete VRAM, so that term instead covers
 /// allocator slack and CUDA context overhead. Baking either constant in would silently move the other
@@ -232,6 +281,32 @@ mod tests {
     /// Mochi's q4 resident weights (GiB): DiT 9.007 + T5-XXL bf16 8.871 + VAE 0.856 = 18.73 (the exact
     /// hosted bytes B1's manifest derivation pins).
     const MOCHI_Q4_RESIDENT_BYTES: u64 = 9_670_883_602 + 9_524_669_250 + 919_551_200;
+
+    #[test]
+    fn reserve_kinds_are_distinct_and_legacy_unified_is_stable_across_host_sizes() {
+        for total_gb in [8.0, 32.0, 128.0] {
+            assert_eq!(
+                legacy_unified_reserve(total_gb),
+                MemoryReserve {
+                    kind: MemoryReserveKind::UnifiedForeignResident,
+                    gb: 2.0,
+                },
+                "Decision 2 keeps unverified cells on the pre-SC-15611 legacy reserve"
+            );
+        }
+        assert_eq!(
+            dedicated_vram_reserve(),
+            MemoryReserve {
+                kind: MemoryReserveKind::DedicatedVramAllocator,
+                gb: 2.0,
+            }
+        );
+        assert_ne!(
+            legacy_unified_reserve(8.0).kind,
+            dedicated_vram_reserve().kind,
+            "equal historical values must not collapse shared-pool demand into allocator slack"
+        );
+    }
 
     /// The decode peak must scale with CLIP LENGTH — the whole reason Mochi cannot ride EITHER lane's
     /// resolution-blind per-load gate. Pins linearity in frames and in pixels, and the architectural
