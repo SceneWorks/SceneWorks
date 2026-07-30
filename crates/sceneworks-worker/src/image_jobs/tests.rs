@@ -12417,6 +12417,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             None,
             &CancelFlag::new(),
             &mut |_| {},
+            None,
         )
         .expect("krea control render");
         Image {
@@ -12546,6 +12547,45 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     assert!(
         base.join("tokenizer").join("tokenizer.json").is_file(),
         "resolved base must carry the tokenizer whose absence produced the sc-11853 load failure"
+    );
+}
+
+#[test]
+fn krea_control_calibration_provenance_accepts_only_exact_base_and_verified_default_overlay() {
+    let data = tempfile::tempdir().unwrap();
+    let base = data
+        .path()
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("snapshots")
+        .join(KREA_CONTROL_BASE_REVISION)
+        .join("q4");
+    std::fs::create_dir_all(&base).unwrap();
+    let cached_overlay = data
+        .path()
+        .join("controlnet-krea")
+        .join(KREA_CONTROL_OVERLAY_FILE);
+    std::fs::create_dir_all(cached_overlay.parent().unwrap()).unwrap();
+    std::fs::write(&cached_overlay, b"verified by ensure_hf_cached_file").unwrap();
+
+    let exact =
+        krea_control_calibration_provenance(&base, &cached_overlay, true).expect("exact identity");
+    assert_eq!(exact.identity.repository, KREA_CONTROL_MLX_REPO);
+    assert_eq!(exact.identity.revision, KREA_CONTROL_BASE_REVISION);
+    assert_eq!(exact.identity.variant, "q4");
+    assert!(exact
+        .identity
+        .fingerprint
+        .contains(KREA_CONTROL_OVERLAY_PIN));
+
+    assert!(
+        krea_control_calibration_provenance(&base, &cached_overlay, false).is_none(),
+        "an arbitrary local overlay path must not inherit the verified default identity"
+    );
+    let wrong_base = data.path().join("q4");
+    std::fs::create_dir_all(&wrong_base).unwrap();
+    assert!(
+        krea_control_calibration_provenance(&wrong_base, &cached_overlay, true).is_none(),
+        "a verified overlay cannot make an unpinned base current"
     );
 }
 

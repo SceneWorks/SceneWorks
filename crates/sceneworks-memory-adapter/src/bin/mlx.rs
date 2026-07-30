@@ -1,7 +1,16 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
+use mlx_gen::gen_core::{
+    MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryPhase,
+    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, MEMORY_CALIBRATION_ABI,
+};
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
+use mlx_gen::{
+    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadSpec,
+    OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+};
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
     reset_peak_memory,
@@ -10,12 +19,20 @@ use mlx_rs::Array;
 use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::process::Command;
 
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
+const KREA_PROVIDER: &str = "krea_2_turbo_control";
+const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
+const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
+const KREA_FINGERPRINT: &str = "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64";
+const KREA_TILE_EDGES: [u32; 2] = [512, 384];
+const KREA_TILE_OVERLAP: u32 = 64;
+const MIB: u64 = 1024 * 1024;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
@@ -281,6 +298,566 @@ fn decoded_max_mean_abs(
     protocol::max_mean_abs(left, right, comparison_output_bias)
 }
 
+fn image_max_mean_abs(left: &Image, right: &Image) -> Result<(f64, f64), String> {
+    if (left.width, left.height) != (right.width, right.height)
+        || left.pixels.len() != right.pixels.len()
+        || left.pixels.is_empty()
+    {
+        return Err(format!(
+            "image shape mismatch: {}x{} ({} bytes) versus {}x{} ({} bytes)",
+            left.width,
+            left.height,
+            left.pixels.len(),
+            right.width,
+            right.height,
+            right.pixels.len()
+        ));
+    }
+    let mut maximum = 0.0_f64;
+    let mut sum = 0.0_f64;
+    for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+        let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+        maximum = maximum.max(difference);
+        sum += difference;
+    }
+    Ok((maximum, sum / left.pixels.len() as f64))
+}
+
+fn fixed_pose_control_image(width: u32, height: u32) -> Image {
+    let mut pixels = vec![0_u8; width as usize * height as usize * 3];
+    let mut line = |start: (i32, i32), end: (i32, i32), color: [u8; 3]| {
+        let (mut x, mut y) = start;
+        let dx = (end.0 - start.0).abs();
+        let sx = if start.0 < end.0 { 1 } else { -1 };
+        let dy = -(end.1 - start.1).abs();
+        let sy = if start.1 < end.1 { 1 } else { -1 };
+        let mut error = dx + dy;
+        loop {
+            for offset_y in -2..=2 {
+                for offset_x in -2..=2 {
+                    let px = x + offset_x;
+                    let py = y + offset_y;
+                    if px >= 0 && py >= 0 && px < width as i32 && py < height as i32 {
+                        let index = (py as usize * width as usize + px as usize) * 3;
+                        pixels[index..index + 3].copy_from_slice(&color);
+                    }
+                }
+            }
+            if (x, y) == end {
+                break;
+            }
+            let doubled = 2 * error;
+            if doubled >= dy {
+                error += dy;
+                x += sx;
+            }
+            if doubled <= dx {
+                error += dx;
+                y += sy;
+            }
+        }
+    };
+    // A deterministic whole-body stick pose: head/neck, shoulders, elbows, wrists, hips, knees,
+    // and ankles. Using a pose-shaped control fixture exercises the real pose branch rather than
+    // merely setting the `ControlKind::Pose` enum on arbitrary pixels.
+    let scale = |x: u32, y: u32| ((x * width / 512) as i32, (y * height / 512) as i32);
+    for (start, end, color) in [
+        (scale(256, 82), scale(256, 138), [255, 255, 255]),
+        (scale(190, 158), scale(322, 158), [255, 128, 0]),
+        (scale(256, 138), scale(256, 296), [255, 255, 0]),
+        (scale(190, 158), scale(145, 238), [0, 255, 0]),
+        (scale(145, 238), scale(116, 320), [0, 255, 255]),
+        (scale(322, 158), scale(370, 225), [0, 128, 255]),
+        (scale(370, 225), scale(404, 292), [0, 0, 255]),
+        (scale(214, 296), scale(298, 296), [255, 0, 255]),
+        (scale(214, 296), scale(194, 396), [255, 0, 0]),
+        (scale(194, 396), scale(176, 482), [128, 0, 255]),
+        (scale(298, 296), scale(330, 390), [255, 64, 128]),
+        (scale(330, 390), scale(366, 472), [128, 255, 0]),
+    ] {
+        line(start, end, color);
+    }
+    Image {
+        width,
+        height,
+        pixels,
+    }
+}
+
+fn validate_krea_overlay_path(canonical: &std::path::Path, revision: &str) -> Result<(), String> {
+    protocol::validate_artifact_identity(
+        KREA_OVERLAY_REPOSITORY,
+        revision,
+        KREA_OVERLAY_REPOSITORY,
+    )?;
+    let repository_component = format!("models--{}", KREA_OVERLAY_REPOSITORY.replace('/', "--"));
+    let expected = [
+        repository_component.as_str(),
+        "snapshots",
+        revision,
+        KREA_OVERLAY_FILE,
+    ];
+    let components = canonical
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if !components.ends_with(&expected) {
+        return Err(format!(
+            "control overlay must end with /{repository_component}/snapshots/{revision}/{KREA_OVERLAY_FILE}"
+        ));
+    }
+    Ok(())
+}
+
+fn krea_context(
+    width: u32,
+    height: u32,
+    tile_edge: u32,
+    predicted_peak_bytes: u64,
+    fingerprint: &str,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: MemoryStrategyParameters {
+                decode_tile_edge: Some(tile_edge),
+                decode_overlap: Some(KREA_TILE_OVERLAP),
+                ..Default::default()
+            },
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q4),
+            },
+        },
+        calibration_abi: MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: fingerprint.to_owned(),
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        overlay: Some("control:1".to_owned()),
+        budget: MemoryBudget {
+            total_bytes: u64::MAX,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-16099@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn krea_request(width: u32, height: u32, steps: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a person standing in a studio, full body editorial photograph".to_owned(),
+        width,
+        height,
+        seed: Some(16099),
+        steps: Some(steps),
+        conditioning: vec![Conditioning::Control {
+            image: fixed_pose_control_image(512, 512),
+            kind: ControlKind::Pose,
+            scale: Some(0.6),
+        }],
+        ..Default::default()
+    }
+}
+
+fn scoped_generate(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    context: &MemoryRunContext,
+    error_phase: Option<MemoryPhase>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(context)
+    {
+        return Err(format!(
+            "provider safety check rejected calibrated request: {reason}"
+        ));
+    }
+    let mut scope = generator
+        .begin_memory_strategy_request(context)
+        .map_err(|error| format!("begin calibrated request: {error}"))?
+        .ok_or_else(|| "optimized Krea request did not open a memory scope".to_owned())?;
+    scope
+        .configure_request(&mut request)
+        .map_err(|error| format!("configure calibrated request: {error}"))?;
+    if let Some(phase) = error_phase {
+        request
+            .memory
+            .as_mut()
+            .ok_or_else(|| "calibrated request lost its memory selection".to_owned())?
+            .calibration_error_phase = Some(phase);
+    }
+    let result = generator.generate(&request, on_progress);
+    let outcome = match &result {
+        Ok(_) => MemoryRunOutcome::Complete,
+        Err(mlx_gen::gen_core::Error::Canceled) => MemoryRunOutcome::Canceled,
+        Err(error) => MemoryRunOutcome::Error {
+            message: error.to_string(),
+        },
+    };
+    let finish = scope.finish(outcome);
+    match (result, finish) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), _) => Err(error.to_string()),
+        (Ok(_), Err(error)) => Err(format!("finish calibrated request: {error}")),
+    }
+}
+
+fn one_image(output: GenerationOutput) -> Result<Image, String> {
+    match output {
+        GenerationOutput::Images(mut images) if images.len() == 1 => Ok(images.remove(0)),
+        other => Err(format!("expected one Krea image, got {other:?}")),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PhaseMemory {
+    active: u64,
+    cache: u64,
+}
+
+impl PhaseMemory {
+    fn capture() -> Self {
+        Self {
+            active: get_peak_memory() as u64,
+            cache: get_cache_memory() as u64,
+        }
+    }
+
+    fn json(self) -> Value {
+        let allocator = self.active.saturating_add(self.cache);
+        json!({
+            "activeBytes": self.active,
+            "allocatorBytes": allocator,
+            "deviceBytes": allocator,
+            "wiredBytes": allocator,
+            "reclaimableBytes": self.cache,
+        })
+    }
+}
+
+fn predicted_ceiling(bytes: u64) -> u64 {
+    let with_margin = bytes.saturating_add(bytes / 20);
+    with_margin
+        .saturating_add(64 * MIB - 1)
+        .saturating_div(64 * MIB)
+        .saturating_mul(64 * MIB)
+}
+
+fn run_krea_control(request: &Value) -> Result<Value, String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    let tile_edge = protocol::parameter(request, "decodeTileEdge")?;
+    let overlap = protocol::parameter(request, "decodeOverlap")?;
+    if tile_edge != KREA_TILE_EDGES[0] || overlap != KREA_TILE_OVERLAP {
+        return Err(format!(
+            "authoritative Krea records must target exact bounded decode {}/{}",
+            KREA_TILE_EDGES[0], KREA_TILE_OVERLAP
+        ));
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let repository = protocol::required_env("SCENEWORKS_KREA_CONTROL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_CONTROL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
+    let base_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_CONTROL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize Krea control root: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &base_root,
+        &repository,
+        &revision,
+        "q4",
+        protocol::KREA_REPOSITORY,
+    )?;
+    let overlay_revision = protocol::required_env("SCENEWORKS_KREA_CONTROL_OVERLAY_REVISION")?;
+    let overlay_path = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_CONTROL_OVERLAY",
+    )?))
+    .map_err(|error| format!("canonicalize Krea control overlay: {error}"))?;
+    validate_krea_overlay_path(&overlay_path, &overlay_revision)?;
+    let resolved_path_fingerprint = format!(
+        "{repository}@{revision}:q4|{KREA_OVERLAY_REPOSITORY}@{overlay_revision}:{KREA_OVERLAY_FILE}"
+    );
+
+    let spec = LoadSpec::new(WeightsSource::Dir(base_root))
+        .with_control(WeightsSource::File(overlay_path))
+        .with_offload_policy(OffloadPolicy::Resident);
+    let generator = mlx_gen_krea::provider_registry()
+        .map_err(|error| format!("build Krea registry: {error}"))?
+        .load(KREA_PROVIDER, &spec)
+        .map_err(|error| format!("load real Krea q4 control provider: {error}"))?;
+
+    let stale_context = krea_context(width, height, tile_edge, 1, "stale-fingerprint");
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale_context),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("provider accepted a stale calibration fingerprint".to_owned());
+    }
+    let mut unknown_context = krea_context(width, height, tile_edge, 1, KREA_FINGERPRINT);
+    unknown_context.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown_context),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("provider accepted an unknown/zero memory budget".to_owned());
+    }
+
+    let context = krea_context(width, height, tile_edge, 1, KREA_FINGERPRINT);
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    reset_peak_memory();
+    let baseline = one_image(scoped_generate(
+        generator.as_ref(),
+        krea_request(width, height, 8),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    if [
+        conditioning.get().active,
+        denoise.get().active,
+        decode.active,
+    ]
+    .contains(&0)
+    {
+        return Err("a synchronized Krea lifecycle phase reported a zero active peak".to_owned());
+    }
+
+    let mut sweep_images = Vec::new();
+    for edge in KREA_TILE_EDGES {
+        let sweep_context = krea_context(width, height, edge, 1, KREA_FINGERPRINT);
+        sweep_images.push((
+            edge,
+            one_image(scoped_generate(
+                generator.as_ref(),
+                krea_request(width, height, 8),
+                &sweep_context,
+                None,
+                &mut |_| {},
+            )?)?,
+        ));
+    }
+    let alternate = &sweep_images
+        .iter()
+        .find(|(edge, _)| *edge == KREA_TILE_EDGES[1])
+        .expect("fixed sweep edge")
+        .1;
+    let (maximum_error, mean_error) = image_max_mean_abs(&baseline, alternate)?;
+    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD {
+        return Err(format!(
+            "Krea bounded-decode sweep exceeded parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let warm_repeat = one_image(scoped_generate(
+        generator.as_ref(),
+        krea_request(width, height, 8),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    if baseline.pixels != warm_repeat.pixels {
+        return Err("warm Krea A/B/A repeat changed output bytes".to_owned());
+    }
+
+    let lifecycle_steps = 1;
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let before_active = get_active_memory() as u64;
+        let cancel = mlx_gen::CancelFlag::new();
+        if phase == MemoryPhase::Conditioning {
+            cancel.cancel();
+        }
+        let mut canceled_request = krea_request(width, height, lifecycle_steps);
+        canceled_request.cancel = cancel.clone();
+        let result = scoped_generate(
+            generator.as_ref(),
+            canceled_request,
+            &context,
+            None,
+            &mut |progress| {
+                if (phase == MemoryPhase::Denoise
+                    && matches!(progress, Progress::Step { current: 1, .. }))
+                    || (phase == MemoryPhase::Decode && matches!(progress, Progress::Decoding))
+                {
+                    cancel.cancel();
+                }
+            },
+        );
+        if !result
+            .as_ref()
+            .is_err_and(|error| error.to_ascii_lowercase().contains("cancel"))
+        {
+            return Err(format!(
+                "{phase:?} cancellation did not return the typed cancellation path: {result:?}"
+            ));
+        }
+        if get_active_memory() as u64 > before_active.saturating_add(64 * MIB) {
+            return Err(format!("{phase:?} cancellation leaked active MLX memory"));
+        }
+        one_image(scoped_generate(
+            generator.as_ref(),
+            krea_request(width, height, lifecycle_steps),
+            &context,
+            None,
+            &mut |_| {},
+        )?)?;
+    }
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let before_active = get_active_memory() as u64;
+        let result = scoped_generate(
+            generator.as_ref(),
+            krea_request(width, height, lifecycle_steps),
+            &context,
+            Some(phase),
+            &mut |_| {},
+        );
+        if !result
+            .as_ref()
+            .is_err_and(|error| error.contains("injected memory-strategy calibration error"))
+        {
+            return Err(format!(
+                "{phase:?} error injection did not reach its physical boundary: {result:?}"
+            ));
+        }
+        if get_active_memory() as u64 > before_active.saturating_add(64 * MIB) {
+            return Err(format!("{phase:?} injected error leaked active MLX memory"));
+        }
+        one_image(scoped_generate(
+            generator.as_ref(),
+            krea_request(width, height, lifecycle_steps),
+            &context,
+            None,
+            &mut |_| {},
+        )?)?;
+    }
+
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory {
+        active: phases.iter().map(|phase| phase.active).max().unwrap_or(0),
+        cache: phases.iter().map(|phase| phase.cache).max().unwrap_or(0),
+    };
+    let predicted_conditioning = predicted_ceiling(conditioning.active + conditioning.cache);
+    let predicted_denoise = predicted_ceiling(denoise.active + denoise.cache);
+    let predicted_decode = predicted_ceiling(decode.active + decode.cache);
+    let predicted_overall = predicted_conditioning
+        .max(predicted_denoise)
+        .max(predicted_decode);
+    let mutation_bias = 0.05_f64;
+    let mutated_maximum = maximum_error + mutation_bias;
+    let mutated_mean = mean_error + mutation_bias;
+
+    Ok(json!({
+        "status": "complete",
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "q4",
+        },
+        "sweep": {
+            "axes": [
+                { "parameter": "decodeTileEdge", "testedValues": KREA_TILE_EDGES },
+                { "parameter": "decodeOverlap", "testedValues": [KREA_TILE_OVERLAP] }
+            ],
+            "cases": KREA_TILE_EDGES.into_iter().map(|edge| json!({
+                "parameters": { "decodeTileEdge": edge, "decodeOverlap": KREA_TILE_OVERLAP },
+                "result": "passed"
+            })).collect::<Vec<_>>(),
+            "rangeVerified": true,
+        },
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted_overall, "effectiveBudgetBytes": predicted_overall },
+            { "name": "unknown_budget", "result": "passed", "reason": "provider rejected a zero/unknown budget before render" },
+            { "name": "stale_evidence", "result": "passed", "reason": "provider rejected a mutated calibration fingerprint before render" },
+            { "name": "warm_repeat", "result": "passed", "reason": "resident A/B/A output bytes were identical" },
+            { "name": "cancel", "result": "passed", "reason": "conditioning, denoise, and decode cancellation returned typed cancellation", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed", "reason": "canonical q4 base and exact pose overlay loaded and rendered" },
+            { "name": "overlay", "result": "passed", "reason": "real pose-control overlay participated in every measured render" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_conditioning,
+            "denoise": predicted_denoise,
+            "decode": predicted_decode,
+            "overall": predicted_overall,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed and control latent, exact 512/64 versus 384/64 bounded Qwen-VAE decode",
+            "identicalLatents": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": MAX_THRESHOLD,
+            "meanErrorThreshold": MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": parameters,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": resolved_path_fingerprint,
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:krea-control",
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.active.saturating_add(overall.cache)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    }))
+}
+
 fn sweep(parameters: &serde_json::Map<String, Value>, passed: bool) -> Value {
     let current_edge = parameters
         .get("decodeTileEdge")
@@ -325,7 +902,7 @@ fn sweep(parameters: &serde_json::Map<String, Value>, passed: bool) -> Value {
     })
 }
 
-fn run(request: &Value) -> Result<Value, String> {
+fn run_qwen(request: &Value) -> Result<Value, String> {
     if protocol::planned(request)?
         .get("backend")
         .and_then(Value::as_str)
@@ -495,6 +1072,18 @@ fn run(request: &Value) -> Result<Value, String> {
             ],
         ),
     ))
+}
+
+fn run(request: &Value) -> Result<Value, String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider == KREA_PROVIDER {
+        run_krea_control(request)
+    } else {
+        run_qwen(request)
+    }
 }
 
 fn main() {

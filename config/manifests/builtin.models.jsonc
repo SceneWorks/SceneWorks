@@ -4370,7 +4370,48 @@
         // bf16 ~43 GB. minMemoryGb 48 covers Q8 + the 1536² stretch with headroom.
         "minMemoryGb": 48,
         "quantize": 8,
-        "repo": "SceneWorks/krea-2-turbo-mlx"
+        "repo": "SceneWorks/krea-2-turbo-mlx",
+        // SC-16099: exact, current MLX pose-control evidence. These bindings are intentionally
+        // geometry-specific; the refusal path may name 768² only by selecting its complete promoted
+        // record through the shared reader. No curve or area interpolation is permitted.
+        "calibrations": [
+          {
+            "abi": 1,
+            "fingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+            "sceneWorksRevision": "sc-16099-contract-v1",
+            "matrixSourceRevision": "sc-16099-contract-v1",
+            "inferenceRevision": "8e186c913d7661aef565b0bf0d559c9dc651d90e",
+            "provider": "krea_2_turbo_control",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control:1",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
+            "rung": "bounded_decode",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "krea-control-mlx-v3-q4-pose-bounded-decode-512-384-64",
+            "sceneWorksRevision": "sc-16099-contract-v1",
+            "matrixSourceRevision": "sc-16099-contract-v1",
+            "inferenceRevision": "8e186c913d7661aef565b0bf0d559c9dc651d90e",
+            "provider": "krea_2_turbo_control",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control:1",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
+            "rung": "bounded_decode",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          }
+        ]
       },
       // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
       // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident

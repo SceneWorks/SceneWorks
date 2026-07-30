@@ -853,9 +853,18 @@ fn evidence_admission_route(
             .map(|candidate| candidate.required_host_bytes)
             .min()
             .unwrap_or(0);
+        let alternative =
+            verified_lower_geometry(bundle, calibration, plan, inputs, mode_key, budget)
+                .map(|geometry| {
+                    format!(
+                        "; current verified alternative: {}x{}",
+                        geometry.width, geometry.height
+                    )
+                })
+                .unwrap_or_default();
         return Err(WorkerError::InvalidPayload(format!(
             "{} request {}x{} count {} needs at least {:.2} GiB from verified MLX evidence, but \
-             {:.2} GiB of unified memory is available",
+             {:.2} GiB of unified memory is available{alternative}",
             plan.model_id,
             inputs.width,
             inputs.height,
@@ -871,6 +880,74 @@ fn evidence_admission_route(
         evidence_revision: None,
         process_limit_bytes: None,
     })
+}
+
+/// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
+/// fits the live host boundary. This is the only source for a named refusal alternative: no formula,
+/// interpolation, tier heuristic, or aspect-ratio rewrite is admitted.
+fn verified_lower_geometry(
+    bundle: &EvidenceBundle,
+    calibration: &MlxCalibrationSet,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> Option<CalibrationGeometry> {
+    let overlay = inputs.overlay.as_deref().unwrap_or("none");
+    let requested_width = u64::from(inputs.width);
+    let requested_height = u64::from(inputs.height);
+    calibration
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.provider == plan.engine_id
+                && binding.tier == plan_tier_key(plan.tier)
+                && binding.mode == mode_key
+                && binding.overlay == overlay
+                && binding.query.artifact_repository == calibration.resolved.identity.repository
+                && binding.query.artifact_resolved_revision
+                    == calibration.resolved.identity.revision
+                && binding.query.artifact_variant == calibration.resolved.identity.variant
+                && binding.query.resolved_path_fingerprint
+                    == calibration.resolved.identity.fingerprint
+                && binding.geometry.batch == inputs.count.max(1)
+                && binding.geometry.frames == 1
+                && binding.geometry.width <= inputs.width
+                && binding.geometry.height <= inputs.height
+                && (binding.geometry.width < inputs.width
+                    || binding.geometry.height < inputs.height)
+                && u64::from(binding.geometry.width) * requested_height
+                    == u64::from(binding.geometry.height) * requested_width
+        })
+        .filter_map(|binding| {
+            let query = EvidenceQuery {
+                backend: CalibrationBackend::Mlx,
+                model_id: plan.model_id.clone(),
+                provider: binding.provider.clone(),
+                tier: binding.tier.clone(),
+                mode: binding.mode.clone(),
+                overlay: binding.overlay.clone(),
+                geometry: binding.geometry,
+                rung: binding.rung,
+                parameters: binding.parameters.clone(),
+                calibration: binding.query.clone(),
+            };
+            let EvidenceVerdict::Verified(record) = bundle.evidence_for(&query) else {
+                return None;
+            };
+            let envelope = record.mlx_admission_envelope()?;
+            let effective = budget.effective_bytes();
+            (envelope.required_host_bytes() <= budget.total_bytes
+                && envelope.peak_bytes <= effective)
+                .then_some(binding.geometry)
+        })
+        .max_by_key(|geometry| {
+            (
+                u64::from(geometry.width) * u64::from(geometry.height),
+                geometry.width,
+                geometry.height,
+            )
+        })
 }
 
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
@@ -1084,9 +1161,25 @@ fn evaluate_request_with_budget_using_bundle(
                 .map(|candidate| candidate.required_host_bytes)
                 .min()
                 .unwrap_or(0);
+            let alternative = evidence_bundle
+                .zip(match &plan.calibration {
+                    MlxCalibrationConfig::Valid(calibration) => Some(calibration),
+                    _ => None,
+                })
+                .and_then(|(bundle, calibration)| {
+                    verified_lower_geometry(bundle, calibration, plan, inputs, mode_key, budget)
+                })
+                .map(|geometry| {
+                    format!(
+                        "; current verified alternative: {}x{}",
+                        geometry.width, geometry.height
+                    )
+                })
+                .unwrap_or_default();
             return Err(WorkerError::InvalidPayload(format!(
                 "{} request {}x{} count {} needs at least {:.2} GiB at its smallest verified \
-                 MLX host boundary, but no exact candidate fits the live unified-memory budget",
+                 MLX host boundary, but no exact candidate fits the live unified-memory budget\
+                 {alternative}",
                 plan.model_id,
                 inputs.width,
                 inputs.height,
@@ -2855,6 +2948,149 @@ mod tests {
             ),
         ];
         (bundle, plan)
+    }
+
+    #[test]
+    fn verified_lower_geometry_requires_exact_current_identity_and_geometry() {
+        let mut bundle = fixture_bundle();
+        let mut lower_record = bundle.records.remove(0);
+        lower_record.target.geometry = CalibrationGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+        };
+        bundle.records = vec![lower_record];
+
+        let mut plan = fixture_plan();
+        let mut lower_binding = fixture_binding("q4", "packed-q4");
+        lower_binding.geometry = CalibrationGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+        };
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings = vec![lower_binding.clone()];
+        let inputs = fixture_inputs(1024, 1024);
+        let MlxCalibrationConfig::Valid(calibration) = &plan.calibration else {
+            panic!("fixture calibration");
+        };
+        assert_eq!(
+            verified_lower_geometry(
+                &bundle,
+                calibration,
+                &plan,
+                &inputs,
+                "text_to_image",
+                fixture_budget(128.0),
+            ),
+            Some(CalibrationGeometry {
+                width: 768,
+                height: 768,
+                batch: 1,
+                frames: 1,
+            })
+        );
+
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings[0].query.fingerprint = "mutated".to_owned();
+        let MlxCalibrationConfig::Valid(calibration) = &plan.calibration else {
+            panic!("fixture calibration");
+        };
+        assert_eq!(
+            verified_lower_geometry(
+                &bundle,
+                calibration,
+                &plan,
+                &inputs,
+                "text_to_image",
+                fixture_budget(128.0),
+            ),
+            None,
+            "a fingerprint mutation must stop the refusal from naming the lower geometry"
+        );
+
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings[0] = lower_binding;
+        calibration.bindings[0].geometry.width = 640;
+        let MlxCalibrationConfig::Valid(calibration) = &plan.calibration else {
+            panic!("fixture calibration");
+        };
+        assert_eq!(
+            verified_lower_geometry(
+                &bundle,
+                calibration,
+                &plan,
+                &inputs,
+                "text_to_image",
+                fixture_budget(128.0),
+            ),
+            None,
+            "a geometry mutation must stop the refusal from naming the lower geometry"
+        );
+    }
+
+    #[test]
+    fn exact_infeasible_geometry_refuses_before_provider_and_names_only_verified_lower_geometry() {
+        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+
+        let mut bundle = fixture_bundle();
+        let mut high_record = bundle.records.remove(0);
+        let mut lower_record = high_record.clone();
+        lower_record.target.geometry = CalibrationGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+        };
+        let RequiredNullable::Value(predicted) = &mut high_record.predicted_peak_bytes else {
+            panic!("fixture predicted peak");
+        };
+        *predicted = PredictedPeakBytes {
+            conditioning: predicted.conditioning,
+            denoise: gib_to_bytes(6.0),
+            decode: predicted.decode,
+            overall: gib_to_bytes(6.0),
+        };
+        bundle.records = vec![high_record, lower_record];
+
+        let mut plan = fixture_plan();
+        let mut lower_binding = fixture_binding("q4", "packed-q4");
+        lower_binding.geometry = CalibrationGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+        };
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings.push(lower_binding);
+
+        let error = evidence_admission_route(
+            &bundle,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect_err("the 6 GiB high record plus its 3 GiB foreign reserve must refuse");
+        let message = error.to_string();
+        assert!(
+            message.contains("verified MLX evidence"),
+            "the refusal must come from the exact evidence precheck: {message}"
+        );
+        assert!(
+            message.contains("current verified alternative: 768x768"),
+            "the refusal must name the lower exact record: {message}"
+        );
     }
 
     #[test]

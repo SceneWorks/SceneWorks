@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:98c519557d2307754e80f890532ade17b844d072e4f45af629063a0a0d976fed",
-    "matrixRevision": "source-tree:be102f367bbd29e6f3afd701a1192533e55e446bab6eea666ad89c5cea4d54d3",
-    "inferenceRevision": "1ca66939c7ea21f91f44d1ec2bbfef70507dd0bc",
+    "sceneWorksRevision": "source-tree:6d07d611659329a767261dcb0dd37636c626d52370999dc6619f07448c477eee",
+    "matrixRevision": "source-tree:64fb783408e531233789372c6b5666fc4dc04bb60748e827bef25aed0498ac93",
+    "inferenceRevision": "8e186c913d7661aef565b0bf0d559c9dc651d90e",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "814d58746879f8b411991b56fd9705915ecd050bcd218296b86d1d032a98bf1c"
+        "sha256": "d5c146f5dcfcb45a286da320d6fdd150ea3d48d58fb9eb9534c16c6131197721"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "271f6e22bc703bbaf234cc9fce6c5cbba6300d1832cd7cb82e0e340bc76b4867"
+        "sha256": "e7fb345ef48026a170d464ace857a8361c483c1567f7572e5cf36c10a3d323ac"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -23,7 +23,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "f6cc6e49a5b03f62f5994e7a8d863c90d053f36ece541a96ddf89273467706cf"
+        "sha256": "325956b6ba36e4f77958d00a9fa16fa620653ebaef5b1cbec1c9b56899440288"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -39,7 +39,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "6c869aeba7f1e53f71e68c0cfa962a701e7b1c3638b9827222c69bee54cfda3f"
+        "sha256": "598dbbb833d34c5a96e70a6a2f2373d8ce72ab1b02d94fc01722abba9bd6ea9a"
       }
     }
   },
@@ -83,8 +83,8 @@
         "label": "No provider adapter covers this (entry, backend) at all",
         "blockedBy": "provider-adapter code",
         "citation": "config/memory-calibration-plan.json (the shipped plan's provider targets)",
-        "cells": 2610,
-        "mlx": 1700,
+        "cells": 2580,
+        "mlx": 1670,
         "candle": 910
       },
       {
@@ -92,8 +92,8 @@
         "label": "An adapter exists, but it has never emitted a `complete` record",
         "blockedBy": "provider-adapter code (phase telemetry and lifecycle injection)",
         "citation": "docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); docs/memory-calibration-harness.md documents both adapters as returning `gated` records today",
-        "cells": 60,
-        "mlx": 30,
+        "cells": 90,
+        "mlx": 60,
         "candle": 30
       },
       {
@@ -113,8 +113,8 @@
           "overlay-declined"
         ],
         "description": "no-provider-adapter + overlay-declined",
-        "cells": 4240,
-        "mlx": 2830,
+        "cells": 4180,
+        "mlx": 2770,
         "candle": 1410
       },
       {
@@ -122,8 +122,8 @@
           "no-provider-adapter"
         ],
         "description": "no-provider-adapter",
-        "cells": 2610,
-        "mlx": 1700,
+        "cells": 2580,
+        "mlx": 1670,
         "candle": 910
       },
       {
@@ -132,8 +132,8 @@
           "overlay-declined"
         ],
         "description": "adapter-gated + overlay-declined",
-        "cells": 114,
-        "mlx": 60,
+        "cells": 174,
+        "mlx": 120,
         "candle": 54
       },
       {
@@ -141,8 +141,8 @@
           "adapter-gated"
         ],
         "description": "adapter-gated",
-        "cells": 60,
-        "mlx": 30,
+        "cells": 90,
+        "mlx": 60,
         "candle": 30
       },
       {
@@ -156,22 +156,22 @@
     "independentBlocking": [
       {
         "id": "no-provider-adapter",
-        "cellsTouched": 6850,
-        "soleBlockerCells": 2610,
-        "coBlockedCells": 4240,
-        "coBlockedShare": 0.619,
+        "cellsTouched": 6760,
+        "soleBlockerCells": 2580,
+        "coBlockedCells": 4180,
+        "coBlockedShare": 0.6183,
         "coBlockedWith": {
-          "overlay-declined": 4240
+          "overlay-declined": 4180
         }
       },
       {
         "id": "adapter-gated",
-        "cellsTouched": 174,
-        "soleBlockerCells": 60,
-        "coBlockedCells": 114,
-        "coBlockedShare": 0.6552,
+        "cellsTouched": 264,
+        "soleBlockerCells": 90,
+        "coBlockedCells": 174,
+        "coBlockedShare": 0.6591,
         "coBlockedWith": {
-          "overlay-declined": 114
+          "overlay-declined": 174
         }
       },
       {
@@ -181,23 +181,23 @@
         "coBlockedCells": 4354,
         "coBlockedShare": 1,
         "coBlockedWith": {
-          "adapter-gated": 114,
-          "no-provider-adapter": 4240
+          "adapter-gated": 174,
+          "no-provider-adapter": 4180
         }
       }
     ],
     "gateOrderSensitivity": {
       "shippedOrder": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 2610,
+        "adapter-gated": 90,
+        "no-provider-adapter": 2580,
         "no-run-needed": 6,
         "overlay-declined": 4354
       },
       "adapterCoverageFirst": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 6850,
+        "adapter-gated": 90,
+        "no-provider-adapter": 6760,
         "no-run-needed": 6,
-        "overlay-declined": 114
+        "overlay-declined": 174
       },
       "note": "The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'."
     },
@@ -211,8 +211,8 @@
       "overlayChargedByFirstMatch": 4354,
       "overlayAlsoBlockedByAdapterCoverage": 4354,
       "overlayIndependentlyBlocking": 0,
-      "overlayBindingAfterAdapterCoverage": 114,
-      "finding": "`overlay-declined` is charged 4354 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 4240 of them (97.4%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 114 while `no-provider-adapter` rises to 6850. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2610 cells and it touches 6850. Scoping overlay support in both adapters is still necessary, but on its own it moves 114 cells, not 4354."
+      "overlayBindingAfterAdapterCoverage": 174,
+      "finding": "`overlay-declined` is charged 4354 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 4180 of them (96%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 174 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 174 while `no-provider-adapter` rises to 6760. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2580 cells and it touches 6760. Scoping overlay support in both adapters is still necessary, but on its own it moves 174 cells, not 4354."
     },
     "behindProviderCode": 7024,
     "behindProviderCodeShare": 0.9991,
@@ -471,6 +471,22 @@
         "evidenceScope": "authoritative",
         "plannedCases": 8,
         "positiveCases": 7
+      },
+      {
+        "name": "mlx-krea-pose-control-q4-768",
+        "backend": "mlx",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "mlx-krea-pose-control-q4-1024",
+        "backend": "mlx",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
       },
       {
         "name": "candle-krea-production-current-v1",
@@ -1119,11 +1135,11 @@
     {
       "gate": "no-provider-adapter",
       "input": "how much provider-adapter work the CATALOG COVERAGE gap needs",
-      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2610 cells and it touches 6850 — 4354 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6850 cells.",
+      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2580 cells and it touches 6760 — 4354 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6760 cells.",
       "howToResolve": "Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.",
       "story": 15508,
-      "independentlyBlockingCells": 2610,
-      "cellsTouched": 6850
+      "independentlyBlockingCells": 2580,
+      "cellsTouched": 6760
     },
     {
       "input": "perRunSeconds",
@@ -1133,16 +1149,16 @@
     {
       "gate": "adapter-gated",
       "input": "what a `complete` record actually requires from an existing adapter",
-      "why": "60 cells are blocked ONLY by this, and 174 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.",
+      "why": "90 cells are blocked ONLY by this, and 264 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.",
       "howToResolve": "Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.",
       "story": 15508,
-      "independentlyBlockingCells": 60,
-      "cellsTouched": 174
+      "independentlyBlockingCells": 90,
+      "cellsTouched": 264
     },
     {
       "gate": "overlay-declined",
       "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4354 cells (59.5% of the matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 4354 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 114 cells, not 4354. It remains necessary work — 3,925 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4354 cells (59.5% of the matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 4354 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 174 cells, not 4354. It remains necessary work — 3,925 cells cannot be certified without it — but it is not where the schedule is decided.",
       "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a 2.47x load saving. The related control-declaration omission is SC-16073.",
       "story": 16072,
       "independentlyBlockingCells": 0,
