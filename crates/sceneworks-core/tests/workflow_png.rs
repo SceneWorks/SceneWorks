@@ -188,45 +188,72 @@ fn the_none_path_is_byte_identical_to_save_with_format() {
     // to the byte. Asserted against a real `save_with_format` write of the same pixel buffer
     // rather than by reading the implementation, so "we call the same function" stays true instead
     // of being true only on the day it was written.
+    // Over both compression regimes, not just the tiny gradient: `save_with_format` and our `None`
+    // arm have to agree on the file `fdeflate` stores unchanged AND on the one it actually
+    // compresses, where the row filter is live. See `Regime`.
     let directory = tempfile::tempdir().expect("temp dir");
-    let via_codec = directory.path().join("via-codec.png");
-    let via_image = directory.path().join("via-image.png");
-    let rgb = rgb_fixture();
+    for (label, rgb) in [
+        ("gradient", rgb_fixture()),
+        ("noise", noisy_rgb(512, 512)),
+        ("render", soft_render_rgb(512, 512)),
+    ] {
+        let via_codec = directory.path().join(format!("via-codec-{label}.png"));
+        let via_image = directory.path().join(format!("via-image-{label}.png"));
 
-    write_workflow_chunk(&rgb, &via_codec, None).expect("writes without a chunk");
-    rgb.save_with_format(&via_image, ImageFormat::Png)
-        .expect("the current encoder writes");
+        write_workflow_chunk(&rgb, &via_codec, None).expect("writes without a chunk");
+        rgb.save_with_format(&via_image, ImageFormat::Png)
+            .expect("the current encoder writes");
 
-    let codec_bytes = fs::read(&via_codec).expect("reads");
-    let image_bytes = fs::read(&via_image).expect("reads");
-    assert_eq!(
-        codec_bytes,
-        image_bytes,
-        "write_workflow_chunk(.., None) diverged from save_with_format: {} vs {} bytes",
-        codec_bytes.len(),
-        image_bytes.len()
-    );
+        let codec_bytes = fs::read(&via_codec).expect("reads");
+        let image_bytes = fs::read(&via_image).expect("reads");
+        assert_eq!(
+            codec_bytes,
+            image_bytes,
+            "on {label} write_workflow_chunk(.., None) diverged from save_with_format: {} vs {} \
+             bytes",
+            codec_bytes.len(),
+            image_bytes.len()
+        );
 
-    // And the same pixels WITH an envelope must differ, or the test above would pass for the
-    // trivial reason that nothing is ever embedded.
-    let with_chunk = directory.path().join("with-chunk.png");
-    write_workflow_chunk(&rgb, &with_chunk, Some(&golden_envelope())).expect("writes");
-    let chunked_bytes = fs::read(&with_chunk).expect("reads");
-    assert_ne!(chunked_bytes, image_bytes);
-    assert!(
-        chunked_bytes.len() > image_bytes.len(),
-        "the embedded file must be the larger of the two"
-    );
+        // And the same pixels WITH an envelope must differ, or the assertion above would pass for
+        // the trivial reason that nothing is ever embedded.
+        let with_chunk = directory.path().join(format!("with-chunk-{label}.png"));
+        write_workflow_chunk(&rgb, &with_chunk, Some(&golden_envelope())).expect("writes");
+        let chunked_bytes = fs::read(&with_chunk).expect("reads");
+        assert_ne!(chunked_bytes, image_bytes, "on {label}");
+        assert!(
+            chunked_bytes.len() > image_bytes.len(),
+            "on {label} the embedded file must be the larger of the two"
+        );
+    }
 }
 
-/// A deterministic image with enough entropy that the DEFLATE level shows up in the output size.
+/// What DEFLATE does with a fixture — and the reason the invariant test below needs one of each.
 ///
-/// The fixture matters as much as the assertion here. `rgb_fixture` is 9x7 and a smooth gradient —
-/// it compresses to nearly the same size at any level, which is exactly how an encoder-settings
-/// divergence stayed invisible: the `Some` and `None` outputs landed a few hundred bytes apart, near
-/// enough to the chunk size to look correct. Gradient plus cheap xorshift noise keeps a level-6
-/// deflate roughly 2:1 away from the fast one at 1024x1024, so mixing the two up is a loud failure
-/// rather than a plausible one.
+/// `png`'s fast path is `fdeflate`, which gives up on data it cannot compress and hands the rows to
+/// `StoredOnlyCompressor` instead (`png-0.18.1/src/encoder.rs`). That compressor writes filter byte
+/// 0 for every row and never consults `Options::filter`, so in the incompressible regime EVERY
+/// filter setting produces byte-identical output. A fixture that only lands there cannot see a
+/// filter divergence at all, no matter how strict the byte comparison around it is.
+#[derive(Clone, Copy)]
+enum Regime {
+    /// Output stays at ~100% of raw: `fdeflate` bailed and the rows were stored. Worth covering
+    /// because it is a real encoder path with its own framing, but it is blind to the filter.
+    Stored,
+    /// Output is a fraction of raw: deflate compresses, and the per-row filter choice is what it
+    /// keys off — so a filter OR a level divergence moves the bytes. This is the regime a real
+    /// render lands in, and the only one in which the filter setting is observable.
+    Deflated,
+}
+
+/// A deterministic image too noisy to compress: the [`Regime::Stored`] half of the corpus.
+///
+/// Worth keeping for the framing it exercises, but its limits are the point of `Regime`. At
+/// 1024x1024 it encodes to 3,147,060 bytes against 3,145,728 raw — 100.04%, i.e. never deflated at
+/// all. `Fast` and `Balanced` land 255 bytes apart (3,147,060 vs 3,147,315) rather than the 2:1 an
+/// earlier version of this comment claimed, and every filter setting produces the SAME bytes. So it
+/// catches a level change only by exact byte comparison, and a filter change not at all —
+/// [`soft_render_rgb`] is what covers that.
 fn noisy_rgb(width: u32, height: u32) -> RgbImage {
     RgbImage::from_fn(width, height, |x, y| {
         // An integer hash, so the noise is reproducible on every platform and needs no dependency.
@@ -240,9 +267,63 @@ fn noisy_rgb(width: u32, height: u32) -> RgbImage {
             let noise = (hash >> shift) & 0xFF;
             u8::try_from((gradient.wrapping_add(noise)) & 0xFF).expect("masked to a byte")
         };
-        // A gradient the filters can predict, plus noise they cannot: compressible enough to be a
-        // realistic render, random enough that the level matters.
+        // A gradient the filters could predict, swamped by noise they cannot. In practice the noise
+        // wins outright and `fdeflate` stores the rows — see `Regime::Stored`.
         Rgb([byte(0, x / 4), byte(8, y / 4), byte(16, (x + y) / 8)])
+    })
+}
+
+/// A soft synthetic render: the [`Regime::Deflated`] half, and the one that stands in for what
+/// SceneWorks actually outputs.
+///
+/// Smooth ramps at three different rates, a quadratic vignette and two flat regions — the shape of a
+/// real generated image, where neighbouring pixels predict each other and DEFLATE has something to
+/// work with. Measured at 1024x1024 against 3,145,728 raw bytes, `Compression::Fast` with each
+/// filter:
+///
+/// | filter     | bytes     | of raw |
+/// |------------|-----------|--------|
+/// | `Adaptive` |   167,360 |  5.3%  |
+/// | `Paeth`    |   173,582 |  5.5%  |
+/// | `Up`       |   242,168 |  7.7%  |
+/// | `Sub`      |   388,103 | 12.3%  |
+/// | `Avg`      |   390,753 | 12.4%  |
+/// | `NoFilter` | 3,147,060 |  100%  |
+///
+/// Six distinct byte streams, so any filter divergence in the `Some` encoder is visible here — the
+/// property `noisy_rgb` cannot supply. It separates the deflate LEVEL too (`Balanced` + `Adaptive` is
+/// 92,526 bytes, 1.81x smaller than `Fast`), so it covers both halves of an encoder-settings drift.
+///
+/// Integer arithmetic throughout: reproducible on every platform, and no dependency.
+fn soft_render_rgb(width: u32, height: u32) -> RgbImage {
+    let half_width = i64::from(width) / 2;
+    let half_height = i64::from(height) / 2;
+    // The squared distance from the centre to a corner, so the vignette spans the whole frame.
+    let corner = (half_width * half_width + half_height * half_height).max(1);
+    RgbImage::from_fn(width, height, |x, y| {
+        let (column, row) = (i64::from(x), i64::from(y));
+        let (dx, dy) = (column - half_width, row - half_height);
+        let vignette = 255 - ((dx * dx + dy * dy) * 255 / corner).min(255);
+        let horizontal = column * 200 / i64::from(width.max(1));
+        let vertical = row * 160 / i64::from(height.max(1));
+        // A flat band across the top third and a flat block in the bottom-left corner, so the
+        // adaptive filter's per-row choice is not the same everywhere.
+        let (red, green, blue) = if row * 3 < i64::from(height) {
+            (198, 214, 236)
+        } else if row * 3 > 2 * i64::from(height) && column * 3 < i64::from(width) {
+            (64, 58, 52)
+        } else {
+            (
+                (horizontal + vignette / 4).min(255),
+                (vertical + vignette / 3).min(255),
+                (vignette * 3 / 4 + horizontal / 8).min(255),
+            )
+        };
+        Rgb([
+            u8::try_from(red).expect("clamped to a byte"),
+            u8::try_from(green).expect("clamped to a byte"),
+            u8::try_from(blue).expect("clamped to a byte"),
+        ])
     })
 }
 
@@ -288,67 +369,92 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
     // through `save_with_format` makes the opt-out structurally identical, but `Some` CANNOT — no
     // `image` encoder writes a text chunk — so it drives `png` directly and could quietly encode
     // with different settings. It did: `png::Encoder::new` defaults to a level-6 deflate while
-    // `image` defaults to the fdeflate fast path, so embedding a chunk also halved the file and
-    // cost ~20x the encode time.
+    // `image` defaults to the fdeflate fast path, so embedding a chunk also changed the file size and
+    // cost ~8x the encode time.
     //
-    // Asserting "the embedded file is bigger" cannot catch that, and neither can a small fixture.
-    // So this strips our chunk back out of the `Some` output at the byte level and requires what
-    // remains to be the `None` output exactly. Any change to compression, filtering or chunking
-    // shows up as a diff no matter which direction it moves the size.
+    // Asserting "the embedded file is bigger" cannot catch that, and neither can a small fixture. So
+    // this strips our chunk back out of the `Some` output at the byte level and requires what remains
+    // to be the `None` output exactly.
+    //
+    // The FIXTURE is load-bearing too, which is why there are two. `noisy_rgb` is incompressible
+    // enough that `png` stores its rows and never consults the filter, so on that fixture alone every
+    // filter setting is byte-identical and `set_filter(NoFilter)` would pass — while costing 18.8x
+    // the file size on a real render once sc-15948 turns this arm on for every generated image.
+    // `soft_render_rgb` deflates, so it separates all six filters and both compression levels. Both
+    // regimes are real encoder paths and both are covered; see `Regime`.
+    type Fixture = fn(u32, u32) -> RgbImage;
+    let fixtures: [(&str, Fixture, Regime); 2] = [
+        ("noise", noisy_rgb, Regime::Stored),
+        ("render", soft_render_rgb, Regime::Deflated),
+    ];
+
     let directory = tempfile::tempdir().expect("temp dir");
     let envelope = golden_envelope();
     let chunk_size = workflow_chunk_size(&envelope).expect("the chunk encodes");
 
-    // Several sizes, and at least one big enough for a compression difference to dominate the
-    // chunk. The row stride varies too, since that is what the adaptive filter keys off.
-    for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
-        let rgb = noisy_rgb(width, height);
-        let embedded = directory.path().join(format!("some-{width}x{height}.png"));
-        let plain = directory.path().join(format!("none-{width}x{height}.png"));
+    for (label, build, regime) in fixtures {
+        // Several sizes, and at least one big enough for a compression difference to dominate the
+        // chunk. The row stride varies too, since that is what the adaptive filter keys off.
+        for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
+            let rgb = build(width, height);
+            let name = format!("{label}-{width}x{height}");
+            let embedded = directory.path().join(format!("some-{name}.png"));
+            let plain = directory.path().join(format!("none-{name}.png"));
 
-        write_workflow_chunk(&rgb, &embedded, Some(&envelope)).expect("writes with a chunk");
-        write_workflow_chunk(&rgb, &plain, None).expect("writes without one");
+            write_workflow_chunk(&rgb, &embedded, Some(&envelope)).expect("writes with a chunk");
+            write_workflow_chunk(&rgb, &plain, None).expect("writes without one");
 
-        let embedded_bytes = fs::read(&embedded).expect("reads");
-        let plain_bytes = fs::read(&plain).expect("reads");
-        let (stripped, removed) = strip_workflow_chunks(&embedded_bytes);
+            let embedded_bytes = fs::read(&embedded).expect("reads");
+            let plain_bytes = fs::read(&plain).expect("reads");
+            let (stripped, removed) = strip_workflow_chunks(&embedded_bytes);
 
-        assert_eq!(
-            removed, chunk_size,
-            "at {width}x{height} the stripper removed {removed} bytes but the chunk measures \
-             {chunk_size}"
-        );
-        assert_eq!(
-            stripped.len(),
-            plain_bytes.len(),
-            "at {width}x{height} the two arms disagree on encoded size by {} bytes — the chunk is \
-             {chunk_size} and was already removed, so this is an ENCODER difference, not the chunk",
-            stripped.len().abs_diff(plain_bytes.len())
-        );
-        assert!(
-            stripped == plain_bytes,
-            "at {width}x{height} the Some output is not the None output plus the chunk: the bytes \
-             differ after stripping the {chunk_size}-byte chunk"
-        );
-        // Stated the other way round as well, because this is the number sc-15948 quotes: the file
-        // grows by the chunk and by nothing else.
-        assert_eq!(
-            embedded_bytes.len(),
-            plain_bytes.len() + chunk_size,
-            "at {width}x{height} embedding cost {} bytes, not the {chunk_size}-byte chunk",
-            embedded_bytes.len() - plain_bytes.len()
-        );
-
-        // And the fixture must actually be compression-sensitive at the larger sizes, or the
-        // assertions above would hold for an image where every level produces the same bytes.
-        if width >= 512 {
-            let raw = rgb.as_raw().len();
-            assert!(
-                plain_bytes.len() * 5 > raw * 2,
-                "at {width}x{height} the fixture compressed to {} of {raw} raw bytes — too \
-                 compressible to distinguish deflate levels",
-                plain_bytes.len()
+            assert_eq!(
+                removed, chunk_size,
+                "on {name} the stripper removed {removed} bytes but the chunk measures {chunk_size}"
             );
+            assert_eq!(
+                stripped.len(),
+                plain_bytes.len(),
+                "on {name} the two arms disagree on encoded size by {} bytes — the chunk is \
+                 {chunk_size} and was already removed, so this is an ENCODER difference \
+                 (compression level or row filter), not the chunk",
+                stripped.len().abs_diff(plain_bytes.len())
+            );
+            assert!(
+                stripped == plain_bytes,
+                "on {name} the Some output is not the None output plus the chunk: the bytes differ \
+                 after stripping the {chunk_size}-byte chunk"
+            );
+            // Stated the other way round as well, because this is the number sc-15948 quotes: the
+            // file grows by the chunk and by nothing else.
+            assert_eq!(
+                embedded_bytes.len(),
+                plain_bytes.len() + chunk_size,
+                "on {name} embedding cost {} bytes, not the {chunk_size}-byte chunk",
+                embedded_bytes.len() - plain_bytes.len()
+            );
+
+            // And each fixture must still be in the regime it was chosen for, at the sizes where
+            // that is the whole point of it. Without this the corpus could drift into covering one
+            // regime twice — which is exactly the hole a single noisy fixture left.
+            if width >= 512 {
+                let raw = rgb.as_raw().len();
+                match regime {
+                    Regime::Stored => assert!(
+                        plain_bytes.len() * 5 > raw * 2,
+                        "on {name} the fixture compressed to {} of {raw} raw bytes, so it is no \
+                         longer the stored-rows regime it is here to cover",
+                        plain_bytes.len()
+                    ),
+                    Regime::Deflated => assert!(
+                        plain_bytes.len() * 4 < raw,
+                        "on {name} the fixture only reached {} of {raw} raw bytes — it is not \
+                         deflating, so `png` stored the rows and the row FILTER was never \
+                         consulted. A filter divergence would be invisible here",
+                        plain_bytes.len()
+                    ),
+                }
+            }
         }
     }
 }

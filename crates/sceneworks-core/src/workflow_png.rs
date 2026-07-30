@@ -83,12 +83,17 @@ pub const MAX_WORKFLOW_TEXT_BYTES: usize = 1024 * 1024;
 /// claims before anyone looked at the contents. `png` meters that against this budget and returns
 /// `LimitsExceeded` instead, so the refusal happens in the megabytes.
 ///
-/// It is a *budget*, not a per-chunk size: the decoder charges a chunk more than once (each
-/// doubling of its growth buffer, then again when it parses), so the effective per-chunk ceiling
-/// is a fraction of this number. That imprecision is fine — the job is to be finite and far below
-/// what a header can claim, not to be an exact quota. 8 MiB is ~8× the text cap (ample for a
-/// legitimate compressed chunk, which runs to a couple of kilobytes) and 8× below `png`'s own
-/// 64 MiB default, so a third-party PNG carrying fat EXIF still reads rather than erroring.
+/// It is a *budget*, not a per-chunk size, and a CUMULATIVE one: `png`'s `Limits::reserve_bytes`
+/// only ever subtracts, so every ancillary chunk in the file draws down the same pool, and one
+/// chunk is charged more than once (each doubling of its growth buffer, then again when it parses).
+/// The effective per-chunk ceiling is therefore a fraction of this number and depends on what came
+/// before it. That imprecision is fine — the job is to be finite and far below what a header can
+/// claim, not to be an exact quota. 8 MiB is ~8× the text cap (ample for a legitimate compressed
+/// chunk, which runs to a couple of kilobytes) and 8× below `png`'s own 64 MiB default, so a
+/// third-party PNG carrying fat EXIF still reads rather than erroring.
+///
+/// Being cumulative is what makes exhausting it in the post-IDAT tail an ABSENCE rather than an
+/// error; see `workflow_chunk_after_image_data` for why the two passes treat it differently.
 pub const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
 
 /// The 8-byte PNG signature. Checked before the decoder runs so "this is not a PNG" is its own
@@ -123,6 +128,10 @@ pub enum WorkflowChunkError {
     DuplicateChunk { count: usize },
     /// The file's metadata wanted more than [`MAX_METADATA_BYTES`] before our chunk was reached —
     /// the oversized-declared-length case.
+    ///
+    /// Raised by the PRIMARY pre-IDAT walk only. A budget already exhausted by the time the
+    /// post-IDAT tail is walked is an absence instead, because the primary walk has by then already
+    /// answered "no workflow"; `workflow_chunk_after_image_data` documents the asymmetry.
     MetadataTooLarge { limit: usize },
     /// An uncompressed chunk whose text is over the cap. Measurable, unlike the compressed case.
     TextTooLarge { bytes: usize, limit: usize },
@@ -278,8 +287,10 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 /// (`png-0.18.1/src/common.rs`). `image` does not use that default: its `PngEncoder::new` takes
 /// `CompressionType::default()`, and `CompressionType::Fast` is the variant carrying `#[default]`
 /// (`image-0.25.10/src/codecs/png.rs`), which `encode_inner` maps to `png::Compression::Fast` →
-/// `DeflateCompression::FdeflateUltraFast`. Left unset, `Some` would silently encode ~20× slower
-/// and produce a file about half the size — a product change nobody asked this story for.
+/// `DeflateCompression::FdeflateUltraFast`. Left unset, `Some` would silently encode ~8× slower and,
+/// on the kind of image SceneWorks actually renders, produce a file a little over half the size
+/// (measured at 1024²: 92,526 bytes at `Balanced` against 167,360 at `Fast`, a 1.81× reduction) — a
+/// product change nobody asked this story for.
 ///
 /// So both calls below mirror `image`'s `encode_inner` exactly, in its order:
 ///
@@ -291,13 +302,16 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 /// pins the filter explicitly *after* setting compression. If `png` ever remapped
 /// `from_simple(Fast)`, `image` would keep writing `Adaptive` and this would follow it rather than
 /// diverge. Mirroring the call sequence is what makes that true; mirroring only the outcome would
-/// not.
+/// not. The filter is not a cosmetic setting either: on a compressible render at 1024², `Adaptive`
+/// writes 167,360 bytes where `Sub` writes 388,103 and `NoFilter` 3,147,060 — 2.3× and 18.8×.
 ///
 /// None of this is trusted to stay true by inspection:
 /// `the_some_path_is_the_none_path_plus_the_chunk` in `tests/workflow_png.rs` strips the `iTXt`
 /// chunk back out of this encoder's output at the byte level and compares what is left against a
-/// real `save_with_format` write of the same pixels, at sizes large enough for a compression
-/// difference to show.
+/// real `save_with_format` write of the same pixels. It runs over TWO fixtures, because the two
+/// deflate regimes see different settings: an incompressible one, where `png` falls back to storing
+/// rows and the filter is not consulted at all, and a smooth one that actually deflates, which is
+/// the only regime in which a filter divergence is visible.
 fn encode_png_with_text<W: Write>(
     rgb: &RgbImage,
     sink: W,
@@ -343,7 +357,9 @@ fn encode_png_with_text<W: Write>(
 /// property survives: a hostile file still cannot make us decompress an image to look for text.
 /// Both passes run under the same [`MAX_METADATA_BYTES`] budget, resolve the same keyword, and hand
 /// whatever they find to the same capped decompress and the same single parser — the tail is not a
-/// laxer route in, only another place to look.
+/// laxer route in, only another place to look. That budget is cumulative, so a file fat enough to
+/// spend it before the tail is reached reads as `Ok(None)` rather than as an error; the tail is an
+/// extra place to look, and failing to look there cannot turn an absence into a failure.
 ///
 /// # Errors
 /// See [`WorkflowChunkError`]. Never panics, and never inflates more than
@@ -474,27 +490,33 @@ fn select_workflow_chunk(info: &png::Info<'_>) -> Result<Option<ITXtChunk>, Work
 /// scales with the pixels. Ancillary chunks it passes are parsed under the limits the decoder was
 /// built with, so the metadata budget still applies out here.
 ///
-/// A walk that FAILS is reported as an absence rather than an error, with one exception. Pass one
+/// A walk that FAILS is reported as an absence rather than an error, with NO exception. Pass one
 /// already succeeded and already told us there is no workflow in the metadata proper; a file whose
 /// tail is truncated or corrupt does not change that answer, and turning "this PNG is a bit damaged
 /// and has no recipe" into a hard error would break the `Ok(None)` promise for a case that reads
 /// cleanly today. Discarding the error can only ever yield *fewer* workflows, never one that
 /// bypassed a check, so this is not a soft edge on the trust boundary.
 ///
-/// The exception is [`png::DecodingError::LimitsExceeded`], which is not damage — it is the budget
-/// refusing an oversized chunk, the one thing out here worth naming. It surfaces as
-/// [`WorkflowChunkError::MetadataTooLarge`], exactly as it would from pass one.
+/// # Why an exhausted budget is an absence out here and an error in pass one
+///
+/// The asymmetry is deliberate. [`MAX_METADATA_BYTES`] is a CUMULATIVE budget — `png`'s
+/// `Limits::reserve_bytes` only subtracts — so a file with several megabytes of legitimate but fat
+/// pre-IDAT `iTXt` can pass through `read_info` and then leave too little of the pool to frame one
+/// more chunk out here. Surfacing that as [`WorkflowChunkError::MetadataTooLarge`] would take a
+/// class of foreign file that read as `Ok(None)` before this pass existed and turn it into a
+/// user-visible error, which is exactly what the module contract forbids and what sc-15949 would hit
+/// on import. The rendered sentence would also be wrong: pass one *did* search the file.
+///
+/// So the rule follows what we were asked for. A chunk too large in the PRIMARY walk is an error —
+/// we were asked to read the metadata and could not. A budget exhausted by the time the TAIL is
+/// reached is an absence — the primary walk already answered "no workflow", and the tail is an extra
+/// place to look, not a second question. `MAX_METADATA_BYTES` still bounds what is buffered either
+/// way, which is the property that matters: the refusal happens instead of the allocation.
 fn workflow_chunk_after_image_data<R: BufRead + Seek>(
     reader: &mut png::Reader<R>,
 ) -> Result<Option<ITXtChunk>, WorkflowChunkError> {
-    match reader.finish() {
-        Ok(()) => {}
-        Err(png::DecodingError::LimitsExceeded) => {
-            return Err(WorkflowChunkError::MetadataTooLarge {
-                limit: MAX_METADATA_BYTES,
-            })
-        }
-        Err(_) => return Ok(None),
+    if reader.finish().is_err() {
+        return Ok(None);
     }
     select_workflow_chunk(reader.info())
 }
@@ -760,18 +782,84 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_chunk_after_the_image_data_refuses_before_it_is_buffered() {
+    fn an_oversized_chunk_after_the_image_data_is_never_buffered_or_read() {
         // The metadata budget has to apply out here too, or the tail would be an unbounded place to
         // put a chunk that the front of the file refuses. Over MAX_METADATA_BYTES of real data,
         // uncompressed so no ratio is involved and the size on disk is the size in memory.
         let huge = "A".repeat(MAX_METADATA_BYTES + 1);
         let tail = framed(&ITXtChunk::new(WORKFLOW_CHUNK_KEYWORD, huge));
+        let result = read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail));
+
+        // Ok(None) is the recorded decision — a budget spent in the tail is an absence, not an
+        // error (`workflow_chunk_after_image_data` documents why), so this must not be Ok(Some) and
+        // must not be an error either.
         assert_eq!(
-            read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail)),
-            Err(WorkflowChunkError::MetadataTooLarge {
-                limit: MAX_METADATA_BYTES
-            }),
-            "an oversized post-IDAT chunk must be refused by the same budget as a pre-IDAT one"
+            result,
+            Ok(None),
+            "an oversized post-IDAT chunk must be an absence, not a workflow and not an error"
+        );
+        // And Ok(None) is itself the proof that the chunk was never buffered. Had the budget let it
+        // through, `select_workflow_chunk` would have matched our keyword and the 8 MiB of text
+        // would have come back as TextTooLarge — which is exactly what the neighbouring test with a
+        // 1 MiB chunk (under the metadata budget, over the text cap) gets. Reaching neither the text
+        // cap nor the parser means `png` refused it while framing.
+    }
+
+    /// Roughly `mib` MiB of uncompressed `iTXt` under a foreign keyword — the fat but legitimate
+    /// metadata a third-party writer might carry, here only to draw the metadata budget down.
+    fn filler_chunk(name: &str, mib: usize) -> ITXtChunk {
+        ITXtChunk::new(format!("sceneworks:{name}"), "A".repeat(mib * 1024 * 1024))
+    }
+
+    #[test]
+    fn a_budget_spent_reaching_the_tail_is_an_absence_not_an_error() {
+        // The cumulative-budget interaction, pinned as a decision rather than left to accident.
+        // `png`'s `Limits::reserve_bytes` only ever subtracts, so MAX_METADATA_BYTES is one pool for
+        // the whole file and pass one can leave too little of it to frame one more chunk out in the
+        // tail. Before the tail pass existed, every file below read as Ok(None); surfacing the
+        // exhausted budget as MetadataTooLarge would have turned case (c) into a user-visible error
+        // on import (sc-15949), which is what the module contract forbids.
+        let envelope = minimal_envelope_json("behind the image data");
+
+        // (a) The PRIMARY walk survives 3 MiB of foreign pre-IDAT text: a workflow chunk in the
+        //     metadata proper alongside that much filler still reads. So whatever (c) does, it is
+        //     not because this much filler defeats pass one.
+        let beside_the_filler = png_with(&[
+            filler_chunk("filler-pre", 3),
+            workflow_chunk(envelope.clone()),
+        ]);
+        assert_eq!(
+            read_workflow_chunk(&beside_the_filler)
+                .expect("the primary walk survives 3 MiB of foreign text")
+                .expect("and finds the workflow beside it")
+                .prompt,
+            "behind the image data"
+        );
+
+        // (b) Straddling with room to spare: filler pre-IDAT, more filler in the tail, our chunk
+        //     behind both. The tail stays reachable through a file that carries pre-IDAT metadata.
+        let base = png_with(&[filler_chunk("filler-pre", 1)]);
+        let mut tail = framed(&filler_chunk("filler-tail", 1));
+        tail.extend_from_slice(&framed(&workflow_chunk(envelope.clone())));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&base, &tail))
+                .expect("a straddling file within the budget must not be an error")
+                .expect("and its tail workflow must be found")
+                .prompt,
+            "behind the image data"
+        );
+
+        // (c) The same shape with fatter filler on both sides of the image data. Pass one succeeds
+        //     — (a) proves 3 MiB does not defeat it — and then the tail walk runs out of pool before
+        //     it reaches our chunk. The answer is the absence pass one already established, NOT an
+        //     error: we are not being asked to read this metadata, only looking in one more place.
+        let base = png_with(&[filler_chunk("filler-pre", 3)]);
+        let mut tail = framed(&filler_chunk("filler-tail", 3));
+        tail.extend_from_slice(&framed(&workflow_chunk(envelope)));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&base, &tail)),
+            Ok(None),
+            "a budget exhausted on the way to the tail must read as an absence, not MetadataTooLarge"
         );
     }
 
