@@ -740,6 +740,34 @@ describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not
     ).toBe(hostGbForPeakGb(10, "mlx"));
   });
 
+  it("does not quote a partial ceiling for the CONVERT-AT-INSTALL tier shape either", () => {
+    // The same class, on a shape memoryFloorCatalogParity.test.js structurally cannot sweep:
+    // convert-at-install models (sc-10730) carry their installed set in `mlxTierStates`, a RUNTIME field
+    // the manifest does not declare, so the catalog mirror never produces one. `installedTiers` reads
+    // `mlxTierStates` while `peakGbByTier` reads `variants`, so the two can disagree about which tiers
+    // exist — and a tier present in the install set with no `variants` row is unevidenced AND unestimable.
+    //
+    // Case 4 has to cover it: with no blanket, the honest answer is silence, not q4's number.
+    const convertAtInstall = (blanket) => ({
+      id: "synthetic_convert_at_install",
+      ...(blanket === null ? {} : { mlx: { minMemoryGb: blanket } }),
+      // Not a download matrix: the convert outputs are decoupled from it (sc-10730).
+      hasVariantMatrix: false,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 10 * GB } },
+      ],
+      mlxTierStates: [
+        { tier: "q4", installState: "installed" },
+        // A convert output with no `variants` row at all — nothing to measure, nothing to estimate.
+        { tier: "bf16", installState: "installed" },
+      ],
+    });
+    expect(installedFloorHostGb(convertAtInstall(null), { backend: "mlx" })).toBeNull();
+    // ...and with a blanket it is the max, exactly as for the download-matrix shape.
+    expect(installedFloorHostGb(convertAtInstall(64), { backend: "mlx" })).toBe(64);
+    expect(installedFloorHostGb(convertAtInstall(4), { backend: "mlx" })).toBe(hostGbForPeakGb(10, "mlx"));
+  });
+
   it("floors a candle-only tier's q8 DEGRADE at the blanket", () => {
     // MINOR 3. The degrade (`declaredPeakGb`'s sc-11042 rule: a candle-only tier with no row of its own uses
     // the q8 row, never `minMemoryGb`) used to be reported as ordinary evidence, so the set counted as fully
