@@ -954,7 +954,7 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         ));
     }
     let (maximum_error, mean_error, maximum_threshold, mean_threshold) =
-        require_quality_fields(quality, &record.id)?;
+        require_complete_quality_fields(quality, &record.id)?;
     if maximum_error > maximum_threshold || mean_error > mean_threshold {
         return Err(format!("{} quality thresholds were exceeded", record.id));
     }
@@ -994,8 +994,8 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
 }
 
 fn validate_negative_complete(record: &EvidenceRecord) -> Result<(), String> {
-    let (_, _, maximum_threshold, mean_threshold) =
-        require_quality_fields(&record.quality, &record.id)?;
+    let (maximum_threshold, mean_threshold) =
+        require_quality_thresholds(&record.quality, &record.id)?;
     let mutation = required_value(&record.negative_mutation, &record.id, "negativeMutation")?;
     if mutation.measured != Some(true)
         || mutation.result != Some(NegativeMutationResult::FailedAsExpected)
@@ -1029,23 +1029,31 @@ fn validate_negative_complete(record: &EvidenceRecord) -> Result<(), String> {
     Ok(())
 }
 
-fn require_quality_fields(quality: &Quality, id: &str) -> Result<(f64, f64, f64, f64), String> {
-    let values = (
-        quality.maximum_error,
-        quality.mean_error,
+fn require_quality_thresholds(quality: &Quality, id: &str) -> Result<(f64, f64), String> {
+    match (
         quality.maximum_error_threshold,
         quality.mean_error_threshold,
-    );
-    match values {
-        (Some(maximum), Some(mean), Some(maximum_threshold), Some(mean_threshold))
+    ) {
+        (Some(maximum_threshold), Some(mean_threshold))
             if quality
                 .contract
                 .as_deref()
                 .is_some_and(|value| !value.is_empty()) =>
         {
-            Ok((maximum, mean, maximum_threshold, mean_threshold))
+            Ok((maximum_threshold, mean_threshold))
         }
-        _ => Err(format!("{id} quality evidence is incomplete")),
+        _ => Err(format!("{id} quality threshold evidence is incomplete")),
+    }
+}
+
+fn require_complete_quality_fields(
+    quality: &Quality,
+    id: &str,
+) -> Result<(f64, f64, f64, f64), String> {
+    let (maximum_threshold, mean_threshold) = require_quality_thresholds(quality, id)?;
+    match (quality.maximum_error, quality.mean_error) {
+        (Some(maximum), Some(mean)) => Ok((maximum, mean, maximum_threshold, mean_threshold)),
+        _ => Err(format!("{id} complete quality measurements are incomplete")),
     }
 }
 
@@ -1476,6 +1484,16 @@ mod tests {
             load_bundle(&bundle(missing_record_harness)),
             Err(BundleLoadError::Json(_))
         ));
+        let mut wrong_typed_record_harness = complete_record();
+        wrong_typed_record_harness["harnessVersion"] = json!(3);
+        assert!(matches!(
+            load_bundle(&bundle(wrong_typed_record_harness)),
+            Err(BundleLoadError::Json(_))
+        ));
+        assert!(matches!(
+            load_bundle(&bundle(json!(7))),
+            Err(BundleLoadError::Json(_))
+        ));
         assert!(matches!(load_bundle("{"), Err(BundleLoadError::Json(_))));
     }
 
@@ -1533,6 +1551,26 @@ mod tests {
             load_bundle(&bundle(dirty)),
             Err(BundleLoadError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn schema_minimal_negative_complete_quality_loads() {
+        let mut record = complete_record();
+        record["status"] = json!("negative_complete");
+        record["predictedPeakBytes"] = Value::Null;
+        record["observedMemory"] = Value::Null;
+        record["quality"] = json!({
+            "contract": "tolerance",
+            "maximumErrorThreshold": 0.08,
+            "meanErrorThreshold": 0.01
+        });
+        let strategy_parameters = record["strategy"]["parameters"].clone();
+        record["negativeMutation"]["parameters"] = strategy_parameters;
+
+        assert!(
+            matches!(load_bundle(&bundle(record)), Ok(BundleLoad::Ready(_))),
+            "negative_complete requires thresholds, not positive-case measured quality"
+        );
     }
 
     #[test]
