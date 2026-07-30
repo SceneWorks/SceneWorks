@@ -79,6 +79,20 @@ COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # so the API can seed an empty config dir, which means they must exist in the
 # build context (not just the runtime bind mount) or the compile can't read them.
 COPY config ./config
+# Same constraint, second source (sc-16080): `sceneworks-core::memory_calibration`
+# embeds the generated calibration evidence via `include_str!`, and that embed is NOT
+# test-gated, so a release build of the API cannot compile without it.
+#
+# Deliberately the single embedded FILE rather than `docs/generated`: that directory
+# also holds `memory-matrix.json`, which is regenerated and re-hashed by any change to
+# the selector's source, so copying the directory would invalidate this layer and
+# rebuild the whole Rust graph on edits the image does not depend on.
+#
+# Every `include_str!`/`include_bytes!` that reaches outside its crate needs a line
+# here, or the Docker build breaks while `cargo build` on a checkout stays green — the
+# two see different trees. Embeds inside `mod tests` are exempt: this stage builds
+# `--release` without tests.
+COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
