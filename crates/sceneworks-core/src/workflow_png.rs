@@ -63,12 +63,14 @@ pub const WORKFLOW_CHUNK_KEYWORD: &str = "sceneworks:workflow";
 /// Hard cap on the DECOMPRESSED chunk text, in bytes. 1 MiB.
 ///
 /// Derived from the contract rather than picked round: [`crate::workflow_share`] already bounds
-/// every string an envelope can carry, and its own worst case is what this has to clear. Five
-/// prose fields (`prompt`, `negativePrompt`, `advanced.stylePrompt`, and the structured prompt's
-/// `intent` / `runtimePrompt`) at `PROSE_MAX_CHARS` = 20,000 **chars** each, and a char is up to
-/// 4 UTF-8 bytes — so ~400 kB of prose in the pathological all-emoji case — plus pose coordinate
-/// arrays and a few dozen bounded labels. Call it ~500 kB for an envelope that is legitimate but
-/// absurd. 1 MiB is 2× that, and 2× *under* `png`'s own 2 MiB `DECOMPRESSION_LIMIT` default,
+/// every string an envelope can carry, and its own worst case is what this has to clear. Six
+/// prose fields (`prompt`, `negativePrompt`, `advanced.stylePrompt`, `advanced.systemMessage`, and
+/// the structured prompt's `intent` / `runtimePrompt`) at `PROSE_MAX_BYTES` = 16 KiB each — the
+/// bound is in BYTES, so 96 kB of prose is the ceiling in every script rather than a figure that
+/// swings with the encoding — plus pose coordinate arrays and a few dozen bounded labels. Call it
+/// ~150 kB for an envelope that is legitimate but absurd, and the serialized whole is refused past
+/// `WORKFLOW_SHARE_MAX_BYTES` = 160 KiB regardless. 1 MiB clears that with room for the framing,
+/// and is 2× *under* `png`'s own 2 MiB `DECOMPRESSION_LIMIT` default,
 /// which is a generic guess where this is a bound on a known shape.
 ///
 /// The cap is what makes a zip bomb cheap to refuse: `decompress_text_with_limit` inflates into a
