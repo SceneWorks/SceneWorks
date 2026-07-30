@@ -17177,3 +17177,77 @@ button.audio-wave {
   background: var(--danger-soft);
   color: var(--danger);
 }
+
+/* The missing-inputs surface (sc-15952). Sits under the report and is rendered ONLY when there is
+   something to do about the recipe — a fully-resolvable one shows none of this, so none of these
+   rules has an empty-state variant to style. */
+.workflow-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+}
+.workflow-fix-title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.workflow-fix-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-fix-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.workflow-fix-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.workflow-fix-head strong {
+  flex: 1 1 auto;
+}
+.workflow-fix-head select {
+  flex: 0 1 220px;
+  min-width: 0;
+}
+.workflow-fix-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.workflow-fix-substitute {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.workflow-fix-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.workflow-fix-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workflow-fix-inputs > .workflow-fix-detail {
+  margin: 0;
+}

@@ -448,14 +448,23 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
         expect(row.detail.length).toBeGreaterThan(20);
       }
     }
-    // …and the unrestored ones are exactly the five lanes an image envelope carries that this
-    // studio has no control for, plus `poses`, whose ids the contract deliberately drops.
+    // …and the unrestored ones are exactly the lanes an image envelope carries that this studio
+    // has no control for, plus the two the CONTRACT deliberately reduces past the point of replay:
+    // `poses`, whose library ids do not travel, and `structuredPrompt`, whose caption object does
+    // not (sc-15952 — the prompt is restored as prose instead, and the row says so).
     expect(
       rows
         .filter((row) => !row.restored)
         .map((row) => row.key)
         .sort(),
-    ).toEqual(["angleSet", "cnScale", "imageGuidanceScale", "poses", "systemMessage"]);
+    ).toEqual([
+      "angleSet",
+      "cnScale",
+      "imageGuidanceScale",
+      "poses",
+      "structuredPrompt",
+      "systemMessage",
+    ]);
   });
 
   // `styleId` is the one CONDITIONAL entry: it is applied, but only when this install has the

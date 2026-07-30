@@ -1573,6 +1573,13 @@ export function ImageStudio() {
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952: the reference images the user supplied in the shared-workflow panel. Guarded on
+    // presence rather than assigned unconditionally — a recorded recipe carries no
+    // `referenceAssetIds`, and clearing the multi-reference picker on every "Use this recipe"
+    // would drop a selection the user had already made.
+    if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
+      setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+    }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
     setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);

@@ -751,3 +751,230 @@ async fn inspect_requires_a_token_when_one_is_configured() {
     let (status, _) = inspect(app, "shared.png", &sceneworks_png(&temp_dir, None), &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// `GET /api/v1/projects/:project_id/assets/:asset_id/workflow` (sc-15952)
+// ---------------------------------------------------------------------------
+
+/// Create a project, import `bytes` as an asset, and answer `(project_id, asset_id)`.
+async fn project_with_imported_image(
+    app: axum::Router,
+    name: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> (String, String) {
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": name }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, asset) = request_multipart_upload(
+        app,
+        &format!("/api/v1/projects/{project_id}/assets"),
+        filename,
+        "image/png",
+        bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "asset: {asset}");
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    (project_id, asset_id)
+}
+
+fn asset_workflow_route(project_id: &str, asset_id: &str) -> String {
+    format!("/api/v1/projects/{project_id}/assets/{asset_id}/workflow")
+}
+
+#[tokio::test]
+async fn the_asset_route_reports_the_envelope_import_recorded_and_a_fresh_report() {
+    // The gap sc-15950 left: `build_resolution_report` had exactly one production caller and
+    // nothing read `extra.importedWorkflow` back into a report, so an imported asset carried a
+    // recipe nothing could say anything about.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+    let share = image_envelope("krea_2_turbo", "a lighthouse in heavy fog");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Imported Workflow",
+        "shared.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+    )
+    .await;
+
+    let (status, body) = request(
+        app,
+        "GET",
+        &asset_workflow_route(&project_id, &asset_id),
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["status"], json!("workflow"));
+    assert_eq!(
+        body["workflow"]["prompt"],
+        json!("a lighthouse in heavy fog")
+    );
+    assert_eq!(body["workflow"]["model"], json!("krea_2_turbo"));
+    // The report is the point of the route — the envelope was already on the asset.
+    assert_eq!(body["resolution"]["model"]["slug"], json!("krea_2_turbo"));
+    assert_eq!(
+        body["resolution"]["loras"][0]["name"],
+        json!("Aurora Portrait v3")
+    );
+    assert!(body["resolution"]["runnable"].is_boolean());
+    assert!(body["resolution"]["inputImagesRequired"].is_u64());
+}
+
+#[tokio::test]
+async fn the_asset_route_reports_a_catalog_known_but_absent_model_as_installable() {
+    // The actionable middle case, through the REAL model catalog: the row is in
+    // `builtin.models.jsonc` and nothing is on disk, so the report must offer the Model Manager's
+    // own download rather than calling it missing. That action is what sc-15952's install button
+    // routes into, and what makes re-resolving after it meaningful.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let config_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    single_model_manifest(&config_dir, "fixture_model", "acme/fixture-model");
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+    let share = image_envelope("fixture_model", "a lighthouse");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Installable Model",
+        "shared.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+    )
+    .await;
+
+    let (status, body) = request(
+        app,
+        "GET",
+        &asset_workflow_route(&project_id, &asset_id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let model = &body["resolution"]["model"];
+    assert_eq!(model["state"], json!("installable"), "model: {model}");
+    assert_eq!(model["catalogId"], json!("fixture_model"));
+    assert_eq!(
+        model["install"],
+        json!({ "method": "POST", "path": "/api/v1/models/fixture_model/download" }),
+        "the middle case must name the existing Model Manager flow"
+    );
+    assert_eq!(body["resolution"]["runnable"], json!(false));
+}
+
+#[tokio::test]
+async fn the_asset_route_reports_an_asset_with_no_chunk_as_no_workflow() {
+    // Every image in the world that did not come from SceneWorks. A 200 with its own status, the
+    // same shape the inspect route uses, so the web has one branch and no error band.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Plain Image",
+        "foreign.png",
+        &sceneworks_png(&temp_dir, None),
+    )
+    .await;
+
+    let (status, body) = request(
+        app,
+        "GET",
+        &asset_workflow_route(&project_id, &asset_id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["status"], json!("no_workflow"));
+    assert_eq!(body["workflow"], Value::Null);
+    assert_eq!(body["resolution"], Value::Null);
+    assert!(body["detail"].is_string(), "body: {body}");
+}
+
+#[tokio::test]
+async fn the_asset_route_mutates_nothing() {
+    // A GET that writes is a GET that turns a panel refresh into a project edit — and the
+    // re-resolution after an install calls this again on every catalog change. Read the STORES,
+    // not just the body.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+    let share = image_envelope("krea_2_turbo", "a lighthouse");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Read Only",
+        "shared.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+    )
+    .await;
+    let (_, project) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let before_tree = directory_tree(&project_path);
+    let before_jobs = request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
+        .await
+        .1;
+
+    for _ in 0..3 {
+        let (status, _) = request(
+            app.clone(),
+            "GET",
+            &asset_workflow_route(&project_id, &asset_id),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    assert_eq!(
+        directory_tree(&project_path),
+        before_tree,
+        "reading the workflow wrote into the project"
+    );
+    assert_eq!(
+        request(app, "GET", "/api/v1/jobs", Value::Null).await.1,
+        before_jobs,
+        "reading the workflow queued a job"
+    );
+}
+
+#[tokio::test]
+async fn the_asset_route_404s_for_an_asset_that_does_not_exist() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Missing Asset" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().expect("project id");
+    let (status, _) = request(
+        app,
+        "GET",
+        &asset_workflow_route(project_id, "does-not-exist"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

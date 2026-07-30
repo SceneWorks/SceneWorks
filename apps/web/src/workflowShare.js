@@ -85,6 +85,27 @@ export async function looksLikeWorkflowCandidate(file) {
   }
 }
 
+// ---- The envelope an already-imported asset is carrying -------------------------------------
+
+// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store.rs`, mirrored.
+//
+// Import clears this key unconditionally before writing its own, so what is under it is either the
+// envelope THIS install's reader parsed and sanitized, or nothing — a caller-supplied
+// `provenance.importedWorkflow` cannot masquerade as one (`docs/workflow-share-envelope.md`, "The
+// trust boundary on import").
+export const IMPORTED_WORKFLOW_KEY = "importedWorkflow";
+
+// The envelope an imported asset carries, or null.
+//
+// The one predicate behind "Use this recipe appears on imported assets carrying a workflow, and
+// nowhere else". Deliberately not a truthiness check on `extra`: an asset imported from any of the
+// billions of PNGs with no SceneWorks chunk in them has an `extra` and no key under it, and that is
+// the common case rather than the edge one.
+export function assetImportedWorkflow(asset) {
+  const stored = asset?.extra?.[IMPORTED_WORKFLOW_KEY];
+  return stored && typeof stored === "object" ? stored : null;
+}
+
 // ---- Reading the report -------------------------------------------------------------------
 
 function requirementResolved(requirement) {
@@ -206,7 +227,25 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // quietly disappears".
 export const ADVANCED_PREFILL = {
   resolution: { label: "Resolution", prefill: PREFILL_CONTROL },
-  structuredPrompt: { label: "Structured prompt", prefill: PREFILL_PROMPT },
+  // sc-15952 reclassified this. It was `PREFILL_PROMPT` on the reading that the panel shows its
+  // content in the prompt block above the grid — true of `stylePrompt`, which the studio really
+  // does read back (`rawSettings.stylePrompt`), and false of this one. The builder rehydrates from
+  // `structuredPrompt.caption`, and the envelope reduces `structuredPrompt` to its SCALAR fields
+  // and drops the caption object (`docs/workflow-share-envelope.md`, Shared table) — so a shared
+  // structured-caption recipe reaches no builder control at all and replays as the composed prose
+  // in the plain prompt box.
+  //
+  // That prose replay is the DECIDED behaviour, not a stopgap: the top-level `prompt` is the exact
+  // string the model received, so it reproduces the image. Rehydrating the builder instead would
+  // need a classified sub-schema for the caption in the envelope itself, which is a contract change
+  // and belongs to its own story (sc-16197). What this row buys is that the panel says so.
+  structuredPrompt: {
+    label: "Structured prompt",
+    prefill: PREFILL_NONE,
+    detail:
+      "The caption object does not travel — only its scalar fields do — so the structured builder " +
+      "cannot be rehydrated. The prompt is restored as prose, exactly as the model received it.",
+  },
   sampler: { label: "Sampler", prefill: PREFILL_CONTROL },
   scheduler: { label: "Scheduler", prefill: PREFILL_CONTROL },
   schedulerShift: { label: "Schedule shift", prefill: PREFILL_CONTROL },
@@ -283,7 +322,17 @@ export function workflowReplaySeed(share) {
 // `report` is not optional in spirit: with it absent nothing that had to be looked up is
 // prefilled, since without a report this module cannot tell a resolvable model from one that
 // would leave the studio's picker blank.
-export function recipeFromWorkflowShare(share, report = null) {
+//
+// `substituteModelId` and `referenceAssetIds` are the two things the user can supply BY HAND in
+// the missing-inputs panel (sc-15952), and they are parameters rather than defaults for the reason
+// this whole module exists: a model chosen from a picker is the user's decision and a model
+// reached for automatically is a substitution. There is no fallback value for either — absent
+// means absent, and the panel blocks the launch instead.
+export function recipeFromWorkflowShare(
+  share,
+  report = null,
+  { substituteModelId = null, referenceAssetIds = [] } = {},
+) {
   if (!share) {
     return null;
   }
@@ -316,6 +365,17 @@ export function recipeFromWorkflowShare(share, report = null) {
   if (share.fitMode) {
     rawSettings.fitMode = share.fitMode;
   }
+  // The reference images the USER picked for an `inputs[].kind === "reference"` requirement. The
+  // envelope carries the SHAPE of the requirement and never an id (`docs/workflow-share-envelope.md`
+  // — "Input images travel by shape, not by id"), so nothing here is restored; this is the user's
+  // own selection travelling from the panel's pickers to the studio's controls.
+  const references = (Array.isArray(referenceAssetIds) ? referenceAssetIds : []).filter(Boolean);
+  if (references.length) {
+    rawSettings.referenceAssetIds = references;
+    // The single-reference control the studio has always read, so one picked image lands whether
+    // or not the selected model offers the plural multi-reference picker.
+    rawSettings.referenceAssetId = references[0];
+  }
 
   const normalizedSettings = {};
   const width = Number(share.width);
@@ -340,7 +400,11 @@ export function recipeFromWorkflowShare(share, report = null) {
     normalizedSettings,
     rawAdapterSettings: rawSettings,
   };
-  const modelId = workflowModelId(report);
+  // The model the RECIPE named, when this install resolved it — otherwise the one the user picked
+  // in the panel, and otherwise nothing at all. The resolved id wins because it is what the file
+  // asked for; the substitute is only ever reached for when there was no resolution, which is the
+  // difference between a choice and a fallback.
+  const modelId = workflowModelId(report) ?? (substituteModelId || null);
   if (modelId) {
     recipe.model = modelId;
   }
@@ -449,9 +513,10 @@ export function workflowModeLabel(share) {
 // has no entry for is rendered under its own name and marked NOT restored, because an unrecognized
 // knob is one this studio certainly has no control for.
 //
-// Only the `prompt`-fated keys are omitted: `stylePrompt` and `structuredPrompt` ARE applied, and
-// the panel already shows their content in the prompt block above the grid, so a second row would
-// be a duplicate rather than a disclosure.
+// Only the `prompt`-fated keys are omitted — today that is `stylePrompt` alone. It IS applied, and
+// the panel already shows its content in the prompt block above the grid, so a second row would be
+// a duplicate rather than a disclosure. (`structuredPrompt` used to sit here on the same reasoning
+// and did not deserve to; see its `ADVANCED_PREFILL` row.)
 //
 // `report` is what makes `styleId` honest. It is a `control` key, but the recipe carries it ONLY
 // when the style resolved here (see `recipeFromWorkflowShare`) — so with the style absent from this
@@ -523,6 +588,122 @@ export function workflowNotRestored(share, report = null) {
     }
   }
   return rows;
+}
+
+// ---- What the user can actually DO about an unresolved requirement (sc-15952) ----------------
+
+// The requirements this install could fetch, as install-action rows.
+//
+// Exactly the `installable` state and nothing else, because that is the only state the report
+// publishes an action for (`install_for` in `workflow_resolution.rs` clears it for every other
+// one). A `missing` row has no button — offering one that cannot work is the lie the report's own
+// docs call out — and a `resolved` row needs none.
+export function workflowInstallable(report) {
+  const rows = [];
+  if (report?.model?.state === "installable" && report.model.catalogId) {
+    rows.push({
+      kind: "model",
+      id: report.model.catalogId,
+      name: report.model.name ?? report.model.slug,
+      detail: report.model.detail,
+    });
+  }
+  for (const lora of report?.loras ?? []) {
+    if (lora.state === "installable" && lora.catalogId) {
+      rows.push({
+        kind: "lora",
+        id: lora.catalogId,
+        name: lora.name ?? lora.repo ?? lora.catalogId,
+        detail: lora.detail,
+      });
+    }
+  }
+  return rows;
+}
+
+// Whether this install has nothing at all that matches the model the file names.
+//
+// The one requirement that gets a SUBSTITUTE picker rather than an install button. Not because a
+// substitute is a good outcome — it makes a different image — but because the alternative on offer
+// is worse: the studio would otherwise keep whatever model it happened to be on and render the
+// prompt with it, which is a silent substitution wearing a successful replay's clothes. Picking one
+// is at least the user's decision, made in front of the sentence naming what the file asked for.
+export function workflowModelUnknown(report) {
+  return Boolean(report?.model) && report.model.state === "missing";
+}
+
+// The input-image requirements, expanded into ONE SLOT PER IMAGE.
+//
+// `InputRequirement` is `{ kind, count }` — one row per kind, `reference` carrying a count rather
+// than repeating (`docs/workflow-share-envelope.md`). A panel that renders one picker for a
+// "2 reference images" requirement quietly asks for half of what the recipe needs, so the count is
+// expanded here and both the pickers and the CTA gate read the same list.
+//
+// `pickable` is whether a chosen image would reach a control. `source` and `reference` are the two
+// the launch seam carries (`launchImageRecipe`'s `sourceAssetId`, and `referenceAssetIds` through
+// the recipe); a `mask` is supplied with the Image Editor's inpaint brush and a `control` map in
+// the studio's own Control panel, neither of which this launch can seed — so those state the
+// requirement and offer no picker, rather than offering one whose value goes nowhere.
+const PICKABLE_INPUT_KINDS = new Set(["source", "reference"]);
+
+const INPUT_KIND_LABELS = {
+  source: "Source image",
+  reference: "Reference image",
+  mask: "Mask",
+  control: "Control image",
+};
+
+// Where an unpickable input is actually supplied, so the row is a direction and not a dead end.
+const INPUT_KIND_ELSEWHERE = {
+  mask: "Masks are painted on the image in the Image Editor, not chosen here.",
+  control:
+    "A pre-made control map is attached in Image Studio's own Control panel once the recipe is " +
+    "loaded.",
+};
+
+export function workflowInputSlots(report) {
+  const slots = [];
+  (report?.inputs ?? []).forEach((input, index) => {
+    // The report floors an absent/zero count at 1 for its own total
+    // (`ResolutionReport::input_images_required`); the same floor is used here so the panel never
+    // renders zero pickers for a requirement the report is simultaneously counting.
+    const count = Math.max(1, Number(input.count) || 0);
+    const pickable = PICKABLE_INPUT_KINDS.has(input.kind);
+    for (let slot = 0; slot < count; slot += 1) {
+      slots.push({
+        key: `${input.kind}-${index}-${slot}`,
+        kind: input.kind,
+        controlMode: input.controlMode ?? null,
+        slot,
+        count,
+        pickable,
+        label:
+          count === 1
+            ? (INPUT_KIND_LABELS[input.kind] ?? input.kind)
+            : `${INPUT_KIND_LABELS[input.kind] ?? input.kind} ${slot + 1} of ${count}`,
+        // The report already wrote the sentence ("Needs 2 reference images."); it is shown once
+        // per requirement, on the first slot, rather than repeated under every picker.
+        detail: slot === 0 ? input.detail : "",
+        elsewhere: pickable ? "" : (INPUT_KIND_ELSEWHERE[input.kind] ?? ""),
+      });
+    }
+  });
+  return slots;
+}
+
+// **Whether the missing-inputs view has anything to render at all.**
+//
+// The AC this answers is a negative one: a fully-resolvable workflow must show NO missing-inputs
+// UI — no empty container, no zero-state line, no stray heading. So the view's own render gate is
+// this predicate rather than a truthy `report`, and the three things it counts are the three the
+// view can act on. A dropped collection (`omitted`) deliberately does NOT count: it makes the
+// report unrunnable and there is nothing anyone can do about it, so it stays a report row.
+export function workflowHasMissingInputs(report) {
+  return (
+    workflowInstallable(report).length > 0 ||
+    workflowModelUnknown(report) ||
+    workflowInputSlots(report).length > 0
+  );
 }
 
 // "1024 × 1024", or null when the envelope carried no geometry.
