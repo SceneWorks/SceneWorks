@@ -79,6 +79,13 @@ COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # so the API can seed an empty config dir, which means they must exist in the
 # build context (not just the runtime bind mount) or the compile can't read them.
 COPY config ./config
+# Same rule, second instance (sc-16080): `sceneworks-core/src/memory_calibration.rs`
+# `include_str!`s the generated calibration-evidence bundle, so it must be in the
+# build context too. Without it `cargo build` fails at compile time with
+# "couldn't read .../docs/generated/memory-calibration-evidence.json", which is
+# what turned the parity lane red on main. Copied as a single FILE rather than the
+# whole `docs/` tree so documentation edits don't bust this layer's cache.
+COPY docs/generated/memory-calibration-evidence.json ./docs/generated/memory-calibration-evidence.json
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
