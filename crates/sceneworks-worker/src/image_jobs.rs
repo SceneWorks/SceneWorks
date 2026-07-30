@@ -24,6 +24,9 @@ use super::*;
 ))]
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
+use sceneworks_core::workflow_png::write_workflow_chunk;
+use sceneworks_core::workflow_share::{build_workflow_share_from, WorkflowAssetFacts};
+use std::sync::Arc;
 
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
@@ -243,11 +246,18 @@ pub(crate) async fn run_image_generate_job(
     // the gallery.
     #[cfg(target_os = "macos")]
     let route = resolve_image_route(&request, settings);
+    // Whether — and from what — every image this job writes embeds its sanitized workflow
+    // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
+    // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
+    // next job rather than the next launch.
+    let workflow_source = workflow_source(settings, &job.payload);
+
     #[cfg(target_os = "macos")]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
         route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        workflow_source,
     );
     // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
     // total into the plan, exactly as the macOS arm does with `resolve_image_route`. An InstantID
@@ -263,12 +273,13 @@ pub(crate) async fn run_image_generate_job(
         &request,
         route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
         route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        workflow_source,
     );
     #[cfg(all(
         not(target_os = "macos"),
         not(all(not(target_os = "macos"), feature = "backend-candle"))
     ))]
-    let plan = ImagePlan::with_count(&request, request.count * upscale_mult);
+    let plan = ImagePlan::with_count(&request, request.count * upscale_mult, workflow_source);
 
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
     // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
@@ -1212,20 +1223,153 @@ pub(crate) struct ImagePlan {
     /// `count`/`expectedCount` reflect this so the gallery streams against the real
     /// total, not the requested `count`.
     image_count: u32,
+    /// The job's raw `payload_json`, or `None` when nothing should be embedded (epic 15945,
+    /// sc-15948). One field for both halves of the decision, resolved ONCE per job by
+    /// [`workflow_source`], so the two write seams that read it cannot disagree about whether the
+    /// user opted out — and a `None` here means both take the byte-identical `save_with_format`
+    /// path.
+    ///
+    /// The RAW payload rather than a re-serialization of [`ImageRequest`]: the envelope's
+    /// allow-list is defined against the payload's own keys (`sceneworks_core::workflow_share`),
+    /// and the epic's decision is to source from `jobs.payload_json` because the recipe is lossy.
+    /// `Arc` because every per-image asset writer clones the plan into a `spawn_blocking` encode
+    /// task and a payload carries the resolved model manifest.
+    pub(crate) workflow_source: Option<Arc<JsonObject>>,
+}
+
+/// The workflow-envelope source for one job, or `None` for "write the file exactly as today"
+/// (sc-15948).
+///
+/// Two independent reasons to embed nothing, deliberately collapsed into one `Option` at the top
+/// of the job rather than re-decided at each write:
+///
+/// * the user turned `embedWorkflowInImages` off (read live off the config dir — see
+///   `sceneworks_core::app_paths::embed_workflow_in_images`);
+/// * there is no payload to describe. A stub or dry-run write with an empty payload has nothing to
+///   say about how the image was made, and an envelope of bare fallbacks is worse than no chunk —
+///   so absence is an absence, never an error.
+pub(crate) fn workflow_source(
+    settings: &Settings,
+    job_payload: &JsonObject,
+) -> Option<Arc<JsonObject>> {
+    if job_payload.is_empty() {
+        return None;
+    }
+    if !sceneworks_core::app_paths::embed_workflow_in_images(&settings.config_dir) {
+        return None;
+    }
+    Some(Arc::new(job_payload.clone()))
+}
+
+/// The workflow envelope for an inline-upscaled variant (sc-15948): the generation's own payload
+/// with the APPLIED pass overlaid.
+///
+/// The inline upscale is a sub-step of the generate job, not a job of its own, so there is no second
+/// payload to build from — but the base generation's envelope alone would describe an image that was
+/// never written. The overlay is what makes the difference honest, and it is the *applied* record
+/// rather than the requested one: `write_upscaled_asset`'s caller normalizes the engine id (anything
+/// unknown, including the dropped `aura-sr`, becomes `real-esrgan`) and clamps the factor to 2 or 4,
+/// and it is that pass the file came out of. It is the same `Value` the fact's
+/// `rawAdapterSettings.upscale` records, so a shared image and its sidecar cannot disagree.
+///
+/// Geometry deliberately stays the GENERATION geometry rather than the upscaled file's. The envelope
+/// is a recipe: "render 1024² then upscale 2x" replays to this image, where "render 2048² then
+/// upscale 2x" would replay to something twice the size.
+///
+/// Compiled under `test` on every platform (unlike `write_upscaled_asset`, which needs an upscaler
+/// backend) so the lineage contract is tested on every build, not only where candle or MLX compiles.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn upscaled_workflow_share(
+    request: &ImageRequest,
+    base_fact: &JsonObject,
+    job_payload: &JsonObject,
+    upscale_record: &Value,
+) -> sceneworks_core::workflow_share::WorkflowShare {
+    let base_u32 = |key: &str| {
+        base_fact
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    let mut overlay = job_payload.clone();
+    overlay.insert("upscale".to_owned(), upscale_record.clone());
+    // `upscale` is the ONLY key overlaid. Everything else — the payload's own `width`/`height`
+    // included — is left exactly as the base image's own envelope reads it, so two envelopes
+    // describing one generation cannot disagree about the render that produced it. The base fact
+    // supplies the geometry fallback for a payload that omitted it, which is the actual written
+    // size of the image this variant was upscaled FROM.
+    build_workflow_share_from(
+        &WorkflowAssetFacts {
+            mode: request.mode.clone(),
+            model: request.model.clone(),
+            prompt: request.prompt.clone(),
+            negative_prompt: request.negative_prompt.clone(),
+            seed: base_fact.get("seed").and_then(Value::as_i64).unwrap_or(0),
+            width: base_u32("width"),
+            height: base_u32("height"),
+        },
+        &overlay,
+    )
+}
+
+/// The workflow envelope for the standalone detail pass (sc-15948).
+///
+/// Unlike the inline upscale, `image_detail` IS its own job with its own payload, so nothing here is
+/// inherited from the generation that produced the source image — there is no base-generation
+/// envelope in play at all. What the payload cannot supply, the resolved pass does: the mode, the
+/// SDXL backbone that actually ran, the detail prompt/negative (which live under `advanced` and are
+/// what the model saw, not the payload's absent top-level prompt), the seed and the output geometry.
+/// `advanced.strength` and `advanced.cnScale` — the two knobs the Detail UI exposes — travel through
+/// the sc-15946 allow-list, and the source image rides as an input SHAPE rather than as the local
+/// asset id `sourceAssetId` names.
+///
+/// Compiled under `test` everywhere for the same reason as [`upscaled_workflow_share`]:
+/// `image_jobs/detail.rs` compiles on macOS only, and the lineage contract should not go untested on
+/// every other platform.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn detail_workflow_share(
+    job_payload: &JsonObject,
+    model: &str,
+    prompt: &str,
+    negative_prompt: &str,
+    seed: i64,
+    width: u32,
+    height: u32,
+) -> sceneworks_core::workflow_share::WorkflowShare {
+    build_workflow_share_from(
+        &WorkflowAssetFacts {
+            mode: "image_detail".to_owned(),
+            model: model.to_owned(),
+            prompt: prompt.to_owned(),
+            negative_prompt: negative_prompt.to_owned(),
+            seed,
+            width: Some(width),
+            height: Some(height),
+        },
+        job_payload,
+    )
 }
 
 impl ImagePlan {
-    /// Test-only convenience: a plan whose image count is the request count. Production
-    /// always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
+    /// Test-only convenience: a plan whose image count is the request count, embedding nothing.
+    /// Production always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
     /// effective count that differs from `request.count`).
     #[cfg(test)]
     fn new(request: &ImageRequest) -> Self {
-        Self::with_count_and_adapter(request, request.count, adapter_id(request))
+        Self::with_count_and_adapter(request, request.count, adapter_id(request), None)
     }
 
     /// Build a plan whose generation set reports `image_count` images (see the field).
-    pub(crate) fn with_count(request: &ImageRequest, image_count: u32) -> Self {
-        Self::with_count_and_adapter(request, image_count, adapter_id(request))
+    pub(crate) fn with_count(
+        request: &ImageRequest,
+        image_count: u32,
+        workflow_source: Option<Arc<JsonObject>>,
+    ) -> Self {
+        Self::with_count_and_adapter(request, image_count, adapter_id(request), workflow_source)
     }
 
     /// Build a plan with the count and adapter label selected by the already-resolved route.
@@ -1233,6 +1377,7 @@ impl ImagePlan {
         request: &ImageRequest,
         image_count: u32,
         adapter: &'static str,
+        workflow_source: Option<Arc<JsonObject>>,
     ) -> Self {
         let genset_id = format!("genset_{}", Uuid::new_v4().simple());
         let created_at = now_rfc3339();
@@ -1256,6 +1401,7 @@ impl ImagePlan {
             generation_set,
             adapter,
             image_count,
+            workflow_source,
         }
     }
 }
@@ -1298,8 +1444,25 @@ pub(crate) fn write_image_asset(
         std::fs::create_dir_all(parent)?;
     }
     let temp_path = media_path.with_extension("tmp.png");
-    rgb_image
-        .save_with_format(&temp_path, image::ImageFormat::Png)
+    // The one funnel every generated image goes through, and therefore the one place the sanitized
+    // workflow needs embedding (epic 15945, sc-15948). `None` — embedding off, or no payload to
+    // describe — routes through the same `save_with_format` call this used to make, byte for byte.
+    let share = plan.workflow_source.as_deref().map(|payload| {
+        build_workflow_share_from(
+            &WorkflowAssetFacts {
+                mode: request.mode.clone(),
+                model: request.model.clone(),
+                prompt: request.prompt.clone(),
+                negative_prompt: request.negative_prompt.clone(),
+                // THIS image's seed, not the batch base the payload carries.
+                seed,
+                width: Some(width),
+                height: Some(height),
+            },
+            payload,
+        )
+    });
+    write_workflow_chunk(&rgb_image, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
@@ -1529,9 +1692,23 @@ fn write_upscaled_asset(
     if let Some(parent) = media_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The APPLIED pass, not the requested one. Hoisted above the write because two things now read
+    // it: the embedded workflow (sc-15948) and the `rawAdapterSettings.upscale` record below, and a
+    // shared image must not describe a different pass from the one the sidecar records.
+    let upscale_record = if engine_id == "seedvr2" {
+        json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
+    } else {
+        json!({ "enabled": true, "engine": engine_id, "factor": factor })
+    };
+
     let temp_path = media_path.with_extension("tmp.png");
-    upscaled
-        .save_with_format(&temp_path, image::ImageFormat::Png)
+    // The upscaled variant is the asset users share most, so it carries the workflow that produced
+    // IT rather than a stale base-generation envelope (sc-15948) — see `upscaled_workflow_share`.
+    let share = plan
+        .workflow_source
+        .as_deref()
+        .map(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+    write_workflow_chunk(upscaled, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp_path);
@@ -1550,11 +1727,6 @@ fn write_upscaled_asset(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let upscale_record = if engine_id == "seedvr2" {
-        json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
-    } else {
-        json!({ "enabled": true, "engine": engine_id, "factor": factor })
-    };
     raw_settings.insert("upscale".to_owned(), upscale_record);
 
     let mut fact = base_fact.clone();

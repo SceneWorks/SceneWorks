@@ -58,6 +58,63 @@ pub fn gpu_telemetry_file(config_dir: &Path) -> PathBuf {
     config_dir.join("gpu_telemetry.json")
 }
 
+/// Filename (under [`AppPaths::config_dir`]) of the durable UI preference store. Written by the
+/// API's `PUT /api/v1/ui-preferences` (`apps/rust-api/src/preferences.rs`), which owns its shape;
+/// this only names the file so a *reader* outside that module can find it.
+///
+/// Named here for the same reason [`gpu_memory_limit_file`] is: the desktop injects one
+/// `SCENEWORKS_CONFIG_DIR` into every process it spawns, so a preference the API persists is
+/// already sitting in a directory the worker holds. See [`embed_workflow_in_images`].
+pub fn ui_preferences_file(config_dir: &Path) -> PathBuf {
+    config_dir.join("ui-preferences.json")
+}
+
+/// The slice of [`ui_preferences_file`] the WORKER reads.
+///
+/// Deliberately NOT the API's whole `UiPreferences` type: that struct is the route's own contract
+/// and grows with the UI, and a worker that deserialized all of it would fail to read a preference
+/// file written by a newer build. Every field is an `Option` and unknown keys are ignored, so this
+/// stays readable across versions in both directions.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerVisiblePreferences {
+    embed_workflow_in_images: Option<bool>,
+}
+
+/// Whether a generated PNG should carry the sanitized workflow envelope (epic 15945, sc-15948).
+///
+/// **Defaults to `true`**, and every failure mode resolves to the default: no config dir, no file,
+/// a truncated file, a file that is not JSON, or the key absent. A feature whose whole point is
+/// that a shared image reloads its recipe is worthless off by default, and a user who does not want
+/// it should have to find the switch once rather than opt in forever (sc-15953 owns that switch and
+/// the first-run disclosure).
+///
+/// Read at the WRITE SEAM rather than cached at worker startup, so flipping the toggle takes effect
+/// on the next image instead of the next launch — the same live-handoff shape as
+/// [`gpu_memory_limit_file`]. The cost is one small file read per encoded image, against tens of
+/// milliseconds of PNG encode.
+#[must_use]
+pub fn embed_workflow_in_images(config_dir: &Path) -> bool {
+    std::fs::read_to_string(ui_preferences_file(config_dir))
+        .as_deref()
+        .map(embed_workflow_in_images_from_json)
+        .unwrap_or(true)
+}
+
+/// [`embed_workflow_in_images`] against an already-read preference file body.
+///
+/// Public so the WRITER of that file can assert against the reader directly — the API owns the
+/// route and the field name, this crate owns the parse, and the two are only correct together
+/// (`embed_workflow_in_images_round_trips_under_the_name_the_worker_reads` in
+/// `apps/rust-api/src/preferences.rs`).
+#[must_use]
+pub fn embed_workflow_in_images_from_json(body: &str) -> bool {
+    serde_json::from_str::<WorkerVisiblePreferences>(body)
+        .ok()
+        .and_then(|preferences| preferences.embed_workflow_in_images)
+        .unwrap_or(true)
+}
+
 /// A snapshot of the MLX runtime's process-global memory counters (epic 7819, sc-7825), written by
 /// the worker to [`gpu_telemetry_file`] and read back by the desktop shell for the Settings
 /// display. All values are bytes. `limit_bytes` is the currently-applied soft ceiling (`0` = no
@@ -142,5 +199,58 @@ mod tests {
         assert!(paths.data_dir.is_dir());
         assert!(paths.config_dir.is_dir());
         assert!(paths.cache_dir.is_dir());
+    }
+
+    /// Every way the preference file can fail to answer must resolve to ON (sc-15948). A user who
+    /// has never opened Settings, an install whose config dir does not exist yet, and a file
+    /// half-written by a crashed process all have to embed — the alternative is a feature that
+    /// silently does nothing on a fresh install.
+    #[test]
+    fn embedding_defaults_on_through_every_unreadable_case() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path();
+
+        assert!(
+            embed_workflow_in_images(&config.join("does-not-exist")),
+            "a missing config dir must default ON"
+        );
+        assert!(
+            embed_workflow_in_images(config),
+            "a missing preference file must default ON"
+        );
+
+        for body in [
+            "",
+            "{",
+            "not json at all",
+            "[]",
+            "{}",
+            r#"{"theme":"dark"}"#,
+            r#"{"embedWorkflowInImages":null}"#,
+            r#"{"embedWorkflowInImages":"yes"}"#,
+        ] {
+            std::fs::write(ui_preferences_file(config), body).expect("writes");
+            assert!(embed_workflow_in_images(config), "{body:?} must default ON");
+        }
+    }
+
+    #[test]
+    fn embedding_is_off_only_when_the_preference_says_so() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path();
+
+        std::fs::write(
+            ui_preferences_file(config),
+            r#"{"theme":"dark","embedWorkflowInImages":false}"#,
+        )
+        .expect("writes");
+        assert!(!embed_workflow_in_images(config));
+
+        std::fs::write(
+            ui_preferences_file(config),
+            r#"{"embedWorkflowInImages":true}"#,
+        )
+        .expect("writes");
+        assert!(embed_workflow_in_images(config));
     }
 }

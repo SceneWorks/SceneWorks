@@ -296,6 +296,14 @@ pub enum AdvancedKeySource {
     /// Emitted by `buildImageJobAdvanced` in `apps/web/src/imageJobAdvanced.js`. The coverage
     /// lint asserts these match the JS source exactly, in both directions.
     StudioBuilder,
+    /// Emitted by `buildDetailJobBody` in `apps/web/src/imageJobs.js` — the standalone
+    /// `image_detail` pass, whose `advanced` is built by its own two-knob builder rather than by
+    /// the studio's (sc-15948). Held to the same both-directions lint as [`Self::StudioBuilder`],
+    /// against that file.
+    ///
+    /// A key both builders emit belongs under `StudioBuilder`: the lint requires each tagged
+    /// source to still emit its keys, and the studio's is the larger, faster-moving surface.
+    DetailBuilder,
     /// Stamped onto `advanced` by the API after the request arrives (recipe-preset resolution
     /// in `apps/rust-api/src/generation.rs`). Classified here for the record; the lint does
     /// not expect to find them in the JS.
@@ -348,6 +356,20 @@ const fn deny(key: &'static str, reason: &'static str) -> AdvancedKeyRule {
         disposition: AdvancedDisposition::Deny,
         shape: AdvancedShape::Scalar,
         source: AdvancedKeySource::StudioBuilder,
+        reason,
+    }
+}
+
+const fn allow_detail(
+    key: &'static str,
+    shape: AdvancedShape,
+    reason: &'static str,
+) -> AdvancedKeyRule {
+    AdvancedKeyRule {
+        key,
+        disposition: AdvancedDisposition::Allow,
+        shape,
+        source: AdvancedKeySource::DetailBuilder,
         reason,
     }
 }
@@ -483,6 +505,13 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "stylePrompt",
         AdvancedShape::Scalar,
         "The raw pre-style prompt, so a reader sees what was actually typed.",
+    ),
+    allow_detail(
+        "cnScale",
+        AdvancedShape::Scalar,
+        "Authored tile-ControlNet strength for the Detail pass — one of the two knobs that \
+         builder exposes, and the sibling of the allow-listed `strength`. Without it a shared \
+         detail-refined image describes half of what produced it (sc-15948).",
     ),
     allow(
         "phases",
@@ -797,6 +826,45 @@ fn hf_repo_id(value: &str) -> Option<String> {
 // Build
 // ---------------------------------------------------------------------------
 
+/// What the envelope takes from the produced IMAGE rather than from the job payload.
+///
+/// Exists because sc-15948 embeds at the worker's write seam, where no [`Asset`] has been built
+/// yet — the worker writes the PNG and reports flat facts, and the API turns those into the
+/// sidecar afterwards. Rather than have the worker fabricate an `Asset` (whose `mode` and
+/// `adapter` are closed enums it would have to guess at), both callers name the same handful of
+/// per-image values and go through the same builder.
+///
+/// Every field here is a FALLBACK for the payload except `seed`, which always wins: the payload
+/// carries the batch's base `seed` and its whole `seeds` list, and only the writer of one file
+/// knows which of those rendered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowAssetFacts {
+    pub mode: String,
+    pub model: String,
+    pub prompt: String,
+    pub negative_prompt: String,
+    /// The seed of THIS image, never the batch base.
+    pub seed: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl WorkflowAssetFacts {
+    /// The facts an already-built sidecar carries.
+    #[must_use]
+    pub fn from_asset(asset: &Asset) -> Self {
+        Self {
+            mode: asset.recipe.mode.as_str().to_owned(),
+            model: asset.recipe.model.clone(),
+            prompt: asset.recipe.prompt.clone(),
+            negative_prompt: asset.recipe.negative_prompt.clone(),
+            seed: asset.recipe.seed,
+            width: asset.file.width,
+            height: asset.file.height,
+        }
+    }
+}
+
 /// Build the sanitized envelope for one generated asset.
 ///
 /// `job_payload` is the job row's `payload_json` — the exact `ImageJobRequest` the API stored,
@@ -809,6 +877,21 @@ fn hf_repo_id(value: &str) -> Option<String> {
 /// produced the file being shared.
 #[must_use]
 pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> WorkflowShare {
+    build_workflow_share_from(&WorkflowAssetFacts::from_asset(asset), job_payload)
+}
+
+/// [`build_workflow_share`] against [`WorkflowAssetFacts`] instead of a built sidecar — the entry
+/// point the worker's write seam uses (sc-15948).
+///
+/// The one implementation both forms share, so the sanitizer, the payload-over-facts precedence
+/// and the allow-list cannot differ between "embedded when the image was written" and "rebuilt
+/// from a sidecar". `build_workflow_share_is_the_facts_builder` in
+/// `crates/sceneworks-core/tests/workflow_share.rs` pins the delegation.
+#[must_use]
+pub fn build_workflow_share_from(
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> WorkflowShare {
     let string_field = |key: &str| {
         job_payload
             .get(key)
@@ -822,17 +905,16 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
             .and_then(|value| u32::try_from(value).ok())
     };
 
-    let mode = string_field("mode").unwrap_or_else(|| asset.recipe.mode.as_str().to_owned());
-    let model = string_field("model").unwrap_or_else(|| asset.recipe.model.clone());
-    let prompt = string_field("prompt").unwrap_or_else(|| asset.recipe.prompt.clone());
+    let mode = string_field("mode").unwrap_or_else(|| facts.mode.clone());
+    let model = string_field("model").unwrap_or_else(|| facts.model.clone());
+    let prompt = string_field("prompt").unwrap_or_else(|| facts.prompt.clone());
     let negative_prompt =
-        string_field("negativePrompt").unwrap_or_else(|| asset.recipe.negative_prompt.clone());
+        string_field("negativePrompt").unwrap_or_else(|| facts.negative_prompt.clone());
 
-    // The sidecar's seed — not the payload's. `payload.seed` is the batch BASE and
-    // `payload.seeds` is the whole batch; only the sidecar knows which one rendered the file
-    // being shared. The batch list never travels: the other images are not this share's
-    // business. (`Recipe::seed` is a required field, so there is nothing to fall back to.)
-    let seed = Some(asset.recipe.seed);
+    // The produced image's seed — not the payload's. `payload.seed` is the batch BASE and
+    // `payload.seeds` is the whole batch; only whoever wrote one file knows which one rendered
+    // it. The batch list never travels: the other images are not this share's business.
+    let seed = Some(facts.seed);
 
     // Raw on purpose: `reduce_workflow_share` runs `sanitize_advanced`, and sanitizing here as
     // well would be the same pass twice — harmless only for as long as every rule stays
@@ -855,8 +937,8 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
         prompt,
         negative_prompt,
         seed,
-        width: u32_field("width").or(asset.file.width),
-        height: u32_field("height").or(asset.file.height),
+        width: u32_field("width").or(facts.width),
+        height: u32_field("height").or(facts.height),
         count: u32_field("count"),
         style_preset: string_field("stylePreset"),
         style_id: string_field("styleId"),

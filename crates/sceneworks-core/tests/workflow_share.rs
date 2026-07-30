@@ -13,8 +13,9 @@ use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
-    build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedKeySource, WorkflowShare,
-    ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_SCHEMA_VERSION,
+    build_workflow_share, build_workflow_share_from, is_path_shaped, parse_workflow_share,
+    AdvancedKeySource, WorkflowAssetFacts, WorkflowShare, ADVANCED_KEY_RULES, PRODUCER_URL,
+    PRODUCER_VERSION, WORKFLOW_SHARE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 
@@ -194,6 +195,60 @@ fn the_builder_reproduces_the_golden_envelope() {
         golden,
         "builder output drifted from the golden fixture.\nActual:\n{}",
         serde_json::to_string_pretty(&encoded).expect("pretty")
+    );
+}
+
+/// The two build entry points are one builder (sc-15948).
+///
+/// sc-15948 embeds at the worker's write seam, where no `Asset` exists yet, so it calls
+/// [`build_workflow_share_from`] with the per-image facts directly. If that were a second
+/// implementation, the allow-list, the path guard and the payload-over-facts precedence could all
+/// drift between "embedded when the file was written" and "rebuilt from a sidecar" — and the
+/// embedded copy is the one that leaves the machine.
+#[test]
+fn build_workflow_share_is_the_facts_builder() {
+    let asset = golden_asset();
+    let payload = golden_payload();
+    let via_asset = build_workflow_share(&asset, &payload);
+    let via_facts = build_workflow_share_from(&WorkflowAssetFacts::from_asset(&asset), &payload);
+    assert_eq!(
+        serde_json::to_value(&via_facts).expect("serializes"),
+        serde_json::to_value(&via_asset).expect("serializes"),
+    );
+
+    // And the facts really are the fallbacks: with an EMPTY payload nothing but them is left, so
+    // each one has to show up in the envelope on its own.
+    let facts = WorkflowAssetFacts {
+        mode: "image_detail".to_owned(),
+        model: "realvisxl".to_owned(),
+        prompt: "ultra detailed, sharp focus".to_owned(),
+        negative_prompt: "blurry, soft".to_owned(),
+        seed: 7,
+        width: Some(1536),
+        height: Some(1024),
+    };
+    let bare = build_workflow_share_from(&facts, &JsonObject::new());
+    assert_eq!(bare.mode, "image_detail");
+    assert_eq!(bare.model, "realvisxl");
+    assert_eq!(bare.prompt, "ultra detailed, sharp focus");
+    assert_eq!(bare.negative_prompt, "blurry, soft");
+    assert_eq!(bare.seed, Some(7));
+    assert_eq!((bare.width, bare.height), (Some(1536), Some(1024)));
+    assert!(bare.advanced.is_empty());
+    assert!(bare.inputs.is_empty());
+
+    // The payload wins over the facts wherever it speaks — except the seed, which is per-image and
+    // is the one thing the payload cannot know.
+    let payload = json!({ "mode": "text_to_image", "seed": 999, "seeds": [999, 1000] })
+        .as_object()
+        .cloned()
+        .expect("object");
+    let overridden = build_workflow_share_from(&facts, &payload);
+    assert_eq!(overridden.mode, "text_to_image");
+    assert_eq!(
+        overridden.seed,
+        Some(7),
+        "the payload's batch base seed must never displace the produced image's own"
     );
 }
 
@@ -399,6 +454,114 @@ fn every_advanced_key_the_studio_can_emit_is_classified() {
             rule.key
         );
     }
+}
+
+const DETAIL_BUILDER_PATH: &str = "apps/web/src/imageJobs.js";
+
+/// The `advanced` keys the standalone Detail pass can emit (sc-15948).
+///
+/// A second, much smaller surface than `buildImageJobAdvanced`: `buildDetailJobBody` returns a
+/// flat shorthand literal (`advanced: { strength, cnScale }`) with no spreads and no nesting, so
+/// this reads that literal directly instead of reusing `emitted_advanced_keys` — which is built
+/// around the studio builder's conditional-spread shape and keyed to that function's name.
+///
+/// Fails loudly rather than returning an empty set if the shape it understands is gone, for the
+/// same reason the studio extractor does: a lint that silently stops looking protects nothing.
+fn emitted_detail_advanced_keys(source: &str) -> BTreeSet<String> {
+    let stripped = strip_comments(source);
+    let function_at = stripped
+        .find("function buildDetailJobBody")
+        .unwrap_or_else(|| {
+            panic!(
+                "`buildDetailJobBody` is gone from {DETAIL_BUILDER_PATH} — this coverage lint \
+                 must be pointed at wherever the `image_detail` payload is built now"
+            )
+        });
+    let advanced_at = stripped[function_at..]
+        .find("advanced:")
+        .map(|offset| function_at + offset + "advanced:".len())
+        .unwrap_or_else(|| {
+            panic!(
+                "`buildDetailJobBody` in {DETAIL_BUILDER_PATH} no longer carries an `advanced:` \
+                 literal, so this lint cannot see which detail knobs travel"
+            )
+        });
+    let open = advanced_at
+        + stripped[advanced_at..]
+            .find('{')
+            .expect("`advanced:` is followed by an object literal");
+    let close = open
+        + stripped[open..]
+            .find('}')
+            .expect("the `advanced` literal is closed");
+    assert!(
+        !stripped[open + 1..close].contains('{'),
+        "`buildDetailJobBody`'s `advanced` literal is no longer flat — teach \
+         `emitted_detail_advanced_keys` the new shape"
+    );
+    stripped[open + 1..close]
+        .split(',')
+        // `key` and `key: value` alike — take the identifier before any colon.
+        .filter_map(|entry| entry.split(':').next())
+        .map(str::trim)
+        .filter(|key| {
+            !key.is_empty()
+                && key
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The Detail pass's own knobs are classified too (sc-15948).
+///
+/// `buildImageJobAdvanced` is not the only builder that fills `advanced`: the standalone
+/// `image_detail` job has its own, and its keys land in the same untyped map and go through the
+/// same allow-list. Before this lint existed, `cnScale` — half of what that UI exposes — was
+/// unclassified and therefore silently dropped from every shared detail-refined image.
+#[test]
+fn every_advanced_key_the_detail_pass_can_emit_is_classified() {
+    let source = read_repo_file(DETAIL_BUILDER_PATH);
+    let emitted = emitted_detail_advanced_keys(&source);
+
+    for anchor in ["strength", "cnScale"] {
+        assert!(
+            emitted.contains(anchor),
+            "the extractor missed the known detail knob `{anchor}` in {DETAIL_BUILDER_PATH}, so \
+             this lint is not protecting anything"
+        );
+    }
+
+    let classified: BTreeSet<String> = ADVANCED_KEY_RULES
+        .iter()
+        .map(|rule| rule.key.to_owned())
+        .collect();
+    let unclassified: Vec<&String> = emitted.difference(&classified).collect();
+    assert!(
+        unclassified.is_empty(),
+        "buildDetailJobBody can emit {unclassified:?}, which `ADVANCED_KEY_RULES` in \
+         crates/sceneworks-core/src/workflow_share.rs does not classify. An unclassified key is \
+         dropped silently, so a shared detail-refined image would describe less of the pass than \
+         the user actually chose."
+    );
+
+    let from_detail: BTreeSet<String> = ADVANCED_KEY_RULES
+        .iter()
+        .filter(|rule| rule.source == AdvancedKeySource::DetailBuilder)
+        .map(|rule| rule.key.to_owned())
+        .collect();
+    assert!(
+        !from_detail.is_empty(),
+        "no rule is tagged `AdvancedKeySource::DetailBuilder`, so nothing holds \
+         {DETAIL_BUILDER_PATH} accountable"
+    );
+    let stale: Vec<&String> = from_detail.difference(&emitted).collect();
+    assert!(
+        stale.is_empty(),
+        "`ADVANCED_KEY_RULES` classifies {stale:?} as coming from buildDetailJobBody, but \
+         {DETAIL_BUILDER_PATH} no longer emits them."
+    );
 }
 
 #[test]
