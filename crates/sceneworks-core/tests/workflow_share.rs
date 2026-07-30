@@ -1700,6 +1700,122 @@ fn denied_top_level_request_fields_never_travel() {
 }
 
 // ---------------------------------------------------------------------------
+// Collection bounds (sc-15949 review)
+// ---------------------------------------------------------------------------
+
+/// `workflow_share::MAX_SHARE_PHASES` against the two validators it claims to be.
+///
+/// `sceneworks-worker` depends on `sceneworks-core`, so the constant cannot be imported and the
+/// derivation would otherwise be a comment nobody checks. Read from source instead, the same
+/// technique the `ADVANCED_BUILDERS` lint uses on `apps/web/src`: if either validator's cap moves,
+/// this fails and the envelope's cap becomes a decision rather than a stale copy.
+#[test]
+fn the_phase_cap_matches_the_multi_phase_validators() {
+    let worker = read_repo_file("crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs");
+    assert!(
+        worker.contains("const MAX_MULTIPHASE_PHASES: usize = 8;"),
+        "the worker's multi-phase cap moved; `workflow_share::MAX_SHARE_PHASES` (8) has to move \
+         with it or the envelope will drop a phase set the worker would have run"
+    );
+    let web = read_repo_file("apps/web/src/imageMultiPhase.js");
+    assert!(
+        web.contains("export const MULTIPHASE_MAX_PHASES = 8;"),
+        "the web's multi-phase cap moved; see `workflow_share::MAX_SHARE_PHASES`"
+    );
+}
+
+/// The bounds against REAL requests, not fixtures written to pass them.
+///
+/// A cap is only correct if nothing legitimate touches it, and the failure mode of getting that
+/// wrong is silent: the envelope simply arrives without its LoRAs. So the three widest shapes the
+/// studio actually submits are run through the builder and every collection is asserted to have
+/// survived whole.
+#[test]
+fn no_real_request_is_truncated_by_the_collection_bounds() {
+    // 1. The golden fixture — an edit with a source, two references, a mask, a control map and a
+    //    LoRA, i.e. all four input kinds at once.
+    let golden = build_workflow_share(&golden_asset(), &golden_payload());
+    assert_eq!(golden.loras.len(), 1, "{:?}", golden.loras);
+    assert_eq!(golden.inputs.len(), 4, "{:?}", golden.inputs);
+    // And the fixture ON DISK, which is what a reader will actually be handed.
+    let parsed = parse_workflow_share(&load_golden_fixture()).expect("the golden fixture parses");
+    assert_eq!(parsed.loras.len(), 1);
+    assert_eq!(parsed.inputs.len(), 4);
+
+    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, each naming phase
+    //    LoRAs by index into a full 5-LoRA stack.
+    let mut krea = golden_payload();
+    krea.insert("model".to_owned(), json!("krea_2_turbo"));
+    krea.insert(
+        "loras".to_owned(),
+        json!((0..5)
+            .map(|index| json!({
+                "id": format!("lora_{index}"),
+                "name": format!("Foggy Coast {index}"),
+                "weight": 0.6,
+                "source": { "provider": "huggingface", "repo": format!("acme/foggy-{index}") }
+            }))
+            .collect::<Vec<Value>>()),
+    );
+    krea.insert(
+        "advanced".to_owned(),
+        json!({
+            "steps": 28,
+            "phases": (0..8)
+                .map(|index| json!({
+                    "steps": index + 2,
+                    "guidance": 3.5,
+                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                }))
+                .collect::<Vec<Value>>(),
+        }),
+    );
+    let krea_share = build_workflow_share(&golden_asset(), &krea);
+    assert_eq!(krea_share.loras.len(), 5, "{:?}", krea_share.loras);
+    let phases = krea_share.advanced["phases"].as_array().expect("phases");
+    assert_eq!(phases.len(), 8);
+    for phase in phases {
+        assert_eq!(
+            phase["loras"].as_array().expect("phase loras").len(),
+            5,
+            "a phase's LoRA indices point into the job's own 5-LoRA stack and must all survive"
+        );
+    }
+
+    // 3. A multi-reference FLUX.2 request: many reference images, which the builder records as ONE
+    //    input entry with a count — the reason `MAX_SHARE_INPUTS` can be the number of kinds.
+    let mut flux = golden_payload();
+    flux.insert("model".to_owned(), json!("flux2_dev"));
+    flux.insert("mode".to_owned(), json!("edit_image"));
+    flux.remove("maskAssetId");
+    flux.insert(
+        "referenceAssetIds".to_owned(),
+        json!((0..10)
+            .map(|index| json!(format!("asset_ref_{index}")))
+            .collect::<Vec<Value>>()),
+    );
+    let flux_share = build_workflow_share(&golden_asset(), &flux);
+    let references = flux_share
+        .inputs
+        .iter()
+        .find(|input| input.kind == "reference")
+        .expect("the reference inputs travel");
+    assert_eq!(references.count, 10, "the COUNT carries the breadth");
+    assert!(flux_share.inputs.len() <= 4, "{:?}", flux_share.inputs);
+
+    // Every one of the three round-trips through the reader unchanged, so the bounds cannot be
+    // asymmetric between the direction that wrote the file and the direction that reads it.
+    for share in [golden, krea_share, flux_share] {
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        assert_eq!(
+            parse_workflow_share(&envelope).expect("parses"),
+            share,
+            "a real envelope must survive its own reader"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

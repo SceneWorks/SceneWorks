@@ -1124,16 +1124,69 @@ const PROSE_MAX_CHARS: usize = 20_000;
 ///
 /// On the BUILD side these strings are the user's own and this is a no-op. On the PARSE side
 /// they are attacker-chosen, which is the epic's trust boundary: the reader (sc-15952) renders
-/// them, so a value carrying ANSI escapes or several megabytes of text must not arrive intact.
-/// Newlines and tabs survive — a multi-line prompt is normal and mangling it would be the very
-/// harm the prose exemption exists to prevent — but every other control character is dropped.
+/// them, so a value carrying ANSI escapes, a bidi override or several megabytes of text must not
+/// arrive intact. Newlines and tabs survive — a multi-line prompt is normal and mangling it would
+/// be the very harm the prose exemption exists to prevent — but every other control character and
+/// every invisible formatting character is dropped.
 fn shareable_prose(value: &str) -> String {
     let stripped: String = value
         .chars()
-        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .filter(|&character| {
+            matches!(character, '\n' | '\t')
+                || !(character.is_control() || is_invisible_formatting(character))
+        })
         .take(PROSE_MAX_CHARS)
         .collect();
     stripped.trim().to_owned()
+}
+
+/// True for a character that takes no width of its own but changes how the text AROUND it reads:
+/// Unicode's `Cf` (format) class plus the `Zl`/`Zp` line and paragraph separators.
+///
+/// [`char::is_control`] is `Cc` and only `Cc`, which is why [`shareable_prose`] cannot stop at it.
+/// `Cc` does catch ANSI escapes (ESC is `Cc`), so this is not terminal injection — it is display
+/// spoofing, and in a feature whose entire pitch is "trust this recipe a stranger sent you" that
+/// is the more relevant one. U+202E RIGHT-TO-LEFT OVERRIDE makes a rendered prompt say something
+/// other than what is stored; U+200B and U+FEFF are the same trick without the reversal, splitting
+/// a word the reader believes is whole. Both survived into a recorded envelope before this guard.
+///
+/// The ranges are the whole `Cf` class (Unicode 15.1) rather than the handful demonstrated,
+/// because a class is what closes a class. Enumerated instead of taken from a crate because `std`
+/// exposes no general-category API and pulling a Unicode table in for one predicate is a poor
+/// trade: `Cf` additions are rare, additive, and — being new invisible formatting characters — are
+/// new display tricks, not new prompt content.
+///
+/// Variation selectors (U+FE00..U+FE0F) are `Mn`, not `Cf`, and are deliberately NOT here: emoji
+/// presentation is prompt content. The tag characters at U+E0020..U+E007F are `Cf` and do go, which
+/// costs subdivision-flag emoji (🏴󠁧󠁢󠁳󠁣󠁴󠁿) in a prompt — the right side of that trade, since the same
+/// range is the standard way to smuggle hidden text through a display.
+fn is_invisible_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            // Zl / Zp: a line or paragraph separator is not a newline the renderer agreed to.
+            | '\u{2028}'..='\u{2029}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// A Hugging Face repo id (`owner/name`) and nothing else — never a path, never a URL.
@@ -1423,6 +1476,98 @@ pub const INPUT_KINDS: &[&str] = &[
     INPUT_KIND_CONTROL,
 ];
 
+// ---------------------------------------------------------------------------
+// Collection bounds
+// ---------------------------------------------------------------------------
+//
+// [`LABEL_MAX_CHARS`] and [`PROSE_MAX_CHARS`] bound every individual STRING an envelope can carry.
+// They said nothing about how MANY of them it can carry, and the only remaining ceiling was
+// sc-15947's 1 MiB cap on the decompressed chunk text — which a compressible envelope turns into
+// enormous leverage. Measured before these bounds existed: an 8,897-byte PNG carrying 8,000
+// `inputs` + 8,000 `loras` + three 20 k prose fields produced a 988,271-byte
+// `extra.importedWorkflow`, a 988 kB sidecar, a 988 kB `assets.asset_json` row, and a
+// 989,210-byte `list_assets` response for ONE asset — 111x amplification, persistent, in the
+// Library's hottest read path (sc-14797 / sc-14798). Before sc-15949 nothing wrote a stranger's
+// megabyte into the asset index; reading the chunk is what exposed it.
+//
+// So every collection is bounded, and — like every other guard in this file — bounded in ONE place
+// that both directions run, so the write side cannot drift away from the read side. Each cap below
+// is derived from the contract that already limits the thing, in the same style
+// [`PROSE_MAX_CHARS`] was: a number nothing legitimate can exceed, whose worst case is stated.
+
+/// The most LoRAs an envelope may name — [`crate::lora_family::MAX_JOB_LORAS`] exactly.
+///
+/// Not a chosen number: it is the hard per-job total the generation path REJECTS above
+/// (`apps/rust-api/src/lib.rs`, the worker's `image_jobs` guard) and the recipe-preset
+/// normalizer's own cap ("Recipe presets can include at most 5 LoRAs"). A run that applied more
+/// than this could not have happened here, so an envelope claiming it did not come from us.
+const MAX_SHARE_LORAS: usize = crate::lora_family::MAX_JOB_LORAS;
+
+/// The most input descriptors an envelope may carry — one per kind, and the kinds are a closed
+/// vocabulary.
+///
+/// Exact rather than generous: [`describe_inputs`] emits at most one entry per [`INPUT_KINDS`]
+/// member (a multi-reference run is `{ kind: "reference", count: N }`, one entry with a count, not
+/// N entries). So [`INPUT_KINDS`]`.len()` is not a budget, it is the shape.
+const MAX_SHARE_INPUTS: usize = INPUT_KINDS.len();
+
+/// The most multi-phase phases an envelope may carry.
+///
+/// The worker's `MAX_MULTIPHASE_PHASES` and the web's `MULTIPHASE_MAX_PHASES`, which are the same
+/// 8 and are the values the request is validated against before it ever runs. `sceneworks-worker`
+/// depends on this crate, so the constant cannot be imported; `the_phase_cap_matches_the_worker`
+/// in `crates/sceneworks-core/tests/workflow_share.rs` reads both files and fails if they drift.
+const MAX_SHARE_PHASES: usize = 8;
+
+/// The most pose entries an envelope may carry.
+///
+/// The one collection with no server-side ceiling to inherit: the pose lane renders one image per
+/// pose and nothing clamps how many a user may select. So the derivation is the library they are
+/// selected FROM — `apps/web/public/poses/index.json` ships 46 poses — and 64 clears an
+/// all-of-the-library selection with room for user-created poses on top.
+///
+/// This bounds the ENTRY count only, which on its own would still admit a quarter of a million
+/// empty `{}` poses; [`MAX_SHARE_POSE_NUMBERS`] is what bounds the volume.
+const MAX_SHARE_POSES: usize = 64;
+
+/// The most numbers the whole `advanced.poses` array may carry, across every entry and field.
+///
+/// A budget rather than a per-entry cap, because that is what admits the real cases while still
+/// bounding the worst one. One sanitized pose is at most 18 body keypoints + 42 hand + 68 face =
+/// 128 points (the worker's `normalize_keypoints` / `normalize_hands` / `normalize_face` truncate
+/// to exactly those counts), and a point is `[x, y]` or `[x, y, confidence]` — so 384 numbers,
+/// and this budget is 16 full whole-body skeletons' worth. 16 is also twice
+/// [`crate::image_request::MAX_COUNT`], the payload-sanity ceiling on how many images one image
+/// job may produce, which a pose set is the pose lane's version of.
+///
+/// Checked against the real cases rather than asserted: all 46 built-in poses are body keypoints
+/// only (18 points, no hands, no face), so selecting the entire library spends 46 x 36 = 1,656
+/// numbers — 27% of the budget. What the budget does refuse is a set of dozens of poses each
+/// carrying full hands and face, which is where the worst case lives: 6,144 numbers is ~147 kB of
+/// JSON at the widest a `f64` serializes, the same order as the ~120 kB the six prose fields are
+/// already allowed, so the envelope stays a text chunk rather than a payload.
+const MAX_SHARE_POSE_NUMBERS: usize = 16 * (18 + 42 + 68) * 3;
+
+/// One bounded collection: kept whole, or dropped whole. Never truncated.
+///
+/// The truncate-or-drop question, answered the same way [`shareable_label`] answers it for an
+/// over-long label — by dropping, because a collection's MEMBERSHIP is its identity in exactly the
+/// way a slug's spelling is. "The first 5 of these 8,000 LoRAs" is not the recipe that made the
+/// image, and sc-15952 offers what survives here to the user as "Use this recipe": a plausible
+/// subset is worse than an absence, because a reader cannot tell it is a subset. So an over-cap
+/// collection travels as absent, which the reader renders as "none recorded", and the rest of the
+/// envelope — model, prompt, size, steps — still travels.
+///
+/// [`shareable_prose`] truncates instead, and the difference is the point: prose still means what
+/// it said after its tail is cut, and a list does not.
+fn bounded_collection<T>(values: Vec<T>, max: usize) -> Vec<T> {
+    if values.len() > max {
+        Vec::new()
+    } else {
+        values
+    }
+}
+
 /// Reduce every VALUE in an envelope to what the contract allows.
 ///
 /// The typed struct reduces at KEY granularity only — it drops fields we do not declare, which
@@ -1476,8 +1621,17 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
             engine: upscale.engine.as_deref().and_then(shareable_label),
             softness: upscale.softness.filter(|value| value.is_finite()),
         }),
-        loras: loras.into_iter().filter_map(reduce_lora).collect(),
-        inputs: inputs.into_iter().filter_map(reduce_input).collect(),
+        // Bounded BEFORE reduction, not after: an envelope that declares 8,000 LoRAs is
+        // disqualified by declaring them, and capping the survivors instead would let 7,995 junk
+        // entries carry 5 real ones through.
+        loras: bounded_collection(loras, MAX_SHARE_LORAS)
+            .into_iter()
+            .filter_map(reduce_lora)
+            .collect(),
+        inputs: bounded_collection(inputs, MAX_SHARE_INPUTS)
+            .into_iter()
+            .filter_map(reduce_input)
+            .collect(),
         advanced: sanitize_advanced(&advanced),
     }
 }
@@ -1643,7 +1797,7 @@ fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
 const POSE_FIELDS: &[&str] = &["keypoints", "hands", "face"];
 
 fn sanitize_poses(value: &Value) -> Option<Value> {
-    let poses = value.as_array()?;
+    let poses = bounded_collection(value.as_array()?.clone(), MAX_SHARE_POSES);
     // The entry count is load-bearing (poses replace `count` variations), so an entry whose
     // coordinates are missing or malformed still occupies its slot as an empty object.
     let sanitized: Vec<Value> = poses
@@ -1660,6 +1814,14 @@ fn sanitize_poses(value: &Value) -> Option<Value> {
             Value::Object(out)
         })
         .collect();
+    // Entry count is not volume: a numeric tree is otherwise unbounded in both length and depth, so
+    // 64 poses of a million coordinates each would walk straight through the cap above. Budgeted
+    // across the WHOLE array (see `MAX_SHARE_POSE_NUMBERS`) rather than per entry, so a large set
+    // of plain body skeletons — which is what the shipped library is — still travels whole.
+    let numbers: usize = sanitized.iter().map(count_numbers).sum();
+    if numbers > MAX_SHARE_POSE_NUMBERS {
+        return None;
+    }
     (!sanitized.is_empty()).then_some(Value::Array(sanitized))
 }
 
@@ -1673,8 +1835,20 @@ fn is_numeric_tree(value: &Value) -> bool {
     }
 }
 
+/// How many numbers a value's tree holds, at any depth. The unit [`MAX_SHARE_POSE_NUMBERS`] is
+/// spent in — a coordinate is a number whether it arrived as `[[x, y]]` or `[[[x, y]]]`, and both
+/// forms are legal for `hands`.
+fn count_numbers(value: &Value) -> usize {
+    match value {
+        Value::Number(_) => 1,
+        Value::Array(values) => values.iter().map(count_numbers).sum(),
+        Value::Object(map) => map.values().map(count_numbers).sum(),
+        _ => 0,
+    }
+}
+
 fn sanitize_phases(value: &Value) -> Option<Value> {
-    let phases = value.as_array()?;
+    let phases = bounded_collection(value.as_array()?.clone(), MAX_SHARE_PHASES);
     let sanitized: Vec<Value> = phases
         .iter()
         .filter_map(Value::as_object)
@@ -1686,9 +1860,11 @@ fn sanitize_phases(value: &Value) -> Option<Value> {
                 }
             }
             // Phase LoRA references are indices into THIS request's own `loras` list, so they
-            // carry no id and stay meaningful next to the sanitized `loras` above.
+            // carry no id and stay meaningful next to the sanitized `loras` above — and they take
+            // the same bound, for the same reason: a phase cannot reference more LoRAs than a job
+            // is allowed to have.
             if let Some(loras) = phase.get("loras").and_then(Value::as_array) {
-                let entries: Vec<Value> = loras
+                let entries: Vec<Value> = bounded_collection(loras.clone(), MAX_SHARE_LORAS)
                     .iter()
                     .filter_map(Value::as_object)
                     .filter_map(|lora| {
@@ -2702,5 +2878,238 @@ mod tests {
                 "a present-but-wrong version must not be reported as missing: {message}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Collection bounds
+    // -----------------------------------------------------------------------------------------
+
+    /// Every cap, against the contract it is derived from. The numbers are load-bearing, so a
+    /// change to either side has to be a decision rather than a drift.
+    #[test]
+    fn every_collection_cap_is_the_contract_it_came_from() {
+        assert_eq!(MAX_SHARE_LORAS, crate::lora_family::MAX_JOB_LORAS);
+        assert_eq!(MAX_SHARE_LORAS, 5);
+        assert_eq!(MAX_SHARE_INPUTS, INPUT_KINDS.len());
+        assert_eq!(MAX_SHARE_INPUTS, 4);
+        // The worker's `MAX_MULTIPHASE_PHASES`; pinned against its source by
+        // `the_phase_cap_matches_the_multi_phase_validators` in tests/workflow_share.rs, which can
+        // read the file this crate cannot import.
+        assert_eq!(MAX_SHARE_PHASES, 8);
+        // The pose budget is 16 whole-body skeletons, and 16 is twice the payload-sanity ceiling on
+        // images per job — the thing a pose set is the pose lane's version of. If that ceiling
+        // moves, the budget is a decision to re-make, not a number to follow.
+        assert_eq!(MAX_SHARE_POSE_NUMBERS, 6_144);
+        assert_eq!(
+            MAX_SHARE_POSE_NUMBERS,
+            2 * crate::image_request::MAX_COUNT as usize * (18 + 42 + 68) * 3
+        );
+    }
+
+    /// The bound that did not exist: an envelope with 8,000 entries in a collection. Asserted in
+    /// BOTH directions from the same fixture, because a bound only one direction runs is how the
+    /// write and read sides drift apart.
+    #[test]
+    fn an_over_cap_collection_is_dropped_in_both_directions() {
+        let many_loras: Vec<Value> = (0..8_000)
+            .map(|index| json!({ "name": format!("lora {index}"), "weight": 0.5 }))
+            .collect();
+        let many_inputs: Vec<Value> = (0..8_000)
+            .map(|_| json!({ "kind": "reference", "count": 1 }))
+            .collect();
+
+        // Parse: a file from a stranger.
+        let parsed = parse_workflow_share(&json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "a lighthouse",
+            "loras": many_loras.clone(),
+            "inputs": many_inputs.clone(),
+            "advanced": {
+                "steps": 8,
+                "poses": (0..8_000).map(|_| json!({})).collect::<Vec<Value>>(),
+                "phases": (0..8_000).map(|_| json!({ "steps": 4 })).collect::<Vec<Value>>(),
+            }
+        }))
+        .expect("a bounded envelope still parses — the recipe is not the collections");
+        assert!(parsed.loras.is_empty(), "{:?}", parsed.loras);
+        assert!(parsed.inputs.is_empty(), "{:?}", parsed.inputs);
+        assert!(parsed.advanced.get("poses").is_none());
+        assert!(parsed.advanced.get("phases").is_none());
+        // Dropped, not truncated: a subset would be offered to the user as the recipe that made
+        // the image, and they could not tell it was a subset.
+        assert_eq!(parsed.advanced["steps"], json!(8), "the rest still travels");
+        assert_eq!(parsed.prompt, "a lighthouse");
+
+        // Build: the same collections arriving on a job payload.
+        let mut payload = payload_fixture();
+        payload.insert("loras".to_owned(), Value::Array(many_loras));
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "steps": 8,
+                "poses": (0..8_000).map(|_| json!({ "keypoints": [[0.1, 0.2]] })).collect::<Vec<Value>>(),
+                "phases": (0..8_000).map(|_| json!({ "steps": 4 })).collect::<Vec<Value>>(),
+            }),
+        );
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert!(built.loras.is_empty(), "{:?}", built.loras);
+        assert!(built.advanced.get("poses").is_none());
+        assert!(built.advanced.get("phases").is_none());
+        assert_eq!(built.advanced["steps"], json!(8));
+    }
+
+    /// The other half of every bound: exactly at the cap must survive, whole, both ways. This is
+    /// the assertion that would fail if a cap were set below anything legitimate.
+    #[test]
+    fn a_collection_exactly_at_its_cap_survives_both_directions() {
+        let loras: Vec<Value> = (0..MAX_SHARE_LORAS)
+            .map(|index| json!({ "name": format!("Lora {index}"), "weight": 0.5, "source": { "repo": format!("acme/lora-{index}") } }))
+            .collect();
+        let phases: Vec<Value> = (0..MAX_SHARE_PHASES)
+            .map(|index| json!({ "steps": index + 1, "guidance": 3.5, "loras": [{ "index": 0, "weight": 0.4 }] }))
+            .collect();
+        // 16 full whole-body skeletons is the pose budget exactly: 18 + 42 + 68 points of [x, y].
+        let skeleton = |points: usize| -> Value {
+            Value::Array(
+                (0..points)
+                    .map(|point| json!([point as f64 / 100.0, 0.5]))
+                    .collect(),
+            )
+        };
+        let poses: Vec<Value> = (0..16)
+            .map(|_| {
+                json!({
+                    "keypoints": skeleton(18),
+                    "hands": [skeleton(21), skeleton(21)],
+                    "face": skeleton(68),
+                })
+            })
+            .collect();
+
+        let mut payload = payload_fixture();
+        payload.insert("loras".to_owned(), Value::Array(loras));
+        payload.insert("sourceAssetId".to_owned(), json!("asset_source"));
+        payload.insert(
+            "referenceAssetIds".to_owned(),
+            json!(["asset_a", "asset_b", "asset_c"]),
+        );
+        payload.insert("maskAssetId".to_owned(), json!("asset_mask"));
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "steps": 8,
+                "controlImage": "asset_control",
+                "controlMode": "canny",
+                "poses": poses,
+                "phases": phases,
+            }),
+        );
+
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(built.loras.len(), MAX_SHARE_LORAS);
+        // One entry per kind, all four kinds — the widest `inputs` the builder can emit.
+        assert_eq!(built.inputs.len(), MAX_SHARE_INPUTS);
+        assert_eq!(
+            built.advanced["phases"].as_array().expect("phases").len(),
+            MAX_SHARE_PHASES
+        );
+        let built_poses = built.advanced["poses"].as_array().expect("poses");
+        assert_eq!(built_poses.len(), 16);
+        assert_eq!(
+            built_poses.iter().map(count_numbers).sum::<usize>(),
+            MAX_SHARE_POSE_NUMBERS * 2 / 3,
+            "16 skeletons of [x, y] pairs is two thirds of a budget sized for [x, y, confidence]"
+        );
+
+        // And back in through the reader, unchanged.
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        let parsed = parse_workflow_share(&envelope).expect("parses");
+        assert_eq!(parsed, built);
+    }
+
+    /// The entry cap is not a volume cap. 64 poses is under [`MAX_SHARE_POSES`], so only the
+    /// numeric budget can catch a pose carrying a million coordinates — and it is the whole reason
+    /// the budget exists as well as the count.
+    #[test]
+    fn a_pose_that_is_a_payload_rather_than_a_skeleton_is_dropped() {
+        let flood: Vec<Value> = (0..4_000).map(|index| json!([index, 0.5])).collect();
+        let advanced = json!({ "steps": 8, "poses": [{ "keypoints": flood }] })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        assert!(
+            sanitized.get("poses").is_none(),
+            "one pose held {} numbers, over the {MAX_SHARE_POSE_NUMBERS} budget",
+            8_000
+        );
+        assert_eq!(sanitized["steps"], json!(8));
+
+        // The realistic large case is NOT refused: every one of the 46 built-in poses
+        // (`apps/web/public/poses/index.json`) is 18 body keypoints with no hands and no face, so
+        // selecting the whole library spends 1,656 of the 6,144 numbers.
+        let library: Vec<Value> = (0..46)
+            .map(|_| {
+                json!({ "keypoints": (0..18).map(|point| json!([f64::from(point) / 20.0, 0.5])).collect::<Vec<Value>>() })
+            })
+            .collect();
+        let advanced = json!({ "poses": library })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        let poses = sanitized["poses"]
+            .as_array()
+            .expect("the whole library travels");
+        assert_eq!(poses.len(), 46);
+        assert_eq!(poses.iter().map(count_numbers).sum::<usize>(), 46 * 36);
+    }
+
+    /// sc-15949 review: `char::is_control` is `Cc` only, so a bidi override and the zero-width
+    /// family were surviving into a recorded envelope — where sc-15952 renders them.
+    #[test]
+    fn prose_strips_invisible_formatting_as_well_as_control_characters() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE / U+202D LEFT-TO-RIGHT OVERRIDE reverse how the rest of
+        // the line reads; U+200B and U+FEFF split a word invisibly; U+2028 / U+2029 are line and
+        // paragraph separators the renderer never agreed to.
+        let hostile = "a light\u{202e}house\u{202d} in\u{200b} fo\u{feff}g\u{2028}second\u{2029}third\u{200f}\u{00ad}\u{2060}";
+        let cleaned = shareable_prose(hostile);
+        assert_eq!(cleaned, "a lighthouse in fogsecondthird");
+        for smuggled in [
+            '\u{202e}', '\u{202d}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{2029}', '\u{200f}',
+            '\u{00ad}', '\u{2060}',
+        ] {
+            assert!(
+                !cleaned.contains(smuggled),
+                "U+{:04X} survived: {cleaned:?}",
+                smuggled as u32
+            );
+        }
+
+        // Through the real parse path, in the field a stranger's file actually fills.
+        let share = parse_workflow_share(&json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": hostile,
+            "advanced": { "systemMessage": hostile }
+        }))
+        .expect("parses");
+        assert_eq!(share.prompt, "a lighthouse in fogsecondthird");
+        assert_eq!(
+            share.advanced["systemMessage"],
+            json!("a lighthouse in fogsecondthird")
+        );
+
+        // What must NOT change: the newlines and tabs a multi-line prompt is made of, and the
+        // emoji variation selectors that are prompt content rather than a display trick.
+        let real = "a lighthouse\n\tshot on 35mm \u{2764}\u{fe0f}, rain \u{1f327}\u{fe0f}";
+        assert_eq!(shareable_prose(real), real);
     }
 }

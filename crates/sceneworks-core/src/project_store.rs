@@ -1865,6 +1865,25 @@ impl ProjectStore {
                 "Uploaded file is empty".to_owned(),
             ));
         }
+        // `extra` is an object in the sidecar contract, and `provenance` is written into it, so a
+        // provenance that is not an object is refused here rather than reshaped or ignored.
+        //
+        // It used to be written through verbatim, which made `extra` a scalar — and once sc-15949
+        // had a second writer of that slot, it became a silent-loss path: a `provenance` of `42`,
+        // `"editor"`, `[1,2]` or `null` would take the whole slot and throw away a workflow the
+        // reader had already found in the file. Rejecting is the only answer that neither loses the
+        // envelope nor quietly rewrites what the caller sent. `apps/rust-api/src/assets.rs` refuses
+        // the same shape at the multipart boundary, so this is the belt to that braces; the API is
+        // the only production caller.
+        if upload
+            .provenance
+            .as_ref()
+            .is_some_and(|provenance| !provenance.is_object())
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Upload provenance must be a JSON object".to_owned(),
+            ));
+        }
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let upload_dir = project_path.join("assets").join("uploads");
         fs::create_dir_all(&upload_dir)?;
@@ -1982,35 +2001,34 @@ impl ProjectStore {
         // recipe"; nothing here fabricates a `text_to_image` mode, a seed we did not run, or a
         // generation set that never existed.
         if let Some(object) = asset.as_object_mut() {
-            match &upload.provenance {
-                // A provenance that is not an object stays exactly what it is today: the whole
-                // `extra` value. Merging is not possible, and quietly reshaping a caller's explicit
-                // blob to make room for a field it did not ask for is the wrong trade.
-                Some(provenance) if !provenance.is_object() => {
-                    object.insert("extra".to_owned(), provenance.clone());
-                }
-                _ => {
-                    let mut extra = upload
-                        .provenance
-                        .as_ref()
-                        .and_then(Value::as_object)
-                        .cloned()
-                        .unwrap_or_default();
-                    // Inserted LAST, so `extra.importedWorkflow` is always the envelope this import
-                    // read and sanitized, and never free JSON a caller put under that key in
-                    // `provenance`.
-                    if let Some(workflow) = normalized
-                        .workflow
-                        .as_ref()
-                        .and_then(|share| serde_json::to_value(share).ok())
-                    {
-                        extra.insert(IMPORTED_WORKFLOW_KEY.to_owned(), workflow);
-                    }
-                    // Still nothing to record: leave the key absent, exactly as before.
-                    if !extra.is_empty() {
-                        object.insert("extra".to_owned(), Value::Object(extra));
-                    }
-                }
+            // A non-object provenance was already refused at the top of this function, so this is
+            // the only shape left.
+            let provenance = upload.provenance.as_ref().and_then(Value::as_object);
+            let mut extra = provenance.cloned().unwrap_or_default();
+            // Cleared UNCONDITIONALLY, before the insert below and whether or not there is anything
+            // to insert. `extra.importedWorkflow` is defined as the envelope THIS import read and
+            // sanitized, so the key must be either ours or absent — never free JSON a caller put
+            // under it in `provenance`.
+            //
+            // Inserting ours last is not enough on its own, and that was the bug: when the file
+            // carries no chunk there is nothing to insert, and a caller-supplied
+            // `provenance.importedWorkflow` was written through untouched — an unsanitized `model`,
+            // an `advanced` map the allow-list would have emptied, and a `loras[].repo` of
+            // `../../../../etc/passwd` in the one field sc-15950/sc-15952 turn into a cache path.
+            // The guard has to be a removal, not an ordering.
+            extra.remove(IMPORTED_WORKFLOW_KEY);
+            if let Some(workflow) = normalized
+                .workflow
+                .as_ref()
+                .and_then(|share| serde_json::to_value(share).ok())
+            {
+                extra.insert(IMPORTED_WORKFLOW_KEY.to_owned(), workflow);
+            }
+            // An explicit `provenance` keeps its slot even when it reduces to nothing, because
+            // `provenance: {}` wrote `extra: {}` before this story and "no behaviour change" means
+            // the empty object too. With no provenance and no workflow, `extra` stays absent.
+            if provenance.is_some() || !extra.is_empty() {
+                object.insert("extra".to_owned(), Value::Object(extra));
             }
         }
         let sidecar_path = media_path.with_extension("sceneworks.json");
@@ -9816,6 +9834,130 @@ mod tests {
             serde_json::to_value(&share).expect("serializes"),
             "the import's own sanitized envelope must win over one supplied in provenance"
         );
+
+        // The case that made "inserted last" a false claim: the SAME injected provenance, on a file
+        // with NO chunk. There is nothing to insert, so ordering protects nothing — the key has to
+        // be REMOVED, or a caller's free JSON lands under it untouched. Everything below is what
+        // was reaching the sidecar before the removal: a traversal `loras[].repo` in the one field
+        // sc-15950/sc-15952 turn into a cache path, an unsanitized absolute `model`, and an
+        // `advanced` map the allow-list would have emptied.
+        let plain = temp_dir.path().join("plain.png");
+        std::fs::write(&plain, sceneworks_png(None)).expect("staged upload writes");
+        let injected = json!({
+            "editor": "image_editor",
+            IMPORTED_WORKFLOW_KEY: {
+                "sceneworksWorkflow": "image",
+                "schemaVersion": 1,
+                "model": "C:\\Users\\Victim\\models\\evil",
+                "prompt": "injected",
+                "loras": [{ "repo": "../../../../etc/passwd" }],
+                "advanced": { "anythingAtAll": { "nested": "free JSON" } },
+            },
+        });
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "plain.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: plain,
+                    source_asset_id: None,
+                    provenance: Some(injected),
+                },
+            )
+            .expect("imports");
+        assert_eq!(
+            asset["extra"],
+            json!({ "editor": "image_editor" }),
+            "with no chunk to record, `{IMPORTED_WORKFLOW_KEY}` must be ABSENT — the key is either \
+             the envelope this import parsed or nothing, never a caller's free JSON"
+        );
+        let encoded = serde_json::to_string(&asset["extra"]).expect("serializes");
+        for leak in ["etc/passwd", "Victim", "anythingAtAll", "injected"] {
+            assert!(
+                !encoded.contains(leak),
+                "{leak} was injected through provenance and reached the sidecar: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_asset_refuses_a_provenance_that_is_not_an_object() {
+        // `extra` is an object in the sidecar contract, and a scalar `provenance` used to become the
+        // whole slot — which, once sc-15949 gave that slot a second writer, silently discarded a
+        // workflow the reader had already found in the file. `Some(Value::Null)` is reachable from
+        // the API today (any non-blank JSON text was accepted), so this is not hypothetical.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Provenance").expect("project creates");
+
+        let share = workflow_fixture("a lighthouse");
+        let embedded = sceneworks_png(Some(&share));
+        for provenance in [json!(42), json!("editor"), json!([1, 2]), Value::Null] {
+            let source = temp_dir.path().join(format!(
+                "scalar-{}.png",
+                crate::store_util::random_hex(6).expect("hex")
+            ));
+            std::fs::write(&source, &embedded).expect("staged upload writes");
+            let error = store
+                .import_asset(
+                    &project.id,
+                    UploadAsset {
+                        filename: "scalar.png".to_owned(),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: source,
+                        source_asset_id: None,
+                        provenance: Some(provenance.clone()),
+                    },
+                )
+                .expect_err("a non-object provenance must be refused, not silently preferred");
+            assert!(
+                matches!(&error, ProjectStoreError::BadRequest(message)
+                    if message.contains("provenance must be a JSON object")),
+                "{provenance} produced the wrong error: {error}"
+            );
+        }
+
+        // An empty object is not a non-object: it keeps its slot, exactly as it did before this
+        // story, and still makes room for the envelope beside it.
+        let source = temp_dir.path().join("empty-provenance.png");
+        std::fs::write(&source, sceneworks_png(None)).expect("staged upload writes");
+        let plain = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "empty.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: Some(json!({})),
+                },
+            )
+            .expect("imports");
+        assert_eq!(
+            plain["extra"],
+            json!({}),
+            "`provenance: {{}}` wrote `extra: {{}}` before sc-15949 and must still"
+        );
+
+        let source = temp_dir.path().join("empty-provenance-with-chunk.png");
+        std::fs::write(&source, &embedded).expect("staged upload writes");
+        let shared = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "shared.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: Some(json!({})),
+                },
+            )
+            .expect("imports");
+        assert_eq!(
+            shared["extra"][IMPORTED_WORKFLOW_KEY],
+            serde_json::to_value(&share).expect("serializes")
+        );
     }
 
     #[test]
@@ -9946,6 +10088,28 @@ mod tests {
             corrupt[offset] ^= 0xFF;
             corpus.push((format!("bit flipped at {offset}"), corrupt));
         }
+        // The corpus size, derived and printed rather than described in prose — a claim about it was
+        // wrong by nearly 2x ("~110 imports") because nobody ever multiplied it out.
+        //
+        // NOT asserted as a literal, and that is deliberate: the count is a function of the fixture
+        // PNG's byte length, which is the length of a DEFLATE stream produced by whatever compressor
+        // the `png` crate links. It is 492 bytes here and has been observed at 417, and neither
+        // number is a property of this test. So the derivation is asserted and the count is printed;
+        // a run's own output is the only honest source for it.
+        let truncations = (AFTER_IHDR..good.len()).step_by(11).count();
+        let flips = (8..good.len()).step_by(23).count();
+        assert_eq!(
+            corpus.len(),
+            8 + 2 + truncations + flips,
+            "8 named fixtures + 2 broken-pixel files + one truncation every 11 bytes + one bit flip \
+             every 23 bytes"
+        );
+        println!(
+            "sc-15949: {} imports over the corpus ({} byte fixture: {truncations} truncations, \
+             {flips} bit flips)",
+            corpus.len(),
+            good.len()
+        );
 
         let intact = serde_json::to_value(workflow_fixture("a lighthouse")).expect("serializes");
         for (label, bytes) in corpus {
@@ -10105,6 +10269,221 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_cannot_amplify_itself_into_the_asset_index() {
+        // The other half of the trust boundary, and the one the path guards said nothing about: not
+        // what the values ARE but how MANY of them there are. Every string in the envelope below is
+        // legitimate; only the counts are hostile.
+        //
+        // sc-15947's 1 MiB cap is on the DECOMPRESSED chunk text, and a repetitive envelope
+        // compresses ~100x — so before the collection bounds, the 8,897-byte PNG built here
+        // produced a 988,271-byte `extra.importedWorkflow`, an equally large sidecar, an equally
+        // large `assets.asset_json` row, and a 989,210-byte `list_assets` response for ONE asset.
+        // Persistent, and in the Library's hottest read path (sc-14797 / sc-14798): 100 of these
+        // 9 kB files, 0.9 MB on disk, made the listing ~100 MB. Reading the chunk is what exposed
+        // it, so it is bounded here.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Amplify").expect("project creates");
+
+        let prose = "z".repeat(20_000);
+        let envelope = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": prose,
+            "negativePrompt": prose,
+            // Identical entries, because that is the shape that maximizes the compression ratio and
+            // so the amplification: the attacker's cost is the COMPRESSED chunk and ours is the
+            // decompressed envelope we then persist forever.
+            "loras": (0..8_000)
+                .map(|_| json!({ "name": "Ghibli watercolor", "repo": "acme/ghibli", "weight": 0.8 }))
+                .collect::<Vec<Value>>(),
+            "inputs": (0..8_000)
+                .map(|_| json!({ "kind": "reference", "count": 1 }))
+                .collect::<Vec<Value>>(),
+            "advanced": {
+                "steps": 8,
+                "stylePrompt": prose,
+                // Smaller counts than the two above only because the whole envelope has to stay
+                // under sc-15947's 1 MiB text cap to reach these bounds at all; 100 is still well
+                // over both caps, and the unit tests in `workflow_share` run the 8,000 case.
+                "poses": (0..100).map(|_| json!({ "keypoints": [[0.1, 0.2]] })).collect::<Vec<Value>>(),
+                "phases": (0..100).map(|_| json!({ "steps": 4, "guidance": 3.5 })).collect::<Vec<Value>>(),
+            },
+        })
+        .to_string();
+        assert!(
+            envelope.len() < crate::workflow_png::MAX_WORKFLOW_TEXT_BYTES,
+            "the fixture must be UNDER the text cap ({} bytes) or the reader refuses it and these \
+             bounds are never reached",
+            envelope.len()
+        );
+        let bytes = splice_after_ihdr(
+            &sceneworks_png(None),
+            &framed_itxt(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, &envelope, true),
+        );
+        let source = temp_dir.path().join("amplify.png");
+        std::fs::write(&source, &bytes).expect("staged upload writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "amplify.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("a bounded envelope still imports");
+
+        let recorded = &asset["extra"][IMPORTED_WORKFLOW_KEY];
+        // Measured and PRINTED before anything is asserted, so reverting a bound to check this test
+        // still bites also reports what the amplification was.
+        let recorded_bytes = serde_json::to_string(recorded).expect("serializes").len();
+        let payload_bytes = serde_json::to_string(
+            &store
+                .list_assets(&project.id, false, false, AssetScope::All)
+                .expect("lists"),
+        )
+        .expect("serializes")
+        .len();
+        let asset_json_bytes: String = Connection::open(
+            store
+                .find_project_path(&project.id)
+                .expect("project path")
+                .join("project.db"),
+        )
+        .expect("opens project.db")
+        .query_row(
+            "select asset_json from assets where id = ?1",
+            params![asset["id"].as_str().expect("id")],
+            |row| row.get(0),
+        )
+        .expect("the row is indexed");
+        println!(
+            "sc-15949: {} byte PNG -> {recorded_bytes} byte workflow, {} byte asset_json, \
+             {payload_bytes} byte list_assets payload",
+            bytes.len(),
+            asset_json_bytes.len()
+        );
+
+        // Every unbounded collection is gone; the recipe around them still travels, so this is not
+        // passing by refusing the envelope wholesale.
+        assert!(
+            recorded.get("loras").is_none(),
+            "{:?}",
+            recorded.get("loras")
+        );
+        assert!(recorded.get("inputs").is_none());
+        assert!(recorded["advanced"].get("poses").is_none());
+        assert!(recorded["advanced"].get("phases").is_none());
+        assert_eq!(recorded["advanced"]["steps"], json!(8));
+        assert_eq!(recorded["model"], json!("z_image_turbo"));
+
+        // What is left is the prose allowance, which is the documented ceiling this file already
+        // accepted (`PROSE_MAX_CHARS`: three 20 k fields here). An upper bound rather than an
+        // equality, so this is a REGRESSION guard and not a fixture: what it catches is a new
+        // unbounded collection appearing later. The same fixture with the bounds reverted:
+        // 817,592 bytes recorded, 818,485 in `asset_json`, 818,551 in the `list_assets` payload —
+        // from a 7,389-byte PNG, so 111x.
+        const CEILING: usize = 200 * 1024;
+        assert!(
+            recorded_bytes < CEILING,
+            "the recorded envelope is {recorded_bytes} bytes, over the {CEILING} byte ceiling"
+        );
+        assert!(
+            asset_json_bytes.len() < CEILING,
+            "asset_json is {} bytes",
+            asset_json_bytes.len()
+        );
+        assert!(
+            payload_bytes < CEILING,
+            "the list_assets payload is {payload_bytes} bytes for a single asset"
+        );
+    }
+
+    /// The measurement behind the table in [`the_workflow_scan_reads_chunks_and_never_the_pixels`].
+    ///
+    /// Ignored because it writes hundreds of megabytes and asserts a shape rather than a threshold —
+    /// but it is IN the tree rather than done out of band, because that table has been wrong once
+    /// already. Refresh it with:
+    ///
+    /// ```text
+    /// cargo test -p sceneworks-core --release --lib the_cost_of_the_scan_against_file_size \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// Two files per size: one carrying the chunk (the SceneWorks case, answered in pass one) and one
+    /// carrying none (every foreign PNG, which walks the whole file). Incompressible pixels, so the
+    /// bytes on disk are the bytes the scan has to move past — a smooth render compresses away and
+    /// makes the miss look far cheaper than it is on a real photograph.
+    #[test]
+    #[ignore = "measurement: writes >200 MB of PNG; run explicitly to refresh the table"]
+    fn the_cost_of_the_scan_against_file_size() {
+        /// A cheap LCG, so "incompressible" needs no dependency.
+        fn noise(side: u32) -> image::RgbImage {
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            image::RgbImage::from_fn(side, side, |_, _| {
+                let mut channel = || {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    u8::try_from((state >> 33) & 0xFF).expect("masked to a byte")
+                };
+                image::Rgb([channel(), channel(), channel()])
+            })
+        }
+        fn elapsed_micros(mut work: impl FnMut()) -> u128 {
+            // Three passes, best of; the first pays for the page cache.
+            (0..3)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    work();
+                    start.elapsed().as_micros()
+                })
+                .min()
+                .expect("three passes")
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let share = workflow_fixture("a lighthouse");
+        println!(
+            "| side | bytes | scan, chunk found | scan, no chunk | plain read | FULL DECODE |"
+        );
+        for side in [1024_u32, 2048, 4096, 6144] {
+            let pixels = noise(side);
+            for (label, embedded) in [("hit", true), ("miss", false)] {
+                let path = temp_dir.path().join(format!("{side}-{label}.png"));
+                crate::workflow_png::write_workflow_chunk(
+                    &pixels,
+                    &path,
+                    embedded.then_some(&share),
+                )
+                .expect("writes");
+                let bytes = std::fs::metadata(&path).expect("metadata").len();
+                let scan = elapsed_micros(|| {
+                    let _ = crate::workflow_png::read_workflow_chunk_file(&path);
+                });
+                let read = elapsed_micros(|| {
+                    let _ = std::fs::read(&path).expect("reads");
+                });
+                let decode = elapsed_micros(|| {
+                    let _ = image::open(&path).expect("decodes");
+                });
+                println!(
+                    "| {side}² {label} | {bytes} | {scan} µs | plain read {read} µs | decode \
+                     {decode} µs | scan/read {:.2}x | scan/decode {:.0}% |",
+                    scan as f64 / read as f64,
+                    100.0 * scan as f64 / decode as f64
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_workflow_scan_reads_chunks_and_never_the_pixels() {
         // The regression this guards is a quiet one: making the scan work by decoding the image.
         // `normalize_image_upload` exists to store a natively-supported upload WITHOUT a decode,
@@ -10115,19 +10494,34 @@ mod tests {
         // Any decode on this path would fail. The import succeeds and reads the recipe, so nothing
         // decoded.
         //
-        // Measured alongside it, on `soft_render_rgb`-shaped PNGs in release, so the throughput
-        // claim is a number rather than a hope:
+        // Measured alongside it by `the_cost_of_the_scan_against_file_size` below (release,
+        // incompressible pixels so the bytes on disk are bytes the scan must move past — a smooth
+        // render compresses away and flatters the miss):
         //
-        // |          | scan, chunk found | scan, no chunk | plain file read | FULL DECODE |
-        // |----------|-------------------|----------------|-----------------|-------------|
-        // | 1024²    |             81 µs |         144 µs |           36 µs |     4.31 ms |
-        // | 2048²    |             47 µs |         292 µs |          104 µs |    13.36 ms |
+        // |         |    on disk | scan, chunk found | scan, no chunk | plain read | FULL DECODE |
+        // |---------|------------|-------------------|----------------|------------|-------------|
+        // | 1024²   |    3.0 MiB |             44 µs |         870 µs |     681 µs |     1.39 ms |
+        // | 2048²   |   12.0 MiB |             89 µs |        3.99 ms |    2.64 ms |     5.29 ms |
+        // | 4096²   |   48.0 MiB |             96 µs |       17.08 ms |   13.45 ms |    24.77 ms |
+        // | 6144²   |  108.0 MiB |            101 µs |       41.04 ms |   30.53 ms |    57.03 ms |
         //
-        // A SceneWorks image answers in pass one and stops at the first IDAT, so its cost barely
-        // moves with the pixel count. The miss — every foreign PNG — walks the tail framing and CRCs
-        // the bytes on their way past: ~3x a plain read of the same file, and 2-3% of what decoding
-        // it would cost. That is the difference between a metadata walk and the decode-everything
-        // path this test exists to keep us out of.
+        // Two different curves, and only one of them is flat.
+        //
+        // The HIT — a SceneWorks image — answers in pass one and stops at the first IDAT: 44 µs to
+        // 101 µs across a 36x range of file size. That is the structural property this test defends,
+        // and it holds: no pixel inflate, and nothing allocated in proportion to the pixels.
+        //
+        // The MISS — every foreign PNG — is O(file), because sc-15947's reader makes a second pass
+        // over the framing past IDAT to be sure there is no late chunk and no duplicate. It costs
+        // ~1.3x a plain read of the same file and 63-76% of a full decode; at 48 MiB it is 70%.
+        // Roughly 0.36 s per GB imported, and NET-NEW: `move_or_copy_file` renames the upload rather
+        // than reading it, and nothing else on the import path touches the image media, so before
+        // sc-15949 a large foreign PNG was never read end to end at all.
+        //
+        // So the honest claim is narrow: the scan is not a decode and does not scale with pixels on
+        // the SceneWorks path, and on the foreign path it is one sequential pass — cheaper than
+        // decoding, but the same order, not the "2-3%" an earlier version of this comment claimed
+        // from small compressible renders.
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
         let project = store.create_project("NoDecode").expect("project creates");

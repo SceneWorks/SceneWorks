@@ -106,6 +106,77 @@ async fn import_asset_removes_staged_temp_file_when_a_later_field_errors() {
 }
 
 #[tokio::test]
+async fn import_asset_rejects_a_provenance_that_is_not_an_object() {
+    // sc-15949 review: any non-blank JSON text was accepted here, and the store then made the
+    // sidecar's `extra` slot that value verbatim. Once sc-15949 gave `extra` a second writer, that
+    // became a silent-loss path — `provenance=42` (or `null`, or `[1,2]`) discarded a workflow the
+    // import had already read out of the PNG. `extra` is an object in the contract, so anything
+    // else is refused at the boundary, and the staged temp is still cleaned up.
+    for provenance in ["42", "\"editor\"", "[1,2]", "null"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        let data_dir = settings.data_dir.clone();
+        let app = create_app(settings).expect("app creates");
+
+        let boundary = "SCENEWORKS_SCALAR_PROVENANCE_BOUNDARY";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"x.png\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+        body.extend_from_slice(b"\x89PNG\r\n\x1a\n payload bytes");
+        body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"provenance\"\r\n\r\n");
+        body.extend_from_slice(provenance.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let (status, _, response) = request_raw(
+            app,
+            "POST",
+            "/api/v1/projects/project-1/assets",
+            body,
+            &[(
+                "content-type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "provenance={provenance} must be refused"
+        );
+        let value: Value = serde_json::from_slice(&response).expect("json body parses");
+        // The API's own sentence, matched exactly. `ProjectStore::import_asset` refuses the same
+        // shape with a different one ("Upload provenance must be a JSON object"), and a loose
+        // `contains` would match either — so this test would pass with the boundary check removed
+        // and only the store's belt holding.
+        assert!(
+            value["detail"].as_str().is_some_and(
+                |detail| detail == "Invalid provenance JSON: provenance must be a JSON object"
+            ),
+            "provenance={provenance} produced {:?}",
+            value["detail"]
+        );
+
+        let upload_root = data_dir.join("cache").join("uploads");
+        let leaked: Vec<_> = std::fs::read_dir(&upload_root)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("upload-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leaked.is_empty(),
+            "staged upload temp file leaked on provenance={provenance}: {leaked:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn import_asset_rejects_duplicate_file_field_and_cleans_first_temp() {
     // sc-8883 (F-081): a second `file` field must be rejected (400), and the first
     // already-staged temp must be cleaned up rather than orphaned until the 24h sweep.
