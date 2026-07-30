@@ -694,12 +694,24 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     }
 
     let lifecycle_steps = 1;
+    clear_cache();
+    reset_peak_memory();
+    one_image(scoped_generate(
+        generator.as_ref(),
+        krea_request(width, height, lifecycle_steps),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let lifecycle_control_peak = get_peak_memory() as u64;
+    let lifecycle_recovery_limit =
+        lifecycle_control_peak.saturating_add(lifecycle_control_peak / 50);
+    let mut lifecycle_max_recovery_peak = 0_u64;
     for phase in [
         MemoryPhase::Conditioning,
         MemoryPhase::Denoise,
         MemoryPhase::Decode,
     ] {
-        let before_active = get_active_memory() as u64;
         let cancel = mlx_gen::CancelFlag::new();
         if phase == MemoryPhase::Conditioning {
             cancel.cancel();
@@ -720,17 +732,21 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
                 }
             },
         );
-        if !result
-            .as_ref()
-            .is_err_and(|error| error.to_ascii_lowercase().contains("cancel"))
-        {
-            return Err(format!(
-                "{phase:?} cancellation did not return the typed cancellation path: {result:?}"
-            ));
+        match result {
+            Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
+            Err(error) => {
+                return Err(format!(
+                    "{phase:?} cancellation returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "{phase:?} cancellation returned images instead of the typed cancellation path"
+                ));
+            }
         }
-        if get_active_memory() as u64 > before_active.saturating_add(64 * MIB) {
-            return Err(format!("{phase:?} cancellation leaked active MLX memory"));
-        }
+        clear_cache();
+        reset_peak_memory();
         one_image(scoped_generate(
             generator.as_ref(),
             krea_request(width, height, lifecycle_steps),
@@ -738,13 +754,20 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
             None,
             &mut |_| {},
         )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        lifecycle_max_recovery_peak = lifecycle_max_recovery_peak.max(recovery_peak);
+        if recovery_peak > lifecycle_recovery_limit {
+            return Err(format!(
+                "{phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, \
+                 above the successful warm control {lifecycle_control_peak} bytes plus 2%"
+            ));
+        }
     }
     for phase in [
         MemoryPhase::Conditioning,
         MemoryPhase::Denoise,
         MemoryPhase::Decode,
     ] {
-        let before_active = get_active_memory() as u64;
         let result = scoped_generate(
             generator.as_ref(),
             krea_request(width, height, lifecycle_steps),
@@ -752,17 +775,22 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
             Some(phase),
             &mut |_| {},
         );
-        if !result
-            .as_ref()
-            .is_err_and(|error| error.contains("injected memory-strategy calibration error"))
-        {
-            return Err(format!(
-                "{phase:?} error injection did not reach its physical boundary: {result:?}"
-            ));
+        match result {
+            Err(error) if error.contains("injected memory-strategy calibration error") => {}
+            Err(error) => {
+                return Err(format!(
+                    "{phase:?} error injection returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "{phase:?} error injection returned images instead of failing at its physical \
+                     boundary"
+                ));
+            }
         }
-        if get_active_memory() as u64 > before_active.saturating_add(64 * MIB) {
-            return Err(format!("{phase:?} injected error leaked active MLX memory"));
-        }
+        clear_cache();
+        reset_peak_memory();
         one_image(scoped_generate(
             generator.as_ref(),
             krea_request(width, height, lifecycle_steps),
@@ -770,6 +798,14 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
             None,
             &mut |_| {},
         )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        lifecycle_max_recovery_peak = lifecycle_max_recovery_peak.max(recovery_peak);
+        if recovery_peak > lifecycle_recovery_limit {
+            return Err(format!(
+                "{phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, \
+                 above the successful warm control {lifecycle_control_peak} bytes plus 2%"
+            ));
+        }
     }
 
     let conditioning = conditioning.get();
@@ -858,6 +894,8 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.active.saturating_add(overall.cache)),
+                ("lifecycleWarmControlPeak", "bytes", lifecycle_control_peak),
+                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle_max_recovery_peak),
             ],
         ),
         "capturedAt": protocol::captured_at(),
