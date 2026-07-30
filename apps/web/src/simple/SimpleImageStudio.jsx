@@ -8,7 +8,12 @@ import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredResolution } from "./modelDefaults.js";
-import { buildSimpleImageRequest, referenceStrengthFor, resolveSimpleTier } from "./simpleJobs.js";
+import {
+  buildSimpleImageRequest,
+  referenceStrengthFor,
+  resolveSimpleTier,
+  workerAdvertises,
+} from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
@@ -459,16 +464,5 @@ export function SimpleImageStudio() {
         type="image"
       />
     </div>
-  );
-}
-
-// Mirrors the advanced studios' candle-only tier gates: a tier is only offered when a
-// live worker advertises the capability, so an MLX/pre-Ada host never resolves one.
-export function workerAdvertises(workers, capability) {
-  return (workers ?? []).some(
-    (worker) =>
-      worker?.status !== "offline" &&
-      Array.isArray(worker?.capabilities) &&
-      worker.capabilities.includes(capability),
   );
 }

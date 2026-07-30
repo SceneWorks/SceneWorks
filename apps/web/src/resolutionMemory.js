@@ -13,10 +13,21 @@
 //   2. Unknown host memory (`null`, the probe hasn't resolved / no signal) ⇒ everything fits. We never
 //      withhold a resolution on missing data — the worst case is offering a heavy one, which the
 //      worker's own load-time fit gate + runtime decode still backstop (mirrors tierFits).
-//   3. A model that declares NO memory floor (no `mlx.minMemoryGb` / `candle.minMemoryGb` — e.g.
-//      SenseNova, which already ships 2048² buckets) is left entirely unchanged: with no floor there
-//      is no basis to predict a peak, so the gate returns "fits". Only a model that BOTH declares a
-//      floor AND advertises >1536² buckets is affected — today that is exactly Krea 2 Raw / Turbo.
+//   3. A model that declares NO memory floor ON THE ACTIVE LANE (no `mlx.minMemoryGb` for MLX / no
+//      `candle.minMemoryGb` for candle) is left unchanged: with no floor there is no basis to predict a
+//      peak, so the gate returns "fits". Only a model that BOTH declares a floor on that lane AND
+//      advertises >1536² buckets is affected. That is 14 shipped models, and the split is heavily
+//      candle-side — worth stating precisely, because a per-lane gate is easy to reason about wrongly:
+//        - `krea_2_raw` / `krea_2_turbo` — the only two floored on BOTH lanes (mlx 48 / candle 32).
+//        - `mage_flow` ×6 (`candle.minMemoryGb` 17) and `sensenova_u1_8b` ×6 (16) — floored on CANDLE
+//          ONLY, with `mlx.minMemoryGb` absent. All 12 advertise 2048² buckets, so on a CUDA host this
+//          gate is live for them today and on a Mac it is a no-op. (SenseNova used to be cited here as
+//          the example of a FLOORLESS 2048² model; that is wrong — it declares a candle floor.)
+//
+// PER-TIER BASIS (sc-15400) IS DELIBERATELY *NOT* WIRED HERE — see the geometry note on
+// `HIGHRES_TRANSIENT_GB_PER_MP` below and the `floorGb` comment. The per-tier measured peaks now drive
+// the Simple Model Manager's "needs N GB" row, but they cannot serve as THIS module's floor until the
+// manifest records the geometry each footprint was measured at.
 
 import { MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
 
@@ -33,6 +44,11 @@ export const BASELINE_PIXELS = 1536 * 1536;
 // that single-pass peak — deliberately conservative: over-estimating hides a borderline size (safe),
 // under-estimating would offer one that OOMs. When generate-lane tiled decode lands upstream this
 // coefficient can be relaxed toward the ~7 GB/MP tiled figure (qwen-image's tiled-VAE transient).
+//
+// GEOMETRY IS PART OF THE CONTRACT. Because this coefficient is applied to `pixels - BASELINE_PIXELS`,
+// whatever `floorGb` returns is asserted to be the peak AT 1536² — not at some other size. Any future
+// basis for `floorGb` has to be normalized to that geometry first; the per-tier measured footprints are
+// 1024² numbers and so are ~1.31 MP (≈17 GB) short of it. See `floorGb`.
 export const HIGHRES_TRANSIENT_GB_PER_MP = 13;
 
 // Parse a "WxH" bucket to its pixel count, or null when malformed.
@@ -47,9 +63,30 @@ function pixelsOf(resolution) {
   return width * height;
 }
 
-// The model's declared memory floor (GB) on the active backend, or null when it declares none. mlx =
-// unified-memory OS peak on a Mac; candle = discrete GPU VRAM. Both are the DEFAULT (lightest) tier's
-// ≤1536² peak — the value `useUnifiedMemoryGb` is budgeted against elsewhere for tier selection.
+// The model's memory floor (GB) on the active backend, or null when there is no basis to predict one.
+//
+// This is the model's BLANKET per-lane `minMemoryGb`, and it is deliberately still tier-blind. The
+// blanket integer must admit the heaviest INSTALLABLE tier, so it over-states the gate for a host that
+// only installed a lighter one — a real defect (a high-res bucket can be hidden that the installed tier
+// renders fine), and sc-15400 fixed exactly that shape of defect in the Simple Model Manager's label.
+//
+// It is NOT fixed here, because the per-tier measured peak is not a valid substitute for THIS value —
+// the two are not the same quantity:
+//
+//   * `floorGb`'s callers treat what it returns as the ≤1536² BASELINE peak, then ADD
+//     `HIGHRES_TRANSIENT_GB_PER_MP` for every megapixel above 1536². That is the contract the blanket
+//     integer satisfies (it is calibrated for the ≤1536² set — see SCOPE note 1).
+//   * `downloads[].footprint.peakMemoryBytes` is measured at 1024². The manifest states that verbatim
+//     for the measured entries ("Apple Silicon, 1024², fresh process"), and the candle probe harness is
+//     documented the same way in the schema's `candle` block.
+//
+// Substituting a 1024² peak for a 1536² baseline UNDER-states every >1536² bucket by the transient the
+// formula then never accounts for: ~(2.36 − 1.05) MP × 13 GB/MP ≈ 17 GB. Concretely, once epic 15448
+// measures krea_2_raw at ~22 GiB for q4, the measured basis would call 2048² a fit on a 64 GB Mac where
+// the calibrated blanket path requires a ~72 GB host. Offering a resolution that then OOMs is the one
+// failure direction this module exists to prevent, so the measured basis is HELD until the manifest
+// records each footprint's measurement geometry (or the read is restricted to models whose largest
+// bucket IS the measurement geometry). Tracked as sc-16020.
 function floorGb(model, backend) {
   const block = backend === "candle" ? model?.candle : model?.mlx;
   const gb = block?.minMemoryGb;
@@ -57,9 +94,9 @@ function floorGb(model, backend) {
 }
 
 // Predicted PEAK memory (GB) a generation at `resolution` needs for `model` on `backend`, or null when
-// it can't be predicted (malformed resolution, or the model declares no memory floor). At/below the
-// baseline this is just the floor (already the calibrated ≤1536² peak); above it, the floor plus the
-// per-megapixel transient for the extra pixels.
+// it can't be predicted (malformed resolution, or the model declares no memory floor on that lane).
+// At/below the baseline this is just the floor (already the calibrated ≤1536² peak); above it, the floor
+// plus the per-megapixel transient for the extra pixels.
 export function predictedResolutionPeakGb(model, resolution, backend) {
   const pixels = pixelsOf(resolution);
   const floor = floorGb(model, backend);
