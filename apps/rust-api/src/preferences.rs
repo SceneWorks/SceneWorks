@@ -19,7 +19,8 @@ use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const PREFERENCES_FILENAME: &str = "ui-preferences.json";
+// The filename lives in `sceneworks_core::app_paths::ui_preferences_file` — see
+// `preferences_path`. A second literal here is what made the cross-crate name drift possible.
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,8 +180,15 @@ const AUTO_GENERATION_QUALITY: &str = "auto";
 /// with the web `AUTO_GENERATION_QUALITY` default in `normalizeGenerationQuality`.
 const DEFAULT_GENERATION_QUALITY: &str = AUTO_GENERATION_QUALITY;
 
+/// The stored preference file.
+///
+/// Goes through `sceneworks_core::app_paths` rather than joining a local literal, because this file
+/// has a reader in ANOTHER crate: the worker reads `embedWorkflowInImages` off it at its PNG write
+/// seam (sc-15948). Two literals for one cross-crate file is a silent-failure shape — a drift in
+/// either would leave the worker reading a path that does not exist, which its reader resolves to
+/// "embedding ON" with no error and no log, forever.
 fn preferences_path(state: &AppState) -> PathBuf {
-    state.settings.config_dir.join(PREFERENCES_FILENAME)
+    sceneworks_core::app_paths::ui_preferences_file(&state.settings.config_dir)
 }
 
 fn load_preferences(path: &std::path::Path) -> UiPreferences {
@@ -504,6 +512,18 @@ mod tests {
 
         let parsed: UiPreferences = serde_json::from_str(&body).expect("deserialize");
         assert_eq!(parsed.embed_workflow_in_images, Some(false));
+
+        // The FILE, not only the field. This test used to pin the wire name while the two crates
+        // named the file with two separate literals, so a drift in either would have left the
+        // worker opening a path that does not exist — which its reader resolves to "embedding ON",
+        // with no error and no log. `preferences_path` now builds the path from this same helper,
+        // and this pins the name the two crates share.
+        let config = std::path::Path::new("config-dir");
+        assert_eq!(
+            sceneworks_core::app_paths::ui_preferences_file(config),
+            config.join("ui-preferences.json"),
+            "the worker finds this preference by opening this exact filename"
+        );
     }
 
     #[test]

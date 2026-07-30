@@ -83,22 +83,33 @@ struct WorkerVisiblePreferences {
 
 /// Whether a generated PNG should carry the sanitized workflow envelope (epic 15945, sc-15948).
 ///
-/// **Defaults to `true`**, and every failure mode resolves to the default: no config dir, no file,
-/// a truncated file, a file that is not JSON, or the key absent. A feature whose whole point is
-/// that a shared image reloads its recipe is worthless off by default, and a user who does not want
-/// it should have to find the switch once rather than opt in forever (sc-15953 owns that switch and
-/// the first-run disclosure).
+/// **Defaults to `true` when the preference is ABSENT** — no config dir, no file, valid JSON with
+/// the key missing, or a body that is not JSON at all. A feature whose whole point is that a shared
+/// image reloads its recipe is worthless off by default, and a user who does not want it should have
+/// to find the switch once rather than opt in forever (sc-15953 owns that switch and the first-run
+/// disclosure).
+///
+/// **Fails CLOSED on any other I/O error.** "Absent" and "unreadable" are not the same state, and
+/// collapsing them is how an explicit opt-out silently inverts itself: a user who deliberately
+/// turned embedding off would start embedding again the first time an antivirus scanner held the
+/// file open or an ACL glitched. The envelope is sanitized, but it still carries their prompt, their
+/// model and their LoRA repos — exactly what someone who turned it off was protecting. A transient
+/// read failure costs one image with no chunk; the other direction costs a disclosure they refused.
 ///
 /// Read at the WRITE SEAM rather than cached at worker startup, so flipping the toggle takes effect
 /// on the next image instead of the next launch — the same live-handoff shape as
-/// [`gpu_memory_limit_file`]. The cost is one small file read per encoded image, against tens of
-/// milliseconds of PNG encode.
+/// [`gpu_memory_limit_file`]. The cost is one small file read per JOB: the worker resolves this once
+/// and the answer rides on the image plan (`ImagePlan::workflow_source`), so a 12-image batch reads
+/// it once, against tens of milliseconds of PNG encode per image.
 #[must_use]
 pub fn embed_workflow_in_images(config_dir: &Path) -> bool {
-    std::fs::read_to_string(ui_preferences_file(config_dir))
-        .as_deref()
-        .map(embed_workflow_in_images_from_json)
-        .unwrap_or(true)
+    match std::fs::read_to_string(ui_preferences_file(config_dir)) {
+        Ok(body) => embed_workflow_in_images_from_json(&body),
+        // No preference file (and no config dir — Windows maps a missing parent to `NotFound`
+        // too) is the fresh-install shape: default ON.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 /// [`embed_workflow_in_images`] against an already-read preference file body.
@@ -201,12 +212,16 @@ mod tests {
         assert!(paths.cache_dir.is_dir());
     }
 
-    /// Every way the preference file can fail to answer must resolve to ON (sc-15948). A user who
-    /// has never opened Settings, an install whose config dir does not exist yet, and a file
-    /// half-written by a crashed process all have to embed — the alternative is a feature that
-    /// silently does nothing on a fresh install.
+    /// An ABSENT preference defaults ON (sc-15948): a user who has never opened Settings and an
+    /// install whose config dir does not exist yet both have to embed, or the feature silently
+    /// does nothing on a fresh install.
+    ///
+    /// Deliberately separate from [`embedding_fails_closed_when_the_file_cannot_be_read`]. These
+    /// were one test bundling "missing" with "unreadable", and that bundling is precisely what hid
+    /// the distinction that matters: absence is a default, an I/O error is a failure, and they must
+    /// not resolve the same way.
     #[test]
-    fn embedding_defaults_on_through_every_unreadable_case() {
+    fn embedding_defaults_on_when_the_preference_is_absent() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config = temp.path();
 
@@ -219,6 +234,8 @@ mod tests {
             "a missing preference file must default ON"
         );
 
+        // A file that answers nothing — unparseable, or parseable with the key absent or the wrong
+        // type — is also an absent PREFERENCE, not a failure to read. It defaults ON.
         for body in [
             "",
             "{",
@@ -232,6 +249,37 @@ mod tests {
             std::fs::write(ui_preferences_file(config), body).expect("writes");
             assert!(embed_workflow_in_images(config), "{body:?} must default ON");
         }
+    }
+
+    /// An I/O error that is NOT "absent" fails CLOSED (sc-15948).
+    ///
+    /// The real-world causes are an antivirus scanner holding the file open, an ACL change, or a
+    /// half-migrated profile. Whatever the cause, the last thing the user SAID may have been "do not
+    /// embed", and a transient read error must not overturn it — the envelope carries their prompt,
+    /// model and LoRA repos.
+    ///
+    /// A directory where the file belongs is the portable way to force a non-`NotFound` error:
+    /// Windows refuses to open a directory for reading (`PermissionDenied`), and Unix opens it and
+    /// then fails the read (`EISDIR`). Either way it is an `Err` that is not `NotFound`.
+    #[test]
+    fn embedding_fails_closed_when_the_file_cannot_be_read() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = temp.path();
+        let preference_path = ui_preferences_file(config);
+        std::fs::create_dir_all(&preference_path).expect("creates a directory in the file's place");
+
+        let error = std::fs::read_to_string(&preference_path)
+            .expect_err("reading a directory as a file must fail");
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "this test only means something if the forced error is NOT the absent case: {error}"
+        );
+        assert!(
+            !embed_workflow_in_images(config),
+            "an unreadable preference file must fail CLOSED — a user who turned embedding off must \
+             not start embedding again because of a transient read error"
+        );
     }
 
     #[test]

@@ -1248,16 +1248,34 @@ pub(crate) struct ImagePlan {
 /// * there is no payload to describe. A stub or dry-run write with an empty payload has nothing to
 ///   say about how the image was made, and an envelope of bare fallbacks is worse than no chunk —
 ///   so absence is an absence, never an error.
+///
+/// Each branch logs its reason at `debug`. Collapsing the two into one `Option` is right for the
+/// callers — both mean "write the file exactly as today" — but it leaves "there is no chunk in this
+/// PNG" with two indistinguishable causes, and a user asking why an image has no recipe needs to
+/// know whether they turned it off or the payload was empty. One line each is the whole diagnostic.
 pub(crate) fn workflow_source(
     settings: &Settings,
     job_payload: &JsonObject,
 ) -> Option<Arc<JsonObject>> {
     if job_payload.is_empty() {
+        tracing::debug!(
+            reason = "empty_job_payload",
+            "not embedding a workflow: the job carries no payload to describe"
+        );
         return None;
     }
     if !sceneworks_core::app_paths::embed_workflow_in_images(&settings.config_dir) {
+        tracing::debug!(
+            reason = "preference_off",
+            config_dir = %settings.config_dir.display(),
+            "not embedding a workflow: `embedWorkflowInImages` did not resolve to true"
+        );
         return None;
     }
+    tracing::debug!(
+        keys = job_payload.len(),
+        "embedding the sanitized workflow in every image this job writes"
+    );
     Some(Arc::new(job_payload.clone()))
 }
 
@@ -1351,6 +1369,71 @@ pub(crate) fn detail_workflow_share(
             height: Some(height),
         },
         job_payload,
+    )
+}
+
+/// The workflow envelope for the STANDALONE `image_upscale` job (sc-15948).
+///
+/// The fourth write seam, and the one carrying the asset class users share most: `single_child_asset.rs`
+/// wrote this PNG with a bare `save_with_format` and no chunk at all, so an upscaled image — the
+/// version people actually post — was the one image in the app with no recipe inside it. The story's
+/// rule for a derived pass is "where the pass is a distinct job, use that job's payload", and this is
+/// exactly that: its own `JobType::ImageUpscale` row with its own payload.
+///
+/// So, like [`detail_workflow_share`] and unlike [`upscaled_workflow_share`], nothing is inherited
+/// from whatever generated the source image. There is no prompt and no model in an upscale — the
+/// "model" IS the engine that ran — and `sourceAssetId` rides as an input SHAPE rather than as a
+/// local id.
+///
+/// The pass is the APPLIED one: `engine_id` has already been canonicalized and validated by the
+/// caller (`real-esrgan` / `seedvr2`; the dropped `aura-sr` is rejected outright) and `factor` has
+/// already been through `resolve_image_upscale_factor`, so what lands here cannot name an engine that
+/// does not exist or a factor nobody offers. `softness` is SeedVR2's knob and is `None` for
+/// Real-ESRGAN, which ignores it — recording `softness: 0.0` on an engine that has no such control
+/// would be inventing a fact.
+///
+/// Geometry is the SOURCE image's, matching [`upscaled_workflow_share`]: the envelope is a recipe, so
+/// "this 1024² image, upscaled 2x" is what reproduces the file, where the written 2048² would read as
+/// an instruction to upscale something already upscaled.
+///
+/// Compiled under `test` on every platform (unlike `upscale_jobs.rs`, which needs an upscaler
+/// backend) so the contract is tested on every build rather than only where candle or MLX compiles.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn standalone_upscale_workflow_share(
+    job_payload: &JsonObject,
+    engine_id: &str,
+    factor: u8,
+    softness: Option<f32>,
+    seed: i64,
+    source_width: u32,
+    source_height: u32,
+) -> sceneworks_core::workflow_share::WorkflowShare {
+    let mut upscale = json!({ "enabled": true, "engine": engine_id, "factor": factor });
+    if let Some(softness) = softness {
+        upscale["softness"] = json!(softness);
+    }
+    // `upscale` is the only key overlaid: the job payload's own `factor` / `engine` are the
+    // REQUESTED values and are not envelope fields, so the record built here is the only thing that
+    // describes the pass.
+    let mut overlay = job_payload.clone();
+    overlay.insert("upscale".to_owned(), upscale);
+    build_workflow_share_from(
+        &WorkflowAssetFacts {
+            mode: "image_upscale".to_owned(),
+            // The engine IS the model for this pass. The payload carries no `model` key (see
+            // `buildUpscaleJobBody`), so this is what travels.
+            model: engine_id.to_owned(),
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            seed,
+            width: Some(source_width),
+            height: Some(source_height),
+        },
+        &overlay,
     )
 }
 
@@ -1448,7 +1531,7 @@ pub(crate) fn write_image_asset(
     // workflow needs embedding (epic 15945, sc-15948). `None` — embedding off, or no payload to
     // describe — routes through the same `save_with_format` call this used to make, byte for byte.
     let share = plan.workflow_source.as_deref().map(|payload| {
-        build_workflow_share_from(
+        let mut share = build_workflow_share_from(
             &WorkflowAssetFacts {
                 mode: request.mode.clone(),
                 model: request.model.clone(),
@@ -1460,7 +1543,17 @@ pub(crate) fn write_image_asset(
                 height: Some(height),
             },
             payload,
-        )
+        );
+        // This function only ever writes a BASE render. The inline-upscale post-pass writes its
+        // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
+        // `upscale.enabled: true` from the request would describe, on this file, a pass this file
+        // never received — and describe it in the REQUESTED terms, which `apply_inline_upscale`
+        // then clamps (factor to 2/4) and normalizes (a dropped engine to `real-esrgan`). Naming a
+        // dropped engine at an unoffered factor is worse than saying nothing: sc-15952 prefills the
+        // studio from this. The variant's own envelope carries the pass that actually ran, which is
+        // the same reasoning `upscaled_workflow_share` applies from the other side.
+        share.upscale = None;
+        share
     });
     write_workflow_chunk(&rgb_image, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;

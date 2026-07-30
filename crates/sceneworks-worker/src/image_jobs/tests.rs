@@ -352,10 +352,9 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
     assert_eq!((share.width, share.height), (Some(320), Some(256)));
     assert_eq!(share.style_preset.as_deref(), Some("cinematic"));
     assert_eq!(share.fit_mode.as_deref(), Some("pad"));
-    assert_eq!(
-        share.upscale.as_ref().map(|upscale| upscale.enabled),
-        Some(true)
-    );
+    // The payload asked for an inline upscale, but THIS file is the base render — see
+    // `the_base_image_of_an_inline_upscale_describes_no_upscale_pass`.
+    assert_eq!(share.upscale, None);
     assert_eq!(
         share.loras.first().and_then(|lora| lora.repo.as_deref()),
         Some("acme/film-grain")
@@ -549,6 +548,72 @@ fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
     geometry_less.remove("height");
     let share = upscaled_workflow_share(&req, &base_fact, &geometry_less, &applied);
     assert_eq!((share.width, share.height), (Some(320), Some(256)));
+}
+
+/// The BASE image of an inline-upscale generation must not describe a pass it never received
+/// (sc-15948).
+///
+/// `apply_inline_upscale` keeps the base render as its own retained asset and appends the upscaled
+/// variant beside it, so an inline-upscale generation ships TWO files. `write_image_asset` embeds the
+/// raw request payload, which means the base file used to claim `upscale.enabled: true` — and claim
+/// it in the REQUESTED terms, which the pass then clamps (`factor` to 2 or 4) and normalizes (the
+/// dropped `aura-sr` to `real-esrgan`). The hostile request below asks for `aura-sr` at 3x: neither
+/// exists, and the base image was never upscaled at all, so a base envelope echoing them named a
+/// dropped engine at an unoffered factor on a file that received no pass. sc-15952 prefills the
+/// studio from this.
+///
+/// The two halves are asserted together on one generation, because "drop it from the base" is only
+/// right if the variant still carries it — otherwise the pass would go unrecorded everywhere.
+#[test]
+fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut payload = embed_payload();
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let base_fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
+
+    let media = project_path.join(base_fact["mediaPath"].as_str().unwrap());
+    let base = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("the base image still carries its own workflow");
+    assert_eq!(
+        base.upscale, None,
+        "the base render received no upscale pass, so its envelope must not describe one"
+    );
+    // Not merely absent from the typed field — absent from the FILE. A serialized `"upscale"` key
+    // would still reach sc-15952's prefill.
+    let text = serde_json::to_string(&base).unwrap();
+    for fragment in ["upscale", "aura-sr"] {
+        assert!(
+            !text.contains(fragment),
+            "{fragment:?} must not appear in the base image's envelope: {text}"
+        );
+    }
+    // Everything else about the base render is untouched.
+    assert_eq!(base.prompt, "Mist over hills");
+    assert_eq!(base.seed, Some(100));
+    assert_eq!((base.width, base.height), (Some(320), Some(256)));
+
+    // The derived variant is where the pass lives, in APPLIED terms: `apply_inline_upscale` clamps
+    // 3 to 2 and normalizes `aura-sr` to `real-esrgan` before upscaling.
+    let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
+    let variant = upscaled_workflow_share(&req, &base_fact, &payload, &applied);
+    let upscale = variant
+        .upscale
+        .as_ref()
+        .expect("the variant records the pass");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.engine.as_deref(), Some("real-esrgan"));
+    assert_eq!(upscale.factor, Some(2));
 }
 
 /// The detail pass has its OWN job payload, so its envelope describes the refine — not the

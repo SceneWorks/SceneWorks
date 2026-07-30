@@ -75,10 +75,13 @@ mod asset_media;
 mod image_sampling;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
-// compile an otherwise dead helper.
+// compile an otherwise dead helper — plus `test`, because this seam is where the standalone
+// upscale's embedded workflow is written (sc-15948) and that contract should be asserted on every
+// lane rather than only where an upscaler backend compiles. The non-test build is unchanged.
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
 ))]
 mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
