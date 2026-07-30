@@ -1489,7 +1489,7 @@
       // residency is higher even at the same resolution. Q4 brings this within tighter Mac
       // budgets via advanced.mlxQuantize.
       "mlx": {
-        "minMemoryGb": 20,
+        "minMemoryGb": 48,
         // q4/ default tier (sc-8670); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
         "quantize": 4,
         "limits": {
@@ -1504,7 +1504,7 @@
       // sequentialPeakGb row. Packed q4/q8 strict-control loading is owned by sc-16170;
       // those control cells remain unverified rather than borrowing the base measurements.
       "candle": {
-        "minMemoryGb": 48,
+        "minMemoryGb": 20,
         "vramGbByTier": { "q4": 17.9, "q8": 23.3, "bf16": 40.6 },
         "measured": true
       },
@@ -3944,7 +3944,7 @@
         // GB runtime peak (E8-2, largely activation-bound), so minMemoryGb 64 with headroom. The
         // `base-bf16/` subfolder is the full-precision opt-in; its selection path is wired with worker
         // routing (sc-6399).
-        "minMemoryGb": 29,
+        "minMemoryGb": 64,
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
@@ -6134,7 +6134,7 @@
       // sequentialPeakGb row is declared. Packed q4/q8 conditioned loading is owned by
       // sc-16171; its matrix cells remain unverified rather than borrowing base evidence.
       "candle": {
-        "minMemoryGb": 64,
+        "minMemoryGb": 29,
         "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },
         "measured": true
       },
