@@ -122,6 +122,8 @@ use assets::{
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
+mod workflows;
+use workflows::inspect_workflow;
 // Test-only crate-root imports: the `tests` module reaches these helpers via
 // `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
 // Gating them keeps the non-test build warning-free — they have no non-test
@@ -350,6 +352,10 @@ const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 thread_local! {
     static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // sc-15950: same override, same reasoning, for `POST /api/v1/workflows/inspect`. The real cap
+    // is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the oversized-body branch is only
+    // reachable through a lowered cap.
+    static TEST_MAX_WORKFLOW_INSPECT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
 static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
@@ -1395,6 +1401,15 @@ fn create_app_with_state_mode(
                 // limit; re-attach it per-route since the router default is now the
                 // small JSON cap. GET has no body, so this is harmless for listing.
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // sc-15950: read a shared image's embedded workflow WITHOUT creating an asset. Registered
+        // beside the asset routes because it shares their multipart shape and staging area, but it
+        // is deliberately not project-scoped — it mutates nothing, so there is nothing to scope.
+        // Same auth posture as the upload route above; the large per-route limit is re-attached
+        // for the same reason (the router default is the small JSON cap).
+        .route(
+            "/api/v1/workflows/inspect",
+            post(inspect_workflow).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
