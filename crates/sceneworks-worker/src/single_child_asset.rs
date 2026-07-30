@@ -191,7 +191,8 @@ mod tests {
             4242,
             320,
             256,
-        );
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
 
         let image =
             DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([12, 34, 56])));
@@ -262,7 +263,8 @@ mod tests {
             0,
             512,
             512,
-        );
+        )
+        .expect("a fixture envelope is far under the recording ceiling");
         let upscale = share.upscale.as_ref().expect("the pass is recorded");
         assert_eq!(upscale.engine.as_deref(), Some("real-esrgan"));
         assert_eq!(upscale.factor, Some(4));

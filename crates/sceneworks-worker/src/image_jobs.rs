@@ -25,7 +25,7 @@ use super::*;
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::workflow_png::write_workflow_chunk;
-use sceneworks_core::workflow_share::{build_workflow_share_from, WorkflowAssetFacts};
+use sceneworks_core::workflow_share::{embeddable_workflow_share, WorkflowAssetFacts};
 use std::sync::Arc;
 
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
@@ -1306,7 +1306,7 @@ pub(crate) fn upscaled_workflow_share(
     base_fact: &JsonObject,
     job_payload: &JsonObject,
     upscale_record: &Value,
-) -> sceneworks_core::workflow_share::WorkflowShare {
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
     let base_u32 = |key: &str| {
         base_fact
             .get(key)
@@ -1320,7 +1320,7 @@ pub(crate) fn upscaled_workflow_share(
     // describing one generation cannot disagree about the render that produced it. The base fact
     // supplies the geometry fallback for a payload that omitted it, which is the actual written
     // size of the image this variant was upscaled FROM.
-    build_workflow_share_from(
+    embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: request.mode.clone(),
             model: request.model.clone(),
@@ -1357,8 +1357,8 @@ pub(crate) fn detail_workflow_share(
     seed: i64,
     width: u32,
     height: u32,
-) -> sceneworks_core::workflow_share::WorkflowShare {
-    build_workflow_share_from(
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
+    embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: "image_detail".to_owned(),
             model: model.to_owned(),
@@ -1411,7 +1411,7 @@ pub(crate) fn standalone_upscale_workflow_share(
     seed: i64,
     source_width: u32,
     source_height: u32,
-) -> sceneworks_core::workflow_share::WorkflowShare {
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
     let mut upscale = json!({ "enabled": true, "engine": engine_id, "factor": factor });
     if let Some(softness) = softness {
         upscale["softness"] = json!(softness);
@@ -1421,7 +1421,7 @@ pub(crate) fn standalone_upscale_workflow_share(
     // describes the pass.
     let mut overlay = job_payload.clone();
     overlay.insert("upscale".to_owned(), upscale);
-    build_workflow_share_from(
+    embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: "image_upscale".to_owned(),
             // The engine IS the model for this pass. The payload carries no `model` key (see
@@ -1530,8 +1530,8 @@ pub(crate) fn write_image_asset(
     // The one funnel every generated image goes through, and therefore the one place the sanitized
     // workflow needs embedding (epic 15945, sc-15948). `None` — embedding off, or no payload to
     // describe — routes through the same `save_with_format` call this used to make, byte for byte.
-    let share = plan.workflow_source.as_deref().map(|payload| {
-        let mut share = build_workflow_share_from(
+    let share = plan.workflow_source.as_deref().and_then(|payload| {
+        let mut share = embeddable_workflow_share(
             &WorkflowAssetFacts {
                 mode: request.mode.clone(),
                 model: request.model.clone(),
@@ -1543,7 +1543,7 @@ pub(crate) fn write_image_asset(
                 height: Some(height),
             },
             payload,
-        );
+        )?;
         // This function only ever writes a BASE render. The inline-upscale post-pass writes its
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
         // `upscale.enabled: true` from the request would describe, on this file, a pass this file
@@ -1553,7 +1553,7 @@ pub(crate) fn write_image_asset(
         // studio from this. The variant's own envelope carries the pass that actually ran, which is
         // the same reasoning `upscaled_workflow_share` applies from the other side.
         share.upscale = None;
-        share
+        Some(share)
     });
     write_workflow_chunk(&rgb_image, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
@@ -1800,7 +1800,7 @@ fn write_upscaled_asset(
     let share = plan
         .workflow_source
         .as_deref()
-        .map(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
     write_workflow_chunk(upscaled, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {

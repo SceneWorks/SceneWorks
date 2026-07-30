@@ -583,7 +583,7 @@ pub(crate) async fn run_image_detail_job(
     // This pass is its own job with its own payload, so the embedded workflow describes the REFINE
     // (its own prompt, backbone, seed, strength and cnScale) and inherits nothing from the
     // generation that produced the source image — see `detail_workflow_share` (sc-15948).
-    let share = workflow_source(settings, &job.payload).map(|payload| {
+    let share = workflow_source(settings, &job.payload).and_then(|payload| {
         detail_workflow_share(
             &payload,
             &model,

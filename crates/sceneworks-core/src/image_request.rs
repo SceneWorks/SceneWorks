@@ -50,7 +50,10 @@ const DEFAULT_COUNT: u32 = 4;
 /// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
 /// still unread (sc-12335 — a menu, and a separate question from this default).
 const MIN_COUNT: u32 = 1;
-const MAX_COUNT: u32 = 8;
+/// `pub(crate)` so `workflow_share`'s pose budget can be derived from it rather than restate it:
+/// a pose set is the pose lane's batch size (one image per pose), so this is the ceiling it is
+/// measured against.
+pub(crate) const MAX_COUNT: u32 = 8;
 
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
