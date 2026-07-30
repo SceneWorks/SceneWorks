@@ -1,23 +1,16 @@
 use super::*;
 
 #[test]
-fn krea_control_geometry_refusal_is_structured_and_never_suggests_an_unverified_size() {
-    let fit = include_str!("../krea_control_fit.rs");
-    let worker = include_str!("krea_control_candle.rs");
-    assert!(fit.contains("pub(crate) struct KreaGeometryRefusal"));
-    assert!(fit.contains("requested_width"));
-    assert!(fit.contains("requested_height"));
-    assert!(fit.contains("verified_alternative"));
-    assert!(worker.contains("\"event\": \"krea_control_geometry_refused\""));
-    assert!(worker.contains("\"refusalReason\": refusal.reason"));
-    assert!(worker.contains("\"requestedGeometry\""));
-    assert!(worker.contains("\"width\": refusal.requested_width"));
-    assert!(worker.contains("\"height\": refusal.requested_height"));
-    assert!(worker.contains("\"verifiedAlternative\": refusal"));
+fn krea_control_refusal_paths_preserve_provider_fields_and_never_invent_geometry_advice() {
+    let mlx = include_str!("krea_control.rs");
+    assert!(mlx.contains("crate::classify_engine_error(\"Krea control generation failed\", error)"));
+
+    let candle = include_str!("krea_control_candle.rs");
     assert!(
-        !worker.contains("Lower the output resolution"),
-        "control refusal must not name a geometry or strategy without a current verified record"
+        !candle.contains("Lower the output resolution"),
+        "tier-only Candle fit evidence must not be relabeled as geometry evidence"
     );
+    assert!(!candle.contains("krea_control_geometry_refused"));
 }
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{

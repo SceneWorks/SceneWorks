@@ -79,10 +79,56 @@ pub(crate) fn task_join_error(label: &str, error: tokio::task::JoinError) -> Wor
 /// message text INTACT, rather than burying it in an opaque [`WorkerError::Engine`]. Everything else
 /// stays [`WorkerError::Engine`]. `context` prefixes the message so the origin (load vs generate)
 /// stays legible, matching the existing `format!("{context}: {error}")` seams.
+fn geometry_refusal_event(
+    context: &str,
+    reason: &str,
+    requested_width: u32,
+    requested_height: u32,
+    alternative: Option<(u32, u32)>,
+) -> Value {
+    json!({
+        "event": "generation_geometry_refused",
+        "context": context,
+        "refusalReason": reason,
+        "requestedGeometry": {
+            "width": requested_width,
+            "height": requested_height,
+        },
+        "verifiedAlternative": alternative
+            .map(|(width, height)| json!({ "width": width, "height": height })),
+    })
+}
+
 pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> WorkerError {
     match error {
         gen_core::Error::Unsupported(_) => {
             WorkerError::InvalidPayload(format!("{context}: {error}"))
+        }
+        gen_core::Error::GeometryRefused {
+            reason,
+            requested_width,
+            requested_height,
+            alternative,
+        } => {
+            emit_event_value(
+                Level::WARN,
+                geometry_refusal_event(
+                    context,
+                    &reason,
+                    requested_width,
+                    requested_height,
+                    alternative,
+                ),
+            );
+            let verified_alternative = alternative.map_or_else(
+                || "none available".to_owned(),
+                |(width, height)| format!("{width}x{height}"),
+            );
+            WorkerError::InvalidPayload(format!(
+                "{context}: geometry refused: {reason}; requested \
+                 {requested_width}x{requested_height}; verified alternative: \
+                 {verified_alternative}"
+            ))
         }
         other => WorkerError::Engine(format!("{context}: {other}")),
     }
@@ -93,6 +139,40 @@ pub type WorkerResult<T> = Result<T, WorkerError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+
+    #[derive(Default)]
+    struct PayloadVisitor {
+        payload: Option<Value>,
+    }
+
+    impl Visit for PayloadVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if field.name() == "sw_payload" {
+                self.payload = serde_json::from_str(&format!("{value:?}")).ok();
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCapture(Arc<Mutex<Vec<(Level, Value)>>>);
+
+    impl<S: Subscriber> Layer<S> for EventCapture {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut visitor = PayloadVisitor::default();
+            event.record(&mut visitor);
+            if let Some(payload) = visitor.payload {
+                self.0
+                    .lock()
+                    .expect("event capture lock")
+                    .push((*event.metadata().level(), payload));
+            }
+        }
+    }
 
     // sc-10051 / epic 10043: at the new mlx-gen rev, the Wan load path rejects a LoHa adapter on a
     // packed (quantized) base with a typed `gen_core::Error::Unsupported` carrying an actionable
@@ -140,5 +220,39 @@ mod tests {
             matches!(classified, WorkerError::Engine(_)),
             "a generic engine failure must stay WorkerError::Engine, got {classified:?}"
         );
+    }
+
+    #[test]
+    fn geometry_refusal_emits_current_none_alternative_and_preserves_user_fields() {
+        let captured = EventCapture::default();
+        let observed = captured.0.clone();
+        let subscriber = tracing_subscriber::registry().with(captured);
+        let classified = tracing::subscriber::with_default(subscriber, || {
+            classify_engine_error(
+                "Krea control generation failed",
+                gen_core::Error::GeometryRefused {
+                    reason: "measured infeasible".to_owned(),
+                    requested_width: 1536,
+                    requested_height: 1024,
+                    alternative: None,
+                },
+            )
+        });
+
+        let events = observed.lock().expect("event capture lock");
+        assert_eq!(events.len(), 1, "the refusal must emit exactly one event");
+        let (level, event) = &events[0];
+        assert_eq!(*level, Level::WARN);
+        assert_eq!(event["event"], "generation_geometry_refused");
+        assert_eq!(event["refusalReason"], "measured infeasible");
+        assert_eq!(event["requestedGeometry"]["width"], 1536);
+        assert_eq!(event["requestedGeometry"]["height"], 1024);
+        assert_eq!(event["verifiedAlternative"], Value::Null);
+
+        let WorkerError::InvalidPayload(message) = classified else {
+            panic!("typed geometry refusal must be user-facing: {classified:?}");
+        };
+        assert!(message.contains("requested 1536x1024"));
+        assert!(message.contains("verified alternative: none available"));
     }
 }

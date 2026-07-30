@@ -344,7 +344,9 @@ fn krea_control_generate_one(
     };
     let output = generator
         .generate(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("Krea control generation failed: {error}")))?;
+        .map_err(|error| {
+            crate::classify_engine_error("Krea control generation failed", error)
+        })?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
