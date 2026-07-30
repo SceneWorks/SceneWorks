@@ -27,7 +27,7 @@
 //      a "resident + constant" measurement artifact) — so peak = resident + a fixed addend, not ×N.
 // The suggestion therefore budgets against PEAK (the real ceiling a generation must fit).
 
-import { tierQuantize } from "./quantTier.js";
+import { installedTiers, tierQuantize } from "./quantTier.js";
 
 // Fidelity order, HIGHEST first. The suggestion walks this list and picks the first tier that both
 // exists on the model AND fits memory; bf16 is preferred, then q8, then q4 (the smallest, always-fits
@@ -101,6 +101,97 @@ export function variantFootprintBytes(variant) {
 
 function numberOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Per-tier MEASURED memory floor (sc-15400)
+//
+// `mlx.minMemoryGb` / `candle.minMemoryGb` is a SINGLE per-model integer, so it must admit the model's
+// heaviest INSTALLABLE tier. That over-states the requirement for every user who only installed a
+// lighter one: krea_realtime_14b is forced to 64 while its default q4 tier peaks at 27.90 GiB
+// (`downloads[].footprint.peakMemoryBytes` 29,957,689,344 — with q8 at 34.44 and bf16 at 46.71 GiB).
+// The per-download `footprint` blocks already carry the real ladder, so a consumer that knows WHICH
+// tier is in play should read the tier's measured peak and use the blanket integer only as a fallback.
+//
+// These helpers are MEASURED-ONLY on purpose. Unlike `variantFootprintBytes` — which falls back to a
+// resident/disk ESTIMATE so a download suggestion always has something to RANK — a memory FLOOR must
+// never be synthesized from a guess: a hand-calibrated blanket `minMemoryGb` is strictly better
+// evidence than a modelled estimate, so callers fall back to it instead of to the estimate.
+// ---------------------------------------------------------------------------------------------------
+
+// A single variant's MEASURED peak memory in GB (base 1024³, the same unit `variantFootprintBytes`
+// budgets in), or null when this tier has no measured `footprint.peakMemoryBytes`.
+export function measuredVariantPeakGb(variant) {
+  const peak = numberOrNull(variant?.footprint?.peakMemoryBytes);
+  return peak !== null && peak > 0 ? peak / BYTES_PER_GB : null;
+}
+
+// Declared quant tier → its catalog variant object. Only real bits-based tiers (bf16/q8/q4) — the
+// "default" pseudo-variant of a single-variant model and the non-quant "training" base are excluded, so
+// neither can ever be mistaken for a generation tier's footprint.
+function variantsByTier(model) {
+  return new Map(
+    (model?.variants ?? [])
+      .filter((variant) => tierQuantize(variant?.variant) !== null)
+      .map((variant) => [variant.variant, variant]),
+  );
+}
+
+// The MEASURED memory ceiling (GB) for the tier(s) `model` will actually run at, or null when no such
+// measurement exists (caller falls back to the blanket floor).
+//
+// `options.tier` — the tier actually selected for generation. When given, that tier's measurement is
+// used verbatim: it is the exact ceiling of the run about to happen.
+//
+// Without an explicit tier the ceiling is the MAX over the INSTALLED tiers, because a studio tier picker
+// can switch among them at will — and only when EVERY installed tier is measured. One unmeasured
+// installed tier means the set has no known bound, so we return null and keep the curated blanket floor.
+// This never UNDER-states the requirement, which matters: for a memory gate an under-estimate offers a
+// resolution (or hides a warning) that then OOMs, whereas an over-estimate is merely conservative.
+//
+// `options` also forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible).
+export function installedTierPeakGb(model, options = {}) {
+  const byTier = variantsByTier(model);
+  const explicit = typeof options.tier === "string" && options.tier ? options.tier : null;
+  if (explicit) {
+    return measuredVariantPeakGb(byTier.get(explicit));
+  }
+  const tiers = installedTiers(model, options);
+  if (tiers.length === 0) {
+    return null;
+  }
+  let ceiling = null;
+  for (const tier of tiers) {
+    const gb = measuredVariantPeakGb(byTier.get(tier));
+    if (gb === null) {
+      // An installed tier we have no measurement for — the set is unbounded, so defer to the blanket.
+      return null;
+    }
+    if (ceiling === null || gb > ceiling) {
+      ceiling = gb;
+    }
+  }
+  return ceiling;
+}
+
+// The CHEAPEST measured tier peak (GB) among the model's declared quant tiers, or null when none is
+// measured. This answers "what does it take to run this model AT ALL", which is the only honest per-tier
+// statement available for a model that is NOT installed yet: the catalog does not emit the manifest's
+// per-download `default` flag (see the `variant.default` note in quantTier.js `defaultTierSelection`), so
+// the client cannot know which tier a download will fetch — and it must not assume the lightest, because
+// 3 of the 53 shipped matrix models declare a heavier default (krea_2_raw / krea_2_turbo default to q8,
+// instantid_realvisxl to bf16).
+//
+// Callers MUST therefore present this as a FLOOR ("from N GB"), never as a specific tier's requirement.
+export function cheapestDeclaredTierPeakGb(model) {
+  let cheapest = null;
+  for (const variant of variantsByTier(model).values()) {
+    const gb = measuredVariantPeakGb(variant);
+    if (gb !== null && (cheapest === null || gb < cheapest)) {
+      cheapest = gb;
+    }
+  }
+  return cheapest;
 }
 
 // The model's real quant tiers (bf16/q8/q4), in fidelity order (highest first). Excludes the

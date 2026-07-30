@@ -17,8 +17,18 @@
 //      SenseNova, which already ships 2048² buckets) is left entirely unchanged: with no floor there
 //      is no basis to predict a peak, so the gate returns "fits". Only a model that BOTH declares a
 //      floor AND advertises >1536² buckets is affected — today that is exactly Krea 2 Raw / Turbo.
+//
+// PER-TIER BASIS (sc-15400). The blanket `minMemoryGb` is a single per-model integer that has to admit
+// the model's heaviest INSTALLABLE tier, so using it here made this a TIER-BLIND gate: a host that only
+// installed q4 was measured against the bf16 worst case and could have a high-res bucket hidden that its
+// installed tier renders fine. `floorGb` now prefers the tier's MEASURED peak
+// (`downloads[].footprint.peakMemoryBytes`) — the selected `tier` when the studio passes one, else the
+// ceiling over the INSTALLED tiers — and falls back to the blanket integer when the tier in play has no
+// measurement. Note this is currently INERT for Krea 2 Raw / Turbo: they are the only shipped models with
+// >1536² buckets AND a floor, and none of their tiers carry a measured footprint yet, so they keep the
+// blanket 48/32 until epic 15448 fills those in. The preference is what makes filling them in take effect.
 
-import { MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
+import { MEMORY_HEADROOM_FRACTION, installedTierPeakGb } from "./tierSuggestion.js";
 
 // The historical resolution ceiling (pixels). Every bucket at/below this was shipped before sc-13959
 // and stays unconditionally offered (SCOPE note 1). 1536×1536 = 2,359,296 px ≈ 2.36 MP.
@@ -47,10 +57,25 @@ function pixelsOf(resolution) {
   return width * height;
 }
 
-// The model's declared memory floor (GB) on the active backend, or null when it declares none. mlx =
-// unified-memory OS peak on a Mac; candle = discrete GPU VRAM. Both are the DEFAULT (lightest) tier's
-// ≤1536² peak — the value `useUnifiedMemoryGb` is budgeted against elsewhere for tier selection.
-function floorGb(model, backend) {
+// The model's memory floor (GB) for the tier in play on the active backend, or null when there is no
+// basis to predict one.
+//
+// PREFERS the per-tier MEASURED peak (`downloads[].footprint.peakMemoryBytes`, sc-15400) for the tier
+// this host will actually run — `tier` when the studio has an explicit pick, else the ceiling over the
+// INSTALLED tiers. The blanket `mlx`/`candle.minMemoryGb` is the FALLBACK: it is a single per-model
+// integer that must admit the heaviest INSTALLABLE tier, so it over-states the gate for a host that only
+// installed a lighter one, and this module used it as a tier-blind visibility gate — hiding a high-res
+// bucket a lighter installed tier would have rendered fine.
+//
+// Both bases are a PEAK compared under `MEMORY_HEADROOM_FRACTION`, so they are interchangeable here: the
+// measured peak is a raw MLX-active high-water mark and the 0.9 fraction supplies the OS/app headroom,
+// exactly as `tierSuggestion.tierFits` budgets it. (The blanket integers additionally bake in some of
+// their own headroom, which only makes the fallback the more conservative of the two.)
+function floorGb(model, backend, tier) {
+  const measured = installedTierPeakGb(model, tier ? { tier } : {});
+  if (measured !== null) {
+    return measured;
+  }
   const block = backend === "candle" ? model?.candle : model?.mlx;
   const gb = block?.minMemoryGb;
   return typeof gb === "number" && Number.isFinite(gb) && gb > 0 ? gb : null;
@@ -60,9 +85,12 @@ function floorGb(model, backend) {
 // it can't be predicted (malformed resolution, or the model declares no memory floor). At/below the
 // baseline this is just the floor (already the calibrated ≤1536² peak); above it, the floor plus the
 // per-megapixel transient for the extra pixels.
-export function predictedResolutionPeakGb(model, resolution, backend) {
+//
+// `tier` (optional) is the quant tier the studio has selected, so the floor comes from THAT tier's
+// measured footprint rather than the model's blanket worst-tier integer (sc-15400).
+export function predictedResolutionPeakGb(model, resolution, backend, tier = null) {
   const pixels = pixelsOf(resolution);
-  const floor = floorGb(model, backend);
+  const floor = floorGb(model, backend, tier);
   if (pixels == null || floor == null) {
     return null;
   }
@@ -78,7 +106,7 @@ export function predictedResolutionPeakGb(model, resolution, backend) {
 // must fit under the same headroom fraction the quant-tier gate uses (0.9), leaving the remainder for
 // the OS + other apps.
 export function resolutionFitsMemory(model, resolution, unifiedMemoryGb, options = {}) {
-  const { backend } = options;
+  const { backend, tier = null } = options;
   const pixels = pixelsOf(resolution);
   // (1) The historical ≤1536² set is always offered.
   if (pixels == null || pixels <= BASELINE_PIXELS) {
@@ -88,7 +116,7 @@ export function resolutionFitsMemory(model, resolution, unifiedMemoryGb, options
   if (unifiedMemoryGb == null || !Number.isFinite(unifiedMemoryGb)) {
     return true;
   }
-  const required = predictedResolutionPeakGb(model, resolution, backend);
+  const required = predictedResolutionPeakGb(model, resolution, backend, tier);
   // (3) No declared floor ⇒ no prediction ⇒ leave the model's buckets unchanged.
   if (required == null) {
     return true;

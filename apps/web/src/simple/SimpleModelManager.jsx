@@ -3,6 +3,7 @@ import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { cheapestDeclaredTierPeakGb, installedTierPeakGb } from "../tierSuggestion.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Model Manager (design handoff): a tabbed catalog (Image / Video / Utility /
@@ -152,9 +153,35 @@ function sizeLabel(entry) {
   return entry.downloadSizeEstimated ? `~${entry.downloadSizeLabel}` : entry.downloadSizeLabel;
 }
 
-// The model's declared memory floor, when it has one (mlx.minMemoryGb — the blanket
-// floor for its heaviest tier). Absent for models that declare none.
+// The model's memory requirement, PREFERRING the per-tier measured footprint over the blanket
+// `mlx.minMemoryGb` (sc-15400). That blanket integer is a single per-model value, so it must admit the
+// model's heaviest INSTALLABLE tier — showing it unconditionally over-warns every variant-matrix model
+// whose user only wants a lighter tier (z_image declares 48 while its measured q4 tier peaks at 19.42
+// GiB; krea_realtime_14b declares 64 against a 27.90 GiB q4). The advanced Models screen dodges this by
+// SUPPRESSING the badge for matrix models and deferring to its per-tier download panel
+// (ModelManagerScreen's `hasTierMatrix`); Simple has no such panel — "Manage" hands off to that screen —
+// so instead of hiding the number it shows the one that applies to the tier actually in play.
+//
+// Three cases, in order:
+//   1. Measured ceiling over the INSTALLED tiers ⇒ `needs N GB`. Exact: this is what is on disk.
+//   2. Not installed, and some declared tier is measured ⇒ `from N GB`. The client cannot know which
+//      tier Download will fetch (the catalog omits the manifest `default` flag, and 3 of the 53 matrix
+//      models default to a heavier tier than the lightest), so the honest statement is the ENTRY cost —
+//      which is also what a "can I use this model at all" decision needs. Deliberately worded as a
+//      floor, never as a specific tier's requirement.
+//   3. No per-tier measurement ⇒ the blanket floor, exactly as before. Covers every single-variant
+//      model and every matrix model epic 15448 has not measured yet.
 function needsLabel(model) {
+  const installedPeak = installedTierPeakGb(model);
+  if (installedPeak !== null) {
+    return `needs ${Math.ceil(installedPeak)} GB`;
+  }
+  if (model?.installState !== "installed") {
+    const cheapest = cheapestDeclaredTierPeakGb(model);
+    if (cheapest !== null) {
+      return `from ${Math.ceil(cheapest)} GB`;
+    }
+  }
   const floor = model?.mlx?.minMemoryGb;
   return Number.isFinite(floor) ? `needs ${floor} GB` : null;
 }
