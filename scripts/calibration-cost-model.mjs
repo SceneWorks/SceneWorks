@@ -307,10 +307,10 @@ export const COLLAPSING_AXES = [
   {
     axis: "overlay",
     verdict: "NOT collapsed for records; NOT collapsible for model loads in the shipped contract",
-    factor: "1 today (the 2.47 load ratio prices a capability that does not exist)",
+    factor: "1 today (the current amortised load ratio prices a capability that does not exist)",
     rule:
-      "3,925 of the 6,595 cells carry a non-`none` overlay, so this axis is 59.5% of the matrix. " +
-      "It does NOT collapse on the record axis: `overlay` is part of the cell key and of " +
+      "A material share of the current matrix carries a non-`none` overlay. It does NOT collapse " +
+      "on the record axis: `overlay` is part of the cell key and of " +
       "`record.target`, and `validateComplete` requires the `overlay` scenario to actually pass " +
       "(or carry a justified `not_applicable` reason) — a `none` record cannot certify a `lora` " +
       "cell. Nor does it collapse on the model-load axis: adapters are resolved at LOAD time into " +
@@ -333,7 +333,7 @@ export const COLLAPSING_AXES = [
       "shape: it assumes a runtime attach/detach operation that does not exist, and if it were " +
       "built naively it would produce inflated `none` baselines rather than a cheaper campaign. An " +
       "`identity` overlay (InstantID / PuLID) additionally materialises extra encoder weights, so " +
-      "even a real swap API would not make this axis uniformly free. The 3,925 records do not " +
+      "even a real swap API would not make this axis uniformly free. Those overlay records do not " +
       "evaporate under any of it.",
   },
   {
@@ -355,6 +355,31 @@ export const COLLAPSING_AXES = [
       "certify an edit_image cell.",
   },
 ];
+
+function collapsingAxesFor(census, runs) {
+  const overlayCells = census.total - (census.byOverlay.none ?? 0);
+  const overlayShare = round((overlayCells / census.total) * 100, 1);
+  return COLLAPSING_AXES.map((axis) => {
+    if (axis.axis !== "overlay") return axis;
+    return {
+      ...axis,
+      factor:
+        `1 today (the current ${runs.overlayLoadCollapseFactor}x amortised load ratio prices ` +
+        "a capability that does not exist)",
+      rule:
+        `${overlayCells} of the ${census.total} cells carry a non-\`none\` overlay, so this axis ` +
+        `is ${overlayShare}% of the matrix. ` +
+        axis.rule.replace(
+          "A material share of the current matrix carries a non-`none` overlay. ",
+          "",
+        ),
+      caveat: axis.caveat.replace(
+        "Those overlay records do not evaporate",
+        `The ${overlayCells} overlay records do not evaporate`,
+      ),
+    };
+  });
+}
 
 /**
  * PRODUCIBILITY. A cell nobody can currently measure is a different cost category from a cell that
@@ -1208,6 +1233,11 @@ export function kreaFitPrecedent(manifestJson) {
 export function rankUncertainties(prod) {
   const blocking = Object.fromEntries(prod.independentBlocking.map((entry) => [entry.id, entry]));
   const ranking = prod.blockerRanking;
+  const partitionTotal = prod.partition.reduce((sum, entry) => sum + entry.cells, 0);
+  const overlayFirstMatchShare = round(
+    (ranking.overlayChargedByFirstMatch / partitionTotal) * 100,
+    1,
+  );
 
   const codeGated = [
     {
@@ -1249,19 +1279,21 @@ export function rankUncertainties(prod) {
       input: "how much provider-adapter work the OVERLAY axis needs",
       why:
         `DEMOTED, and this is the correction that matters most in this document. The first-match ` +
-        `partition charges this gate ${ranking.overlayChargedByFirstMatch} cells (59.5% of the ` +
-        `matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on ` +
+        `partition charges this gate ${ranking.overlayChargedByFirstMatch} cells ` +
+        `(${overlayFirstMatchShare}% of the ${partitionTotal}-cell matrix), which previously made ` +
+        `it the #1 uncertainty. But it is the SOLE blocker on ` +
         `${ranking.overlayIndependentlyBlocking} of them: ${ranking.overlayAlsoBlockedByAdapterCoverage} ` +
         "are also blocked by having no adapter or no `complete` record at all. Scoping overlay " +
         `support in both adapters therefore moves ${ranking.overlayBindingAfterAdapterCoverage} cells, ` +
-        `not ${ranking.overlayChargedByFirstMatch}. It remains necessary work — 3,925 cells cannot be ` +
-        "certified without it — but it is not where the schedule is decided.",
+        `not ${ranking.overlayChargedByFirstMatch}. It remains necessary work — those ` +
+        `${ranking.overlayChargedByFirstMatch} cells cannot be certified without it — but it is ` +
+        "not where the schedule is decided.",
       howToResolve:
         "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note " +
         "that the load-side saving SC-16072 was expected to unlock is not available in the shipped " +
         "load contract at all (see the `overlay` axis above), so this work should be scoped for " +
-        "RECORD correctness, not for a 2.47x load saving. The related control-declaration omission " +
-        "is SC-16073.",
+        "RECORD correctness, not for a model-load reduction. Control coverage is now declared by " +
+        "CONTROL_LANE_MODELS and is not part of this remediation.",
       story: 16072,
     },
   ]
@@ -1490,7 +1522,7 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
       runUnitCitation: "scripts/memory-calibration-harness.mjs#runProviderPlan",
       requiredScenariosPerRecord: REQUIRED_SCENARIOS.length,
       requiredScenarios: [...REQUIRED_SCENARIOS].sort(),
-      axes: COLLAPSING_AXES,
+      axes: collapsingAxesFor(census, runs),
       shippedPlan: planProviders,
     },
     runs,

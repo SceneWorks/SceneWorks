@@ -70,6 +70,23 @@ test("control coverage follows CONTROL_LANE_MODELS, not backend measurement bloc
   );
 });
 
+test("published overlay prose derives its census and load ratio from the current matrix", async () => {
+  const model = await buildCostModel();
+  const overlayCells = model.cells.total - model.cells.byOverlay.none;
+  const overlayAxis = model.collapsing.axes.find((axis) => axis.axis === "overlay");
+  const overlayUncertainty = model.biggestUncertainties.find(
+    (entry) => entry.gate === "overlay-declined",
+  );
+
+  assert.match(overlayAxis.rule, new RegExp(`${overlayCells} of the ${model.cells.total} cells`));
+  assert.match(overlayAxis.factor, new RegExp(`${model.runs.overlayLoadCollapseFactor}x`));
+  assert.match(
+    overlayUncertainty.why,
+    new RegExp(`${model.producibility.blockerRanking.overlayChargedByFirstMatch} cells`),
+  );
+  assert.doesNotMatch(JSON.stringify(model), /3,925|6,595|2\.47x|SC-16073/);
+});
+
 /**
  * A small synthetic matrix with the shape that matters:
  *
