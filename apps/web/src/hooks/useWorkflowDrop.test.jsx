@@ -74,6 +74,15 @@ describe("useWorkflowDrop", () => {
     await act(async () => root.render(<Harness {...props} />));
   };
 
+  // Start a drop and let the prescreen (an async range read off the file) finish, WITHOUT waiting
+  // for the inspect it then starts — which is the state the abort tests need to observe.
+  const startDrop = async (file) => {
+    await act(async () => {
+      hook.handleDroppedFile(file);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     inspectWorkflowFile.mockReset();
@@ -98,7 +107,66 @@ describe("useWorkflowDrop", () => {
     expect(hook.offer?.report?.model?.state).toBe("resolved");
     const [sent, options] = inspectWorkflowFile.mock.calls[0];
     expect(sent.name).toBe("shared.png");
-    expect(options).toEqual({ projectId: "project_1", token: "t" });
+    expect(options.projectId).toBe("project_1");
+    expect(options.token).toBe("t");
+    // A cancellable upload: the endpoint stages up to 512 MiB before it reads a byte, so an
+    // abandoned inspect has to STOP rather than merely have its answer ignored.
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.signal.aborted).toBe(false);
+  });
+
+  it("aborts the in-flight inspect when a second drop supersedes it", async () => {
+    let firstSignal = null;
+    inspectWorkflowFile.mockImplementation(
+      (file, options) =>
+        new Promise((resolve) => {
+          if (!firstSignal) {
+            firstSignal = options.signal;
+            return; // never settles — the first upload is still running
+          }
+          resolve(workflowBody());
+        }),
+    );
+    await render({ projectId: "project_1", token: "t" });
+    await startDrop(pngFile("first.png"));
+    expect(firstSignal?.aborted).toBe(false);
+    await act(async () => {
+      await hook.handleDroppedFile(pngFile("second.png"));
+    });
+    expect(firstSignal.aborted).toBe(true);
+  });
+
+  it("aborts the in-flight inspect on unmount", async () => {
+    let signal = null;
+    inspectWorkflowFile.mockImplementation(
+      (file, options) =>
+        new Promise(() => {
+          signal = options.signal;
+        }),
+    );
+    await render({ projectId: "project_1", token: "t" });
+    await startDrop(pngFile());
+    expect(signal?.aborted).toBe(false);
+    // Unmount the harness (rather than the root, which afterEach still owns) — the cleanup
+    // effect is what has to abandon the request.
+    await act(async () => root.render(null));
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("aborts the in-flight inspect when the panel is dismissed", async () => {
+    let signal = null;
+    inspectWorkflowFile.mockImplementation(
+      (file, options) =>
+        new Promise(() => {
+          signal = options.signal;
+        }),
+    );
+    await render({ projectId: "project_1", token: "t" });
+    await startDrop(pngFile());
+    await act(async () => {
+      hook.dismiss();
+    });
+    expect(signal.aborted).toBe(true);
   });
 
   it("does nothing at all for an image with no workflow — the common case", async () => {

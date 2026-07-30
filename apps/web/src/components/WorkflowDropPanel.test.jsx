@@ -232,3 +232,147 @@ describe("WorkflowDropPanel", () => {
     expect(buttonByLabel("Close")).toBeTruthy();
   });
 });
+
+// The mark, and the verdict that counts it (sc-15951 review). A settings grid where
+// "PiD decoder — On" and "Steps — 28" look identical, when only one of them reaches a control,
+// tells the user a recipe replayed faithfully when it did not.
+describe("WorkflowDropPanel — what will not be restored", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const render = async (props) =>
+    act(async () =>
+      root.render(
+        <WorkflowDropPanel
+          canImport
+          importState={idleImport}
+          onDismiss={() => {}}
+          onImport={() => {}}
+          onUse={() => {}}
+          {...props}
+        />,
+      ),
+    );
+
+  const settingRow = (label) =>
+    [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+      node.textContent.startsWith(label),
+    );
+
+  it("marks the rows that reach no control, and leaves the applied ones unmarked", async () => {
+    await render({
+      offer: {
+        share: share({
+          advanced: {
+            steps: 28,
+            usePid: true,
+            cnScale: 0.4,
+            poses: [{ keypoints: [] }, { keypoints: [] }, { keypoints: [] }],
+          },
+        }),
+        report: report(),
+        error: "",
+      },
+    });
+
+    expect(settingRow("Steps").querySelector(".workflow-drop-setting-mark")).toBeNull();
+    expect(settingRow("PiD decoder").querySelector(".workflow-drop-setting-mark")).toBeNull();
+    expect(settingRow("Tile ControlNet").textContent).toContain("not restored");
+    expect(settingRow("Poses").textContent).toContain("3 poses");
+    expect(settingRow("Poses").textContent).toContain("not restored");
+  });
+
+  it("folds them into the verdict, so a fully installed recipe still reads as lossy", async () => {
+    await render({
+      offer: {
+        share: share({ advanced: { steps: 28, poses: [{ keypoints: [] }] } }),
+        report: report(),
+        error: "",
+      },
+    });
+
+    // The report itself is clean — the model is installed and nothing was omitted — so without
+    // this clause the panel would say "Everything this recipe names is installed here." over a
+    // pose selection that is about to be dropped on the floor.
+    expect(document.body.textContent).toContain("1 setting will not be restored");
+    expect(document.querySelector(".workflow-req-verdict.ok")).toBeNull();
+    expect(document.body.textContent).toContain("Poses — 1 pose");
+  });
+
+  it("says nothing extra when every setting in the file lands somewhere", async () => {
+    await render({
+      offer: { share: share({ advanced: { steps: 28, usePid: true } }), report: report(), error: "" },
+    });
+
+    expect(document.body.textContent).toContain("Everything this recipe names is installed here.");
+    expect(document.body.textContent).not.toContain("will not be restored");
+    expect(document.querySelector(".workflow-req-verdict.ok")).toBeTruthy();
+  });
+
+  it("does not count an input image the user supplies as something that cannot be reproduced", async () => {
+    await render({
+      offer: {
+        share: share({ mode: "edit_image" }),
+        report: report({
+          inputs: [
+            { kind: "source", count: 1, state: "userSupplied", detail: "Needs a source image." },
+          ],
+          inputImagesRequired: 1,
+          runnable: true,
+        }),
+        error: "",
+      },
+    });
+
+    expect(document.body.textContent).toContain("It still needs 1 image from you.");
+    expect(document.body.textContent).not.toContain("cannot be reproduced");
+    // The row is still rendered — only the verdict's arithmetic excludes it.
+    expect(document.body.textContent).toContain("Input image — source");
+  });
+
+  it("marks an installed style preset, which reaches no control on this replay path", async () => {
+    await render({
+      offer: {
+        share: share(),
+        report: report({
+          styles: [
+            { field: "stylePreset", id: "cine", name: "Cinematic", state: "resolved", detail: "ok" },
+          ],
+        }),
+        error: "",
+      },
+    });
+
+    expect(document.body.textContent).toContain("Style preset — Cinematic");
+    expect(document.body.textContent).toContain("Not restored");
+    // …and NOT as a "Ready" style row, which claimed an axis the studio never receives.
+    expect(document.body.textContent).not.toContain("Style — Cinematic");
+  });
+
+  it("says why the launch refused rather than closing over a button that did nothing", async () => {
+    await render({
+      offer: {
+        share: share(),
+        report: report(),
+        error: "",
+        launchError: "That opens in the Advanced workspace — switch on a larger screen.",
+      },
+    });
+
+    expect(document.body.textContent).toContain("switch on a larger screen");
+    expect(document.querySelector(".workflow-drop-modal")).toBeTruthy();
+  });
+});

@@ -1,6 +1,6 @@
 import React from "react";
 
-import { workflowUnresolved } from "../workflowShare.js";
+import { workflowNotRestored, workflowUnresolved } from "../workflowShare.js";
 
 // "Can this machine actually run this workflow?", rendered (sc-15951, epic 15945).
 //
@@ -20,12 +20,19 @@ import { workflowUnresolved } from "../workflowShare.js";
 // * **`omitted`.** A collection the envelope declared but could not record. A recipe whose LoRAs
 //   were omitted is not a LoRA-free recipe, and it is indistinguishable from one in the JSON, so
 //   this marker is the only thing standing between the user and a confidently wrong replay.
+// * **`notRestored`.** A setting that travelled INTACT and still will not be applied, because this
+//   studio has no control for it (`workflowNotRestored`). It is the mirror image of `omitted` and
+//   exists for the same reason: without it, a recipe whose poses were dropped over the writer's cap
+//   is reported honestly while one whose poses arrived perfectly is not — successful transport
+//   punished, silent loss rewarded. `share` is optional only so a caller with a report and no
+//   envelope still renders; every real caller passes both.
 
 const STATE_LABELS = {
   resolved: "Ready",
   installable: "Not downloaded",
   missing: "Missing",
   userSupplied: "You supply it",
+  notRestored: "Not restored",
 };
 
 const STATE_CLASSES = {
@@ -33,6 +40,7 @@ const STATE_CLASSES = {
   installable: "workflow-req-warn",
   missing: "workflow-req-bad",
   userSupplied: "workflow-req-warn",
+  notRestored: "workflow-req-warn",
 };
 
 function StateChip({ state }) {
@@ -55,7 +63,25 @@ function Row({ title, state, detail }) {
   );
 }
 
-export function WorkflowResolutionReport({ report }) {
+// The verdict sentence. Two independent axes, so three sentences rather than a boolean: what this
+// install cannot RESOLVE, and what this studio cannot APPLY. A recipe can fail either alone.
+function verdictText({ report, blocking, notRestored }) {
+  const lost = `${notRestored.length} setting${notRestored.length === 1 ? "" : "s"} will not be restored`;
+  if (!report.runnable) {
+    const blocked = `${blocking.length} thing${blocking.length === 1 ? "" : "s"} in this recipe cannot be reproduced on this install.`;
+    return notRestored.length ? `${blocked} ${lost[0].toUpperCase()}${lost.slice(1)}.` : blocked;
+  }
+  const inputClause =
+    report.inputImagesRequired > 0
+      ? ` It still needs ${report.inputImagesRequired} image${report.inputImagesRequired === 1 ? "" : "s"} from you.`
+      : "";
+  if (notRestored.length) {
+    return `Everything this recipe names is installed here, but ${lost}.${inputClause}`;
+  }
+  return `Everything this recipe names is installed here.${inputClause}`;
+}
+
+export function WorkflowResolutionReport({ report, share = null }) {
   if (!report) {
     return (
       <p className="workflow-req-empty">
@@ -64,20 +90,22 @@ export function WorkflowResolutionReport({ report }) {
       </p>
     );
   }
-  const unresolved = workflowUnresolved(report);
+  const blocking = workflowUnresolved(report);
+  const notRestored = workflowNotRestored(share, report);
   const model = report.model ?? null;
   const loras = report.loras ?? [];
-  const styles = report.styles ?? [];
+  // A resolved `stylePreset` is rendered by the not-restored list below instead — "Ready" would be
+  // a true statement about the catalog and a false one about this replay.
+  const styles = (report.styles ?? []).filter(
+    (style) => !(style.field === "stylePreset" && style.state === "resolved"),
+  );
   const inputs = report.inputs ?? [];
   const omitted = report.omitted ?? [];
+  const clean = report.runnable && notRestored.length === 0;
   return (
     <div className="workflow-req">
-      <p className={report.runnable ? "workflow-req-verdict ok" : "workflow-req-verdict warn"}>
-        {report.runnable
-          ? report.inputImagesRequired > 0
-            ? `Everything this recipe names is installed here. It still needs ${report.inputImagesRequired} image${report.inputImagesRequired === 1 ? "" : "s"} from you.`
-            : "Everything this recipe names is installed here."
-          : `${unresolved.length} thing${unresolved.length === 1 ? "" : "s"} in this recipe cannot be reproduced on this install.`}
+      <p className={clean ? "workflow-req-verdict ok" : "workflow-req-verdict warn"}>
+        {verdictText({ report, blocking, notRestored })}
       </p>
       <ul className="workflow-req-list">
         {model ? (
@@ -117,6 +145,14 @@ export function WorkflowResolutionReport({ report }) {
             key={`omitted-${entry.field}`}
             state="missing"
             title={`Not recorded — ${entry.field}`}
+          />
+        ))}
+        {notRestored.map((entry) => (
+          <Row
+            detail={entry.detail}
+            key={`not-restored-${entry.kind}-${entry.key}`}
+            state="notRestored"
+            title={entry.title}
           />
         ))}
       </ul>

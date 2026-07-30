@@ -16,6 +16,12 @@
 // studio's own pickers filter out (they drop `installState === "missing"` rows) drops it
 // silently, and falling back to a default model would reproduce someone else's image with our
 // model.
+//
+// The same rule has a second half, and it is the one this module got wrong first: a knob that
+// travels in the envelope but reaches no Image Studio control is ALSO a silent substitution — the
+// studio keeps whatever it was already on while the panel says "PiD decoder — On". So
+// [`ADVANCED_PREFILL`] below is the single table both halves read: the recipe carries exactly the
+// keys the studio applies, and the panel marks exactly the rest as not restored.
 
 // `status` values of `POST /api/v1/workflows/inspect`. Both keys are always present in the body,
 // so a reader branches on `status` rather than on the absence of `workflow`.
@@ -132,8 +138,16 @@ function styleIdResolved(report) {
   return live ? requirementResolved(live) : false;
 }
 
-// Every requirement that is not resolved, as the sentences the report already wrote. The panel
+// Every requirement that BLOCKS replay, as the sentences the report already wrote. The panel
 // renders these; nothing here rewords them.
+//
+// `inputs` are deliberately absent, mirroring `ResolutionReport::runnable`
+// (`crates/sceneworks-core/src/workflow_resolution.rs`), which excludes them for the reason
+// written there: nothing on this machine could ever have supplied someone else's source image, so
+// an input is a thing the user provides and not a thing this install lacks. Counting them here
+// made the verdict read "2 things in this recipe cannot be reproduced on this install" for a
+// perfectly runnable edit recipe whose only "problem" was that it starts from an image. The panel
+// still renders every input row — the count is what excludes them.
 export function workflowUnresolved(report) {
   if (!report) {
     return [];
@@ -152,13 +166,101 @@ export function workflowUnresolved(report) {
       rows.push({ kind: "style", state: style.state, detail: style.detail });
     }
   }
-  for (const input of report.inputs ?? []) {
-    rows.push({ kind: "input", state: input.state, detail: input.detail });
-  }
   for (const entry of report.omitted ?? []) {
     rows.push({ kind: "omitted", state: "missing", detail: entry.detail });
   }
   return rows;
+}
+
+// ---- What the studio actually does with each allow-listed knob ------------------------------
+
+// The three fates an `advanced` key can meet on the way into Image Studio.
+export const PREFILL_CONTROL = "control"; // the replay effect sets a control from it
+export const PREFILL_PROMPT = "prompt"; // applied, but as prompt text — the panel shows it there
+export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere to put it
+
+// **The one table both halves of the panel read.**
+//
+// The envelope's allow-list is `ADVANCED_KEY_RULES` in `crates/sceneworks-core/src/workflow_share.rs`
+// and is pinned to the `advanced-shared` table of `docs/workflow-share-envelope.md`. That list
+// answers "may this key leave the machine?". It says nothing about whether the RECEIVING studio has
+// a control for it — and those are different questions, because an image envelope carries keys from
+// four lanes (the Image Studio, the standalone Detail pass, the Character studio's angle set, the
+// interleaved-document lane) while this prefill lands in exactly one of them.
+//
+// Splitting that judgement across two places is what shipped ten knobs — `enhancePrompt`, `usePid`,
+// `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`, `poses`,
+// `phases` — displayed as ordinary "Settings" rows beside "Steps — 28" while none of them reached a
+// control. The user was told a recipe replayed faithfully when it had not, which is the exact
+// failure epic 15945 exists to prevent.
+//
+// So there is one table, and two readers of it:
+//
+// * `recipeFromWorkflowShare` copies across exactly the `control` / `prompt` keys, so the recipe
+//   the studio receives contains nothing the studio ignores;
+// * `workflowSettingRows` marks exactly the `none` keys as not restored, and
+//   `workflowNotRestored` folds them into the panel's verdict.
+//
+// A key that appears in the envelope and NOT in this table is treated as `none`: rendered, marked
+// as not restored, and left out of the recipe. The safe default is "the user is told", never "it
+// quietly disappears".
+export const ADVANCED_PREFILL = {
+  resolution: { label: "Resolution", prefill: PREFILL_CONTROL },
+  structuredPrompt: { label: "Structured prompt", prefill: PREFILL_PROMPT },
+  sampler: { label: "Sampler", prefill: PREFILL_CONTROL },
+  scheduler: { label: "Scheduler", prefill: PREFILL_CONTROL },
+  schedulerShift: { label: "Schedule shift", prefill: PREFILL_CONTROL },
+  steps: { label: "Steps", prefill: PREFILL_CONTROL },
+  guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
+  guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
+  enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
+  usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
+  pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },
+  ipAdapterScale: { label: "Reference strength", prefill: PREFILL_CONTROL },
+  controlnetConditioningScale: { label: "Identity structure", prefill: PREFILL_CONTROL },
+  trueCfgScale: { label: "Variation strength", prefill: PREFILL_CONTROL },
+  strength: { label: "img2img strength", prefill: PREFILL_CONTROL },
+  viewAngle: { label: "Head angle", prefill: PREFILL_CONTROL },
+  textStyleGain: { label: "Text-style gain", prefill: PREFILL_CONTROL },
+  faceRestore: { label: "Face restoration", prefill: PREFILL_CONTROL },
+  controlMode: { label: "Control type", prefill: PREFILL_CONTROL },
+  controlScale: { label: "Control strength", prefill: PREFILL_CONTROL },
+  styleId: { label: "Style", prefill: PREFILL_CONTROL },
+  stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
+  phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
+  // The five that travel and land nowhere. Each names why, because "not restored" without a
+  // reason reads like a bug.
+  poses: {
+    label: "Poses",
+    prefill: PREFILL_NONE,
+    detail:
+      "The coordinates travelled, but the pose-library ids that named them deliberately do not — " +
+      "so there is nothing for the pose picker to select. Tracked by sc-16132.",
+  },
+  cnScale: {
+    label: "Tile ControlNet",
+    prefill: PREFILL_NONE,
+    detail: "A knob of the standalone Detail pass, which Image Studio does not run.",
+  },
+  angleSet: {
+    label: "Angle set",
+    prefill: PREFILL_NONE,
+    detail: "A Character Studio turnaround request. Image Studio has no angle-set control.",
+  },
+  systemMessage: {
+    label: "System prompt",
+    prefill: PREFILL_NONE,
+    detail: "A Document Studio interleave setting. Image Studio has no system prompt.",
+  },
+  imageGuidanceScale: {
+    label: "Reference guidance",
+    prefill: PREFILL_NONE,
+    detail: "A Document Studio interleave setting. Image Studio has no control for it.",
+  },
+};
+
+function prefillDisposition(key) {
+  return ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE;
 }
 
 // ---- The adapter --------------------------------------------------------------------------
@@ -185,14 +287,28 @@ export function recipeFromWorkflowShare(share, report = null) {
   if (!share) {
     return null;
   }
-  // `share.advanced` is already the allow-listed, re-sanitized map the reader produced, and the
-  // studio's replay effect reads exactly these keys out of `rawAdapterSettings` — so it is copied
-  // across rather than re-filtered here. (Copied, never aliased: the panel still renders the
-  // envelope and must not see the studio-facing edits below.)
-  const rawSettings = { ...(share.advanced ?? {}) };
+  // The studio-facing copy of the envelope's settings: exactly the keys `ADVANCED_PREFILL` says
+  // the replay effect reads, and nothing else. Filtered rather than copied wholesale so the recipe
+  // cannot carry a key the studio ignores while the panel presents it as restored — the two now
+  // disagree only if someone edits the table, which is the point of there being a table.
+  // (Built fresh, never aliased: the panel still renders the envelope and must not see the
+  // studio-facing edits below.)
+  const rawSettings = {};
+  for (const [key, value] of Object.entries(share.advanced ?? {})) {
+    if (value !== null && value !== undefined && prefillDisposition(key) !== PREFILL_NONE) {
+      rawSettings[key] = value;
+    }
+  }
   if (!styleIdResolved(report)) {
     delete rawSettings.styleId;
     delete rawSettings.stylePrompt;
+  }
+  // The multi-phase schedule, reindexed onto the LoRA stack this install will actually hold.
+  const phases = workflowPhases(share, report);
+  if (phases) {
+    rawSettings.phases = phases;
+  } else {
+    delete rawSettings.phases;
   }
   if (share.upscale) {
     rawSettings.upscale = { ...share.upscale };
@@ -228,13 +344,63 @@ export function recipeFromWorkflowShare(share, report = null) {
   if (modelId) {
     recipe.model = modelId;
   }
-  const stylePreset = report?.styles?.find(
-    (style) => style.field === "stylePreset" && style.state === "resolved",
-  );
-  if (stylePreset) {
-    recipe.stylePreset = stylePreset.id;
-  }
+  // `stylePreset` is NOT set here even when it resolved. Nothing in `apps/web/src` reads
+  // `recipe.stylePreset` — the studio's preset seam is `launchRequest.presetId`, a different
+  // launch shape entirely — so assigning it was a dead write that made the panel's "Style — <name>
+  // [Ready]" row a claim about an axis that reaches no control. The row is marked not-restored
+  // instead (see `workflowNotRestored`).
   return recipe;
+}
+
+// The envelope's multi-phase schedule, reindexed onto the LoRA stack this install will hold — or
+// null when there is no schedule to replay.
+//
+// `advanced.phases[].loras[].index` is a position in the ORIGINAL request's LoRA list. The recipe's
+// list is `workflowLoras(report)`, which drops every LoRA this install could not resolve, so those
+// positions no longer line up: a 3-LoRA share whose first LoRA is missing would have every phase
+// pointing one slot too far right, silently activating the WRONG adapter — worse than not
+// replaying at all. So the map is envelope index → position in the resolved subset, and a phase
+// reference to a LoRA that did not resolve is dropped rather than repointed. (The dropped LoRA is
+// already named by the report, so the loss is visible.)
+//
+// The output stays in the index shape the recorded-recipe path also uses, so `ImageStudio`'s
+// replay effect has ONE thing to deserialize (`imageMultiPhase.deserializePhases`) rather than a
+// share-shaped branch beside a recipe-shaped one.
+export function workflowPhases(share, report = null) {
+  const phases = share?.advanced?.phases;
+  if (!Array.isArray(phases) || phases.length === 0) {
+    return null;
+  }
+  const requirements = Array.isArray(report?.loras) ? report.loras : [];
+  const compacted = new Map();
+  let position = 0;
+  requirements.forEach((requirement, index) => {
+    if (resolvedCatalogId(requirement)) {
+      compacted.set(index, position);
+      position += 1;
+    }
+  });
+  return phases.map((phase) => {
+    const steps = Math.trunc(Number(phase?.steps));
+    const out = { steps: Number.isFinite(steps) ? steps : 0 };
+    const guidance = Number(phase?.guidance);
+    if (Number.isFinite(guidance)) {
+      out.guidance = guidance;
+    }
+    out.loras = (Array.isArray(phase?.loras) ? phase.loras : []).flatMap((ref) => {
+      const index = compacted.get(Number(ref?.index));
+      if (index === undefined) {
+        return [];
+      }
+      const entry = { index };
+      const weight = Number(ref?.weight);
+      if (ref?.weight != null && ref.weight !== "" && Number.isFinite(weight)) {
+        entry.weight = weight;
+      }
+      return [entry];
+    });
+    return out;
+  });
 }
 
 // ---- Display ------------------------------------------------------------------------------
@@ -247,58 +413,116 @@ const MODE_LABELS = {
   pose_image: "Pose image",
 };
 
-// Human labels for the envelope's `advanced` keys. A key with no entry is shown under its own
-// name rather than hidden — this panel's job is to show what is in the file, and a knob nobody
-// wrote a label for is still a knob that changes the image.
-const SETTING_LABELS = {
-  resolution: "Resolution",
-  sampler: "Sampler",
-  scheduler: "Scheduler",
-  schedulerShift: "Schedule shift",
-  steps: "Steps",
-  guidanceScale: "Guidance",
-  guidanceMethod: "Guidance method",
-  enhancePrompt: "Prompt upsampling",
-  usePid: "PiD decoder",
-  pidTarget: "PiD output",
-  ipAdapterScale: "Reference strength",
-  controlnetConditioningScale: "Identity structure",
-  trueCfgScale: "Variation strength",
-  strength: "img2img strength",
-  viewAngle: "Head angle",
-  textStyleGain: "Text-style gain",
-  faceRestore: "Face restoration",
-  controlMode: "Control type",
-  controlScale: "Control strength",
-  styleId: "Style",
-  cnScale: "Tile ControlNet",
-  angleSet: "Angle set",
-  imageGuidanceScale: "Reference guidance",
-};
+// How long a prose value may run inside a one-line settings row before it is elided. The full
+// text is in the file either way; this is a row, not a document viewer.
+const PROSE_ROW_MAX_CHARS = 90;
 
-// Keys whose value is prose or a structure the panel shows elsewhere (or cannot render as a
-// one-line scalar). Skipped from the settings grid, never from the file.
-const SETTING_SKIP = new Set(["stylePrompt", "systemMessage", "structuredPrompt", "poses", "phases"]);
+// One row's value, as a string. Collections say how many they are rather than dumping coordinates
+// (a 12-pose selection is ~800 numbers), and prose is elided rather than allowed to run the row
+// off the panel.
+function settingValueLabel(key, value) {
+  if (typeof value === "boolean") {
+    return value ? "On" : "Off";
+  }
+  if (Array.isArray(value)) {
+    const noun = key === "phases" ? "phase" : key === "poses" ? "pose" : "entry";
+    const plural = noun === "entry" ? "entries" : `${noun}s`;
+    return `${value.length} ${value.length === 1 ? noun : plural}`;
+  }
+  if (value && typeof value === "object") {
+    return "Recorded";
+  }
+  const text = String(value);
+  return text.length > PROSE_ROW_MAX_CHARS ? `${text.slice(0, PROSE_ROW_MAX_CHARS - 1)}…` : text;
+}
 
 export function workflowModeLabel(share) {
   const mode = share?.mode;
   return MODE_LABELS[mode] ?? (typeof mode === "string" && mode ? mode : "Unknown mode");
 }
 
-// The allow-listed advanced knobs, as `{ key, label, value }` rows fit for a definition list.
-export function workflowSettingRows(share) {
+// The allow-listed advanced knobs as `{ key, label, value, restored, detail }` rows fit for a
+// definition list — every row carrying whether "Use this workflow" will actually apply it.
+//
+// `restored` is read from `ADVANCED_PREFILL`, the same table `recipeFromWorkflowShare` filters the
+// recipe with, so a row cannot claim an application the prefill does not perform. A key this build
+// has no entry for is rendered under its own name and marked NOT restored, because an unrecognized
+// knob is one this studio certainly has no control for.
+//
+// Only the `prompt`-fated keys are omitted: `stylePrompt` and `structuredPrompt` ARE applied, and
+// the panel already shows their content in the prompt block above the grid, so a second row would
+// be a duplicate rather than a disclosure.
+//
+// `report` is what makes `styleId` honest. It is a `control` key, but the recipe carries it ONLY
+// when the style resolved here (see `recipeFromWorkflowShare`) — so with the style absent from this
+// catalog the row has to say so rather than inherit the table's optimism.
+export function workflowSettingRows(share, report = null) {
   const settings = share?.advanced;
   if (!settings || typeof settings !== "object") {
     return [];
   }
+  const styleResolvedHere = styleIdResolved(report);
   return Object.keys(settings)
-    .filter((key) => !SETTING_SKIP.has(key))
-    .map((key) => ({ key, label: SETTING_LABELS[key] ?? key, value: settings[key] }))
-    .filter((row) => row.value !== null && row.value !== undefined && row.value !== "")
+    .filter((key) => prefillDisposition(key) !== PREFILL_PROMPT)
+    .map((key) => ({ key, value: settings[key] }))
+    .filter(
+      (row) =>
+        row.value !== null &&
+        row.value !== undefined &&
+        row.value !== "" &&
+        !(Array.isArray(row.value) && row.value.length === 0),
+    )
+    .map((row) => {
+      const styleUnavailable = row.key === "styleId" && !styleResolvedHere;
+      return {
+        key: row.key,
+        label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
+        value: settingValueLabel(row.key, row.value),
+        restored: prefillDisposition(row.key) === PREFILL_CONTROL && !styleUnavailable,
+        detail: styleUnavailable
+          ? "This install does not have that style, so the prompt is used exactly as it was already composed."
+          : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+      };
+    });
+}
+
+// Everything the panel promises will NOT survive "Use this workflow", as report-shaped rows.
+//
+// Two sources, one list, because the user's question is one question — "what will I not get?" —
+// and answering it in two places is how one of them goes stale:
+//
+// * the `advanced` knobs that reach no Image Studio control (`workflowSettingRows`, above); and
+// * a RESOLVED `stylePreset`. The report says "Ready" for it because the preset is installed here,
+//   which is true and beside the point: the recipe seam this prefill uses carries no preset (the
+//   studio takes one through `launchRequest.presetId`, a different launch shape), so an installed
+//   preset is as unrestored as a missing one. An UNRESOLVED `stylePreset` is left out — it is
+//   already a blocking row in the report, and listing it twice would double-count it.
+//
+// The panel's verdict counts this list, which is what stops successful transport being punished:
+// a pose selection DROPPED over the writer's cap lands in `omitted` and forces `runnable: false`,
+// so before this existed the only silent case was the one where the poses arrived intact.
+export function workflowNotRestored(share, report = null) {
+  const rows = workflowSettingRows(share, report)
+    .filter((row) => !row.restored)
     .map((row) => ({
-      ...row,
-      value: typeof row.value === "boolean" ? (row.value ? "On" : "Off") : String(row.value),
+      kind: "setting",
+      key: row.key,
+      title: `${row.label} — ${row.value}`,
+      detail: row.detail,
     }));
+  for (const style of report?.styles ?? []) {
+    if (style.field === "stylePreset" && style.state === "resolved") {
+      rows.push({
+        kind: "style",
+        key: "stylePreset",
+        title: `Style preset — ${style.name ?? style.id}`,
+        detail:
+          "Installed here, but this replay path carries no preset — the studio keeps the preset " +
+          "it is already on.",
+      });
+    }
+  }
+  return rows;
 }
 
 // "1024 × 1024", or null when the envelope carried no geometry.

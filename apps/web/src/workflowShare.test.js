@@ -2,12 +2,22 @@
 // `WorkflowShare` becomes the recipe the Image Studio's existing injection effect already reads.
 import { describe, expect, it } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
+  ADVANCED_PREFILL,
   looksLikeWorkflowCandidate,
   MAX_WORKFLOW_INSPECT_BYTES,
+  PREFILL_CONTROL,
+  PREFILL_NONE,
+  PREFILL_PROMPT,
   recipeFromWorkflowShare,
   workflowLoras,
   workflowModelId,
+  workflowNotRestored,
+  workflowPhases,
   workflowReplaySeed,
   workflowResolutionLabel,
   workflowSettingRows,
@@ -296,8 +306,24 @@ describe("workflowUnresolved", () => {
         runnable: false,
       }),
     );
-    expect(rows.map((row) => row.kind)).toEqual(["model", "lora", "style", "input", "omitted"]);
+    // `input` is absent on purpose: `ResolutionReport::runnable` excludes input images (nothing on
+    // this machine could ever have supplied someone else's source image), so counting them here
+    // made a perfectly runnable edit share read "2 things … cannot be reproduced on this install".
+    // The panel still RENDERS every input row — this list is what the verdict counts.
+    expect(rows.map((row) => row.kind)).toEqual(["model", "lora", "style", "omitted"]);
     expect(rows.map((row) => row.detail)).toContain("The LoRA list was not recorded.");
+  });
+
+  it("counts nothing for a runnable recipe that merely needs an image from the user", () => {
+    const rows = workflowUnresolved(
+      report({
+        inputs: [
+          { kind: "source", count: 1, state: "userSupplied", detail: "Needs a source image." },
+        ],
+        runnable: true,
+      }),
+    );
+    expect(rows).toEqual([]);
   });
 
   it("is empty for a fully resolved report", () => {
@@ -323,5 +349,217 @@ describe("display helpers", () => {
     expect(byKey.someFutureKnob.label).toBe("someFutureKnob");
     // Prose and structures are shown elsewhere, not squeezed into the scalar grid.
     expect(byKey.stylePrompt).toBeUndefined();
+  });
+});
+
+// ---- The one table both halves read -----------------------------------------------------------
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ENVELOPE_DOC = resolve(HERE, "../../../docs/workflow-share-envelope.md");
+
+// The `advanced` keys the ENVELOPE can carry, read out of the pinned table in
+// `docs/workflow-share-envelope.md`. That table is itself pinned to `ADVANCED_KEY_RULES` in both
+// directions by `crates/sceneworks-core/tests/workflow_share_doc.rs`, so reading it here fails the
+// moment a key is added to the contract and not to `ADVANCED_PREFILL` — which is what stops a new
+// knob being displayed as restored while reaching no control.
+function sharedAdvancedKeysFromTheContract() {
+  const doc = readFileSync(ENVELOPE_DOC, "utf8");
+  const block = doc.split("<!-- PINNED: advanced-shared -->")[1]?.split("<!-- END PINNED")[0] ?? "";
+  const keys = [...block.matchAll(/^\|\s*`([A-Za-z][\w.]*)`\s*\|/gm)].map((match) => match[1]);
+  expect(keys.length).toBeGreaterThan(20); // the parse still works
+  return keys;
+}
+
+// A plausible value per key, so one envelope can carry the whole table.
+function sampleValueFor(key) {
+  switch (key) {
+    case "poses":
+      return [{ keypoints: [1, 2] }, { keypoints: [3, 4] }];
+    case "phases":
+      return [{ steps: 4, guidance: 3.5, loras: [] }];
+    case "structuredPrompt":
+      return { intent: "a lighthouse" };
+    case "enhancePrompt":
+    case "usePid":
+    case "faceRestore":
+      return true;
+    case "pidTarget":
+      return "2k";
+    case "controlMode":
+      return "depth";
+    case "sampler":
+      return "euler";
+    case "scheduler":
+      return "shift";
+    case "guidanceMethod":
+      return "cfg";
+    case "resolution":
+      return "1024x1536";
+    case "styleId":
+      return "ghibli";
+    case "stylePrompt":
+      return "a lighthouse";
+    case "systemMessage":
+      return "You are a storyboard artist.";
+    case "viewAngle":
+      return "three_quarter";
+    case "angleSet":
+      return "turnaround_4";
+    default:
+      return 0.75;
+  }
+}
+
+describe("ADVANCED_PREFILL is the source of truth for both the prefill and the panel", () => {
+  it("classifies every advanced key the envelope contract can carry, and no others", () => {
+    expect(Object.keys(ADVANCED_PREFILL).sort()).toEqual(sharedAdvancedKeysFromTheContract().sort());
+  });
+
+  it("gives every entry a known disposition, and every unapplied one a reason", () => {
+    for (const entry of Object.values(ADVANCED_PREFILL)) {
+      expect([PREFILL_CONTROL, PREFILL_PROMPT, PREFILL_NONE]).toContain(entry.prefill);
+      expect(entry.label.length).toBeGreaterThan(0);
+      if (entry.prefill === PREFILL_NONE) {
+        // "Not restored" with no reason reads like a bug rather than a decision.
+        expect(entry.detail?.length ?? 0).toBeGreaterThan(20);
+      } else {
+        expect(entry.detail).toBeUndefined();
+      }
+    }
+  });
+
+  // THE ANTI-DRIFT TEST. Marking is worthless if it can disagree with the prefill, so both are
+  // derived from the same table against ONE envelope carrying every key: whatever the recipe
+  // carries is exactly what the panel does not mark, and vice versa.
+  it("marks exactly the rows the recipe does not carry", () => {
+    const everyKey = Object.fromEntries(
+      Object.keys(ADVANCED_PREFILL).map((key) => [key, sampleValueFor(key)]),
+    );
+    const here = report({
+      styles: [{ field: "styleId", id: "ghibli", name: "Ghibli", state: "resolved", detail: "ok" }],
+    });
+    const recipe = recipeFromWorkflowShare(share({ advanced: everyKey }), here);
+    const rows = workflowSettingRows(share({ advanced: everyKey }), here);
+
+    const carried = new Set(Object.keys(recipe.rawAdapterSettings));
+    for (const row of rows) {
+      expect(row.restored).toBe(carried.has(row.key));
+      if (!row.restored) {
+        expect(row.detail.length).toBeGreaterThan(20);
+      }
+    }
+    // …and the unrestored ones are exactly the five lanes an image envelope carries that this
+    // studio has no control for, plus `poses`, whose ids the contract deliberately drops.
+    expect(
+      rows
+        .filter((row) => !row.restored)
+        .map((row) => row.key)
+        .sort(),
+    ).toEqual(["angleSet", "cnScale", "imageGuidanceScale", "poses", "systemMessage"]);
+  });
+
+  // `styleId` is the one CONDITIONAL entry: it is applied, but only when this install has the
+  // style — so its row follows the report rather than the table's optimism.
+  it("marks a styleId this install does not have, and restores one it does", () => {
+    const styled = share({ advanced: { styleId: "ghibli", stylePrompt: "a lighthouse" } });
+    const absent = workflowSettingRows(styled, report());
+    expect(absent[0].key).toBe("styleId");
+    expect(absent[0].restored).toBe(false);
+    expect(recipeFromWorkflowShare(styled, report()).rawAdapterSettings.styleId).toBeUndefined();
+
+    const here = report({
+      styles: [{ field: "styleId", id: "ghibli", name: "Ghibli", state: "resolved", detail: "ok" }],
+    });
+    expect(workflowSettingRows(styled, here)[0].restored).toBe(true);
+    expect(recipeFromWorkflowShare(styled, here).rawAdapterSettings.styleId).toBe("ghibli");
+  });
+
+  it("keeps a key the panel has never heard of out of the recipe, and marks it", () => {
+    const unknown = share({ advanced: { someFutureKnob: "on" } });
+    const rows = workflowSettingRows(unknown);
+    expect(rows.map((row) => row.key)).toEqual(["someFutureKnob"]);
+    expect(rows[0].restored).toBe(false);
+    expect(recipeFromWorkflowShare(unknown, report()).rawAdapterSettings.someFutureKnob).toBeUndefined();
+  });
+});
+
+describe("workflowNotRestored", () => {
+  it("names the knobs that travelled intact and still land nowhere", () => {
+    const rows = workflowNotRestored(
+      share({
+        advanced: { steps: 28, cnScale: 0.4, poses: [{ keypoints: [] }, { keypoints: [] }] },
+      }),
+    );
+    expect(rows.map((row) => row.key)).toEqual(["cnScale", "poses"]);
+    // Successful transport must not be punished with silence: a 2-pose selection that arrived
+    // perfectly is now reported as loudly as one the writer dropped over its cap (`omitted`).
+    expect(rows.find((row) => row.key === "poses").title).toBe("Poses — 2 poses");
+  });
+
+  it("names a RESOLVED style preset, which is installed here and still not replayed", () => {
+    const styles = [
+      { field: "stylePreset", id: "cine", name: "Cinematic", state: "resolved", detail: "ok" },
+    ];
+    const rows = workflowNotRestored(share({ advanced: {} }), report({ styles }));
+    expect(rows.map((row) => row.key)).toEqual(["stylePreset"]);
+    // …and the recipe no longer carries the dead `stylePreset` assignment nothing ever read.
+    expect(recipeFromWorkflowShare(share(), report({ styles })).stylePreset).toBeUndefined();
+  });
+
+  it("leaves an UNRESOLVED style preset to the report, which already blocks on it", () => {
+    const styles = [
+      { field: "stylePreset", id: "cine", name: "Cinematic", state: "missing", detail: "gone" },
+    ];
+    expect(workflowNotRestored(share({ advanced: {} }), report({ styles }))).toEqual([]);
+    expect(workflowUnresolved(report({ styles, runnable: false })).map((row) => row.kind)).toEqual([
+      "style",
+    ]);
+  });
+});
+
+describe("workflowPhases", () => {
+  const loraRequirement = (name, catalogId) => ({
+    name,
+    state: catalogId ? "resolved" : "missing",
+    catalogId: catalogId ?? undefined,
+    detail: "…",
+  });
+
+  it("reindexes each phase's LoRA references onto the resolved subset", () => {
+    // The envelope's indices point into the ORIGINAL request's LoRA list. `workflowLoras` drops the
+    // unresolved middle entry, so index 2 has to become index 1 — leaving it alone would silently
+    // activate a different adapter, which is worse than not replaying the schedule at all.
+    const withLoras = report({
+      loras: [
+        loraRequirement("Grain", "film_grain"),
+        loraRequirement("A private LoRA", null),
+        loraRequirement("Turbo", "krea2_turbo_accel"),
+      ],
+      runnable: false,
+    });
+    const phases = workflowPhases(
+      share({
+        advanced: {
+          phases: [
+            { steps: 4, guidance: 3.5, loras: [] },
+            { steps: 4, guidance: 0, loras: [{ index: 2, weight: 0.9 }, { index: 1 }] },
+            { steps: 2, guidance: 1, loras: [{ index: 0 }] },
+          ],
+        },
+      }),
+      withLoras,
+    );
+    expect(phases).toEqual([
+      { steps: 4, guidance: 3.5, loras: [] },
+      { steps: 4, guidance: 0, loras: [{ index: 1, weight: 0.9 }] },
+      { steps: 2, guidance: 1, loras: [{ index: 0 }] },
+    ]);
+    expect(workflowLoras(withLoras)).toEqual([{ id: "film_grain" }, { id: "krea2_turbo_accel" }]);
+  });
+
+  it("is null when the envelope carried no schedule", () => {
+    expect(workflowPhases(share(), report())).toBeNull();
+    expect(workflowPhases(share({ advanced: { phases: [] } }), report())).toBeNull();
+    expect(recipeFromWorkflowShare(share(), report()).rawAdapterSettings.phases).toBeUndefined();
   });
 });

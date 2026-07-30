@@ -36,7 +36,7 @@ export function WorkflowDropPanel({
   if (!offer) {
     return null;
   }
-  const { share, report, error } = offer;
+  const { share, report, error, launchError } = offer;
   if (error) {
     return (
       <Modal
@@ -58,7 +58,7 @@ export function WorkflowDropPanel({
   }
 
   const resolutionLabel = workflowResolutionLabel(share);
-  const settings = workflowSettingRows(share);
+  const settings = workflowSettingRows(share, report);
   const batchCount = Number(share.count);
   const producer = share.producer ?? {};
   // A model this install cannot resolve is NOT prefilled — the studio keeps the model it is
@@ -100,17 +100,26 @@ export function WorkflowDropPanel({
         <div className="workflow-drop-settings">
           <span className="workflow-drop-field-label">Settings</span>
           <ul>
+            {/* Each row says whether "Use this workflow" will actually apply it. A grid where
+                "PiD decoder — On" and "Steps — 28" look identical, when only one of them reaches a
+                control, tells the user a recipe replayed faithfully when it did not — so the mark
+                is a state on the row, not a footnote under the list. */}
             {settings.map((row) => (
-              <li key={row.key}>
+              <li className={row.restored ? undefined : "not-restored"} key={row.key}>
                 <span>{row.label}</span>
                 <strong>{row.value}</strong>
+                {row.restored ? null : (
+                  <em className="workflow-drop-setting-mark" title={row.detail}>
+                    not restored
+                  </em>
+                )}
               </li>
             ))}
           </ul>
         </div>
       ) : null}
 
-      <WorkflowResolutionReport report={report} />
+      <WorkflowResolutionReport report={report} share={share} />
 
       {/* The count note. The envelope's seed is THIS image's; `count` is what the run asked for,
           so a naive replay would make the shared image the first of an N-image batch. Prefill
@@ -132,6 +141,11 @@ export function WorkflowDropPanel({
         <p className="workflow-drop-note">The image was imported into this project.</p>
       ) : null}
       {importState.error ? <p className="workflow-drop-error">{importState.error}</p> : null}
+      {/* "Use this workflow" refused, and the panel stays open saying why. The one case today is a
+          viewport locked to the Simple UI: Image Studio's prefill lands in the Advanced workspace,
+          which cannot be opened at that width, and closing the panel over a launch that went
+          nowhere is the inert-control failure this whole path exists to avoid. */}
+      {launchError ? <p className="workflow-drop-error">{launchError}</p> : null}
 
       <div className="workflow-drop-actions">
         <button className="btn" onClick={onDismiss} type="button">

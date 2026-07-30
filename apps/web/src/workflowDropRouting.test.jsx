@@ -7,10 +7,11 @@
 // DocumentStudio, PoseLibraryScreen). If the inspector could see their files it would open a
 // "Workflow found" panel over an upload that was already happening.
 //
-// So this file dispatches REAL bubbling drops through the two the acceptance criteria name and
-// asserts, on each, that the component handled it and the inspector never saw it. Nothing here
-// stubs the dropzone: the assertion is worthless unless the component's own `preventDefault` is
-// the thing being tested.
+// So this file dispatches REAL bubbling drops through every one of them and asserts, on each, that
+// the component handled it and the inspector never saw it. Nothing here stubs the dropzone: the
+// assertion is worthless unless the component's own `preventDefault` is the thing being tested.
+// (Four cases cover five dropzones — `PoseLibraryScreen` draws none of its own; it renders
+// `DatasetAddDialog`, so that case is literally the same handler.)
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,9 +31,26 @@ vi.mock("react-konva", async () => {
 });
 
 import { ImageEditSourcePickerField } from "./components/AssetPicker.jsx";
+import { DatasetAddDialog } from "./components/DatasetAddDialog.jsx";
 import { AppContext } from "./context/AppContext.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
+import { DocumentStudio } from "./screens/DocumentStudio.jsx";
 import { ImageEditor } from "./screens/ImageEditor.jsx";
+
+// Document Studio gates its compose form (and therefore its filmstrip) on an interleave-capable
+// model being present, so the drop target does not exist without one.
+const INTERLEAVE_MODEL = {
+  id: "sensenova_u1",
+  name: "SenseNova U1",
+  type: "image",
+  family: "sensenova",
+  capabilities: ["interleave"],
+  installState: "installed",
+  defaults: { resolution: "1024x1024" },
+  limits: { resolutions: ["1024x1024"] },
+  loraCompatibility: {},
+  ui: {},
+};
 
 function pngFile(name = "shared.png") {
   return new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: "image/png" });
@@ -173,5 +191,116 @@ describe("the workflow inspector never steals a claimed drop", () => {
     });
     expect(event.defaultPrevented).toBe(true);
     expect(inspect).toHaveBeenCalledWith(file);
+  });
+});
+
+// The other three real dropzones. `PoseLibraryScreen` is covered by the `DatasetAddDialog` case:
+// it does not draw a dropzone of its own — it renders that dialog (with `fileHint`/`title`
+// overrides), so the handler under test is literally the same one.
+describe("the other dropzones keep their drops too", () => {
+  let container;
+  let root;
+  let inspect;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    inspect = vi.fn();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const render = async (ui) => {
+    await act(async () => root.render(ui));
+    await act(async () => {});
+  };
+
+  const click = async (node) =>
+    act(async () => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+  it("DatasetAddDialog — and therefore PoseLibraryScreen, which renders it", async () => {
+    const onImport = vi.fn();
+    await render(
+      <>
+        <Guard onUnclaimedFileDrop={inspect} />
+        <DatasetAddDialog
+          assets={[]}
+          characters={[]}
+          onAdd={() => {}}
+          onClose={() => {}}
+          onImport={onImport}
+        />
+      </>,
+    );
+    // The dialog portals to <body>; React attaches its delegated listeners to portal containers
+    // too, so a drop dispatched inside it runs the dialog's own handler first.
+    const dropzone = document.querySelector(".dataset-add-dropzone");
+    expect(dropzone).toBeTruthy();
+
+    const file = pngFile("dataset.png");
+    let event;
+    await act(async () => {
+      event = dispatchDrop(dropzone, [file]);
+    });
+
+    expect(onImport).toHaveBeenCalledTimes(1);
+    expect(onImport.mock.calls[0][0][0]).toBe(file);
+    expect(event.defaultPrevented).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  it("the Document Studio storyboard frame", async () => {
+    const importAsset = vi.fn(async () => ({ id: "asset_1" }));
+    await render(
+      <>
+        <Guard onUnclaimedFileDrop={inspect} />
+        <AppContext.Provider
+          value={{
+            activeProject: { id: "project_1", name: "My Project" },
+            assets: [],
+            characters: [],
+            createInterleaveJob: vi.fn(),
+            createModelDownloadJob: vi.fn(),
+            documentLocalJobs: [],
+            gpuOptions: [],
+            imageModels: [INTERLEAVE_MODEL],
+            importAsset,
+            jobs: [],
+            jobAction: vi.fn(),
+            models: [INTERLEAVE_MODEL],
+            rememberLocalGenerationJob: vi.fn(),
+            requestedGpu: "",
+            setActiveView: vi.fn(),
+            setRequestedGpu: vi.fn(),
+          }}
+        >
+          <DocumentStudio />
+        </AppContext.Provider>
+      </>,
+    );
+    // The filmstrip starts empty, so the frame that owns the drop handler has to exist first.
+    await click(
+      [...container.querySelectorAll("button")].find((node) =>
+        node.textContent.includes("Add frame"),
+      ),
+    );
+    const frame = container.querySelector(".doc-frame");
+    expect(frame).toBeTruthy();
+
+    const file = pngFile("frame.png");
+    let event;
+    await act(async () => {
+      event = dispatchDrop(frame, [file]);
+    });
+
+    expect(importAsset).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
   });
 });

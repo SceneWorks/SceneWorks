@@ -2404,6 +2404,11 @@ export function App() {
   // `assetId` / `sourceAssetId` are null for a launch with no asset behind it, which is exactly
   // the dropped-file case: the studio's edit branch then leaves its source picker empty rather
   // than pointing at an image this install does not have.
+  //
+  // Returns `{ ok }`, plus a `reason` when it refused, because "the launch went nowhere" and "the
+  // launch cannot go anywhere from here" need different answers on the other side: the first is a
+  // race the caller should close its panel over, the second is a control the caller must not
+  // pretend worked.
   async function launchImageRecipe({
     recipe,
     replaySeed = null,
@@ -2411,13 +2416,29 @@ export function App() {
     sourceAssetId = null,
   }) {
     if (!recipe) {
-      return false;
+      return { ok: false, reason: "no-recipe" };
+    }
+    // The Simple shell renders its OWN studios and consumes no `studioLaunch`, so from in there
+    // `setActiveView("Image")` alone points the workspace at a screen nobody is looking at: the
+    // panel dismisses, nothing visible happens, and the launch sits queued to fire unprompted the
+    // next time the user opens the Advanced studio. Flip the shell the way `SimpleShell`'s own
+    // `openInAdvanced` does — and refuse for the same reason it does when the viewport has Simple
+    // locked on, because there is no Advanced workspace to land in at that width.
+    if (uiMode === SIMPLE_MODE) {
+      if (uiModeLocked) {
+        return {
+          ok: false,
+          reason: "locked",
+          detail: "That opens in the Advanced workspace — switch on a larger screen.",
+        };
+      }
+      setUiModeOverride(ADVANCED_MODE);
     }
     const projectId = activeProjectRef.current?.id;
     setActiveView("Image");
     const hydration = await stableHydrateLaunchDomains("Image", projectId);
     if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
-      return false;
+      return { ok: false, reason: "raced" };
     }
     setStudioLaunch({
       id: crypto.randomUUID(),
@@ -2427,7 +2448,7 @@ export function App() {
       recipe,
       replaySeed,
     });
-    return true;
+    return { ok: true };
   }
 
   async function sendAssetRecipeToImage(asset, options = {}) {

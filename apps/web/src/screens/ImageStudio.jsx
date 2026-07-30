@@ -8,6 +8,7 @@ import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
 import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import {
   buildTurboFinishPhases,
+  deserializePhases,
   modelSupportsMultiPhase,
   multiPhaseIssues as computeMultiPhaseIssues,
   serializePhases,
@@ -1576,6 +1577,50 @@ export function ImageStudio() {
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
     setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);
     setViewAngle(rawSettings.viewAngle ?? settings.viewAngle ?? "");
+    // The rest of the allow-listed knobs (sc-15951). Every one of these travels in a shared
+    // image's envelope AND is recorded on a generated asset's recipe, so leaving them out made
+    // both replay paths quietly produce a different image — the recipe said "PiD decoder on,
+    // control strength 0.9" and the studio rendered with neither.
+    //
+    // ORDERING. `setControlMode` / `setControlScale` / `setTextStyleGain` are also written by the
+    // model-change reset above (and by its late-catalog twin), which `setModel` a few lines up
+    // will trigger on the NEXT commit. Both are disarmed for this path by the `skip*` /
+    // `referenceTuningDeclaredArmed` flags set at the top of this effect, which is what lets the
+    // assignments here stand — see the ordering test in `ImageStudio.recipeKnobs.test.jsx`, which
+    // replays a control recipe onto a DIFFERENT model and asserts the recipe's values survive the
+    // reset rather than the model's defaults.
+    //
+    // The booleans hydrate from `=== true` rather than falling back to their sticky values: each
+    // is emitted by `buildImageJobAdvanced` only when it is ON, so an absent key means the run had
+    // it off, and inheriting the user's current toggle would replay someone else's recipe with a
+    // decoder they never used. The numbers keep the current value when absent, matching the
+    // tuning knobs above.
+    //
+    // `replayNumber` keeps the current value for an ABSENT knob rather than for a zero one:
+    // `finiteRecipeNumber(null)` is 0 (`Number(null) === 0`), so reading these through it alone
+    // would turn "the run recorded nothing" into "the run recorded zero" — a 0.0 control strength
+    // is a real, very different setting.
+    const replayNumber = (value, fallback) =>
+      value === null || value === undefined || value === ""
+        ? fallback
+        : (finiteRecipeNumber(value) ?? fallback);
+    setEnhancePrompt(rawSettings.enhancePrompt === true);
+    setUsePid(rawSettings.usePid === true);
+    setPidTarget(rawSettings.pidTarget === "2k" ? "2k" : "4k");
+    setFaceRestore(rawSettings.faceRestore === true);
+    setImg2imgStrength(replayNumber(rawSettings.strength, img2imgStrength));
+    setTextStyleGain(replayNumber(rawSettings.textStyleGain, textStyleGain));
+    if (rawSettings.controlMode) {
+      setControlMode(rawSettings.controlMode);
+    }
+    setControlScale(replayNumber(rawSettings.controlScale, controlScale));
+    // Multi-phase denoise (epic 13879 S5). The recorded list is index-keyed against the job's own
+    // LoRA stack; the editor is id-keyed, so `deserializePhases` resolves it against the ids this
+    // launch is selecting in the very same commit. Absent → the editor is cleared AND switched
+    // off, because a stale schedule left enabled would silently re-shape the next render.
+    const restoredPhases = deserializePhases(rawSettings.phases ?? [], loraIds);
+    setMultiPhasePhases(restoredPhases);
+    setMultiPhaseEnabled(restoredPhases.length > 0);
     setSelectedPoseIds([]);
     if (nextMode === "edit_image") {
       setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");

@@ -17065,6 +17065,23 @@ button.audio-wave {
   font-weight: 600;
   overflow-wrap: anywhere;
 }
+/* A knob that travelled in the file but reaches no Image Studio control. Struck through and
+   labelled rather than merely dimmed: a dimmed row still reads as "applied, quietly", which is
+   the misreading this mark exists to prevent (sc-15951). */
+.workflow-drop-settings li.not-restored strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.workflow-drop-setting-mark {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+  white-space: nowrap;
+}
 .workflow-drop-note {
   margin: 0;
   font-size: 12.5px;

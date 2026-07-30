@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { inspectWorkflowFile } from "../api.js";
 import {
@@ -63,11 +63,32 @@ export function useWorkflowDrop({
   // Monotonic ticket: a second drop supersedes the first, so a slow inspect cannot open a panel
   // for a file the user has already replaced.
   const ticketRef = useRef(0);
+  // The in-flight inspect's controller, so superseding a ticket actually STOPS the upload rather
+  // than only ignoring its answer. The endpoint accepts up to 512 MiB and stages the whole body
+  // before it reads a byte, so an ignored request is a multi-hundred-megabyte upload still running
+  // — on a LAN deployment that is real bandwidth, and on unmount it is a leak.
+  const inFlightRef = useRef(null);
+
+  // Abandon whatever inspect is running and take the next ticket. Every supersede goes through
+  // here so there is one place that can forget to abort.
+  const supersede = useCallback(() => {
+    inFlightRef.current?.abort();
+    inFlightRef.current = null;
+    ticketRef.current += 1;
+    return ticketRef.current;
+  }, []);
 
   const dismiss = useCallback(() => {
-    ticketRef.current += 1;
+    supersede();
     setOffer(null);
     setImportState({ busy: false, done: false, error: "" });
+  }, [supersede]);
+
+  // Unmount is a supersede with nobody left to tell. Without this the request outlives the tree
+  // that started it.
+  useEffect(() => () => {
+    inFlightRef.current?.abort();
+    inFlightRef.current = null;
   }, []);
 
   const handleDroppedFile = useCallback(
@@ -78,21 +99,27 @@ export function useWorkflowDrop({
       // The ticket is taken BEFORE the prescreen, not after it. The prescreen is itself
       // asynchronous (a range read off the file), so a ticket taken after it would leave a
       // window in which `dismiss` — or a newer drop — could not supersede this one.
-      ticketRef.current += 1;
-      const ticket = ticketRef.current;
+      const ticket = supersede();
       if (!(await looksLikeWorkflowCandidate(file))) {
         return;
       }
       if (ticket !== ticketRef.current) {
         return;
       }
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      inFlightRef.current = controller;
       let response = null;
       try {
-        response = await inspectWorkflowFile(file, { projectId, token });
+        response = await inspectWorkflowFile(file, {
+          projectId,
+          token,
+          signal: controller?.signal,
+        });
       } catch (error) {
         if (ticket !== ticketRef.current) {
           return;
         }
+        inFlightRef.current = null;
         const detail = inspectFailureMessage(error);
         if (detail) {
           setImportState({ busy: false, done: false, error: "" });
@@ -103,6 +130,7 @@ export function useWorkflowDrop({
       if (ticket !== ticketRef.current) {
         return;
       }
+      inFlightRef.current = null;
       // The no-workflow branch, and the only one that has to be invisible.
       if (response?.status !== WORKFLOW_STATUS_WORKFLOW || !response.workflow) {
         return;
@@ -115,21 +143,35 @@ export function useWorkflowDrop({
         error: "",
       });
     },
-    [enabled, projectId, token],
+    [enabled, projectId, token, supersede],
   );
 
   // "Use this workflow" — build the recipe and hand it to the SAME launch the viewer's
-  // "Use this recipe" uses. The panel closes either way: a launch that bailed (a project switch
-  // raced the hydration) has already navigated to the studio, and leaving the panel over it would
-  // be worse than closing.
+  // "Use this recipe" uses.
+  //
+  // The panel then closes for every outcome BUT one. A launch that bailed on a hydration race has
+  // already navigated to the studio, and leaving the panel over it would be worse than closing.
+  // A launch that REFUSED — today, a viewport locked to the Simple UI, where the Advanced
+  // workspace this prefill lands in cannot be opened at all — has navigated nowhere, so closing
+  // the panel would leave the button looking like it worked. That one keeps the panel and says
+  // why.
   const useWorkflow = useCallback(async () => {
     const current = offer;
     if (!current?.share || typeof launchRecipe !== "function") {
       return;
     }
     const recipe = recipeFromWorkflowShare(current.share, current.report);
+    const outcome = await launchRecipe({
+      recipe,
+      replaySeed: workflowReplaySeed(current.share),
+    });
+    if (outcome?.ok === false && outcome.reason === "locked") {
+      setOffer((existing) =>
+        existing ? { ...existing, launchError: outcome.detail ?? "" } : existing,
+      );
+      return;
+    }
     dismiss();
-    await launchRecipe({ recipe, replaySeed: workflowReplaySeed(current.share) });
   }, [offer, launchRecipe, dismiss]);
 
   // "Import the image too" — the ordinary upload path, which is what records
