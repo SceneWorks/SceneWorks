@@ -17,11 +17,15 @@
 //   the recipes this feature was built to rescue;
 // * an **omitted collection** is a fact about the file, frozen at the moment it was written.
 //
+// And one can only be cleared AFTER the hand-over: a mask is painted in the Image Editor and a
+// control map is attached in the studio's Control panel, so blocking on either would refuse to
+// perform the step its own message tells the user to take first.
+//
 // A permanently-dead CTA is not a safety property; it is a feature that does not work, and the user
 // reaches for the prompt with a screenshot instead. So blocking is reserved for the requirements a
-// user can actually resolve in front of the panel — the model, and the images they supply — and
-// everything else is SURFACED as an advisory that says plainly what the replay will not carry.
-// Nothing is silent either way.
+// user can actually resolve in front of the panel — the model, and the source/reference images the
+// pickers offer — and everything else is SURFACED as an advisory that says plainly what the replay
+// will not carry, or where the missing piece is supplied. Nothing is silent either way.
 
 import { issue } from "./validation/issues.js";
 import { workflowInputSlots } from "./workflowShare.js";
@@ -64,21 +68,22 @@ export function workflowReplayValidation({
 
   // Every image the recipe needs, counted the way the report counts them. A picker with nothing in
   // it is a requirement, not an error: the empty control is its own message, and a chip repeating
-  // "pick a source image" beside an obviously empty picker is the noise sc-10492 removed. The
-  // UNPICKABLE kinds (mask, control) are a different matter — nothing on this panel could fill
-  // them, so they get a stated reason.
+  // "pick a source image" beside an obviously empty picker is the noise sc-10492 removed.
+  //
+  // The UNPICKABLE kinds go the other way. A mask is painted in the Image Editor and a control map
+  // is attached in the studio's own Control panel — both AFTER the recipe has been loaded — so
+  // blocking on them would refuse to perform the step its own sentence tells the user to take
+  // first. They are surfaced, loudly, and the recipe is handed over.
   for (const slot of workflowInputSlots(report)) {
-    if (slot.pickable) {
-      if (!inputPicks[slot.key]) {
-        issues.push(issue.requirement(`input:${slot.key}`, `Choose ${slot.label.toLowerCase()}`));
-      }
-    } else {
+    if (!slot.pickable) {
       issues.push(
-        issue.error(
+        issue.advisory(
           `input:${slot.key}`,
           `${slot.detail || `Needs a ${slot.kind}.`} ${slot.elsewhere}`.trim(),
         ),
       );
+    } else if (!inputPicks[slot.key]) {
+      issues.push(issue.requirement(`input:${slot.key}`, `Choose ${slot.label.toLowerCase()}`));
     }
   }
 

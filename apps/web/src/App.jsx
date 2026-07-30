@@ -2858,12 +2858,15 @@ export function App() {
   // The viewer's "Use this recipe" for an IMPORTED asset. The preview closes first, the way the
   // recorded-recipe path does — the offer is a modal of its own, and stacking it over the viewer
   // would trap focus between two dialogs.
+  const offerAssetWorkflow = workflowDrop.offerAssetWorkflow;
   const useImportedAssetRecipe = useCallback(
     (asset) => {
       closePreview();
-      workflowDrop.offerAssetWorkflow(asset);
+      offerAssetWorkflow(asset);
     },
-    [closePreview, workflowDrop],
+    // Depends on the CALLBACK, not the hook's return object, which is a fresh literal every render
+    // — an unstable prop here would defeat `FullscreenPreview`'s `React.memo` on every App render.
+    [closePreview, offerAssetWorkflow],
   );
   useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
   // Rendered from a single place even though the app has two shells: `Modal` portals to

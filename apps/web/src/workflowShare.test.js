@@ -8,14 +8,19 @@ import { fileURLToPath } from "node:url";
 
 import {
   ADVANCED_PREFILL,
+  assetImportedWorkflow,
   looksLikeWorkflowCandidate,
   MAX_WORKFLOW_INSPECT_BYTES,
   PREFILL_CONTROL,
   PREFILL_NONE,
   PREFILL_PROMPT,
   recipeFromWorkflowShare,
+  workflowHasMissingInputs,
+  workflowInputSlots,
+  workflowInstallable,
   workflowLoras,
   workflowModelId,
+  workflowModelUnknown,
   workflowNotRestored,
   workflowPhases,
   workflowReplaySeed,
@@ -570,5 +575,209 @@ describe("workflowPhases", () => {
     expect(workflowPhases(share(), report())).toBeNull();
     expect(workflowPhases(share({ advanced: { phases: [] } }), report())).toBeNull();
     expect(recipeFromWorkflowShare(share(), report()).rawAdapterSettings.phases).toBeUndefined();
+  });
+});
+
+// ---- The envelope on an imported asset (sc-15952) --------------------------------------------
+
+describe("assetImportedWorkflow", () => {
+  it("finds the envelope import recorded, and nothing else", () => {
+    const envelope = { sceneworksWorkflow: "image", schemaVersion: 1 };
+    expect(assetImportedWorkflow({ extra: { importedWorkflow: envelope } })).toBe(envelope);
+    // The common case: an image imported from any of the billions of PNGs with no chunk in them.
+    // `extra` exists; the key does not. A truthiness check on `extra` would answer yes here.
+    expect(assetImportedWorkflow({ extra: { source: "upload" } })).toBeNull();
+    expect(assetImportedWorkflow({ extra: {} })).toBeNull();
+    expect(assetImportedWorkflow({})).toBeNull();
+    expect(assetImportedWorkflow(null)).toBeNull();
+    // A scalar under the key is not an envelope.
+    expect(assetImportedWorkflow({ extra: { importedWorkflow: "yes" } })).toBeNull();
+  });
+});
+
+// ---- What the missing-inputs view is derived from (sc-15952) ---------------------------------
+
+describe("the missing-inputs derivations", () => {
+  it("offers an install only for the state that publishes one", () => {
+    // `install_for` in `workflow_resolution.rs` clears the action for every state but
+    // `installable`, so a button anywhere else would be a button that cannot work.
+    expect(workflowInstallable(report())).toEqual([]);
+    const rows = workflowInstallable(
+      report({
+        model: {
+          slug: "krea_2_turbo",
+          state: "installable",
+          catalogId: "krea_2_turbo",
+          name: "Krea 2 Turbo",
+          detail: "not downloaded",
+          install: { method: "POST", path: "/api/v1/models/krea_2_turbo/download" },
+        },
+        loras: [
+          { name: "Film Grain", state: "installable", catalogId: "film_grain", detail: "d" },
+          { name: "Aurora v3", state: "missing", detail: "user-trained" },
+          { name: "Here", state: "resolved", catalogId: "here", detail: "d" },
+        ],
+      }),
+    );
+    expect(rows.map((row) => `${row.kind}:${row.id}`)).toEqual([
+      "model:krea_2_turbo",
+      "lora:film_grain",
+    ]);
+  });
+
+  it("tells an unknown model apart from one that merely needs downloading", () => {
+    // Installing the model the file NAMES reproduces the image; substituting one does not. Only
+    // the first of those gets a substitute picker.
+    expect(workflowModelUnknown(report())).toBe(false);
+    expect(
+      workflowModelUnknown(report({ model: { slug: "x", state: "installable", detail: "d" } })),
+    ).toBe(false);
+    expect(workflowModelUnknown(report({ model: { slug: "x", state: "missing", detail: "d" } }))).toBe(
+      true,
+    );
+  });
+
+  it("expands an input requirement into one slot per image", () => {
+    // `reference` travels as ONE entry carrying a count — never as N entries — so a reader that
+    // maps over `inputs` renders half a two-reference recipe.
+    const slots = workflowInputSlots(
+      report({
+        inputs: [
+          { kind: "source", count: 1, state: "userSupplied", detail: "Needs a source image." },
+          { kind: "reference", count: 2, state: "userSupplied", detail: "Needs 2 reference images." },
+          { kind: "mask", count: 1, state: "userSupplied", detail: "Needs a mask." },
+        ],
+      }),
+    );
+    expect(slots).toHaveLength(4);
+    expect(slots.map((slot) => slot.label)).toEqual([
+      "Source image",
+      "Reference image 1 of 2",
+      "Reference image 2 of 2",
+      "Mask",
+    ]);
+    // Only the kinds the launch seam can actually carry get a picker.
+    expect(slots.map((slot) => slot.pickable)).toEqual([true, true, true, false]);
+    // The report's sentence is shown once per requirement, not once per slot.
+    expect(slots.map((slot) => slot.detail)).toEqual([
+      "Needs a source image.",
+      "Needs 2 reference images.",
+      "",
+      "Needs a mask.",
+    ]);
+    expect(slots[3].elsewhere).toContain("Image Editor");
+  });
+
+  it("floors an absent count at one slot, the way the report floors its own total", () => {
+    const slots = workflowInputSlots(
+      report({ inputs: [{ kind: "source", count: 0, state: "userSupplied", detail: "d" }] }),
+    );
+    expect(slots).toHaveLength(1);
+  });
+
+  it("has nothing to show for a recipe this install can run outright", () => {
+    // The acceptance criterion behind the component's `return null`.
+    expect(workflowHasMissingInputs(report())).toBe(false);
+    expect(workflowHasMissingInputs(null)).toBe(false);
+    // …including one whose only problems are ones nobody can act on. `omitted` makes the report
+    // unrunnable and belongs to the report rows, not to a section of things to do.
+    expect(
+      workflowHasMissingInputs(
+        report({
+          runnable: false,
+          omitted: [{ field: "loras", detail: "dropped whole" }],
+          loras: [{ name: "Aurora v3", state: "missing", detail: "user-trained" }],
+          styles: [{ field: "styleId", id: "ghibli", state: "missing", detail: "absent" }],
+        }),
+      ),
+    ).toBe(false);
+    // …and something for each of the three it CAN act on.
+    expect(
+      workflowHasMissingInputs(report({ model: { slug: "x", state: "missing", detail: "d" } })),
+    ).toBe(true);
+    expect(
+      workflowHasMissingInputs(
+        report({ inputs: [{ kind: "source", count: 1, state: "userSupplied", detail: "d" }] }),
+      ),
+    ).toBe(true);
+  });
+});
+
+// ---- Prefilling a partially-resolvable recipe (sc-15952) -------------------------------------
+
+describe("recipeFromWorkflowShare — the user's own answers", () => {
+  const unknownModel = report({
+    runnable: false,
+    model: { slug: "someones_private_model", state: "missing", detail: "not here" },
+    loras: [{ name: "Aurora v3", state: "missing", detail: "user-trained" }],
+  });
+
+  it("prefills everything that resolved and names no model when nothing did", () => {
+    // "Partially-resolvable prefills the resolved fields and lists the rest": the prompt, the
+    // geometry and the allow-listed knobs all land; the model and the LoRA do not, and neither is
+    // reached for.
+    const recipe = recipeFromWorkflowShare(share(), unknownModel);
+    expect(recipe.prompt).toBe("a lighthouse in heavy fog, cinematic");
+    expect(recipe.normalizedSettings).toEqual({ width: 1024, height: 1536, count: 1 });
+    expect(recipe.rawAdapterSettings.steps).toBe(28);
+    expect(recipe.rawAdapterSettings.sampler).toBe("euler");
+    expect(recipe.model).toBeUndefined();
+    expect(recipe.loras).toEqual([]);
+  });
+
+  it("carries a model the USER chose, and never one it chose itself", () => {
+    expect(
+      recipeFromWorkflowShare(share(), unknownModel, { substituteModelId: "z_image_turbo" }).model,
+    ).toBe("z_image_turbo");
+    // No substitute → no model, whatever the picker's placeholder happens to be.
+    for (const empty of ["", null, undefined]) {
+      expect(
+        recipeFromWorkflowShare(share(), unknownModel, { substituteModelId: empty }).model,
+      ).toBeUndefined();
+    }
+  });
+
+  it("never lets a substitute displace a model this install actually resolved", () => {
+    // The resolved id is what the FILE asked for. A substitute is only ever reached for when there
+    // was no resolution — that is the difference between a choice and a fallback.
+    expect(
+      recipeFromWorkflowShare(share(), report(), { substituteModelId: "z_image_turbo" }).model,
+    ).toBe("krea_2_turbo");
+  });
+
+  it("carries the reference images the user picked, in order", () => {
+    const recipe = recipeFromWorkflowShare(share(), report(), {
+      referenceAssetIds: ["ref_one", "ref_two"],
+    });
+    expect(recipe.rawAdapterSettings.referenceAssetIds).toEqual(["ref_one", "ref_two"]);
+    // The single-reference control the studio has always read, so one pick lands even on a model
+    // with no plural picker.
+    expect(recipe.rawAdapterSettings.referenceAssetId).toBe("ref_one");
+    // Nothing picked writes nothing, so a recorded recipe's own selection is never cleared.
+    const bare = recipeFromWorkflowShare(share(), report());
+    expect(bare.rawAdapterSettings.referenceAssetIds).toBeUndefined();
+    expect(bare.rawAdapterSettings.referenceAssetId).toBeUndefined();
+  });
+
+  it("leaves a structured recipe's prompt as the prose the model received", () => {
+    // The decided answer to "does the builder rehydrate?" — no. The envelope reduces
+    // `structuredPrompt` to its scalars and drops the caption object, so there is nothing for the
+    // builder to load; the top-level `prompt` is the exact string that made the image. The recipe
+    // therefore carries no `structuredPrompt` at all rather than one the studio silently ignores.
+    const structured = share({
+      advanced: { structuredPrompt: { intent: "a lighthouse", runtimePrompt: "{…}" }, steps: 28 },
+    });
+    const recipe = recipeFromWorkflowShare(structured, report());
+    expect(recipe.rawAdapterSettings.structuredPrompt).toBeUndefined();
+    expect(recipe.prompt).toBe("a lighthouse in heavy fog, cinematic");
+    // …and the panel says so rather than dropping it silently.
+    const row = workflowSettingRows(structured, report()).find(
+      (entry) => entry.key === "structuredPrompt",
+    );
+    expect(row.restored).toBe(false);
+    expect(row.detail).toContain("restored as prose");
+    expect(
+      workflowNotRestored(structured, report()).some((entry) => entry.key === "structuredPrompt"),
+    ).toBe(true);
   });
 });

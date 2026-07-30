@@ -376,3 +376,139 @@ describe("WorkflowDropPanel — what will not be restored", () => {
     expect(document.querySelector(".workflow-drop-modal")).toBeTruthy();
   });
 });
+
+// The missing-inputs surface, embedded, and the CTA it gates (sc-15952).
+//
+// The panel is the point where the recipe is handed over, so it is where "generate is blocked with
+// the reason named" is enforced. `disabled` and the chips come out of one `useValidation`, which is
+// the mechanism Image Studio's own Generate uses — these tests read BOTH on every case, because a
+// dead button with nothing to explain it is the failure that vocabulary exists to prevent.
+describe("WorkflowDropPanel — what it needs from the user", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const buttonByLabel = (label) =>
+    [...document.querySelectorAll("button")].find((node) => node.textContent.trim() === label);
+
+  const render = async (props) =>
+    act(async () =>
+      root.render(
+        <WorkflowDropPanel
+          canImport
+          importState={idleImport}
+          onDismiss={() => {}}
+          onImport={() => {}}
+          onUse={() => {}}
+          {...props}
+        />,
+      ),
+    );
+
+  const cta = () => buttonByLabel("Use this workflow") ?? buttonByLabel("Use this recipe");
+
+  it("shows no missing-inputs UI at all for a fully-resolvable recipe", async () => {
+    await render({ offer: { share: share(), report: report(), error: "" } });
+    // The acceptance criterion is an absence, so it is asserted as one: not an empty section, not
+    // a zero-state line, not a heading.
+    expect(document.querySelector(".workflow-fix")).toBeNull();
+    expect(document.body.textContent).not.toContain("What this needs from you");
+    expect(cta()?.disabled).toBe(false);
+  });
+
+  it("blocks the CTA on an unresolvable model and prints the reason beside it", async () => {
+    await render({
+      offer: {
+        share: share({ model: "someones_private_model" }),
+        report: report({
+          runnable: false,
+          model: {
+            slug: "someones_private_model",
+            state: "missing",
+            detail: "No model matching `someones_private_model` is in this install's catalog.",
+          },
+        }),
+        error: "",
+      },
+      missing: { models: [{ id: "z_image_turbo", name: "Z-Image Turbo" }] },
+    });
+    expect(cta()?.disabled).toBe(true);
+    // The dead button and its reason come from ONE summarize, so a chip is always there to read.
+    const chips = [...document.querySelectorAll(".validation-chip")].map((node) => node.textContent);
+    expect(chips.join(" ")).toContain("someones_private_model");
+    expect(chips.join(" ")).toContain("nothing is substituted for you");
+    // …and the surface that can clear it is on screen.
+    expect(document.querySelector(".workflow-fix")).toBeTruthy();
+  });
+
+  it("unblocks the CTA once the user has chosen a model", async () => {
+    await render({
+      offer: {
+        share: share({ model: "someones_private_model" }),
+        report: report({
+          runnable: false,
+          model: { slug: "someones_private_model", state: "missing", detail: "…" },
+        }),
+        error: "",
+      },
+      missing: {
+        models: [{ id: "z_image_turbo", name: "Z-Image Turbo" }],
+        substituteModelId: "z_image_turbo",
+      },
+    });
+    expect(cta()?.disabled).toBe(false);
+    // The "keeps the model it is already on" warning is now false, and must not be shown.
+    expect(document.body.textContent).not.toContain("keeps the model it is already on");
+  });
+
+  it("blocks until every input image the recipe needs has been picked", async () => {
+    const inputs = report({
+      inputImagesRequired: 2,
+      inputs: [
+        { kind: "source", count: 1, state: "userSupplied", detail: "Needs a source image." },
+        { kind: "reference", count: 1, state: "userSupplied", detail: "Needs a reference image." },
+      ],
+    });
+    const assets = [{ id: "asset_a", displayName: "Harbour at dawn" }];
+    await render({ assets, offer: { share: share(), report: inputs, error: "" } });
+    expect(cta()?.disabled).toBe(true);
+    await render({
+      assets,
+      offer: { share: share(), report: inputs, error: "" },
+      missing: { inputPicks: { "source-0-0": "asset_a", "reference-1-0": "asset_a" } },
+    });
+    expect(cta()?.disabled).toBe(false);
+  });
+
+  // ---- The library surface -------------------------------------------------------------------
+
+  it("reads as a recipe from the library, with no import action, when opened from an asset", async () => {
+    await render({
+      offer: { assetId: "asset_1", file: null, share: share(), report: report(), error: "" },
+    });
+    expect(document.body.textContent).toContain("The recipe in this image");
+    expect(document.body.textContent).not.toContain("Workflow found");
+    // "Import the image too" for an image that is already imported is a control describing a
+    // state; the panel is not rendered with it at all rather than rendered with it disabled.
+    expect(buttonByLabel("Import the image too")).toBeUndefined();
+    expect(buttonByLabel("Use this recipe")).toBeTruthy();
+  });
+
+  it("keeps the import action for a dropped file", async () => {
+    await render({ offer: { assetId: null, share: share(), report: report(), error: "" } });
+    expect(buttonByLabel("Import the image too")).toBeTruthy();
+    expect(buttonByLabel("Use this workflow")).toBeTruthy();
+  });
+});

@@ -275,6 +275,67 @@ fn a_repo_match_wins_over_a_name_match() {
 }
 
 #[test]
+fn a_repo_two_local_adapters_share_resolves_to_nothing_and_the_name_may_not_break_the_tie() {
+    // sc-15952. `loras[].source.file` does not travel, so an envelope naming a repo that TWO
+    // locally-installed adapters came out of cannot say which the sender used. `lora_by_repo`
+    // already refused to choose — and `classify_lora` then fell through to the display-name pass,
+    // which happily picked one of the very rows the repo pass had declined to choose between. The
+    // weaker key broke a tie the stronger one could not, and the answer was a plausible WRONG
+    // adapter reported as installed, with one-click replay offered on top of it.
+    let catalogs = StaticCatalogs {
+        loras: vec![
+            CatalogEntry::new("pack_union")
+                .with_name("Union")
+                .with_repo("acme/pack")
+                .installed(),
+            CatalogEntry::new("pack_hdr")
+                .with_name("HDR")
+                .with_repo("acme/pack")
+                .installed(),
+        ],
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Union", "repo": "acme/pack", "weight": 0.8 }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras.len(), 1, "the entry is listed, never dropped");
+    assert_eq!(report.loras[0].state, RequirementState::Missing);
+    assert!(
+        report.loras[0].catalog_id.is_none(),
+        "neither adapter may be presented as the answer: {:?}",
+        report.loras[0]
+    );
+    assert!(report.loras[0].matched_by.is_none());
+    assert!(
+        report.loras[0].detail.contains("acme/pack"),
+        "the sentence must name the repo: {}",
+        report.loras[0].detail
+    );
+    assert!(!report.runnable);
+}
+
+#[test]
+fn a_repo_nothing_here_carries_still_falls_through_to_the_name_pass() {
+    // The guard above is scoped to AMBIGUITY. A repo this install simply does not know must still
+    // let a display-name match resolve — that is how a locally-imported copy of a shared LoRA is
+    // found at all, and narrowing it would report half the resolvable LoRAs as user-trained.
+    let catalogs = StaticCatalogs {
+        loras: vec![CatalogEntry::new("film_grain")
+            .with_name("Film Grain")
+            .installed()],
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Film Grain", "repo": "acme/never-heard-of-it" }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras[0].state, RequirementState::Resolved);
+    assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Name));
+    assert_eq!(report.loras[0].catalog_id.as_deref(), Some("film_grain"));
+}
+
+#[test]
 fn an_unresolvable_lora_is_listed_rather_than_dropped() {
     // A user-trained LoRA is the EXPECTED unresolvable case. Dropping the entry would make the
     // report claim a recipe with no LoRAs, which is the silent-loss failure this epic exists for.
