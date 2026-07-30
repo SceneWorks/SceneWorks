@@ -39,15 +39,39 @@ const KREA_RT_Q4_BYTES = 29957689344; // 27.90 GiB
 const KREA_RT_Q8_BYTES = 36980832256; // 34.44 GiB
 const KREA_RT_BF16_BYTES = 50154536960; // 46.71 GiB
 
-function variant(key, installState, peakMemoryBytes) {
+// REAL `footprint.diskSizeBytes` values, because sc-15400 round 4 made them LOAD-BEARING: an installed
+// tier with no measured peak is now filled from `variantFootprintBytes`, which reads exactly this field.
+// These fixtures previously stubbed every disk size as `diskSizeBytes: 1`, which silently modelled every
+// unmeasured tier as a 14 GiB (transient-only) requirement — a fixture understating what ships, in the
+// one field the fill consumes.
+const Z_IMAGE_DISK = { q4: 5907321677, q8: 10996438540, bf16: 20538412852 };
+const KREA_RT_DISK = { q4: 20265258499, q8: 27290719452, bf16: 40463370856 };
+const LENS_TURBO_DISK = { q4: 21830326407, q8: 32753474289, bf16: 30651441376 };
+const FLUX_DEV_DISK = { q4: 9617334683, q8: 18010071290, bf16: 33746402173 };
+const SENSENOVA_DISK = { q4: 11824472971, q8: 19927870461, bf16: 35121691427 };
+
+// `diskSizeBytes` is REQUIRED (pass null only for an entry that genuinely ships no footprint at all, as
+// krea_2_raw does) so no fixture can silently reintroduce a stub disk size.
+function variant(key, installState, peakMemoryBytes, diskSizeBytes) {
+  if (diskSizeBytes === undefined) {
+    throw new Error(`fixture ${key}: pass the REAL diskSizeBytes, or null when the entry ships none`);
+  }
+  const footprint = {};
+  if (diskSizeBytes !== null) {
+    footprint.diskSizeBytes = diskSizeBytes;
+  }
+  if (peakMemoryBytes != null) {
+    footprint.peakMemoryBytes = peakMemoryBytes;
+  }
   return {
     variant: key,
     installState,
-    footprint: peakMemoryBytes == null ? { diskSizeBytes: 1 } : { diskSizeBytes: 1, peakMemoryBytes },
+    footprint: Object.keys(footprint).length > 0 ? footprint : null,
   };
 }
 
-// z_image as shipped: blanket mlx floor 48, a q4/q8/bf16 matrix, and a measured footprint on q4 only.
+// z_image as shipped: blanket mlx floor 48, a q4/q8/bf16 matrix, real disk sizes on all three, and a
+// measured footprint on q4 only.
 // Note it declares NO candle block at all — which is what makes it the candle-lane silence case below.
 function zImage({ installState = "missing", variants } = {}) {
   return {
@@ -61,9 +85,14 @@ function zImage({ installState = "missing", variants } = {}) {
     variants:
       variants ??
       [
-        variant("q4", installState === "installed" ? "installed" : "missing", Z_IMAGE_Q4_BYTES),
-        variant("q8", "missing", null),
-        variant("bf16", "missing", null),
+        variant(
+          "q4",
+          installState === "installed" ? "installed" : "missing",
+          Z_IMAGE_Q4_BYTES,
+          Z_IMAGE_DISK.q4,
+        ),
+        variant("q8", "missing", null, Z_IMAGE_DISK.q8),
+        variant("bf16", "missing", null, Z_IMAGE_DISK.bf16),
       ],
   };
 }
@@ -171,9 +200,9 @@ describe("SimpleModelManager memory label", () => {
       mlx: { minMemoryGb: 64 },
       hasVariantMatrix: true,
       variants: [
-        variant("q4", "installed", KREA_RT_Q4_BYTES),
-        variant("q8", "missing", KREA_RT_Q8_BYTES),
-        variant("bf16", "installed", KREA_RT_BF16_BYTES),
+        variant("q4", "installed", KREA_RT_Q4_BYTES, KREA_RT_DISK.q4),
+        variant("q8", "missing", KREA_RT_Q8_BYTES, KREA_RT_DISK.q8),
+        variant("bf16", "installed", KREA_RT_BF16_BYTES, KREA_RT_DISK.bf16),
       ],
     };
     await render(root, { models: [model] });
@@ -189,9 +218,9 @@ describe("SimpleModelManager memory label", () => {
           ...model,
           type: "image",
           variants: [
-            variant("q4", "installed", KREA_RT_Q4_BYTES),
-            variant("q8", "missing", KREA_RT_Q8_BYTES),
-            variant("bf16", "missing", KREA_RT_BF16_BYTES),
+            variant("q4", "installed", KREA_RT_Q4_BYTES, KREA_RT_DISK.q4),
+            variant("q8", "missing", KREA_RT_Q8_BYTES, KREA_RT_DISK.q8),
+            variant("bf16", "missing", KREA_RT_BF16_BYTES, KREA_RT_DISK.bf16),
           ],
         },
       ],
@@ -207,9 +236,9 @@ describe("SimpleModelManager memory label", () => {
         zImage({
           installState: "installed",
           variants: [
-            variant("q4", "installed", Z_IMAGE_Q4_BYTES),
-            variant("q8", "installed", null),
-            variant("bf16", "missing", null),
+            variant("q4", "installed", Z_IMAGE_Q4_BYTES, Z_IMAGE_DISK.q4),
+            variant("q8", "installed", null, Z_IMAGE_DISK.q8),
+            variant("bf16", "missing", null, Z_IMAGE_DISK.bf16),
           ],
         }),
       ],
@@ -217,53 +246,93 @@ describe("SimpleModelManager memory label", () => {
     expect(metaText(container)).toEqual(["needs 48 GB"]);
   });
 
-  it("keeps the blanket floor for a model with no measured tier at all", async () => {
-    // krea_2_raw as shipped: a matrix, a 48 GB floor, and not one measured footprint. Byte-identical to
-    // the pre-fix label — this is what makes the assertions above about the FOOTPRINT and not the shape.
-    await render(root, {
-      models: [
-        {
-          id: "krea_2_raw",
-          name: "Krea 2 Raw",
-          type: "image",
-          installState: "installed",
-          mlx: { minMemoryGb: 48 },
-          hasVariantMatrix: true,
-          variants: [
-            variant("q4", "installed", null),
-            variant("q8", "installed", null),
-            variant("bf16", "missing", null),
-          ],
-        },
+  // krea_2_raw AS SHIPPED, in full. An earlier version of this fixture claimed "as shipped" while omitting
+  // the `candle` block the manifest really carries (`minMemoryGb: 32`, `vramGbByTier { q4: 28.8, q8: 33.4,
+  // bf16: 46.4 }`, `measured: false`) — and that omission concealed the candle under-statement for two
+  // review rounds, because with no candle block the row could only ever fall silent on that lane.
+  //
+  // It is also the one shipped matrix entry whose downloads carry NO `footprint` AT ALL — not even a
+  // `diskSizeBytes` — which makes it the fixture for `installedFloorHostGb`'s "still unbounded after the
+  // fill" path: there is nothing for `mlxEstimatedPeakGb` to read, so the blanket has to carry the answer.
+  function krea2Raw() {
+    return {
+      id: "krea_2_raw",
+      name: "Krea 2 Raw",
+      type: "image",
+      installState: "installed",
+      mlx: { minMemoryGb: 48 },
+      candle: {
+        minMemoryGb: 32,
+        vramGbByTier: { q4: 28.8, q8: 33.4, bf16: 46.4 },
+        measured: false,
+      },
+      hasVariantMatrix: true,
+      variants: [
+        variant("q4", "installed", null, null),
+        variant("q8", "installed", null, null),
+        variant("bf16", "missing", null, null),
       ],
-    });
+    };
+  }
+
+  it("keeps the blanket floor for a model with no measured tier and no estimable size", async () => {
+    // MLX lane: no measured peak, and no `diskSizeBytes` for the fill to fall back on, so the install set
+    // stays genuinely unbounded and the curated blanket 48 is the honest answer.
+    await render(root, { models: [krea2Raw()] });
     expect(metaText(container)).toEqual(["needs 48 GB"]);
   });
 
+  it("reads krea_2_raw's shipped candle ladder on the candle lane", async () => {
+    // The lane the omitted block hid. q4+q8 installed ⇒ the ceiling is the q8 row 33.4, which the candle
+    // gate's additive criterion turns into ceil(33.4 + 2) = 36 — ABOVE the blanket 32, so the blanket
+    // cannot stand in for it. `measured: false` means neither number is a measurement, hence the max.
+    await render(root, {
+      models: [krea2Raw()],
+      macCapabilities: { macGatingActive: false },
+    });
+    expect(metaText(container)).toEqual(["needs 36 GB"]);
+  });
+
   it("leaves a single-variant model and a floorless model unchanged", async () => {
+    // BOTH fixtures are the SHIPPED shapes. The first previously read `id: "sana_sprint"` with a blanket of
+    // 12 — an id that is NOT IN THE MANIFEST at all (the real entries are `sana_sprint_1600m` / `sana_1600m`,
+    // and both ship a q4/q8/bf16 matrix on macOS, so neither is a single-variant model). A fixture naming a
+    // model that does not exist cannot be checked against anything.
     await render(root, {
       models: [
-        // Single-variant: the "default" pseudo-tier is not a quant tier, so the blanket floor stands.
+        // flux2_klein_9b_true_v2 as shipped: ONE download with no `variant` key, so the "default"
+        // pseudo-tier is not a quant tier, `installedTiers` is empty, and the blanket floor stands. It also
+        // ships no `footprint`, so there is nothing for the fill to read even in principle.
         {
-          id: "sana_sprint",
-          name: "SANA Sprint",
+          id: "flux2_klein_9b_true_v2",
+          name: "FLUX.2 Klein 9B (true v2)",
           type: "image",
           installState: "installed",
-          mlx: { minMemoryGb: 12 },
+          mlx: { minMemoryGb: 42 },
           hasVariantMatrix: false,
-          variants: [variant("default", "installed", 999)],
+          variants: [variant("default", "installed", null, null)],
         },
-        // No floor declared on either lane ⇒ no memory text.
+        // chroma1_hd as shipped: a q4/q8/bf16 matrix with real disk sizes, NO measured peak on any tier,
+        // and no `minMemoryGb` on either lane (`mlx` carries only `quantize`/`standardTierLayout`; there is
+        // no `candle` block). Nothing installed, so this is the "from" branch — which reads MEASURED
+        // per-tier evidence only and is deliberately NOT filled from disk, because an uninstalled model has
+        // no install set to bound. Hence silence.
         {
           id: "chroma1_hd",
           name: "Chroma1 HD",
           type: "image",
           installState: "missing",
+          hasVariantMatrix: true,
+          variants: [
+            variant("q4", "missing", null, 15121207891),
+            variant("q8", "missing", null, 19424564251),
+            variant("bf16", "missing", null, 27493363692),
+          ],
         },
       ],
     });
     // The floorless row renders the em-dash placeholder the component uses for empty meta.
-    expect(metaText(container)).toEqual(["needs 12 GB", "—"]);
+    expect(metaText(container)).toEqual(["needs 42 GB", "—"]);
   });
 });
 
@@ -306,9 +375,14 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
       candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 }, measured: false },
       hasVariantMatrix: true,
       variants: [
-        variant("q4", installState === "installed" ? "installed" : "missing", LENS_TURBO_Q4_BYTES),
-        variant("q8", "missing", null),
-        variant("bf16", "missing", null),
+        variant(
+          "q4",
+          installState === "installed" ? "installed" : "missing",
+          LENS_TURBO_Q4_BYTES,
+          LENS_TURBO_DISK.q4,
+        ),
+        variant("q8", "missing", null, LENS_TURBO_DISK.q8),
+        variant("bf16", "missing", null, LENS_TURBO_DISK.bf16),
       ],
     };
   }
@@ -347,9 +421,9 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
       candle: { minMemoryGb: 24, vramGbByTier: { q4: 21.3, q8: 31.8 }, measured: true },
       hasVariantMatrix: true,
       variants: [
-        variant("q4", "installed", null),
-        variant("q8", "installed", null),
-        variant("bf16", "installed", null),
+        variant("q4", "installed", null, FLUX_DEV_DISK.q4),
+        variant("q8", "installed", null, FLUX_DEV_DISK.q8),
+        variant("bf16", "installed", null, FLUX_DEV_DISK.bf16),
       ],
     };
     await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
@@ -373,7 +447,7 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
         measured: true,
       },
       hasVariantMatrix: true,
-      variants: [variant("int8-convrot", "installed", null)],
+      variants: [variant("int8-convrot", "installed", null, null)],
     };
 
     // No worker advertises the capability ⇒ the tier is invisible, so the row falls back to the blanket.
@@ -405,20 +479,69 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     expect(container.textContent).not.toContain("22 GB");
   });
 
-  it("prefers the candle BLANKET when the lane has no per-tier row", async () => {
-    // sensenova_u1_8b's shape: candle.minMemoryGb only, and no mlx floor at all.
+  it("prefers the candle PER-TIER row over the blanket, as sensenova_u1_8b really ships", async () => {
+    // sensenova_u1_8b AS SHIPPED. An earlier version of this fixture declared `candle: { minMemoryGb: 16 }`
+    // and called that "sensenova_u1_8b's shape: candle.minMemoryGb only" — FALSE. The manifest ships a full
+    // `vramGbByTier { q4: 14.8, q8: 22.5, bf16: 36.7 }` with `measured: true`, under which a q4-only install
+    // reports 17, not 16. The fixture asserted the number its own invented shape produced.
     const model = {
       id: "sensenova_u1_8b",
       name: "SenseNova U1 8B",
       type: "image",
       installState: "installed",
-      candle: { minMemoryGb: 16 },
+      // No `mlx.minMemoryGb`: the real `mlx` block carries only `minQualityTier`/`quantize`/
+      // `standardTierLayout`.
+      mlx: { minQualityTier: "q8", quantize: 4, standardTierLayout: true },
+      candle: {
+        minMemoryGb: 16,
+        vramGbByTier: { q4: 14.8, q8: 22.5, bf16: 36.7 },
+        measured: true,
+      },
       hasVariantMatrix: true,
-      variants: [variant("q4", "installed", null)],
+      variants: [
+        variant("q4", "installed", null, SENSENOVA_DISK.q4),
+        variant("q8", "missing", null, SENSENOVA_DISK.q8),
+        variant("bf16", "missing", null, SENSENOVA_DISK.bf16),
+      ],
+    };
+    // candle: the q4 row 14.8 by the gate's additive criterion ⇒ ceil(14.8 + 2) = 17. The lane is
+    // `measured: true` and coverage over the install set is complete, so the row is used ALONE — it lands
+    // above the blanket 16 here, but the point is that the per-tier row decides, not the blanket.
+    await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
+    expect(metaText(container)).toEqual(["needs 17 GB"]);
+
+    // MLX: this entry declares NO mlx floor and NO measured footprint on any tier, so the q4 install is
+    // bounded by the disk-based fill alone — 11824472971 B + 14 GiB transient = 25.02 GiB ⇒
+    // ceil(25.02 / 0.9) = 28. Before round 4 the row said NOTHING here, while `tierFits`/`suggestTier` were
+    // already ranking this tier against exactly that estimate; silence was not the conservative option, it
+    // just left the picker free to refuse a tier the row had implied nothing about.
+    await render(root, { models: [model], macCapabilities: { macGatingActive: true } });
+    expect(metaText(container)).toEqual(["needs 28 GB"]);
+    // Pinned to the app's own criterion rather than to the literal 28, so it cannot drift from the picker.
+    const q4 = model.variants[0];
+    expect(tierFits(q4, displayedGb(container))).toBe(true);
+    expect(tierFits(q4, displayedGb(container) - 1)).toBe(false);
+  });
+
+  it("uses the candle BLANKET when the lane really has no per-tier row (kokoro_82m)", async () => {
+    // The blanket-only shape the previous fixture MISNAMED. It genuinely exists — on eight shipped audio
+    // entries, all `candle: { minMemoryGb, measured: false }` with no `vramGbByTier` — `kokoro_82m` being
+    // the smallest. Single download, no `variant` key, so `installedTiers` is empty and case 3 of
+    // `needsLabel` (the blanket) is the only branch available. Rendered as `type: "image"` purely to land it
+    // on the default tab; the memory logic does not read `type`.
+    const model = {
+      id: "kokoro_82m",
+      name: "Kokoro 82M",
+      type: "image",
+      installState: "installed",
+      candle: { minMemoryGb: 2, measured: false },
+      hasVariantMatrix: false,
+      variants: [variant("default", "installed", null, 327214577)],
     };
     await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
-    expect(metaText(container)).toEqual(["needs 16 GB"]);
-    // ...and nothing on the MLX lane, which declares no floor for it.
+    expect(metaText(container)).toEqual(["needs 2 GB"]);
+    // ...and nothing on the MLX lane, which declares no block at all for it. The fill cannot rescue this:
+    // `installedTiers` is empty, so there is no installed tier to estimate for.
     await render(root, { models: [model], macCapabilities: { macGatingActive: true } });
     expect(metaText(container)).toEqual(["—"]);
   });

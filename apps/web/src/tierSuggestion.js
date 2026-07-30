@@ -146,22 +146,47 @@ function numberOrNull(value) {
 // lane's fields. `options.backend === "candle"` selects the candle lane; anything else is MLX (the
 // convention every existing caller already uses: `macGatingActive ? "mlx" : "candle"`).
 //
-// These helpers never SYNTHESIZE a floor. Unlike `variantFootprintBytes` — which falls back to a
-// resident/disk ESTIMATE so a download suggestion always has something to RANK — a memory floor is only
-// ever taken from a number the manifest actually declares for the lane. There is no disk-size modelling
-// anywhere below.
+// MEASURED EVIDENCE IS PREFERRED, BUT AN UNEVIDENCED INSTALLED TIER IS *ESTIMATED*, NOT IGNORED
+// (sc-15400 round 4). An earlier revision of this header claimed these helpers "never SYNTHESIZE a
+// floor" — only ever reading a number the manifest declares for the lane, with "no disk-size modelling
+// anywhere below". That framing produced a wrong CLAIM rather than a conservative one, because the
+// ceiling is taken over the INSTALLED SET: with q4 measured and q8/bf16 carrying only `diskSizeBytes`,
+// `z_image_edit` (which declares NO `mlx` block, so there is no blanket to fall back on) quoted q4's
+// 19.42 GiB peak — 22 GB — as the requirement for a `{q4,bf16}` install whose bf16 tier this module's
+// OWN estimator puts at 33.13 GiB, i.e. a 37 GB host. `tierFits(bf16, 22)` is false and
+// `suggestTier(entry, 22)` is `q4`, so the label contradicted the picker on the same screen.
 //
-// BUT "declared" is not the same as "measured", and the candle lane says which it is. `candle.measured`
-// is `false` on five shipped entries (`lens_turbo`, `flux_schnell`, `krea_2_raw`, `sd3_5_large_turbo`,
-// `sd3_5_medium`) — schema: "false when ESTIMATED (scaled from weight size + a measured sibling) pending
-// a real measurement". The flag covers `minMemoryGb` AND `vramGbByTier` TOGETHER, which decides what to
-// do about it: on such an entry the blanket integer is ITSELF an estimate, so "distrust the per-tier row
-// and fall through to the blanket" would merely swap one estimate for another. What it CAN do is refuse
-// to let either estimate lower the other, so `laneEvidenceEstimated` makes the blanket a FLOOR under the
-// per-tier figure (`max`, identical to the incomplete-coverage rule above). Concretely: `lens_turbo`'s
-// estimated candle q4 row of 37.3 converts to a 40 GB host, below the curated blanket of 44 — so the row
-// reports 44. There is no `mlx.measured` counterpart because the MLX per-tier evidence is a harness
-// measurement by construction (`footprint_measure.rs`), so the flag is read on the candle lane only.
+// So: a per-tier MEASURED number is used verbatim where it exists (that is still the whole point of
+// sc-15400), and an installed tier with NO number on this lane is filled from `variantFootprintBytes`
+// — the SAME disk-based estimate `tierFits` and `suggestTier` already rank with — so the ceiling bounds
+// the WHOLE install set instead of a strict subset of it. Two rules keep the estimate honest:
+//   * it is MLX-LANE ONLY (`mlxEstimatedPeakGb`). `variantFootprintBytes` prefers
+//     `footprint.peakMemoryBytes`, an Apple unified-memory measurement, and 18 shipped (model, os, tier)
+//     rows are an unevidenced CANDLE tier that carries exactly that field (`z_image_edit`/`z_image` q4,
+//     `sdxl` q8, `illustrious_xl_v1`/`v2` all three on windows+linux) — filling from it would be the
+//     lane-crossing this module forbids. Its disk fallback is no better on candle: the addend is
+//     `TRANSIENT_HEADROOM_BYTES`, a 14 GiB MLX 1024²-VAE-decode measurement with no candle counterpart,
+//     and candle converts additively, so the two would not even compose into a comparable quantity.
+//   * a filled tier makes the answer ESTIMATED, so it can never LOWER the blanket (`maxHostGb`), exactly
+//     as `laneEvidenceEstimated` does. Without that, `qwen_image`'s `{q4}` install would read its
+//     filled q4 estimate INSTEAD OF the larger blanket 50 — trading one under-statement for another.
+// When a tier has no lane number AND no estimable size either (`krea_2_raw` ships neither a footprint
+// nor a `diskSizeBytes`), the set stays genuinely unbounded and `installedFloorHostGb` says so.
+//
+// "Declared" is not the same as "measured", and the candle lane says which it is. `candle.measured`
+// is `false` on 13 shipped entries; five of the 13 also carry `vramGbByTier` (`lens_turbo`,
+// `flux_schnell`, `krea_2_raw`, `sd3_5_large_turbo`, `sd3_5_medium`) and are the set meant here, the
+// other eight being blanket-only audio entries (`kokoro_82m`, `chatterbox_tts`, …) where the flag has
+// nothing per-tier to qualify — schema: "false when ESTIMATED (scaled from weight size + a measured
+// sibling) pending a real measurement". The flag covers `minMemoryGb` AND `vramGbByTier` TOGETHER,
+// which decides what to do about it: on such an entry the blanket integer is ITSELF an estimate, so
+// "distrust the per-tier row and fall through to the blanket" would merely swap one estimate for
+// another. What it CAN do is refuse to let either estimate lower the other, so `laneEvidenceEstimated`
+// makes the blanket a FLOOR under the per-tier figure (`max`, identical to the incomplete-coverage rule
+// above). Concretely: `lens_turbo`'s estimated candle q4 row of 37.3 converts to a 40 GB host, below the
+// curated blanket of 44 — so the row reports 44. There is no `mlx.measured` counterpart because the MLX
+// per-tier evidence is a harness measurement by construction (`footprint_measure.rs`), so the flag is
+// read on the candle lane only.
 // ---------------------------------------------------------------------------------------------------
 
 // A single variant's MEASURED peak memory in GB (base 1024³, the same unit `variantFootprintBytes`
@@ -258,20 +283,30 @@ function isCandleOnlyTier(tier) {
 // ~4.5 effective bits), which is safe.
 //
 // Latent today, deliberately: `krea_2_turbo` is the only entry offering a candle-only tier and it ships
-// the matching `int8-convrot` row, so nothing currently reaches this branch (pinned by
+// the matching `int8-convrot` row, so nothing currently reaches the degrade (pinned by
 // memoryFloorCatalogParity.test.js). One honest caveat if it ever does: sc-12425 measured INT8-ConvRot
-// ABOVE q8 on a real trunk (42.9 vs 35.9), so for that tier q8 is a known under-prediction of the real
-// peak — it is still strictly better than `minMemoryGb`, and `installedFloorHostGb` floors the answer at
-// the blanket regardless, so the degrade can never report below today's number.
+// ABOVE q8 on a real trunk (42.9 vs 35.9), so for that tier the q8 row is a known UNDER-prediction of
+// the real peak.
+//
+// Which is why the degrade is reported as `exact: false`. An earlier revision of this comment instead
+// reassured that "`installedFloorHostGb` floors the answer at the blanket regardless, so the degrade can
+// never report below today's number" — that was FALSE: a degraded figure is non-null, so the install set
+// counted as fully evidenced, `installedFloorHostGb` took its `complete` branch, and the converted q8
+// number was returned with no blanket floor under it. (`vram_gate::predicted_peak_gb` degrades only
+// `nvfp4` and otherwise falls to `minMemoryGb`, so there is no upstream floor either.) `exact: false`
+// makes the claim true rather than merely deleting it: a proxy figure is treated exactly like the
+// disk-based fill — it may raise the answer, never lower it below the blanket.
 function declaredPeakGb(byTier, backend, tier) {
   const own = byTier.get(tier) ?? null;
   if (own !== null) {
-    return own;
+    return { gb: own, exact: true };
   }
   if (backend === "candle" && isCandleOnlyTier(tier)) {
-    return byTier.get("q8") ?? null;
+    const degraded = byTier.get("q8") ?? null;
+    // A non-null answer here is the q8 PROXY, not this tier's own evidence.
+    return { gb: degraded, exact: degraded === null };
   }
-  return null;
+  return { gb: null, exact: true };
 }
 
 // The model's BLANKET declared floor (GB) on `backend`, or null when that lane declares none. The
@@ -358,22 +393,55 @@ function maxHostGb(a, b) {
 // `options` also forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible), so
 // a tier this host cannot serve never contributes to the ceiling.
 export function installedTierPeakGb(model, options = {}) {
+  // NO fill: this is the strict primitive, so an unevidenced installed tier makes it null.
   const { ceiling, complete, count } = installedCeiling(model, options);
   // An installed tier we have no number for means the set is unbounded — the caller must not treat the
-  // ceiling as the requirement (see `installedFloorHostGb`, which floors it at the blanket instead).
+  // ceiling as the requirement (see `installedFloorHostGb`, which fills or floors it instead).
   return count === 0 || !complete ? null : ceiling;
 }
 
-// The max declared peak (GB) over the installed tiers, together with whether EVERY installed tier
-// contributed. `complete: false` with a non-null `ceiling` is the partially-measured case — real and
-// common: `flux_dev` ships measured q4/q8 candle rows and offers a bf16 tier with no row at all.
-function installedCeiling(model, options) {
+// One installed tier's MLX-lane ESTIMATED peak (GB) — `variantFootprintBytes` in the same base-1024³ unit
+// the rest of this section works in, so `hostGbForPeakGb(_, "mlx")` (`ceil(peak / 0.9)`) reproduces
+// `tierFits`'s budget EXACTLY and the label can never sit at a host the picker would refuse.
+//
+// Returns null on candle, unconditionally — see the lane rule in the section header. Also null when the
+// catalog knows no size for the tier at all, which keeps "unbounded" distinguishable from "estimated".
+function mlxEstimatedPeakGb(model, tier, options) {
+  if (options.backend === "candle") {
+    return null;
+  }
+  const variant = (model?.variants ?? []).find((entry) => entry?.variant === tier);
+  const footprint = variant ? variantFootprintBytes(variant) : null;
+  return footprint === null ? null : footprint.bytes / BYTES_PER_GB;
+}
+
+// The max peak (GB) over the installed tiers, plus how it was arrived at:
+//   * `complete` — every installed tier contributed a number. `false` with a non-null `ceiling` is the
+//     partially-covered case: real and common (`flux_dev` ships measured q4/q8 candle rows and offers a
+//     bf16 tier with no row at all).
+//   * `estimated` — at least one contribution was NOT that tier's own lane evidence: either a `fill`
+//     estimate or `declaredPeakGb`'s candle-only q8 proxy. Such a ceiling may raise the reported host
+//     size but must never lower it below the blanket.
+//
+// `fill` is optional so `installedTierPeakGb` keeps its strict all-or-nothing semantics unchanged.
+function installedCeiling(model, options, fill = null) {
   const byTier = peakGbByTier(model, options.backend);
   const tiers = installedTiers(model, options);
   let ceiling = null;
   let complete = true;
+  let estimated = false;
   for (const tier of tiers) {
-    const gb = declaredPeakGb(byTier, options.backend, tier);
+    const declared = declaredPeakGb(byTier, options.backend, tier);
+    let gb = declared.gb;
+    if (gb !== null && !declared.exact) {
+      estimated = true;
+    }
+    if (gb === null && fill !== null) {
+      gb = fill(model, tier, options);
+      if (gb !== null) {
+        estimated = true;
+      }
+    }
     if (gb === null) {
       complete = false;
       continue;
@@ -382,7 +450,7 @@ function installedCeiling(model, options) {
       ceiling = gb;
     }
   }
-  return { ceiling, complete, count: tiers.length };
+  return { ceiling, complete, count: tiers.length, estimated };
 }
 
 // The host size (GB) to quote for the tiers a model ACTUALLY HAS INSTALLED on `options.backend`, or null
@@ -392,29 +460,51 @@ function installedCeiling(model, options) {
 // Three inputs, and the rule is one-directional throughout — under-stating is what makes a user download
 // a model that then OOMs, over-stating is merely conservative:
 //
-//   1. EVERY installed tier measured, and the lane calls its numbers measured ⇒ the converted ceiling
-//      ALONE. This is the whole point of sc-15400: krea_realtime_14b with only q4 on disk reports the
-//      32 GB its 27.90 GiB peak needs, not the blanket 64.
-//   2. SOME installed tier has no number ⇒ `max(blanket, converted ceiling over the tiers that do)`.
-//      NOT the blanket alone. The blanket is the DEFAULT (lightest) tier's peak plus headroom, so it can
-//      sit below a heavier installed tier's measured requirement — `flux_dev`'s blanket of 24 against a
-//      measured q8 of 31.8 (a 34 GB host) is the shipped example, and `krea_2_turbo`'s 32 against a
-//      measured bf16 of 47.2 (50 GB) is the largest. Reporting the blanket alone under-stated both.
-//   3. The lane flags its numbers ESTIMATED ⇒ `max` as well, for the reason in the section header.
+//   1. EVERY installed tier carries this lane's OWN measured number, and the lane calls its numbers
+//      measured ⇒ the converted ceiling ALONE. This is the whole point of sc-15400: krea_realtime_14b
+//      with only q4 on disk reports the 32 GB its 27.90 GiB peak needs, not the blanket 64.
+//   2. SOME installed tier has no number of its own ⇒ it is FILLED from `mlxEstimatedPeakGb` where that
+//      lane can estimate, and the answer becomes `max(blanket, converted ceiling)`. Two distinct
+//      under-statements make both halves load-bearing:
+//        * the ceiling must cover the WHOLE set, not the subset that happens to be measured —
+//          `z_image_edit` `{q4,bf16}` quoted q4's 22 against a bf16 estimate of 37, with no blanket to
+//          catch it (see the section header);
+//        * and the blanket must still floor it, because an ESTIMATE may not lower a curated number —
+//          `qwen_image` `{q4}` would otherwise read its filled q4 estimate instead of the larger 50.
+//      The blanket alone was never right either: it is the DEFAULT (lightest) tier's peak plus headroom,
+//      so it can sit below a heavier installed tier's MEASURED requirement — `flux_dev`'s 24 against a
+//      measured q8 of 31.8 (a 34 GB host), `krea_2_turbo`'s 32 against a measured bf16 of 47.2 (50 GB).
+//   3. The lane flags its numbers ESTIMATED, or a candle-only tier fell back to the q8 proxy ⇒ `max` as
+//      well, for the reason in the section header.
+//   4. STILL unbounded after the fill (an installed tier has no lane number, and no estimable size on a
+//      lane that can estimate) AND no blanket ⇒ null, so the surface says NOTHING. A ceiling over a
+//      strict subset is not a bound on the set, and quoting it is a false claim rather than a
+//      conservative one. Silence is the honest answer; `installedTierPeakGb`'s doc calls this
+//      "unbounded", and this is where that distinction is finally respected instead of discarded.
+//      Unreachable on the shipped catalog (pinned by memoryFloorCatalogParity.test.js) — every lane that
+//      cannot estimate also ships a blanket wherever it ships any per-tier row.
 //
 // `options` forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible), so a
 // tier this host cannot serve never raises the number.
 export function installedFloorHostGb(model, options = {}) {
   const backend = options.backend;
-  const { ceiling, complete, count } = installedCeiling(model, options);
+  const { ceiling, complete, estimated, count } = installedCeiling(
+    model,
+    options,
+    mlxEstimatedPeakGb,
+  );
   if (count === 0) {
     return null;
   }
   const converted = hostGbForPeakGb(ceiling, backend);
-  if (complete && !laneEvidenceEstimated(model, backend)) {
+  if (complete && !estimated && !laneEvidenceEstimated(model, backend)) {
     return converted;
   }
-  return maxHostGb(converted, blanketFloorGb(model, backend));
+  const blanket = blanketFloorGb(model, backend);
+  if (!complete && blanket === null) {
+    return null;
+  }
+  return maxHostGb(converted, blanket);
 }
 
 // The host size (GB) to quote as an ENTRY floor for a model that is NOT installed yet, or null when the

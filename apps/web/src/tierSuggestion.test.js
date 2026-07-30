@@ -21,11 +21,15 @@ const GB = 1024 * 1024 * 1024;
 
 // Build a /models-shaped quant-matrix model. Each entry in `tiers` may be a bare tier key (which
 // gets a disk-only footprint sized from `diskGb`) or an object { variant, diskGb, residentGb } to
-// exercise the measured-vs-estimate paths. Defaults roughly mirror a real z-image-class model:
-// q4 ~4 GB on disk, q8 ~8 GB, bf16 ~16 GB.
+// exercise the measured-vs-estimate paths.
+//
+// DELIBERATELY SYNTHETIC — the round-tier sizes below (q4 4 GB, q8 8 GB, bf16 16 GB) are chosen to make the
+// suggestion arithmetic legible, and they are NOT z_image_turbo's shipped disk sizes (which are 5.50 / 10.24
+// / 19.13 GB). The id is `synthetic_matrix` so no reader can mistake these for catalog provenance; the
+// numbers that must match the manifest are asserted in memoryFloorCatalogParity.test.js, which reads it.
 function matrixModel(tiers = defaultTiers()) {
   return {
-    id: "z_image_turbo",
+    id: "synthetic_matrix",
     hasVariantMatrix: true,
     variants: tiers.map((tier) => {
       const spec = typeof tier === "string" ? { variant: tier } : tier;
@@ -319,16 +323,29 @@ describe("per-tier memory floor: headroom conversion", () => {
 });
 
 describe("per-tier memory floor: the lane selects the evidence", () => {
-  // A model carrying BOTH lanes' evidence for the same tier, as lens_turbo really does.
+  // A model carrying BOTH lanes' evidence for the same tier, as lens_turbo really does — now including the
+  // shipped `measured: false`, which an earlier version of this fixture omitted while claiming "as
+  // lens_turbo really does". The omission was inert for the two helpers asserted here (neither reads the
+  // flag) but it is exactly the provenance drift that let krea_2_raw's candle gap survive two rounds, and
+  // with the flag absent `installedFloorHostGb` would answer 40 for this entry instead of the shipped 44.
+  // Disk sizes are the real ones too, since the round-4 fill reads them.
   function bothLanes() {
     return {
       id: "lens_turbo",
       mlx: { minMemoryGb: 60 },
-      candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 } },
+      candle: {
+        minMemoryGb: 44,
+        vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 },
+        measured: false,
+      },
       hasVariantMatrix: true,
       variants: [
-        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 32749818036 } },
-        { variant: "q8", installState: "missing", footprint: { diskSizeBytes: 1 } },
+        {
+          variant: "q4",
+          installState: "installed",
+          footprint: { diskSizeBytes: 21830326407, peakMemoryBytes: 32749818036 },
+        },
+        { variant: "q8", installState: "missing", footprint: { diskSizeBytes: 32753474289 } },
       ],
     };
   }
@@ -428,15 +445,21 @@ describe("per-tier memory floor: the blanket is a FLOOR, not a ceiling", () => {
   // hosted tier, plus headroom ... heavier hosted tiers (q8 / bf16) can exceed this value" (schema), and
   // `vram_gate.rs:180` says landing on it is "the WRONG floor". So an install set with ONE unmeasured tier
   // must not report the blanket alone.
+  // flux_dev as shipped, INCLUDING the real `diskSizeBytes` on all three tiers. Those were `footprint: null`
+  // before, which is not what ships — and the omission mattered: the round-4 fill reads `diskSizeBytes`, so
+  // with real disk sizes present this fixture now DOUBLES as the guard that the fill stays MLX-only. If
+  // `mlxEstimatedPeakGb` ever stopped short-circuiting on candle, bf16's 33746402173 B + 14 GiB transient
+  // would enter the candle ceiling and the expectations below (34, 24) would move.
   function fluxDev() {
     return {
       id: "flux_dev",
+      mlx: { minMemoryGb: 42 },
       candle: { minMemoryGb: 24, vramGbByTier: { q4: 21.3, q8: 31.8 }, measured: true },
       hasVariantMatrix: true,
       variants: [
-        { variant: "q4", installState: "installed", footprint: null },
-        { variant: "q8", installState: "installed", footprint: null },
-        { variant: "bf16", installState: "installed", footprint: null },
+        { variant: "q4", installState: "installed", footprint: { diskSizeBytes: 9617334683 } },
+        { variant: "q8", installState: "installed", footprint: { diskSizeBytes: 18010071290 } },
+        { variant: "bf16", installState: "installed", footprint: { diskSizeBytes: 33746402173 } },
       ],
     };
   }
@@ -451,8 +474,10 @@ describe("per-tier memory floor: the blanket is a FLOOR, not a ceiling", () => {
   });
 
   it("still reports the blanket when it is the HIGHER of the two", () => {
-    // sd3_5_medium's shape: q8 unrowed, and the blanket 36 already covers the measured bf16 of 33
-    // (33 + 2 = 35). The max must not lower the curated number either.
+    // sd3_5_medium as shipped (`candle.minMemoryGb` 36, `vramGbByTier { q4: 28.5, bf16: 33 }`,
+    // `measured: false` — verified field-for-field against the manifest): q8 unrowed, and the blanket 36
+    // already covers the ESTIMATED bf16 of 33 (33 + 2 = 35). `measured: false` means neither figure is a
+    // measurement, so the max must not lower the curated number either.
     const model = {
       candle: { minMemoryGb: 36, vramGbByTier: { q4: 28.5, bf16: 33 }, measured: false },
       hasVariantMatrix: true,
@@ -560,5 +585,180 @@ describe("per-tier memory floor: duplicate tier keys resolve to the MAX", () => 
     };
     expect(installedTierPeakGb(ascending, { backend: "mlx" })).toBe(20);
     expect(installedTierPeakGb(descending, { backend: "mlx" })).toBe(20);
+  });
+});
+
+describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not ignored", () => {
+  // THE ROUND-4 BLOCKER. `installedFloorHostGb` took `max(convertedCeiling, blanket)` when coverage was
+  // incomplete, and `maxHostGb(x, null) === x` — so on a lane declaring NO blanket, the ceiling over the
+  // MEASURED SUBSET became the answer for the whole install set. `installedTierPeakGb`'s own doc says a null
+  // there means "unbounded, not no requirement"; the composer discarded exactly that distinction.
+  //
+  // z_image_edit AS SHIPPED is the entry it reached: no `mlx` block at all (so `blanketFloorGb(_, "mlx")` is
+  // null), a measured q4 peak, and q8/bf16 carrying only `diskSizeBytes`.
+  const Z_IMAGE_EDIT_Q4_PEAK = 20854139600; // 19.42 GiB, measured
+  const Z_IMAGE_EDIT_DISK = { q4: 5909406487, q8: 10998523666, bf16: 20538406851 };
+
+  function zImageEdit(installed = ["q4"]) {
+    return {
+      id: "z_image_edit",
+      // No `mlx` and no `candle` block — verified against the manifest.
+      hasVariantMatrix: true,
+      variants: ["q4", "q8", "bf16"].map((tier) => ({
+        variant: tier,
+        installState: installed.includes(tier) ? "installed" : "missing",
+        footprint: {
+          diskSizeBytes: Z_IMAGE_EDIT_DISK[tier],
+          ...(tier === "q4" ? { peakMemoryBytes: Z_IMAGE_EDIT_Q4_PEAK } : {}),
+        },
+      })),
+    };
+  }
+
+  it("has no blanket to fall back on, which is what made the partial ceiling the answer", () => {
+    expect(blanketFloorGb(zImageEdit(), "mlx")).toBeNull();
+    // The strict primitive correctly refuses to bound a partially-covered set...
+    expect(installedTierPeakGb(zImageEdit(["q4", "bf16"]), { backend: "mlx" })).toBeNull();
+  });
+
+  it("bounds the WHOLE install set, so the label agrees with tierFits and suggestTier", () => {
+    // The measured-only case is untouched: q4 alone is complete, so it reports its own measured peak.
+    expect(installedFloorHostGb(zImageEdit(["q4"]), { backend: "mlx" })).toBe(22);
+
+    // ...and every set containing an unevidenced tier is now bounded by that tier's estimate. 22 was the
+    // pre-fix answer for all three of these.
+    expect(installedFloorHostGb(zImageEdit(["q4", "q8"]), { backend: "mlx" })).toBe(27);
+    expect(installedFloorHostGb(zImageEdit(["q4", "bf16"]), { backend: "mlx" })).toBe(37);
+    expect(installedFloorHostGb(zImageEdit(["q4", "q8", "bf16"]), { backend: "mlx" })).toBe(37);
+
+    // THE INVARIANT, stated against the module's own picker rather than the literals above: at the host the
+    // label quotes, `tierFits` must accept every installed tier and `suggestTier` must not have to degrade
+    // below the heaviest of them. Pre-fix, `tierFits(bf16, 22)` was false and `suggestTier(entry, 22)` was
+    // "q4" — the label contradicted the picker on the same screen.
+    for (const installed of [["q4"], ["q4", "q8"], ["q4", "bf16"], ["q4", "q8", "bf16"], ["q8"], ["bf16"]]) {
+      const entry = zImageEdit(installed);
+      const shown = installedFloorHostGb(entry, { backend: "mlx" });
+      expect(shown, `${installed.join(",")} must quote a number`).not.toBeNull();
+      for (const tier of installed) {
+        const found = entry.variants.find((v) => v.variant === tier);
+        expect(tierFits(found, shown), `${installed.join(",")}: tierFits(${tier}, ${shown})`).toBe(true);
+        // TIGHT: one GB less must fail for the heaviest installed tier, so the fill is not inflating.
+      }
+      const heaviest = entry.variants
+        .filter((v) => installed.includes(v.variant))
+        .reduce((a, b) => (variantFootprintBytes(a).bytes >= variantFootprintBytes(b).bytes ? a : b));
+      expect(tierFits(heaviest, shown - 1), `${installed.join(",")}: minimal host`).toBe(false);
+    }
+  });
+
+  it("fills from variantFootprintBytes, the SAME estimate tierFits and suggestTier rank with", () => {
+    // Not a new guess: the filled figure is exactly what the download suggestion already models, restated
+    // as the arithmetic the two share so the intent survives a refactor of either side.
+    const bf16 = zImageEdit(["bf16"]).variants.find((v) => v.variant === "bf16");
+    const estimateGb = variantFootprintBytes(bf16).bytes / GB;
+    expect(variantFootprintBytes(bf16).measured).toBe(false);
+    expect(estimateGb).toBeCloseTo(
+      (Z_IMAGE_EDIT_DISK.bf16 * DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES) / GB,
+      6,
+    );
+    expect(installedFloorHostGb(zImageEdit(["bf16"]), { backend: "mlx" })).toBe(
+      hostGbForPeakGb(estimateGb, "mlx"),
+    );
+  });
+
+  it("does NOT fill on the candle lane, in either the measured or the disk direction", () => {
+    // `variantFootprintBytes` prefers `footprint.peakMemoryBytes`, an Apple unified-memory measurement, and
+    // 18 shipped (model, os, tier) rows are an unevidenced CANDLE tier that carries exactly that field —
+    // z_image_edit's own q4 among them. Filling from it would be the lane-crossing this module forbids, and
+    // its disk fallback is no better (the 14 GiB addend is an MLX 1024²-decode measurement, and candle
+    // converts additively). So candle keeps its own evidence or says nothing.
+    for (const installed of [["q4"], ["q4", "bf16"], ["q4", "q8", "bf16"]]) {
+      expect(installedFloorHostGb(zImageEdit(installed), { backend: "candle" })).toBeNull();
+    }
+    // Nor may the MLX answer change when the candle block is stripped, or vice versa.
+    const withCandle = {
+      ...zImageEdit(["q4", "bf16"]),
+      candle: { minMemoryGb: 8, vramGbByTier: { q4: 5 }, measured: true },
+    };
+    expect(installedFloorHostGb(withCandle, { backend: "mlx" })).toBe(37);
+  });
+
+  it("never lets an ESTIMATE lower the blanket", () => {
+    // The trap the fill would otherwise have opened: filling COMPLETES the set, so a naive implementation
+    // would take its "fully evidenced" branch and return the estimate ALONE. qwen_image is the shipped case
+    // — no MLX per-tier evidence at all, a curated blanket of 50, and a q4 whose disk-based estimate lands
+    // well under it.
+    const qwenImage = (installed) => ({
+      id: "qwen_image",
+      mlx: { minMemoryGb: 50 },
+      hasVariantMatrix: true,
+      variants: [
+        ["q4", 28387655680],
+        ["q8", 38583632655],
+        ["bf16", 57731960832],
+      ].map(([tier, diskSizeBytes]) => ({
+        variant: tier,
+        installState: installed.includes(tier) ? "installed" : "missing",
+        footprint: { diskSizeBytes },
+      })),
+    });
+    // q4's estimate is BELOW the blanket, so the blanket stands.
+    const q4Estimate = hostGbForPeakGb(
+      (28387655680 + TRANSIENT_HEADROOM_BYTES) / GB,
+      "mlx",
+    );
+    expect(q4Estimate).toBeLessThan(50);
+    expect(installedFloorHostGb(qwenImage(["q4"]), { backend: "mlx" })).toBe(50);
+    // ...and bf16's is ABOVE it, so the estimate raises the answer. Both directions from one rule.
+    expect(installedFloorHostGb(qwenImage(["bf16"]), { backend: "mlx" })).toBeGreaterThan(50);
+    expect(installedFloorHostGb(qwenImage(["bf16"]), { backend: "mlx" })).toBe(
+      hostGbForPeakGb((57731960832 + TRANSIENT_HEADROOM_BYTES) / GB, "mlx"),
+    );
+  });
+
+  it("says NOTHING when the set is still unbounded after the fill and there is no blanket", () => {
+    // Case 4. krea_2_raw is the shipped entry with no `footprint` at all — nothing to estimate from — so
+    // with its blanket removed there is no honest number, and a ceiling over the measured subset is a FALSE
+    // claim rather than a conservative one. Unreachable on the real catalog (pinned in
+    // memoryFloorCatalogParity.test.js); asserted here on a deliberately SYNTHETIC entry.
+    const unboundable = {
+      id: "synthetic_no_blanket_partial",
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 10 * GB } },
+        // No footprint at all: not measured, and not estimable either.
+        { variant: "bf16", installState: "installed", footprint: null },
+      ],
+    };
+    expect(installedFloorHostGb(unboundable, { backend: "mlx" })).toBeNull();
+    // With a blanket present it becomes max(partial ceiling, blanket) again — the unchanged case 2.
+    expect(
+      installedFloorHostGb({ ...unboundable, mlx: { minMemoryGb: 64 } }, { backend: "mlx" }),
+    ).toBe(64);
+    expect(
+      installedFloorHostGb({ ...unboundable, mlx: { minMemoryGb: 4 } }, { backend: "mlx" }),
+    ).toBe(hostGbForPeakGb(10, "mlx"));
+  });
+
+  it("floors a candle-only tier's q8 DEGRADE at the blanket", () => {
+    // MINOR 3. The degrade (`declaredPeakGb`'s sc-11042 rule: a candle-only tier with no row of its own uses
+    // the q8 row, never `minMemoryGb`) used to be reported as ordinary evidence, so the set counted as fully
+    // measured and `installedFloorHostGb` returned the converted q8 figure with NO blanket under it — while
+    // the comment claimed the opposite. sc-12425 measured INT8-ConvRot ABOVE q8 (42.9 vs 35.9), so the q8
+    // proxy is a known under-prediction and must not be trusted alone.
+    const degrading = {
+      id: "synthetic_candle_only_degrade",
+      candle: { minMemoryGb: 48, vramGbByTier: { q8: 30 }, measured: true },
+      hasVariantMatrix: true,
+      variants: [{ variant: "int8-convrot", installState: "installed", footprint: null }],
+    };
+    // ceil(30 + 2) = 32 from the proxy, floored at the curated blanket 48.
+    expect(installedFloorHostGb(degrading, { backend: "candle" })).toBe(48);
+    // A tier with its OWN row is unaffected: no proxy, so no floor, and the row is used alone.
+    const owned = {
+      ...degrading,
+      candle: { minMemoryGb: 48, vramGbByTier: { q8: 30, "int8-convrot": 34.7 }, measured: true },
+    };
+    expect(installedFloorHostGb(owned, { backend: "candle" })).toBe(37);
   });
 });

@@ -9,10 +9,13 @@ import {
   blanketFloorGb,
   cheapestDeclaredTierPeakGb,
   hostGbForPeakGb,
+  installedFloorHostGb,
   installedTierPeakGb,
+  suggestTier,
   tierFits,
+  variantFootprintBytes,
 } from "./tierSuggestion.js";
-import { isSelectableTier, tierQuantize } from "./quantTier.js";
+import { isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 
 // CATALOG-DRIVEN memory-floor guard (sc-15400 review). Sibling of controlModesParity.test.js /
@@ -182,11 +185,19 @@ describe("catalog memory floors: the displayed number satisfies the app's own fi
   // The reported figure must never sit BELOW the lane's own measured requirement — the one direction
   // that causes the reported failure mode (a user downloads a model that then OOMs).
   //
-  // NOTE the `peak === null` skip: this test only sees install-sets where EVERY tier is measured. That
-  // is exactly the blind spot the label sweep below exists to close — the blanket-fallback path, where
-  // the previous round's under-statement lived, never reaches this loop at all.
+  // ROUND 4 REMOVED THE BLIND SPOT THAT LET THE ROUND-3 BLOCKER SHIP GREEN THROUGH THIS VERY TEST. It read
+  // `installedTierPeakGb` — the STRICT primitive, which returns null whenever any installed tier is
+  // unevidenced — and then `if (peak === null) continue`. So a partially-evidenced install-set asserted
+  // NOTHING here, and that is precisely the shape `z_image_edit` has on macOS. The test written to catch the
+  // class could not see the instance.
+  //
+  // It now asserts on `installedFloorHostGb`, the COMPOSER the label actually calls, so no model is skipped:
+  // every (model, os) with at least one selectable tier contributes an assertion, and the strict primitive is
+  // checked as an ADDITIONAL constraint wherever it is non-null rather than as the gate for looking at all.
   it("never reports a host size below the lane's measured peak, on either lane", () => {
     let checked = 0;
+    let skipped = 0;
+    const silentWithEvidence = [];
     for (const os of OSES) {
       const backend = BACKEND_FOR_OS[os];
       for (const model of manifestModels) {
@@ -194,17 +205,23 @@ describe("catalog memory floors: the displayed number satisfies the app's own fi
         if (tiers.length === 0) {
           continue;
         }
-        // The "everything installed" host: the ceiling over all tiers.
+        // The "everything installed" host — the widest set, so the ceiling is over every tier.
         const entry = catalogEntry(model, os, tiers);
-        const peak = installedTierPeakGb(entry, { backend });
-        if (peak === null) {
+        const options = { backend, convRotEligible: true, nvfp4Eligible: true };
+        const shown = installedFloorHostGb(entry, options);
+        const evidenced = tiers.filter((tier) => laneEvidenceGb(model, os, tier) !== null);
+        if (shown === null) {
+          // Silence is only ever correct when the lane has NO per-tier evidence and NO blanket. Anything
+          // else here would be the round-3 defect in its other direction.
+          skipped++;
+          if (evidenced.length > 0 || blanketFloorGb(model, backend) !== null) {
+            silentWithEvidence.push(`${model.id} on ${os}`);
+          }
           continue;
         }
-        const shown = hostGbForPeakGb(peak, backend);
         checked++;
-        expect(shown, `${model.id} on ${os}`).toBeGreaterThanOrEqual(Math.ceil(peak));
-        // ...and it is the ceiling, not some tier's number: no single tier may exceed it, judged by
-        // THAT LANE's own criterion (MLX multiplies by 0.9, candle adds 2 — see `hostGbForPeakGb`).
+        // No single tier's own lane evidence may exceed the reported figure, judged by THAT LANE's own
+        // criterion (MLX multiplies by 0.9, candle adds 2 — see `hostGbForPeakGb`).
         for (const tier of tiers) {
           const lanePeak = laneEvidenceGb(model, os, tier);
           if (lanePeak !== null) {
@@ -214,9 +231,20 @@ describe("catalog memory floors: the displayed number satisfies the app's own fi
             ).toBeLessThanOrEqual(shown);
           }
         }
+        // Where the STRICT primitive can also speak, the composed answer must not sit below it.
+        const strict = installedTierPeakGb(entry, options);
+        if (strict !== null) {
+          expect(shown, `${model.id} on ${os} vs the strict ceiling`).toBeGreaterThanOrEqual(
+            Math.ceil(strict),
+          );
+        }
       }
     }
+    expect(silentWithEvidence.join(", ")).toBe("");
     expect(checked, "must actually check some models on both lanes").toBeGreaterThanOrEqual(8);
+    // Non-vacuity in the other direction: the skipped set is the genuinely-evidenceless one, and it must
+    // not have quietly grown to swallow the corpus.
+    expect(skipped).toBeLessThan(checked);
   });
 });
 
@@ -594,5 +622,312 @@ describe("catalog memory floors: duplicate tier keys cannot reach the client", (
     }
     // mage_flow x6 (coRequisite component rows) + wan_2_2* x3 (per-platform twins).
     expect(withDuplicatesUpstream).toBeGreaterThanOrEqual(6);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// THE CONSISTENCY INVARIANT (sc-15400 round 4)
+//
+// Every sweep above compares the label to the lane's own per-tier EVIDENCE. That is necessary but it is
+// structurally unable to express the round-3 blocker, because the offending tiers were the ones with NO
+// evidence: `z_image_edit`'s q8/bf16 contributed nothing to compare against, so the label could quote q4's
+// 22 GB for a `{q4,bf16}` install and every evidence-based assertion stayed green.
+//
+// So this sweep asserts a DIFFERENT property, over the same catalog: the number the label quotes must be a
+// host at which the module's OWN PICKER would accept every installed tier. `tierFits` is the gate
+// `suggestTier` uses to decide which tier to preselect on the Models screen, and it needs no per-tier
+// measurement — it falls back to `variantFootprintBytes`'s disk estimate. That is what lets it see the tiers
+// the evidence sweeps cannot, and it is why "label ≥ what tierFits demands" is the invariant that makes the
+// class unrepeatable rather than merely fixing the instance.
+//
+// WHY IT IS ASSERTED ON THE MLX LANE ONLY. `tierFits` is lane-BLIND and MLX-flavoured in both of its parts:
+// its input is `variantFootprintBytes` (disk × 1.0 + a 14 GiB transient measured by the MLX
+// `footprint_measure.rs` harness at 1024², an Apple unified-memory quantity) and its criterion is
+// `peak <= host × 0.9`, the MLX budget. On MLX that makes the invariant hold BY CONSTRUCTION —
+// `hostGbForPeakGb(_, "mlx")` is `ceil(peak / 0.9)`, literally `tierFits`'s own boundary.
+//
+// On candle it is not an invariant, it is a category error, and asserting it there would overwrite every
+// number this PR's review confirmed. Measured against the shipped catalog: requiring it on candle demands
+// `flux_dev` 51 where `vram_gate` requires 34, `sd3_5_medium` 42 against 36, `lens_turbo` 50 against 44 —
+// 346 combinations in total, and all 294 of the fully-evidenced ones. Those are the figures the candle gate
+// itself admits at (`peak + 2` on `candle.vramGbByTier`, a discrete-VRAM measurement), so raising them would
+// re-create precisely the over-warning MAJOR 3 removed. The candle lane's correct analogue is its own gate's
+// criterion, which is what the evidence sweeps above already assert with zero violations.
+// ---------------------------------------------------------------------------------------------------
+
+// The candle-only tiers' host-eligibility gates, as `SimpleModelManager` derives them from live workers.
+// Both flags matter because either can REMOVE a tier from the install set, and a tier that cannot contribute
+// to the ceiling must also not be one the invariant demands coverage for.
+const ELIGIBILITY = [
+  { convRotEligible: true, nvfp4Eligible: true },
+  { convRotEligible: true, nvfp4Eligible: false },
+  { convRotEligible: false, nvfp4Eligible: true },
+  { convRotEligible: false, nvfp4Eligible: false },
+];
+
+// Every (model, OS, install-subset, eligibility) the real catalog can produce.
+const SWEEP = [];
+for (const os of OSES) {
+  const backend = BACKEND_FOR_OS[os];
+  for (const model of manifestModels) {
+    const tiers = tiersOn(model, os);
+    if (tiers.length === 0) {
+      continue;
+    }
+    for (const subset of subsetsOf(tiers)) {
+      for (const eligibility of ELIGIBILITY) {
+        const entry = {
+          ...catalogEntry(model, os, subset),
+          installState: subset.length > 0 ? "installed" : "missing",
+        };
+        const options = { backend, ...eligibility };
+        SWEEP.push({
+          id: model.id,
+          os,
+          backend,
+          subset,
+          tiers,
+          model,
+          entry,
+          options,
+          eligibility,
+          label: needsLabel(entry, options),
+        });
+      }
+    }
+  }
+}
+
+describe("catalog memory floors: the label never contradicts the module's own picker", () => {
+  it("sweeps every (model, OS, install-subset, eligibility) on both lanes", () => {
+    // 4 eligibility combinations over every install-subset of every matrix model on both lanes.
+    expect(SWEEP.length).toBeGreaterThanOrEqual(1200);
+    expect(SWEEP.some((row) => row.backend === "mlx")).toBe(true);
+    expect(SWEEP.some((row) => row.backend === "candle")).toBe(true);
+    // All four eligibility combinations really are present...
+    const combos = new Set(
+      SWEEP.map((row) => `${row.eligibility.convRotEligible}/${row.eligibility.nvfp4Eligible}`),
+    );
+    expect(combos.size).toBe(4);
+    // ...and at least one really CHANGES the install set, or the extra dimension would be inert.
+    const gated = SWEEP.filter(
+      (row) => row.subset.length > 0 && row.subset.some((tier) => !tierHostEligible(tier, row.eligibility)),
+    );
+    expect(gated.length).toBeGreaterThan(0);
+  });
+
+  it("MLX: every installed eligible tier FITS at the host the label quotes", () => {
+    // THE INVARIANT. For every install-subset, for every installed host-eligible tier, `tierFits` must accept
+    // the quoted host. A silent row asserts nothing (it makes no claim), so silence is counted separately and
+    // required to be the evidenceless case only — otherwise this test could be satisfied by saying nothing.
+    const violations = [];
+    const silent = [];
+    let asserted = 0;
+    let subsetsCovered = 0;
+    for (const row of SWEEP) {
+      if (row.backend !== "mlx" || row.subset.length === 0) {
+        continue;
+      }
+      const installed = row.subset.filter((tier) => tierHostEligible(tier, row.eligibility));
+      if (installed.length === 0) {
+        continue;
+      }
+      subsetsCovered++;
+      const shown = shownGb(row.label);
+      const estimable = installed.filter((tier) =>
+        variantFootprintBytes(row.entry.variants.find((v) => v.variant === tier)) !== null,
+      );
+      if (shown === null) {
+        if (estimable.length > 0) {
+          silent.push(`${row.id} on ${row.os} [${row.subset.join(",")}] said nothing`);
+        }
+        continue;
+      }
+      for (const tier of installed) {
+        const variant = row.entry.variants.find((v) => v.variant === tier);
+        if (variantFootprintBytes(variant) === null) {
+          continue;
+        }
+        asserted++;
+        if (!tierFits(variant, shown)) {
+          const need = Math.ceil(
+            variantFootprintBytes(variant).bytes / BYTES_PER_GB / MEMORY_HEADROOM_FRACTION,
+          );
+          violations.push(
+            `${row.id} on ${row.os} [${row.subset.join(",")}]: label ` +
+              `${JSON.stringify(row.label)} but tierFits refuses ${tier} at ${shown} GB (needs ${need})`,
+          );
+        }
+      }
+      // ...and the two surfaces must agree on WHICH tier is servable: at the quoted host, `suggestTier` must
+      // not have to fall below the heaviest installed tier. This is the form the round-3 defect took —
+      // `suggestTier(z_image_edit, 22)` was "q4" while bf16 sat on disk.
+      if (estimable.length > 0) {
+        const heaviest = estimable
+          .map((tier) => row.entry.variants.find((v) => v.variant === tier))
+          .reduce((a, b) => (variantFootprintBytes(a).bytes >= variantFootprintBytes(b).bytes ? a : b));
+        if (!tierFits(heaviest, shown)) {
+          violations.push(
+            `${row.id} on ${row.os} [${row.subset.join(",")}]: suggestTier at ${shown} GB degrades ` +
+              `below the installed ${heaviest.variant} (picked ${suggestTier(row.entry, shown)})`,
+          );
+        }
+      }
+    }
+    expect(violations.join("\n")).toBe("");
+    expect(silent.join("\n")).toBe("");
+    // Non-vacuity: the sweep must really be comparing a large corpus, and every eligible subset must have
+    // been visited (which is what the round-3 suite's `peak === null` skip prevented).
+    expect(asserted, "must compare a real corpus of installed tiers").toBeGreaterThanOrEqual(500);
+    expect(subsetsCovered).toBeGreaterThanOrEqual(400);
+  });
+
+  it("records WHY the same invariant is not asserted on the candle lane", () => {
+    // A manifest fact, pinned so the asymmetry above cannot be mistaken for an oversight — and so that if it
+    // ever stopped being true, the choice would be revisited rather than silently inherited.
+    //
+    // `tierFits`'s MLX budget demands strictly MORE than the candle gate on the shipped corpus, including on
+    // entries whose candle coverage is COMPLETE (so no fill is involved and the figure is purely the gate's
+    // own arithmetic). Forcing agreement would raise those confirmed numbers.
+    const wouldRaise = [];
+    for (const row of SWEEP) {
+      if (row.backend !== "candle" || row.subset.length === 0) {
+        continue;
+      }
+      const shown = shownGb(row.label);
+      if (shown === null) {
+        continue;
+      }
+      for (const tier of row.subset.filter((t) => tierHostEligible(t, row.eligibility))) {
+        const variant = row.entry.variants.find((v) => v.variant === tier);
+        const footprint = variantFootprintBytes(variant);
+        const evidence = laneEvidenceGb(row.model, row.os, tier);
+        if (footprint === null || evidence === null || tierFits(variant, shown)) {
+          continue;
+        }
+        // The candle GATE is satisfied at the quoted host; only the MLX-flavoured `tierFits` is not.
+        expect(shown, `${row.id} ${tier}: the candle gate must still be satisfied`).toBeGreaterThanOrEqual(
+          hostGbForPeakGb(evidence, "candle"),
+        );
+        wouldRaise.push(`${row.id} ${tier}`);
+      }
+    }
+    // Real and numerous, on entries with full candle coverage — flux_dev among them.
+    expect(wouldRaise.length).toBeGreaterThanOrEqual(50);
+    expect(wouldRaise.join(",")).toContain("flux_dev");
+  });
+
+  it("pins that the linux projection is byte-identical to windows, so two OSes sweep exhaustively", () => {
+    // OSES is macos + windows. linux runs the same candle lane, and if any download ever declared
+    // `platforms: ["windows"]` without linux (or vice versa) the sweep would silently stop being exhaustive.
+    for (const model of manifestModels) {
+      const project = (os) =>
+        catalogEntry(model, os, []).variants.map(
+          (v) => `${v.variant}:${v.footprint?.diskSizeBytes ?? "-"}:${v.footprint?.peakMemoryBytes ?? "-"}`,
+        );
+      expect(project("linux"), `${model.id}: linux must project identically to windows`).toEqual(
+        project("windows"),
+      );
+    }
+  });
+});
+
+describe("catalog memory floors: the shapes the round-4 guards depend on", () => {
+  it("has no candle entry with partial per-tier rows and no blanket", () => {
+    // `installedFloorHostGb` case 4 returns null rather than quoting a ceiling over a strict subset. On the
+    // MLX lane the disk-based fill almost always avoids that branch; on CANDLE there is no fill (the lane
+    // rule), so the branch would be reachable for an entry that ships SOME `vramGbByTier` rows and no
+    // `candle.minMemoryGb`. No such entry exists, which is why the label never falls silent while candle
+    // evidence exists. If one ever ships, this reds — and the "never falls silent" sweep would red too, so
+    // the failure mode is a red build, not a wrong number.
+    const partialNoBlanket = manifestModels.filter(
+      (model) =>
+        Object.keys(model.candle?.vramGbByTier ?? {}).length > 0 &&
+        !Number.isFinite(model.candle?.minMemoryGb),
+    );
+    expect(partialNoBlanket.map((model) => model.id).join(", ")).toBe("");
+  });
+
+  it("has exactly one shipped shape that reached the round-3 blocker, and it is z_image_edit on MLX", () => {
+    // The blocker class, enumerated from the manifest: an install-set with SOME evidenced tier, SOME
+    // unevidenced tier, and no blanket on the lane. Pinned so the fix's blast radius stays a known quantity.
+    const reached = new Set();
+    for (const row of SWEEP) {
+      if (row.subset.length === 0) {
+        continue;
+      }
+      const installed = row.subset.filter((tier) => tierHostEligible(tier, row.eligibility));
+      const evidenced = installed.filter((tier) => laneEvidenceGb(row.model, row.os, tier) !== null);
+      const unevidenced = installed.filter((tier) => laneEvidenceGb(row.model, row.os, tier) === null);
+      if (
+        evidenced.length > 0 &&
+        unevidenced.length > 0 &&
+        blanketFloorGb(row.model, row.backend) === null
+      ) {
+        reached.add(`${row.id}|${row.os}`);
+      }
+    }
+    expect([...reached].sort()).toEqual(["z_image_edit|macos"]);
+  });
+
+  it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
+    // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 13; five
+    // of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers pinned so the
+    // prose cannot drift from the catalog again.
+    const estimatedLane = manifestModels.filter((model) => model.candle?.measured === false);
+    expect(estimatedLane.length).toBe(13);
+    const withPerTier = estimatedLane.filter(
+      (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
+    );
+    expect(withPerTier.map((model) => model.id).sort()).toEqual(
+      ["flux_schnell", "krea_2_raw", "lens_turbo", "sd3_5_large_turbo", "sd3_5_medium"].sort(),
+    );
+    // The other eight are blanket-only, so the flag has nothing per-tier to qualify on them.
+    expect(estimatedLane.length - withPerTier.length).toBe(8);
+  });
+
+  it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {
+    // FIXTURE PROVENANCE. Two fixtures misstated what ships, and one of them concealed krea_2_raw's candle
+    // under-statement through two review rounds. These assertions make the claims checkable from the manifest
+    // instead of from a comment.
+    const byId = new Map(manifestModels.map((model) => [model.id, model]));
+    // sensenova_u1_8b is NOT "candle.minMemoryGb only" — it ships a full measured ladder.
+    expect(byId.get("sensenova_u1_8b").candle).toMatchObject({
+      minMemoryGb: 16,
+      vramGbByTier: { q4: 14.8, q8: 22.5, bf16: 36.7 },
+      measured: true,
+    });
+    expect(byId.get("sensenova_u1_8b").mlx?.minMemoryGb).toBeUndefined();
+    // krea_2_raw ships a candle block, and ships NO footprint on any download.
+    expect(byId.get("krea_2_raw").candle).toMatchObject({
+      minMemoryGb: 32,
+      vramGbByTier: { q4: 28.8, q8: 33.4, bf16: 46.4 },
+      measured: false,
+    });
+    expect(byId.get("krea_2_raw").mlx?.minMemoryGb).toBe(48);
+    for (const download of byId.get("krea_2_raw").downloads ?? []) {
+      expect(download.footprint, "krea_2_raw ships no footprint at all").toBeUndefined();
+    }
+    // The genuinely blanket-only shape the corrected fixture uses instead.
+    expect(byId.get("kokoro_82m").candle).toMatchObject({ minMemoryGb: 2, measured: false });
+    expect(byId.get("kokoro_82m").candle.vramGbByTier).toBeUndefined();
+    expect(byId.get("kokoro_82m").mlx ?? null).toBeNull();
+    // The real single-variant image entry the "sana_sprint" fixture should have named. `sana_sprint` is not a
+    // manifest id at all; the real SANA entries ship a full matrix on macOS.
+    expect(byId.get("sana_sprint")).toBeUndefined();
+    expect(byId.get("flux2_klein_9b_true_v2").mlx?.minMemoryGb).toBe(42);
+    expect(
+      (byId.get("flux2_klein_9b_true_v2").downloads ?? []).filter((d) => d.coRequisite !== true).length,
+    ).toBe(1);
+    // ...and the disk sizes the fixtures now carry, since the round-4 fill reads exactly this field.
+    const diskOf = (id, tier) =>
+      (byId.get(id).downloads ?? []).find((d) => d.variant === tier)?.footprint?.diskSizeBytes;
+    expect(diskOf("z_image", "q8")).toBe(10996438540);
+    expect(diskOf("z_image", "bf16")).toBe(20538412852);
+    expect(diskOf("sensenova_u1_8b", "q4")).toBe(11824472971);
+    expect(diskOf("flux_dev", "bf16")).toBe(33746402173);
+    expect(diskOf("lens_turbo", "q8")).toBe(32753474289);
+    expect(diskOf("z_image_edit", "bf16")).toBe(20538406851);
+    expect(diskOf("chroma1_hd", "q4")).toBe(15121207891);
   });
 });
