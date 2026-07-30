@@ -1,9 +1,12 @@
 # The workflow share envelope
 
 A PNG that SceneWorks generates carries a small block of JSON describing the recipe that made it,
-so the image can be dropped back into SceneWorks — or into someone else's SceneWorks — and reload
-the settings that produced it. The local sidecar (`<media>.sceneworks.json`) does not survive a
-copy-paste into a chat window; this does, because it is inside the file.
+so the recipe travels with the image. The local sidecar (`<media>.sceneworks.json`) does not survive
+a copy-paste into a chat window; this does, because it is inside the file.
+
+Two things read it back today: importing such an image records the envelope on the asset, and
+`POST /api/v1/workflows/inspect` reads one out of an uploaded file without importing anything. The
+studio surfaces that offer it as "use this recipe" are still being built (sc-15951 / sc-15952).
 
 This document is the contract. It exists for two people:
 
@@ -14,12 +17,13 @@ This document is the contract. It exists for two people:
   needs to know what it wants. That is [Adding a new advanced
   setting](#adding-a-new-advanced-setting).
 
-> ## Your prompt is in the file, exactly as you typed it
+> ## Your prompt is in the file, as you wrote it
 >
-> The envelope embeds authored text **verbatim**. These six fields are deliberately exempt from the
-> filesystem-path guard that strips locations out of every other field, because silently mangling
-> someone's prompt because it mentions a directory would be worse than the leak it prevents — you
-> wrote it, and you can read it back before you share:
+> These six fields are recorded as authored, and are deliberately **exempt from the filesystem-path
+> guard** that drops every other field that looks like a location. Silently mangling someone's
+> prompt because it mentions a directory would be worse than the leak it prevents — you wrote it,
+> and you can read it back before you share. The only things removed from them are invisible
+> formatting characters and anything past the 16 KiB prose ceiling.
 >
 > <!-- PINNED: prose-fields -->
 >
@@ -133,8 +137,10 @@ in that table is not in the file. Named explicitly because these are the ones pe
   installation id. `producer` names the *software*, never the install.
 - **Filesystem paths, anywhere.** Every non-prose string is dropped if it looks like a location —
   absolute or relative, Windows or POSIX, `~` expansions, UNC shares, `file://`, percent-encoded
-  forms and `..` traversals. A value that trips the check is dropped rather than trimmed. This does
-  **not** apply to the six prose fields; see the callout above.
+  forms and `..` traversals. A value that trips the check is dropped rather than trimmed. Two
+  honest limits on that: it is a **shape** test and not knowledge of your disk, so a bare name with
+  no separators in it (`acme-brief`) is not a location and travels; and it does **not** apply to
+  the six prose fields, which is the callout at the top of this document.
 - **Project, job and asset identity.** `projectId`, `projectName`, `jobId`, `assetId`,
   `generationSetId`, `characterId`, `characterLookId`.
 - **Timestamps.** The envelope has no time field.
@@ -272,10 +278,10 @@ exists to prevent.
 ## Ceilings
 
 Two kinds of bound. Per-collection caps, each inherited from the validator that already limits the
-thing so that an envelope claiming more did not come from a run here; and one ceiling on the
-serialized envelope, checked after every per-field rule has run. The second is what actually
-composes — per-field bounds did not, and each new measurement found a new way to spend what they
-left.
+thing — where one exists; `MAX_SHARE_POSES` is the one that has no upstream validator to inherit
+and is derived from the size of the shipped pose library instead. And one ceiling on the serialized
+envelope, checked after every per-field rule has run. The second is what actually composes:
+per-field bounds did not, and each new measurement found a new way to spend what they left.
 
 <!-- PINNED: ceilings -->
 
@@ -294,10 +300,11 @@ left.
 
 <!-- END PINNED: ceilings -->
 
-None of the per-collection caps is reachable through the API in normal use: the request validators
-that bound prompts, the advanced map and the LoRA list all sit well under them. The pose cap is the
-exception — nothing upstream clamps how many poses a user may select — which is why `omitted` is
-emitted on the write side too.
+No request this app accepted can exceed a per-collection cap, because each cap **is** the limit the
+generation path already enforces: five LoRAs is the hard per-job total, eight phases is the
+multi-phase validator's own number. A run that declared more could not have happened here. The pose
+cap is the exception — nothing upstream clamps how many poses a user may select, so this one can
+fire on our own write side, which is why `omitted` is emitted in that direction too.
 
 ## The trust boundary on import
 
@@ -318,9 +325,11 @@ An image being read arrived from a stranger. Extending the reader means keeping 
   tag characters) are removed so a rendered prompt cannot claim to say something other than what is
   stored. Newlines and tabs survive. This is narrower than "prose is safe": characters that render
   blank but are not `Cf` — the Hangul and Braille fillers — are not currently stripped.
-- **Every failure degrades to "no workflow".** A hostile or malformed chunk costs the user the
-  recipe field and nothing else; their image still imports. A PNG with no chunk is the normal case
-  for every image in the world and is never an error.
+- **Every failure degrades to "no workflow".** On import: a hostile or malformed chunk costs the
+  user the recipe field and nothing else, and their image still imports. A PNG with no chunk is the
+  normal case for every image in the world and is never an error. The read-only inspect endpoint is
+  the one surface that reports a typed error instead, because nothing is being imported there and
+  the user asked specifically what the file contains.
 - **`extra.importedWorkflow` is ours or absent.** Import clears that key unconditionally before
   writing its own, so a caller-supplied `provenance.importedWorkflow` cannot masquerade as an
   envelope this reader sanitized.
@@ -345,10 +354,11 @@ The failure is one of the coverage lints in `crates/sceneworks-core/tests/workfl
 <!-- END PINNED: lints -->
 
 **It is not an obstacle. It is the guardrail.** An unclassified key is dropped silently from every
-shared image the lane writes — which is either a silent leak the day someone allow-lists it wrongly,
-or, far more often, silent loss: the two bugs that motivated generalizing this lint were `cnScale`
-already vanishing from every shared Detail-pass image, and `angleSet` vanishing so a shared
-angle-set image replayed as a single image.
+shared image the lane writes, and in practice that shows up as silent loss more often than as a
+leak. Two real ones, both found when the lint was generalized past its first builder: `cnScale` was
+already vanishing from every shared Detail-pass image, and `angleSet` — the knob that makes the
+worker emit one image per view angle — was vanishing, so a shared angle-set image replayed as a
+single image.
 
 ### Classify the key
 
@@ -407,8 +417,12 @@ of scope" different states:
 
 <!-- END PINNED: deferred-builders -->
 
-Nothing in a deferred lane can start embedding while its keys sit in that list. That is what the
-list is for.
+Be clear about what that list is: a decision record, not an enforced gate. Nothing in the build
+stops a write seam on a deferred lane from calling the embedder while its builder is still parked
+here — the lint would stay green and every one of that builder's keys would be dropped silently,
+which is exactly the failure the registry exists to make visible. Moving the entry up into
+`ADVANCED_BUILDERS` is the step that turns the lint on, and it is the step whoever makes that lane
+embed has to remember.
 
 ## The setting
 
@@ -418,10 +432,11 @@ the PNG write seam.
 - **Default: on.** A feature whose point is that a shared image reloads its recipe is worthless off
   by default. Someone who does not want it should have to find the switch once rather than opt in
   forever.
-- **Read live, per job.** Flipping it takes effect on the next image, not the next launch.
-- **Fails closed.** If the preference file exists but cannot be read, embedding is off. "Absent" and
-  "unreadable" are different states, and collapsing them is how a deliberate opt-out silently
-  inverts itself.
+- **Read live, per job.** Flipping it takes effect on the next job, not the next launch.
+- **Fails closed on an unreadable file.** If reading the preference file fails with anything other
+  than "not found" — a sharing violation, an ACL error — embedding is off. "Absent" and "unreadable"
+  are different states, and collapsing them is how a deliberate opt-out silently inverts itself. A
+  file that is present and readable but not parseable falls back to the default, which is on.
 - Turning it off changes nothing about images already written. The chunk is in those files.
 
 The settings UI and its first-run disclosure are sc-15953's, not this document's.
