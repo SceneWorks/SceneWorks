@@ -1,7 +1,10 @@
 import React from "react";
 import { Icon } from "./Icons.jsx";
 import {
+  SAVE_WITHOUT_WORKFLOW_LABEL,
   WORKFLOW_SHARE_DOC_URL,
+  inFileSentence,
+  notInFileSentence,
   proseFieldSentence,
 } from "../workflowEmbed.js";
 
@@ -11,9 +14,13 @@ import {
 // Both live here so there is ONE set of claims about what leaves with an image. Every sentence
 // below is checked against `docs/workflow-share-envelope.md`, which is itself pinned in both
 // directions against the shipped sanitizer by `crates/sceneworks-core/tests/workflow_share_doc.rs`.
-// The list of path-exempt prose fields is not written out as prose at all — it is rendered from
-// `EMBEDDED_PROSE_FIELDS`, which that same Rust test pins against the doc's `prose-fields` table,
-// so a seventh prose field cannot be added to the sanitizer without this copy failing a test.
+//
+// The three lists are not written out as prose at all. They are rendered from
+// `EMBEDDED_PROSE_FIELDS`, `WORKFLOW_FIELDS_IN_FILE` and `WORKFLOW_FIELDS_NOT_IN_FILE`, each of
+// which that same Rust test pins against a table in the document — so a seventh prose field, a new
+// allow-listed advanced setting, or a withheld key that quietly became shared all fail this copy
+// rather than silently going unmentioned in it. That gap was real: `advanced.poses` (the
+// `keypoints` / `hands` / `face` coordinate arrays) travelled while the copy named none of it.
 //
 // The standing failure mode this epic keeps hitting is an artifact claiming a stronger guarantee
 // than the code delivers. So the wording is deliberately narrow: it says what IS in the file rather
@@ -34,21 +41,15 @@ export function WorkflowEmbedDetails() {
         Face repo id and is not treated as a location.
       </p>
       <p className="settings-note">
-        <strong>Also in the file:</strong> the generation mode, the model and style names, the seed
-        for this image, its size, how it was fitted, how many images the run asked for, any upscale
-        settings, LoRA names, weights and Hugging Face repo ids, the shared generation settings
-        (sampler, steps, guidance and the like), which kinds of input image the recipe needs, and
-        the SceneWorks version that wrote the file.
+        <strong>Also in the file:</strong> {inFileSentence()}.
       </p>
       <p className="settings-note">
-        <strong>Not in the file:</strong> your user or machine name, project, job and asset ids, any
-        timestamp, the other seeds in a batch, the input images themselves, and this
-        machine&apos;s quality tier, attention kernel or GPU.
+        <strong>Not in the file:</strong> {notInFileSentence()}.
       </p>
       <p className="settings-note">
         Turning this off applies from the next generation. Images already on disk keep the block
         they were written with — to share one of those without it, use{" "}
-        <strong>Save without workflow</strong>.
+        <strong>{SAVE_WITHOUT_WORKFLOW_LABEL}</strong>.
       </p>
       <p className="settings-note">
         <a href={WORKFLOW_SHARE_DOC_URL} rel="noreferrer noopener" target="_blank">

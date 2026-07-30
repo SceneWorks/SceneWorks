@@ -761,8 +761,163 @@ fn the_doc_lists_exactly_the_path_exempt_prose_fields() {
     }
 }
 
-/// The web module that holds the Settings copy's one machine-checkable claim (sc-15953).
+/// The web module that holds the Settings copy's machine-checkable claims (sc-15953).
 const SETTINGS_COPY_PATH: &str = "apps/web/src/workflowEmbed.js";
+
+/// The first quoted string of every `["key", LABEL],` entry of a `Object.freeze([…])` list in
+/// [`SETTINGS_COPY_PATH`], as a set.
+///
+/// Only the KEY is read. The labels beside them are shared constants rather than literals — one
+/// phrase legitimately covers several keys — and the prose is not what these lints check: the
+/// question is whether every field the contract carries has been *classified* by someone writing
+/// the copy, which is the step that would have caught `advanced.poses` going unnamed.
+///
+/// Panics when the list is gone, for the reason every parser in this file does: a lint that
+/// quietly finds nothing passes against a file that was emptied.
+fn declared_keys(name: &str) -> BTreeSet<String> {
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let anchor = format!("{name} = Object.freeze([");
+    let start = source.find(&anchor).unwrap_or_else(|| {
+        panic!(
+            "{SETTINGS_COPY_PATH} no longer declares {anchor:?}. The settings copy's field lists \
+             are pinned to the tables in {DOC_PATH}; if one moved, teach this lint where."
+        )
+    }) + anchor.len();
+    let rest = &source[start..];
+    let end = rest
+        .find("]);")
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: {name} is never closed"));
+
+    let mut listed: BTreeSet<String> = BTreeSet::new();
+    for line in rest[..end].lines() {
+        let Some(open) = line.trim().strip_prefix("[\"") else {
+            continue;
+        };
+        let Some(close) = open.find('"') else {
+            continue;
+        };
+        let key = open[..close].to_owned();
+        assert!(
+            listed.insert(key.clone()),
+            "{SETTINGS_COPY_PATH}: {name} lists {key:?} twice"
+        );
+    }
+    assert!(
+        !listed.is_empty(),
+        "{SETTINGS_COPY_PATH}: {name} parsed to no keys at all"
+    );
+    listed
+}
+
+/// The `advanced-shared` / `advanced-withheld` keys as the settings copy spells them: prefixed,
+/// because `styleId` is both a top-level envelope field and an advanced setting and the copy has to
+/// be able to say something about each.
+fn prefixed_advanced(block: &str) -> BTreeSet<String> {
+    pinned_set(&doc(), block, 0)
+        .into_iter()
+        .map(|key| format!("advanced.{key}"))
+        .collect()
+}
+
+#[test]
+fn the_settings_copy_accounts_for_every_shared_and_withheld_field() {
+    // The finding this test exists for: "Also in the file" and "Not in the file" are the two
+    // paragraphs a user acts on before sending an image to a client, and they were pinned to
+    // NOTHING. `advanced.poses` — the `keypoints` / `hands` / `face` coordinate arrays, facial
+    // landmarks included — reached the file while the copy named none of it, and the next paragraph
+    // said "the input images themselves" are not in the file, which invites exactly the wrong
+    // reading: that nothing derived from a reference travels. Claiming more privacy than the
+    // allow-list delivers is the forbidden direction, and this is the surface where it matters.
+    //
+    // So both lists are declared per key and pinned here in both directions. What this buys is not
+    // that the prose is good — no lint can say that — but that a field cannot reach a shared image
+    // without a human deciding, in the copy, what to say about it.
+    let mut shared = pinned_set(&doc(), "envelope-fields", 0);
+    shared.extend(prefixed_advanced("advanced-shared"));
+    assert_same_set(
+        &shared,
+        &declared_keys("WORKFLOW_FIELDS_IN_FILE"),
+        "envelope-fields + advanced-shared",
+        &format!("{SETTINGS_COPY_PATH}'s WORKFLOW_FIELDS_IN_FILE"),
+    );
+
+    // The withheld half. Every key the contract classified as withheld must be spoken for by the
+    // "Not in the file" list, so a decision someone wrote down against a key is a decision the user
+    // is actually told about.
+    let withheld = prefixed_advanced("advanced-withheld");
+    let claimed_absent = declared_keys("WORKFLOW_FIELDS_NOT_IN_FILE");
+    let unspoken: Vec<&String> = withheld.difference(&claimed_absent).collect();
+    assert!(
+        unspoken.is_empty(),
+        "{SETTINGS_COPY_PATH}'s WORKFLOW_FIELDS_NOT_IN_FILE does not account for {unspoken:?}, \
+         which the `advanced-withheld` table in {DOC_PATH} says is deliberately dropped. A \
+         withheld key nobody mentions is a decision the user never hears about."
+    );
+
+    // And the direction that is a leak rather than an omission: nothing the copy claims is ABSENT
+    // may appear in either table of things that travel. This is what would fire the day someone
+    // moved `quantTier` from withheld to shared and left the paragraph promising it stays home.
+    let contradicted: Vec<&String> = claimed_absent.intersection(&shared).collect();
+    assert!(
+        contradicted.is_empty(),
+        "{SETTINGS_COPY_PATH} tells the user {contradicted:?} are NOT in the file, but {DOC_PATH} \
+         lists them among the fields that travel. The copy is claiming a privacy the allow-list \
+         does not deliver, which is the one direction this contract must never drift in."
+    );
+}
+
+#[test]
+fn the_settings_copy_names_the_save_without_workflow_control_once() {
+    // Three surfaces name this control — the context menu, the button beside Save As, and the copy
+    // that tells you to use it — and they said three different things ("Save without workflow",
+    // "Save a copy without the workflow…", and a third in the document). A user told to look for a
+    // control that is not spelled that way anywhere is a user who concludes it does not exist.
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let anchor = "SAVE_WITHOUT_WORKFLOW_LABEL = \"";
+    let start = source
+        .find(anchor)
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH} no longer declares {anchor:?}"))
+        + anchor.len();
+    let label = &source[start
+        ..start
+            + source[start..]
+                .find('"')
+                .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: the label is never closed"))];
+    assert!(
+        !label.is_empty(),
+        "{SETTINGS_COPY_PATH}: the label parsed as empty"
+    );
+    assert!(
+        doc().contains(label),
+        "{DOC_PATH} must name the control exactly as the UI does ({label:?}); the document is what \
+         a user is sent to when the copy says to use it"
+    );
+}
+
+#[test]
+fn the_settings_copy_derives_its_doc_link_from_the_producer_url() {
+    // The link in the app and the link a shared file carries in `producer.url` have to be the same
+    // repository, or "what travels, exactly" sends someone somewhere the envelope does not vouch
+    // for. It used to be a hardcoded URL under a comment CLAIMING it was rooted at PRODUCER_URL,
+    // with nothing deriving or checking that — so the full prefix is pinned here, not just the
+    // path substring.
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let declared = format!("PRODUCER_URL = \"{PRODUCER_URL}\";");
+    assert!(
+        source.contains(&declared),
+        "{SETTINGS_COPY_PATH} must declare {declared:?} — the web copy's idea of the project URL \
+         and the one the envelope carries are the same fact"
+    );
+    let derived = format!(
+        "WORKFLOW_SHARE_DOC_URL = `${{PRODUCER_URL}}/blob/main/{}`;",
+        DOC_PATH.replace('\\', "/")
+    );
+    assert!(
+        source.contains(&derived),
+        "{SETTINGS_COPY_PATH} must derive the doc link as {derived:?} rather than writing the URL \
+         out beside PRODUCER_URL, where the two can drift apart silently"
+    );
+}
 
 #[test]
 fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
@@ -773,29 +928,7 @@ fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
     // itself is pinned to. A seventh prose field added to `PROSE_KEYS` therefore fails three
     // things: the doc, the sanitizer's own lint, and the copy that would otherwise have gone on
     // naming six.
-    let source = read_repo_file(SETTINGS_COPY_PATH);
-    let anchor = "EMBEDDED_PROSE_FIELDS = Object.freeze([";
-    let start = source.find(anchor).unwrap_or_else(|| {
-        panic!(
-            "{SETTINGS_COPY_PATH} no longer declares {anchor:?}. The settings copy's field list is \
-             pinned to the {DOC_PATH} `prose-fields` table; if it moved, teach this lint where."
-        )
-    }) + anchor.len();
-    let rest = &source[start..];
-    let end = rest
-        .find("]);")
-        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: EMBEDDED_PROSE_FIELDS is never closed"));
-
-    let mut listed: BTreeSet<String> = BTreeSet::new();
-    for line in rest[..end].lines() {
-        let Some(open) = line.trim().strip_prefix("[\"") else {
-            continue;
-        };
-        let Some(close) = open.find('"') else {
-            continue;
-        };
-        listed.insert(open[..close].to_owned());
-    }
+    let listed = declared_keys("EMBEDDED_PROSE_FIELDS");
     let documented = pinned_set(&doc(), "prose-fields", 0);
 
     let missing: Vec<&String> = documented.difference(&listed).collect();
@@ -814,10 +947,11 @@ fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
     );
 
     // And the copy points at the document this test reads, so the "what travels, exactly" link is
-    // the contract rather than a page that happens to exist.
+    // the contract rather than a page that happens to exist. The FULL URL, prefix included, is
+    // pinned by `the_settings_copy_derives_its_doc_link_from_the_producer_url`.
     let link_target = DOC_PATH.replace('\\', "/");
     assert!(
-        source.contains(&link_target),
+        read_repo_file(SETTINGS_COPY_PATH).contains(&link_target),
         "{SETTINGS_COPY_PATH} must link to {link_target} — the copy is a summary, and the summary \
          has to be able to send the user to the exact list"
     );

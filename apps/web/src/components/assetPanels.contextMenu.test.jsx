@@ -129,6 +129,11 @@ function menuItemLabels() {
   );
 }
 
+// The always-visible footer row, as opposed to what a right-click reveals (sc-15953).
+function footerButtonLabels() {
+  return [...document.body.querySelectorAll(".preview-actions button")].map((b) => b.textContent.trim());
+}
+
 async function loadComponent(isDesktop) {
   runtimeState.isDesktop = isDesktop;
   vi.resetModules();
@@ -215,11 +220,38 @@ describe("FullscreenPreview context menu (desktop)", () => {
 
   it("omits it for a format the envelope cannot ride in (sc-15953)", async () => {
     // Offering a no-op control would imply the file might be carrying a workflow.
-    actionMocks.assetCanCarryWorkflow.mockReturnValueOnce(false);
+    // `mockReturnValue`, not `…Once`: TWO surfaces ask the predicate now — the menu row and the
+    // visible button beside Save As — and a one-shot stub would answer the button and leave the
+    // menu on the default.
+    actionMocks.assetCanCarryWorkflow.mockReturnValue(false);
     await renderPreview(baseProps({ asset: videoAsset }));
     await rightClickStage();
     expect(menuItemLabels()).not.toContain("Save a copy without the workflow…");
     expect(menuItemLabels()).toContain("Save As…");
+    expect(footerButtonLabels()).not.toContain("Save a copy without the workflow…");
+    actionMocks.assetCanCarryWorkflow.mockReturnValue(true);
+  });
+
+  it("puts the same copy behind a visible button, not only a right-click (sc-15953)", async () => {
+    // The option existed ONLY in the context menu, which is unreachable on a touch device and
+    // undiscoverable everywhere else — for the one action a user takes specifically because the
+    // file is about to leave their machine.
+    await renderPreview(baseProps({ asset: imageAsset }));
+    const label = "Save a copy without the workflow…";
+    expect(footerButtonLabels()).toContain(label);
+    // Beside the plain Save As rather than instead of it.
+    expect(footerButtonLabels()).toContain("Save As…");
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".preview-actions button")]
+        .find((button) => button.textContent.trim() === label)
+        .click();
+    });
+    expect(actionMocks.saveAssetAs).toHaveBeenCalledWith(imageAsset, { withoutWorkflow: true });
+    // And it is the SAME string the menu row uses, so the settings copy telling a user to look for
+    // it names one control rather than three.
+    await rightClickStage();
+    expect(menuItemLabels()).toContain(label);
   });
 
   it("Zoom In / Zoom Out / Fit menu items drive the view transform", async () => {

@@ -33,8 +33,10 @@ import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
 import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
 import { WorkflowEmbedNotice } from "./components/WorkflowEmbedNotice.jsx";
 import {
+  persistWorkflowEmbedPreference,
   readEmbedWorkflowInImages,
   readWorkflowEmbedNoticeSeen,
+  subscribeWorkflowEmbedFlags,
   writeEmbedWorkflowInImages,
   writeWorkflowEmbedNoticeSeen,
 } from "./workflowEmbed.js";
@@ -757,17 +759,52 @@ export function App() {
   const workflowEmbedRef = useRef({ hydrated: false, embed: true, seen: false });
   workflowEmbedRef.current.embed = embedWorkflow;
   workflowEmbedRef.current.seen = workflowEmbedNoticeSeen;
-  const changeEmbedWorkflow = useCallback((next) => {
-    setEmbedWorkflow(next);
-    writeEmbedWorkflowInImages(next);
-    putUiPreferences({ embedWorkflowInImages: next }).catch(() => {});
-  }, []);
+  // Both writes go through `persistWorkflowEmbedPreference`, which retries and then REPORTS. A
+  // swallowed `.catch(() => {})` is wrong for this pair specifically: localStorage is only an
+  // instant-paint mirror, and on the desktop shell it is wiped by the per-launch origin — so a
+  // dropped PUT is not "saved locally", it is a privacy opt-out that reverts to ON at the next
+  // launch, or a disclosure that fires again as though it had never been dismissed. Both are
+  // things the user should be told about rather than discover.
+  const changeEmbedWorkflow = useCallback(
+    (next) => {
+      setEmbedWorkflow(next);
+      writeEmbedWorkflowInImages(next);
+      persistWorkflowEmbedPreference({ embedWorkflowInImages: next }).catch(() => {
+        pushNotice(
+          "workflow-embed",
+          "Could not save whether generated images include their recipe. The setting is active now but may revert when SceneWorks restarts.",
+        );
+      });
+    },
+    [pushNotice],
+  );
   const dismissWorkflowEmbedNotice = useCallback(() => {
     setWorkflowEmbedNoticeOpen(false);
     setWorkflowEmbedNoticeSeen(true);
     writeWorkflowEmbedNoticeSeen(true);
-    putUiPreferences({ workflowEmbedNoticeSeen: true }).catch(() => {});
-  }, []);
+    persistWorkflowEmbedPreference({ workflowEmbedNoticeSeen: true }).catch(() => {
+      pushNotice(
+        "workflow-embed",
+        "Could not record that this notice was dismissed, so it may appear again.",
+      );
+    });
+  }, [pushNotice]);
+  // A second tab that was already mounted when the notice was dismissed holds `seen: false` and
+  // would show the disclosure again on its own next generation — "once" being per tab rather than
+  // per user. The mirror write raises a `storage` event in every other tab, so they follow.
+  useEffect(
+    () =>
+      subscribeWorkflowEmbedFlags(({ embed, seen }) => {
+        setEmbedWorkflow(embed);
+        // One-way: see `subscribeWorkflowEmbedFlags`. `seen` is a record that something was said,
+        // and another tab clearing its storage is not evidence it never was.
+        if (seen) {
+          setWorkflowEmbedNoticeSeen(true);
+          setWorkflowEmbedNoticeOpen(false);
+        }
+      }),
+    [],
+  );
   // The observable event the disclosure hangs off: a generation was accepted while embedding is
   // on. Submission rather than completion, so the user is told BEFORE the files with their prompt
   // in them exist — and only on a job the API actually took, so a failed POST does not burn it.

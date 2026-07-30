@@ -1,14 +1,30 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
+const putUiPreferences = vi.fn();
+vi.mock("./uiPreferences.js", () => ({ putUiPreferences: (...args) => putUiPreferences(...args) }));
+
+const {
   EMBEDDED_PROSE_FIELDS,
+  PRODUCER_URL,
+  SAVE_WITHOUT_WORKFLOW_LABEL,
+  WORKFLOW_FIELDS_IN_FILE,
+  WORKFLOW_FIELDS_NOT_IN_FILE,
   WORKFLOW_SHARE_DOC_URL,
+  inFileSentence,
+  notInFileSentence,
+  persistWorkflowEmbedPreference,
   proseFieldSentence,
   readEmbedWorkflowInImages,
   readWorkflowEmbedNoticeSeen,
+  subscribeWorkflowEmbedFlags,
   writeEmbedWorkflowInImages,
   writeWorkflowEmbedNoticeSeen,
-} from "./workflowEmbed.js";
+} = await import("./workflowEmbed.js");
+
+beforeEach(() => {
+  putUiPreferences.mockReset();
+  putUiPreferences.mockResolvedValue(undefined);
+});
 
 afterEach(() => {
   try {
@@ -79,5 +95,139 @@ describe("the copy's field list (sc-15953)", () => {
   it("links to the contract document rather than to a marketing page", () => {
     expect(WORKFLOW_SHARE_DOC_URL).toContain("docs/workflow-share-envelope.md");
     expect(WORKFLOW_SHARE_DOC_URL.startsWith("https://")).toBe(true);
+    // DERIVED from the URL the envelope itself carries, not written out beside it. The prefix used
+    // to be a hardcoded string under a comment claiming it was rooted here, with nothing checking.
+    expect(WORKFLOW_SHARE_DOC_URL.startsWith(`${PRODUCER_URL}/`)).toBe(true);
+  });
+});
+
+describe("the two lists a user acts on (sc-15953)", () => {
+  // The SET of keys is pinned against the doc's tables in both directions by
+  // `the_settings_copy_accounts_for_every_shared_and_withheld_field`. What is asserted here is what
+  // the user actually reads.
+
+  it("names the pose, hand and FACE coordinates in what travels", () => {
+    // The finding: `advanced.poses` reduces to the `keypoints` / `hands` / `face` arrays —
+    // coordinates derived from a reference photo, facial landmarks included — and the copy named
+    // none of it, folding them under "the shared generation settings … and the like".
+    const sentence = inFileSentence();
+    for (const word of ["pose", "hand", "face"]) {
+      expect(sentence).toContain(word);
+    }
+    expect(sentence).toContain("facial landmarks");
+    // And the multi-phase schedule, the other thing a user would recognise but never saw named.
+    expect(sentence).toContain("multi-phase denoise schedule");
+  });
+
+  it("does not let 'not in the file' imply nothing derived from a reference travels", () => {
+    // "The input images themselves" sitting in a list of absences invites exactly that reading,
+    // which is the forbidden direction: claiming more privacy than the allow-list delivers.
+    const sentence = notInFileSentence();
+    expect(sentence).toContain("the input images themselves");
+    expect(sentence).toContain("what a pose selection traced from one does travel");
+  });
+
+  it("renders every declared label into its sentence, with repeats collapsed", () => {
+    const rendered = inFileSentence();
+    for (const [, label] of WORKFLOW_FIELDS_IN_FILE) {
+      expect(rendered).toContain(label);
+    }
+    for (const [, label] of WORKFLOW_FIELDS_NOT_IN_FILE) {
+      expect(notInFileSentence()).toContain(label);
+    }
+    // `width` and `height` share one phrase; the reader must see it once.
+    expect(rendered.split("its size")).toHaveLength(2);
+  });
+
+  it("keys both lists by envelope path, so the Rust pin has something to match", () => {
+    for (const list of [WORKFLOW_FIELDS_IN_FILE, WORKFLOW_FIELDS_NOT_IN_FILE]) {
+      const keys = list.map(([key]) => key);
+      expect(new Set(keys).size).toBe(keys.length);
+      for (const [key, label] of list) {
+        expect(typeof key).toBe("string");
+        expect(key.length).toBeGreaterThan(0);
+        expect(label.length).toBeGreaterThan(0);
+      }
+    }
+    expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.poses");
+    expect(WORKFLOW_FIELDS_NOT_IN_FILE.map(([key]) => key)).toContain("advanced.quantTier");
+  });
+
+  it("names the without-workflow control once, for every surface to reuse", () => {
+    expect(SAVE_WITHOUT_WORKFLOW_LABEL.length).toBeGreaterThan(0);
+    // No trailing ellipsis in the constant: the surfaces that open a dialog add their own.
+    expect(SAVE_WITHOUT_WORKFLOW_LABEL.endsWith("…")).toBe(false);
+  });
+});
+
+describe("persisting a flag durably (sc-15953)", () => {
+  const noSleep = () => Promise.resolve();
+
+  it("returns on the first success without retrying", async () => {
+    await expect(
+      persistWorkflowEmbedPreference({ embedWorkflowInImages: false }, { sleep: noSleep }),
+    ).resolves.toBe(true);
+    expect(putUiPreferences).toHaveBeenCalledTimes(1);
+    expect(putUiPreferences).toHaveBeenCalledWith({ embedWorkflowInImages: false });
+  });
+
+  it("retries a transient failure rather than dropping the write", async () => {
+    // The localStorage mirror is wiped by the desktop shell's per-launch origin, so a dropped PUT
+    // is not "saved locally" — it is a privacy opt-out that reverts to ON at the next launch.
+    putUiPreferences.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(undefined);
+    await expect(
+      persistWorkflowEmbedPreference({ workflowEmbedNoticeSeen: true }, { sleep: noSleep }),
+    ).resolves.toBe(true);
+    expect(putUiPreferences).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates the failure once the attempts are spent, instead of swallowing it", async () => {
+    putUiPreferences.mockRejectedValue(new Error("401"));
+    await expect(
+      persistWorkflowEmbedPreference({ workflowEmbedNoticeSeen: true }, { sleep: noSleep }),
+    ).rejects.toThrow("401");
+    expect(putUiPreferences).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("following another tab (sc-15953)", () => {
+  function fireStorage(key) {
+    globalThis.dispatchEvent(new globalThis.StorageEvent("storage", { key }));
+  }
+
+  it("carries a dismissal into a tab that was already mounted", async () => {
+    // Two tabs are two React trees. Before this, a second tab went on holding `seen: false` and
+    // re-showed the disclosure on its own next generation — "once" being per tab, not per user.
+    const seen = [];
+    const unsubscribe = subscribeWorkflowEmbedFlags((state) => seen.push(state));
+    writeWorkflowEmbedNoticeSeen(true);
+    fireStorage("sceneworks-embed-workflow-notice-seen");
+    expect(seen.at(-1).seen).toBe(true);
+
+    // The embed preference is mirrored BOTH ways: it is a setting with two states.
+    writeEmbedWorkflowInImages(false);
+    fireStorage("sceneworks-embed-workflow");
+    expect(seen.at(-1).embed).toBe(false);
+    unsubscribe();
+  });
+
+  it("never moves the disclosure flag back to unseen", async () => {
+    // A record that something was said. Another tab clearing its storage is not evidence the user
+    // was never told, and letting it move back would re-arm the notice everywhere.
+    writeWorkflowEmbedNoticeSeen(true);
+    const seen = [];
+    const unsubscribe = subscribeWorkflowEmbedFlags((state) => seen.push(state));
+    globalThis.localStorage.clear();
+    fireStorage(null);
+    expect(seen.at(-1).seen).toBeUndefined();
+    unsubscribe();
+  });
+
+  it("ignores an unrelated key so a busy tab is not re-rendered by every write", () => {
+    const seen = [];
+    const unsubscribe = subscribeWorkflowEmbedFlags((state) => seen.push(state));
+    fireStorage("sceneworks-theme");
+    expect(seen).toHaveLength(0);
+    unsubscribe();
   });
 });
