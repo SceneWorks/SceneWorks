@@ -16,8 +16,8 @@ pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v3";
 /// ABI paired by the manifest/query side of the reader.
 ///
 /// The evidence schema deliberately stays at v2: callers must supply the manifest's ABI together
-/// with its fingerprint and exact source revisions. That makes an ABI mutation stale without
-/// rewriting the already-promoted producer contract.
+/// with its fingerprint. Exact source revisions remain captured provenance; the ABI/fingerprint
+/// pair owns SceneWorks invalidation without rewriting the already-promoted producer contract.
 pub const MEMORY_CALIBRATION_ABI: u32 = 1;
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
@@ -482,8 +482,6 @@ pub struct EvidenceQuery {
 pub enum StaleEvidenceReason {
     CalibrationAbi,
     CalibrationFingerprint,
-    SceneWorksRevision,
-    MatrixSourceRevision,
     InferenceRevision,
     ArtifactRepository,
     ArtifactResolvedRevision,
@@ -533,18 +531,6 @@ impl EvidenceBundle {
         for record in candidates {
             let mismatch = if record.calibration_fingerprint != query.calibration.fingerprint {
                 Some(StaleEvidenceReason::CalibrationFingerprint)
-            } else if record.repositories.scene_works.revision
-                != query.calibration.scene_works_revision
-            {
-                Some(StaleEvidenceReason::SceneWorksRevision)
-            } else if record
-                .repositories
-                .scene_works
-                .matrix_source_revision
-                .as_deref()
-                != Some(query.calibration.matrix_source_revision.as_str())
-            {
-                Some(StaleEvidenceReason::MatrixSourceRevision)
             } else if record.repositories.inference.revision != query.calibration.inference_revision
             {
                 Some(StaleEvidenceReason::InferenceRevision)
@@ -1704,7 +1690,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_revision_and_abi_mutations_are_independently_stale() {
+    fn fingerprint_inference_and_abi_mutations_are_stale_but_source_revisions_are_provenance() {
         let bundle = loaded_bundle();
 
         let mut fingerprint = exact_query();
@@ -1716,10 +1702,10 @@ mod tests {
 
         let mut scene_works = exact_query();
         scene_works.calibration.scene_works_revision = "c".repeat(40);
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&scene_works),
-            EvidenceVerdict::Stale(StaleEvidenceReason::SceneWorksRevision)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut inference = exact_query();
         inference.calibration.inference_revision = "d".repeat(40);
@@ -1730,10 +1716,10 @@ mod tests {
 
         let mut matrix = exact_query();
         matrix.calibration.matrix_source_revision = "source-tree:2222222".to_owned();
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&matrix),
-            EvidenceVerdict::Stale(StaleEvidenceReason::MatrixSourceRevision)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut artifact_repository = exact_query();
         artifact_repository.calibration.artifact_repository = "other/repo".to_owned();

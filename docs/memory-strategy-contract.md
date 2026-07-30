@@ -22,11 +22,20 @@ share as explicit headroom. In both cases effective capacity is
 semantics are not interchangeable.
 
 The selector accepts only `Verified` evidence with all six generated evidence dimensions, matching
-provider/calibration fingerprints, current SceneWorks and inference revisions, an exact tier/mode/
-overlay match, and an in-envelope geometry. `Implemented/unverified`, unknown, stale, fingerprint
+provider/calibration fingerprints, the current inference revision, an exact tier/mode/overlay match,
+and an in-envelope geometry. `Implemented/unverified`, unknown, stale, fingerprint
 mismatch, structural N/A, route unavailable, or out-of-envelope evidence returns `Unverified`; it
 never selects an optimized rung. Equality fits (`needed_gb <= available_gb`). A calibration that
 needs tolerance must include it in the provider estimate and golden evidence.
+
+SceneWorks invalidation is owned by the provider calibration ABI fingerprint, not by the exact source
+tree. The fallback fingerprint hashes the provider's explicit ABI version, pinned inference revision,
+model/provider/backend/tier/mode/overlay/rung identity, and runtime strategy parameters. Bump a
+provider's entry in `CALIBRATION_ABI_VERSIONS` when its quantization floors, tensor layout, or
+execution structure invalidate measurements; bump the default only for an ecosystem-wide calibration
+contract change. `matrixSourceRevision`, `generatedFrom.sceneWorksRevision`, and cell
+`evidenceRevision.sceneWorks` retain exact source-tree provenance, but comments, formatting, docs, and
+unrelated source edits do not make otherwise matching evidence stale.
 
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.

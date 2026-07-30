@@ -17,6 +17,12 @@ const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
 const EXPECTED_MLX_STAGED_COUNT = 39;
+// Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
+// execution/layout/quantization change that makes measurements unsafe must add or bump its key;
+// ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
+const CALIBRATION_ABI_VERSIONS = Object.freeze({
+  default: 1,
+});
 const RUNGS = [
   "resident",
   "staged_residency",
@@ -310,6 +316,39 @@ function sha256(body) {
 
 function sortedUnique(values) {
   return [...new Set(values)].sort();
+}
+
+function calibrationAbiVersion(provider) {
+  return CALIBRATION_ABI_VERSIONS[provider] ?? CALIBRATION_ABI_VERSIONS.default;
+}
+
+export function derivedCalibrationFingerprint({
+  inferencePin,
+  model,
+  provider,
+  backend,
+  tier,
+  mode,
+  overlay,
+  rung,
+  parameters,
+}) {
+  return sha256(
+    JSON.stringify({
+      calibrationAbi: {
+        provider,
+        version: calibrationAbiVersion(provider),
+      },
+      inferencePin,
+      model,
+      backend,
+      tier,
+      mode,
+      overlay,
+      rung,
+      parameters,
+    }),
+  );
 }
 
 function runtimeStrategyParameters(parameters) {
@@ -707,7 +746,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
   }
 }
 
-export async function buildMatrix() {
+export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const sourcePaths = {
     manifest: "config/manifests/builtin.models.jsonc",
     engines: "crates/sceneworks-worker/src/engines.rs",
@@ -720,8 +759,12 @@ export async function buildMatrix() {
   };
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
-    Object.values(sourcePaths).map(async (relative) =>
-      canonicalSourceText(await readFile(path.join(ROOT, relative), "utf8")),
+    sourceEntries.map(async ([name, relative]) =>
+      canonicalSourceText(
+        Object.hasOwn(sourceOverrides, name)
+          ? sourceOverrides[name]
+          : await readFile(path.join(ROOT, relative), "utf8"),
+      ),
     ),
   );
   const bodies = Object.fromEntries(
@@ -798,20 +841,17 @@ export async function buildMatrix() {
                 status.state === "Missing"
                   ? null
                   : status.calibrationFingerprint ??
-                    sha256(
-                      JSON.stringify({
-                        sceneWorksRevision,
-                        inferencePin: pin,
-                        model: model.id,
-                        route: route.engine,
-                        backend,
-                        tier,
-                        mode,
-                        overlay,
-                        rung,
-                        parameters: status.parameters,
-                      }),
-                    );
+                    derivedCalibrationFingerprint({
+                      inferencePin: pin,
+                      model: model.id,
+                      provider: route.engine,
+                      backend,
+                      tier,
+                      mode,
+                      overlay,
+                      rung,
+                      parameters: status.parameters,
+                    });
               const calibrationRuns = calibrationBundle.records.filter(
                 (record) =>
                   record.target.modelId === model.id &&

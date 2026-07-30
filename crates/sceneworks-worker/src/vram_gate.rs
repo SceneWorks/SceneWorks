@@ -611,7 +611,6 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         mode: "text_to_image",
         overlay: (!allow_streamed_blocks).then_some("adapter"),
         geometry,
-        expected_sceneworks_revision: KREA_TURBO_SCENEWORKS_REVISION,
         expected_inference_revision: KREA_TURBO_INFERENCE_REVISION,
     };
     let resident_peak_gb = manifest_entry

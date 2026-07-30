@@ -266,7 +266,7 @@ test("candidate evidence is permanently non-promotable", () => {
   }), "candidate");
 });
 
-test("clean exact matrix source identity and inference SHA are both required for current", () => {
+test("calibration ABI binding owns SceneWorks invalidation while inference SHA remains currentness input", () => {
   const record = complete({ evidenceScope: "authoritative" });
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
@@ -275,7 +275,11 @@ test("clean exact matrix source identity and inference SHA are both required for
     inference: record.repositories.inference.revision,
   };
   assert.equal(evidenceSemantics(record, revisions), "current");
-  assert.equal(evidenceSemantics(record, { ...revisions, sceneWorks: "source-tree:different" }), "historical");
+  assert.equal(
+    evidenceSemantics(record, { ...revisions, sceneWorks: "source-tree:different" }),
+    "current",
+    "matrixSourceRevision is exact provenance; calibrationBinding separately enforces the SceneWorks ABI fingerprint",
+  );
   assert.equal(evidenceSemantics(record, { ...revisions, inference: "c".repeat(40) }), "historical");
 });
 

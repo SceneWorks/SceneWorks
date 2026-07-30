@@ -385,8 +385,10 @@ export function evidenceSemantics(record, revisions) {
   if (record.evidenceScope === "candidate") return "candidate";
   if (record.status === "negative_complete") return "negative";
   if (record.status !== "complete") return "gated";
-  return record.repositories.sceneWorks.matrixSourceRevision === revisions.sceneWorks &&
-    record.repositories.inference.revision === revisions.inference
+  // SceneWorks invalidation is owned by calibrationBinding's provider ABI fingerprint. The exact
+  // matrixSourceRevision remains captured provenance, but treating it as a second invalidation gate
+  // would stale every measurement on comments, formatting, or unrelated source edits.
+  return record.repositories.inference.revision === revisions.inference
     ? "current" : "historical";
 }
 
