@@ -10,6 +10,8 @@ import {
   cheapestDeclaredTierPeakGb,
   declaredFloorHostGb,
   declaredTiers,
+  evidenceRequiredHostBytes,
+  evidenceRunFitsHostBytes,
   hostGbForPeakGb,
   installedFloorHostGb,
   installedTierPeakGb,
@@ -20,6 +22,17 @@ import {
 } from "./tierSuggestion.js";
 
 const GB = 1024 * 1024 * 1024;
+
+describe("exact evidence host seam", () => {
+  it("fits at equality and rejects one byte below without adding UI policy", () => {
+    const run = { requiredHostBytes: 7 * GB };
+    expect(evidenceRequiredHostBytes(run)).toBe(7 * GB);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB)).toBe(true);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB - 1)).toBe(false);
+    expect(evidenceRequiredHostBytes({ requiredHostBytes: "7 GiB" })).toBeNull();
+    expect(evidenceRunFitsHostBytes({}, 128 * GB)).toBe(false);
+  });
+});
 
 // Build a /models-shaped quant-matrix model. Each entry in `tiers` may be a bare tier key (which
 // gets a disk-only footprint sized from `diskGb`) or an object { variant, diskGb, residentGb } to

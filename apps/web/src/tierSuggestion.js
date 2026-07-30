@@ -361,6 +361,23 @@ export function hostGbForPeakGb(peakGb, backend) {
     : Math.ceil(peakGb / MEMORY_HEADROOM_FRACTION);
 }
 
+// Exact generated-evidence seam for a future UI consumer. This intentionally does not participate
+// in tier suggestion yet: SC-15613 owns the presentation/behavior that may consume it.
+export function evidenceRequiredHostBytes(run) {
+  const value = run?.requiredHostBytes;
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+export function evidenceRunFitsHostBytes(run, hostBytes) {
+  const required = evidenceRequiredHostBytes(run);
+  return (
+    required !== null &&
+    Number.isSafeInteger(hostBytes) &&
+    hostBytes >= 0 &&
+    required <= hostBytes
+  );
+}
+
 // Whether `backend`'s per-tier numbers for `model` are ESTIMATED rather than measured. See the
 // `candle.measured` discussion in the section header: the flag covers `minMemoryGb` and `vramGbByTier`
 // together, so it does not make one of them trustworthy — it makes NEITHER a safe lower bound on the

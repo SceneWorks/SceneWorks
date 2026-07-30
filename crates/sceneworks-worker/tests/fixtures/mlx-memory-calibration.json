@@ -178,7 +178,7 @@
       },
       "loadability": {
         "result": "passed",
-        "resolvedPathFingerprint": "fixture@resolved:packed-q4"
+        "resolvedPathFingerprint": "SceneWorks/fixture@cccccccccccccccccccccccccccccccccccccccc:packed-q4"
       },
       "diagnostics": {
         "adapter": "fixture",

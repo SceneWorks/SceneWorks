@@ -36,7 +36,7 @@ use gen_core::{
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
     MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
     MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, WeightsSource,
+    OffloadPolicy, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -61,7 +61,7 @@ pub(crate) struct MlxRequestPlan {
     tier: MemoryNumericTier,
     asset_bytes: u64,
     activation_headroom_bytes: u64,
-    calibration: Option<MlxCalibrationBinding>,
+    calibration: MlxCalibrationConfig,
 }
 
 impl MlxRequestPlan {
@@ -72,13 +72,27 @@ impl MlxRequestPlan {
         manifest: Option<&JsonObject<String, Value>>,
     ) -> Self {
         let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
+        let tier = MemoryNumericTier {
+            precision: spec.precision,
+            quant: spec.quantize,
+        };
+        let calibration = match manifest {
+            Some(manifest) => match MlxCalibrationBinding::from_manifest(manifest) {
+                Ok(Some(bindings)) => match resolved_source_identity(spec, tier) {
+                    Ok(resolved) => {
+                        MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved })
+                    }
+                    Err(reason) => MlxCalibrationConfig::Invalid(reason),
+                },
+                Ok(None) => MlxCalibrationConfig::Absent,
+                Err(reason) => MlxCalibrationConfig::Invalid(reason),
+            },
+            None => MlxCalibrationConfig::Absent,
+        };
         Self {
             engine_id,
             model_id: model_id.to_owned(),
-            tier: MemoryNumericTier {
-                precision: spec.precision,
-                quant: spec.quantize,
-            },
+            tier,
             asset_bytes,
             // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
             // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
@@ -86,7 +100,7 @@ impl MlxRequestPlan {
             activation_headroom_bytes: gib_to_bytes(
                 (headroom_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
             ),
-            calibration: manifest.and_then(MlxCalibrationBinding::from_manifest),
+            calibration,
         }
     }
 
@@ -107,28 +121,151 @@ struct MlxCalibrationBinding {
     query: CalibrationBinding,
     provider: String,
     tier: String,
+    mode: String,
+    overlay: String,
+    geometry: CalibrationGeometry,
     rung: StrategyRung,
     parameters: JsonObject<String, Value>,
+    selection_parameters: gen_core::MemoryStrategyParameters,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedArtifactIdentity {
+    repository: String,
+    revision: String,
+    variant: String,
+    fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
+struct MlxCalibrationSet {
+    bindings: Vec<MlxCalibrationBinding>,
+    resolved: ResolvedArtifactIdentity,
+}
+
+#[derive(Clone, Debug)]
+enum MlxCalibrationConfig {
+    Absent,
+    Valid(MlxCalibrationSet),
+    Invalid(String),
 }
 
 impl MlxCalibrationBinding {
-    /// Read the optional generic MLX calibration identity. No current catalog row has this block:
-    /// calibration stories opt in one model only after promoting exact evidence into the packaged
-    /// bundle. Missing or malformed bindings stay on the legacy path and never manufacture coverage.
-    fn from_manifest(manifest: &JsonObject<String, Value>) -> Option<Self> {
-        let calibration = manifest.get("mlx")?.get("calibration")?;
-        let text = |name| calibration.get(name)?.as_str().map(str::to_owned);
-        let rung = match calibration.get("rung")?.as_str()? {
+    /// Read the optional closed collection of exact-cell MLX bindings. A model may carry many tiers
+    /// and many request cells per tier; request-time routing selects exactly one by resolved source
+    /// plus mode/overlay/geometry. Duplicate selectors are rejected here as ambiguous opt-in.
+    fn from_manifest(manifest: &JsonObject<String, Value>) -> Result<Option<Vec<Self>>, String> {
+        let Some(calibrations) = manifest.get("mlx").and_then(|mlx| mlx.get("calibrations")) else {
+            return Ok(None);
+        };
+        let calibrations = calibrations
+            .as_array()
+            .filter(|items| !items.is_empty())
+            .ok_or_else(|| "mlx.calibrations must be a non-empty array".to_owned())?;
+        let mut bindings = Vec::with_capacity(calibrations.len());
+        for (index, calibration) in calibrations.iter().enumerate() {
+            bindings.push(Self::parse(calibration, index)?);
+        }
+        for left in 0..bindings.len() {
+            for right in (left + 1)..bindings.len() {
+                if bindings[left].same_selector(&bindings[right]) {
+                    return Err(format!(
+                        "mlx.calibrations[{left}] and mlx.calibrations[{right}] are ambiguous duplicates"
+                    ));
+                }
+            }
+        }
+        Ok(Some(bindings))
+    }
+
+    fn parse(calibration: &Value, index: usize) -> Result<Self, String> {
+        const CALIBRATION_FIELDS: [&str; 16] = [
+            "abi",
+            "fingerprint",
+            "sceneWorksRevision",
+            "matrixSourceRevision",
+            "inferenceRevision",
+            "provider",
+            "tier",
+            "mode",
+            "overlay",
+            "geometry",
+            "artifactRepository",
+            "artifactResolvedRevision",
+            "artifactVariant",
+            "resolvedPathFingerprint",
+            "rung",
+            "parameters",
+        ];
+        let calibration = calibration
+            .as_object()
+            .ok_or_else(|| format!("mlx.calibrations[{index}] must be an object"))?;
+        if let Some(field) = calibration
+            .keys()
+            .find(|field| !CALIBRATION_FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!(
+                "mlx.calibrations[{index}] contains unknown field {field:?}"
+            ));
+        }
+        let text = |name| {
+            calibration
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("mlx.calibrations[{index}].{name} must be a non-empty string")
+                })
+        };
+        let rung = match text("rung")?.as_str() {
             "resident" => StrategyRung::Resident,
             "staged_residency" => StrategyRung::StagedResidency,
             "bounded_decode" => StrategyRung::BoundedDecode,
             "bounded_attention" => StrategyRung::BoundedAttention,
             "bounded_transformer_residency" => StrategyRung::BoundedTransformerResidency,
-            _ => return None,
+            other => {
+                return Err(format!(
+                    "unsupported mlx.calibrations[{index}].rung {other:?}"
+                ))
+            }
         };
-        Some(Self {
+        let parameters = calibration
+            .get("parameters")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| format!("mlx.calibrations[{index}].parameters must be an object"))?;
+        let selection_parameters = parse_evidence_parameters(rung, &parameters)?;
+        let geometry = calibration
+            .get("geometry")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("mlx.calibrations[{index}].geometry must be an object"))?;
+        const GEOMETRY_FIELDS: [&str; 4] = ["width", "height", "batch", "frames"];
+        if let Some(field) = geometry
+            .keys()
+            .find(|field| !GEOMETRY_FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!(
+                "mlx.calibrations[{index}].geometry contains unknown field {field:?}"
+            ));
+        }
+        let geometry_value = |name| {
+            geometry
+                .get(name)
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    format!("mlx.calibrations[{index}].geometry.{name} must be a positive u32")
+                })
+        };
+        Ok(Self {
             query: CalibrationBinding {
-                abi: u32::try_from(calibration.get("abi")?.as_u64()?).ok()?,
+                abi: calibration
+                    .get("abi")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| format!("mlx.calibrations[{index}].abi must be a u32"))?,
                 fingerprint: text("fingerprint")?,
                 scene_works_revision: text("sceneWorksRevision")?,
                 matrix_source_revision: text("matrixSourceRevision")?,
@@ -140,10 +277,98 @@ impl MlxCalibrationBinding {
             },
             provider: text("provider")?,
             tier: text("tier")?,
+            mode: text("mode")?,
+            overlay: text("overlay")?,
+            geometry: CalibrationGeometry {
+                width: geometry_value("width")?,
+                height: geometry_value("height")?,
+                batch: geometry_value("batch")?,
+                frames: geometry_value("frames")?,
+            },
             rung,
-            parameters: calibration.get("parameters")?.as_object()?.clone(),
+            parameters,
+            selection_parameters,
         })
     }
+
+    fn same_selector(&self, other: &Self) -> bool {
+        self.tier == other.tier
+            && self.query.artifact_repository == other.query.artifact_repository
+            && self.query.artifact_resolved_revision == other.query.artifact_resolved_revision
+            && self.query.artifact_variant == other.query.artifact_variant
+            && self.query.resolved_path_fingerprint == other.query.resolved_path_fingerprint
+            && self.mode == other.mode
+            && self.overlay == other.overlay
+            && self.geometry == other.geometry
+    }
+}
+
+fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
+    match tier.quant {
+        Some(gen_core::Quant::Q4) => "q4",
+        Some(gen_core::Quant::Q8) => "q8",
+        Some(gen_core::Quant::Nvfp4) => "nvfp4",
+        None if tier.precision == gen_core::Precision::Fp32 => "fp32",
+        None => "bf16",
+    }
+}
+
+fn resolved_weights_path(spec: &LoadSpec) -> &Path {
+    match &spec.weights {
+        WeightsSource::Dir(path) | WeightsSource::File(path) => path,
+    }
+}
+
+/// Prove repository/revision/tier from the actual source the loader will open. This handles the
+/// generic Hugging Face snapshot layout without a model allowlist. Receipt-backed/local layouts
+/// remain invalid for calibration opt-in until their resolver supplies an equally provable identity.
+fn resolved_source_identity(
+    spec: &LoadSpec,
+    _tier: MemoryNumericTier,
+) -> Result<ResolvedArtifactIdentity, String> {
+    let path = resolved_weights_path(spec);
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    let snapshots = components
+        .iter()
+        .position(|component| *component == "snapshots")
+        .ok_or_else(|| {
+            format!(
+                "resolved MLX weights path {} does not expose a snapshot identity",
+                path.display()
+            )
+        })?;
+    let repo_component = snapshots
+        .checked_sub(1)
+        .and_then(|index| components.get(index))
+        .and_then(|component| component.strip_prefix("models--"))
+        .ok_or_else(|| format!("{} has no models-- repository component", path.display()))?;
+    let repository = repo_component.replace("--", "/");
+    let revision = components
+        .get(snapshots + 1)
+        .filter(|revision| !revision.is_empty())
+        .ok_or_else(|| format!("{} has no snapshot revision", path.display()))?
+        .to_string();
+    let variant = components
+        .get(snapshots + 2)
+        .copied()
+        .filter(|component| !component.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} does not expose an artifact variant below snapshots/{revision}",
+                path.display()
+            )
+        })?
+        .to_owned();
+    let fingerprint = format!("{repository}@{revision}:{variant}");
+    Ok(ResolvedArtifactIdentity {
+        repository,
+        revision,
+        variant,
+        fingerprint,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,22 +537,97 @@ fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
     }
 }
 
-fn evidence_parameters(
+fn parse_evidence_parameters(
+    rung: StrategyRung,
     parameters: &JsonObject<String, Value>,
-) -> gen_core::MemoryStrategyParameters {
-    let value = |key: &str| {
+) -> Result<gen_core::MemoryStrategyParameters, String> {
+    const KEYS: [&str; 5] = [
+        "decodeTileEdge",
+        "decodeOverlap",
+        "attentionChunkSize",
+        "transformerWindowSize",
+        "transformerWindowComponent",
+    ];
+    if let Some(key) = parameters.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return Err(format!("unknown MLX strategy parameter {key:?}"));
+    }
+    let integer = |key: &str, minimum: u32| -> Result<u32, String> {
         parameters
             .get(key)
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value >= minimum)
+            .ok_or_else(|| format!("{key} must be an integer >= {minimum}"))
     };
-    gen_core::MemoryStrategyParameters {
-        decode_tile_edge: value("decodeTileEdge"),
-        decode_overlap: value("decodeOverlap"),
-        attention_chunk_size: value("attentionChunkSize"),
-        transformer_window_size: value("transformerWindowSize"),
-        ..Default::default()
+    let expected_numeric: &[(&str, u32)] = match rung {
+        StrategyRung::Resident | StrategyRung::StagedResidency => &[],
+        StrategyRung::BoundedDecode => &[("decodeTileEdge", 1), ("decodeOverlap", 0)],
+        StrategyRung::BoundedAttention => &[
+            ("decodeTileEdge", 1),
+            ("decodeOverlap", 0),
+            ("attentionChunkSize", 1),
+        ],
+        StrategyRung::BoundedTransformerResidency => &[
+            ("decodeTileEdge", 1),
+            ("decodeOverlap", 0),
+            ("attentionChunkSize", 1),
+            ("transformerWindowSize", 1),
+        ],
+    };
+    for (key, _) in expected_numeric {
+        if !parameters.contains_key(*key) {
+            return Err(format!("{rung:?} requires {key}"));
+        }
     }
+    for key in KEYS[..4].iter().filter(|key| {
+        !expected_numeric
+            .iter()
+            .any(|(expected, _)| expected == *key)
+    }) {
+        if parameters.contains_key(*key) {
+            return Err(format!("{rung:?} forbids {key}"));
+        }
+    }
+    let transformer_window_component = match parameters.get("transformerWindowComponent") {
+        None => None,
+        Some(Value::String(value)) if rung == StrategyRung::BoundedTransformerResidency => {
+            Some(match value.as_str() {
+                "dit" => TransformerComponent::Dit,
+                "text_encoder" => TransformerComponent::TextEncoder,
+                "both" => TransformerComponent::Both,
+                other => return Err(format!("unsupported transformerWindowComponent {other:?}")),
+            })
+        }
+        Some(_) if rung != StrategyRung::BoundedTransformerResidency => {
+            return Err(format!("{rung:?} forbids transformerWindowComponent"))
+        }
+        Some(_) => {
+            return Err("transformerWindowComponent must be dit, text_encoder, or both".to_owned())
+        }
+    };
+    Ok(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "decodeTileEdge")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        decode_overlap: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "decodeOverlap")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        attention_chunk_size: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "attentionChunkSize")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        transformer_window_size: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "transformerWindowSize")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        transformer_window_component,
+    })
 }
 
 /// Apply Decision 2 at the request seam: exact verified cells fail closed; every non-covering state
@@ -339,6 +639,12 @@ fn packaged_admission_route(
     mode_key: &str,
     budget: MemoryBudget,
 ) -> WorkerResult<AdmissionRoute> {
+    if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} has an invalid MLX calibration opt-in: {reason}",
+            plan.model_id
+        )));
+    }
     let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "packaged memory-calibration evidence is invalid: {error}"
@@ -366,6 +672,12 @@ fn evidence_admission_route(
     mode_key: &str,
     budget: MemoryBudget,
 ) -> WorkerResult<AdmissionRoute> {
+    if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} has an invalid MLX calibration opt-in: {reason}",
+            plan.model_id
+        )));
+    }
     if bundle.records.is_empty() {
         return Ok(AdmissionRoute {
             path: AdmissionPath::Legacy,
@@ -375,14 +687,72 @@ fn evidence_admission_route(
             process_limit_bytes: None,
         });
     }
-    let Some(binding) = &plan.calibration else {
+    let calibration = match &plan.calibration {
+        MlxCalibrationConfig::Absent => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::NoBinding),
+                evidence: None,
+                evidence_revision: None,
+                process_limit_bytes: None,
+            })
+        }
+        MlxCalibrationConfig::Valid(calibration) => calibration,
+        MlxCalibrationConfig::Invalid(_) => unreachable!("invalid opt-in rejected above"),
+    };
+    let plan_tier = plan_tier_key(plan.tier);
+    let identity_matches = calibration
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.tier == plan_tier
+                && binding.query.artifact_repository == calibration.resolved.repository
+                && binding.query.artifact_resolved_revision == calibration.resolved.revision
+                && binding.query.artifact_variant == calibration.resolved.variant
+                && binding.query.resolved_path_fingerprint == calibration.resolved.fingerprint
+        })
+        .collect::<Vec<_>>();
+    if identity_matches.is_empty() {
         return Ok(AdmissionRoute {
             path: AdmissionPath::Legacy,
-            fallback_reason: Some(LegacyAdmissionReason::NoBinding),
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
             evidence: None,
             evidence_revision: None,
             process_limit_bytes: None,
         });
+    }
+    let request_geometry = CalibrationGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: inputs.count.max(1),
+        frames: 1,
+    };
+    let overlay = inputs.overlay.as_deref().unwrap_or("none");
+    let matching = identity_matches
+        .into_iter()
+        .filter(|binding| {
+            binding.mode == mode_key
+                && binding.overlay == overlay
+                && binding.geometry == request_geometry
+        })
+        .collect::<Vec<_>>();
+    let binding = match matching.as_slice() {
+        [binding] => *binding,
+        [] => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::OutOfEnvelope),
+                evidence: None,
+                evidence_revision: None,
+                process_limit_bytes: None,
+            })
+        }
+        _ => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} has ambiguous MLX calibration bindings for the exact request cell",
+                plan.model_id
+            )))
+        }
     };
     let query = EvidenceQuery {
         backend: CalibrationBackend::Mlx,
@@ -390,13 +760,8 @@ fn evidence_admission_route(
         provider: binding.provider.clone(),
         tier: binding.tier.clone(),
         mode: mode_key.to_owned(),
-        overlay: inputs.overlay.clone().unwrap_or_else(|| "none".to_owned()),
-        geometry: CalibrationGeometry {
-            width: inputs.width,
-            height: inputs.height,
-            batch: inputs.count.max(1),
-            frames: 1,
-        },
+        overlay: overlay.to_owned(),
+        geometry: request_geometry,
         rung: binding.rung,
         parameters: binding.parameters.clone(),
         calibration: binding.query.clone(),
@@ -441,7 +806,7 @@ fn evidence_admission_route(
                             frames: 1,
                         },
                         strategy: evidence_strategy(binding.rung),
-                        parameters: evidence_parameters(&binding.parameters),
+                        parameters: binding.selection_parameters,
                     },
                     conformance: MemoryConformanceState::Verified,
                     dimensions: MemoryEvidenceDimensions::VERIFIED,
@@ -497,6 +862,33 @@ fn evaluate_request_with_budget(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
 ) -> WorkerResult<MlxRequestEvaluation> {
+    evaluate_request_with_budget_using_bundle(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        additional_evidence,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_request_with_budget_using_bundle(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    budget: MemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[MemoryEvidence],
+    evidence_bundle: Option<&EvidenceBundle>,
+) -> WorkerResult<MlxRequestEvaluation> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
     let geometry = MemoryGeometry {
@@ -537,13 +929,16 @@ fn evaluate_request_with_budget(
         .calibration
         .as_ref()
         .map_or(0, |identity| identity.abi);
-    let mut admission = packaged_admission_route(plan, inputs, mode_key, budget)?;
+    let mut admission = match evidence_bundle {
+        Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
+        None => packaged_admission_route(plan, inputs, mode_key, budget)?,
+    };
     if admission.path == AdmissionPath::Evidence
         && !matches!(
-            (&plan.calibration, contract.calibration.as_ref()),
-            (Some(binding), Some(identity))
-                if identity.abi == binding.query.abi
-                    && identity.fingerprint == binding.query.fingerprint
+            (admission.evidence.as_ref(), contract.calibration.as_ref()),
+            (Some(evidence), Some(identity))
+                if identity.abi == evidence.calibration_abi
+                    && identity.fingerprint == evidence.calibration_fingerprint
         )
     {
         admission = AdmissionRoute {
@@ -558,7 +953,7 @@ fn evaluate_request_with_budget(
     // as the fail-closed precheck and the request-scoped MLX ceiling. Otherwise a covered request
     // with existing committed memory could be admitted against the legacy 2 GiB reserve even though
     // its record captured a larger non-process share.
-    let budget = budget_for_admission(budget, &admission);
+    let mut budget = budget_for_admission(budget, &admission);
     tracing::info!(
         event = "mlx_memory_admission_path",
         route = plan.engine_id,
@@ -595,14 +990,29 @@ fn evaluate_request_with_budget(
         .committed_bytes
         .saturating_sub(external_committed_bytes)
         .min(contract.asset_facts.base_bytes);
-    if attributable_resident_bytes > total_peak_bytes {
+    let evidence_peak_bytes = admission
+        .evidence
+        .as_ref()
+        .map(|evidence| evidence.predicted_peak_bytes);
+    let modeled_peak_bytes = evidence_peak_bytes.unwrap_or(total_peak_bytes);
+    if attributable_resident_bytes > modeled_peak_bytes {
         return Err(WorkerError::InvalidPayload(format!(
             "{} live resident attribution {} exceeds modeled total peak {}; refusing an \
              inconsistent MLX budget",
-            plan.engine_id, attributable_resident_bytes, total_peak_bytes
+            plan.engine_id, attributable_resident_bytes, modeled_peak_bytes
         )));
     }
-    let predicted_peak_bytes = total_peak_bytes - attributable_resident_bytes;
+    let predicted_peak_bytes = if admission.path == AdmissionPath::Evidence {
+        // Exact evidence describes the whole request peak. On a warm cache, remove only this
+        // provider's already-resident assets from committed bytes so the full peak is charged once;
+        // unrelated allocations remain committed. Do not rewrite the evidence record's peak.
+        budget.committed_bytes = budget
+            .committed_bytes
+            .saturating_sub(attributable_resident_bytes);
+        modeled_peak_bytes
+    } else {
+        total_peak_bytes - attributable_resident_bytes
+    };
     let (resident_selection, resident) = resident_evidence(
         plan.engine_id,
         plan.tier,
@@ -612,27 +1022,29 @@ fn evaluate_request_with_budget(
         predicted_peak_bytes,
         calibration_fingerprint,
     );
-    let packaged_evidence = admission.evidence.as_ref();
-    let mut selections = Vec::with_capacity(
-        1 + usize::from(packaged_evidence.is_some()) + additional_evidence.len(),
-    );
-    selections.push(resident_selection);
-    selections.extend(packaged_evidence.map(|evidence| MemorySelection {
-        strategy: evidence.key.strategy,
-        parameters: evidence.key.parameters,
-        tier: evidence.key.tier,
-    }));
-    selections.extend(additional_evidence.iter().map(|evidence| MemorySelection {
-        strategy: evidence.key.strategy,
-        parameters: evidence.key.parameters,
-        tier: evidence.key.tier,
-    }));
-    let mut evidence = Vec::with_capacity(
-        1 + usize::from(packaged_evidence.is_some()) + additional_evidence.len(),
-    );
-    evidence.push(&resident);
-    evidence.extend(packaged_evidence);
-    evidence.extend(additional_evidence);
+    let mut selections = Vec::new();
+    let mut evidence = Vec::new();
+    if let Some(exact) = admission.evidence.as_ref() {
+        // A covered cell is authorized by exactly one record. Letting the generic resident estimate
+        // or caller-supplied evidence run first would turn Evidence telemetry into a legacy bypass.
+        selections.push(MemorySelection {
+            strategy: exact.key.strategy,
+            parameters: exact.key.parameters,
+            tier: exact.key.tier,
+        });
+        evidence.push(exact);
+    } else {
+        selections.reserve(1 + additional_evidence.len());
+        evidence.reserve(1 + additional_evidence.len());
+        selections.push(resident_selection);
+        evidence.push(&resident);
+        selections.extend(additional_evidence.iter().map(|item| MemorySelection {
+            strategy: item.key.strategy,
+            parameters: item.key.parameters,
+            tier: item.key.tier,
+        }));
+        evidence.extend(additional_evidence);
+    }
     let candidates = selections
         .iter()
         .zip(evidence)
@@ -641,19 +1053,17 @@ fn evaluate_request_with_budget(
             evidence,
         })
         .collect::<Vec<_>>();
-    let expected_scene_works_revision = plan
-        .calibration
+    let expected_scene_works_revision = admission
+        .evidence
         .as_ref()
-        .filter(|_| admission.path == AdmissionPath::Evidence)
-        .map_or(REQUEST_EVIDENCE_REVISION, |binding| {
-            binding.query.scene_works_revision.as_str()
+        .map_or(REQUEST_EVIDENCE_REVISION, |evidence| {
+            evidence.sceneworks_revision.as_str()
         });
-    let expected_inference_revision = plan
-        .calibration
+    let expected_inference_revision = admission
+        .evidence
         .as_ref()
-        .filter(|_| admission.path == AdmissionPath::Evidence)
-        .map_or(INFERENCE_CONTRACT_REVISION, |binding| {
-            binding.query.inference_revision.as_str()
+        .map_or(INFERENCE_CONTRACT_REVISION, |evidence| {
+            evidence.inference_revision.as_str()
         });
     let selection = crate::memory_strategy::select_strategy(
         RequestScope {
@@ -2024,7 +2434,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
-            calibration: None,
+            calibration: MlxCalibrationConfig::Absent,
         }
     }
 
@@ -2070,7 +2480,95 @@ mod tests {
         }
     }
 
+    fn fixture_binding(tier: &str, variant: &str) -> MlxCalibrationBinding {
+        let parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+        ]);
+        MlxCalibrationBinding {
+            query: CalibrationBinding {
+                abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                fingerprint: "fixture-formula-v2".to_owned(),
+                scene_works_revision: "a".repeat(40),
+                matrix_source_revision: "source-tree:1111111".to_owned(),
+                inference_revision: "b".repeat(40),
+                artifact_repository: "SceneWorks/fixture".to_owned(),
+                artifact_resolved_revision: "c".repeat(40),
+                artifact_variant: variant.to_owned(),
+                resolved_path_fingerprint: format!(
+                    "SceneWorks/fixture@{}:{variant}",
+                    "c".repeat(40)
+                ),
+            },
+            provider: "fixture_provider".to_owned(),
+            tier: tier.to_owned(),
+            mode: "text_to_image".to_owned(),
+            overlay: "none".to_owned(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            rung: StrategyRung::BoundedDecode,
+            selection_parameters: parse_evidence_parameters(
+                StrategyRung::BoundedDecode,
+                &parameters,
+            )
+            .expect("fixture parameters"),
+            parameters,
+        }
+    }
+
+    fn fixture_calibration_json(tier: &str, variant: &str) -> Value {
+        serde_json::json!({
+            "abi": sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+            "fingerprint": "fixture-formula-v2",
+            "sceneWorksRevision": "a".repeat(40),
+            "matrixSourceRevision": "source-tree:1111111",
+            "inferenceRevision": "b".repeat(40),
+            "provider": "fixture_provider",
+            "tier": tier,
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+                "width": 1024,
+                "height": 1024,
+                "batch": 1,
+                "frames": 1
+            },
+            "artifactRepository": "SceneWorks/fixture",
+            "artifactResolvedRevision": "c".repeat(40),
+            "artifactVariant": variant,
+            "resolvedPathFingerprint": format!(
+                "SceneWorks/fixture@{}:{variant}",
+                "c".repeat(40)
+            ),
+            "rung": "bounded_decode",
+            "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128
+            }
+        })
+    }
+
+    fn fixture_manifest(calibrations: Vec<Value>) -> JsonObject<String, Value> {
+        serde_json::json!({ "mlx": { "calibrations": calibrations } })
+            .as_object()
+            .expect("manifest object")
+            .clone()
+    }
+
+    fn fixture_spec(tier: gen_core::Quant, variant: &str) -> LoadSpec {
+        LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(format!(
+            "/cache/models--SceneWorks--fixture/snapshots/{}/{variant}/weights",
+            "c".repeat(40)
+        ))))
+        .with_quant(tier)
+    }
+
     fn fixture_plan() -> MlxRequestPlan {
+        let variant = "packed-q4";
         MlxRequestPlan {
             engine_id: "fixture_model",
             model_id: "fixture_model".to_owned(),
@@ -2080,25 +2578,14 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(3.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
-            calibration: Some(MlxCalibrationBinding {
-                query: CalibrationBinding {
-                    abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
-                    fingerprint: "fixture-formula-v2".to_owned(),
-                    scene_works_revision: "a".repeat(40),
-                    matrix_source_revision: "source-tree:1111111".to_owned(),
-                    inference_revision: "b".repeat(40),
-                    artifact_repository: "SceneWorks/fixture".to_owned(),
-                    artifact_resolved_revision: "c".repeat(40),
-                    artifact_variant: "packed-q4".to_owned(),
-                    resolved_path_fingerprint: "fixture@resolved:packed-q4".to_owned(),
+            calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet {
+                bindings: vec![fixture_binding("q4", variant)],
+                resolved: ResolvedArtifactIdentity {
+                    repository: "SceneWorks/fixture".to_owned(),
+                    revision: "c".repeat(40),
+                    variant: variant.to_owned(),
+                    fingerprint: format!("SceneWorks/fixture@{}:{variant}", "c".repeat(40)),
                 },
-                provider: "fixture_provider".to_owned(),
-                tier: "q4".to_owned(),
-                rung: StrategyRung::BoundedDecode,
-                parameters: JsonObject::from_iter([
-                    ("decodeTileEdge".to_owned(), serde_json::json!(512)),
-                    ("decodeOverlap".to_owned(), serde_json::json!(128)),
-                ]),
             }),
         }
     }
@@ -2117,6 +2604,72 @@ mod tests {
         }
     }
 
+    fn fixture_generator() -> RequestGenerator {
+        use gen_core::{
+            MemoryCalibrationIdentity, MemoryLifecycleCapabilities, MemoryParameterRanges,
+            MemoryPhase, MemoryStrategyCapability, MemoryStrategySupport,
+        };
+
+        let mut contract = MemoryProviderContract::compatibility_default(
+            "fixture_model",
+            MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.calibration = Some(MemoryCalibrationIdentity::new("fixture-formula-v2"));
+        contract.asset_facts.base_bytes = gib_to_bytes(3.0);
+        contract.lifecycle = MemoryLifecycleCapabilities {
+            phases: vec![
+                MemoryPhase::Conditioning,
+                MemoryPhase::Denoise,
+                MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: false,
+            transformer_window_materialization: false,
+        };
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if matches!(
+                    strategy,
+                    MemoryStrategy::Resident
+                        | MemoryStrategy::StagedResidency
+                        | MemoryStrategy::BoundedDecode
+                ) {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                },
+                parameters: if strategy == MemoryStrategy::BoundedDecode {
+                    MemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![128],
+                        ..Default::default()
+                    }
+                } else {
+                    MemoryParameterRanges::default()
+                },
+            })
+            .collect();
+        RequestGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "fixture_model",
+                family: "test",
+                backend: "mlx",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                required_components: &[],
+            },
+            contract: Some(contract),
+        }
+    }
+
     fn fixture_budget(total_gib: f64) -> MemoryBudget {
         MemoryBudget {
             total_bytes: gib_to_bytes(total_gib),
@@ -2127,12 +2680,283 @@ mod tests {
     }
 
     #[test]
+    fn manifest_reader_distinguishes_absent_valid_and_malformed_opt_in() {
+        let spec = fixture_spec(gen_core::Quant::Q4, "packed-q4");
+        let absent = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &spec,
+            Some(&JsonObject::new()),
+        );
+        assert!(matches!(absent.calibration, MlxCalibrationConfig::Absent));
+
+        let valid_manifest = fixture_manifest(vec![fixture_calibration_json("q4", "packed-q4")]);
+        let valid = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &spec,
+            Some(&valid_manifest),
+        );
+        let MlxCalibrationConfig::Valid(calibration) = valid.calibration else {
+            panic!("well-formed opt-in must be valid");
+        };
+        assert_eq!(calibration.bindings.len(), 1);
+        assert_eq!(calibration.resolved.variant, "packed-q4");
+        assert_eq!(plan_tier_key(valid.tier), "q4");
+
+        let mut malformed = fixture_calibration_json("q4", "packed-q4");
+        malformed
+            .as_object_mut()
+            .expect("calibration object")
+            .remove("fingerprint");
+        let malformed_manifest = fixture_manifest(vec![malformed]);
+        let malformed = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &spec,
+            Some(&malformed_manifest),
+        );
+        assert!(matches!(
+            malformed.calibration,
+            MlxCalibrationConfig::Invalid(_)
+        ));
+        assert!(packaged_admission_route(
+            &malformed,
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0)
+        )
+        .expect_err("a malformed present opt-in must not collapse to packaged-empty legacy")
+        .to_string()
+        .contains("invalid MLX calibration opt-in"));
+    }
+
+    #[test]
+    fn parameter_reader_is_closed_and_preserves_transformer_component() {
+        let parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+            ("attentionChunkSize".to_owned(), serde_json::json!(256)),
+            ("transformerWindowSize".to_owned(), serde_json::json!(4)),
+            (
+                "transformerWindowComponent".to_owned(),
+                serde_json::json!("both"),
+            ),
+        ]);
+        let parsed =
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &parameters)
+                .expect("the complete exact parameter set is valid");
+        assert_eq!(parsed.decode_tile_edge, Some(512));
+        assert_eq!(parsed.decode_overlap, Some(128));
+        assert_eq!(parsed.attention_chunk_size, Some(256));
+        assert_eq!(parsed.transformer_window_size, Some(4));
+        assert_eq!(
+            parsed.transformer_window_component,
+            Some(TransformerComponent::Both)
+        );
+
+        let mut unknown = parameters.clone();
+        unknown.insert("unrecognized".to_owned(), serde_json::json!(1));
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unknown)
+                .expect_err("unknown parameters fail closed")
+                .contains("unknown")
+        );
+
+        let mut malformed = parameters.clone();
+        malformed.insert(
+            "transformerWindowComponent".to_owned(),
+            serde_json::json!(12),
+        );
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &malformed)
+                .expect_err("a non-string transformer component fails closed")
+                .contains("transformerWindowComponent")
+        );
+
+        let mut unsupported = parameters;
+        unsupported.insert(
+            "transformerWindowComponent".to_owned(),
+            serde_json::json!("vae"),
+        );
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unsupported)
+                .expect_err("an unknown transformer component fails closed")
+                .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn calibration_collection_supports_tiers_and_cells_but_rejects_duplicate_selectors() {
+        let mut second_cell = fixture_calibration_json("q4", "packed-q4");
+        second_cell["geometry"]["width"] = serde_json::json!(512);
+        second_cell["geometry"]["height"] = serde_json::json!(512);
+        let manifest = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            second_cell,
+            fixture_calibration_json("q8", "packed-q8"),
+        ]);
+        let bindings = MlxCalibrationBinding::from_manifest(&manifest)
+            .expect("valid collection")
+            .expect("present collection");
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.tier == "q4")
+                .count(),
+            2,
+            "one tier may contain multiple exact request cells"
+        );
+        assert!(bindings.iter().any(|binding| binding.tier == "q8"));
+
+        let duplicate = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            fixture_calibration_json("q4", "packed-q4"),
+        ]);
+        assert!(MlxCalibrationBinding::from_manifest(&duplicate)
+            .expect_err("duplicate request selectors are ambiguous")
+            .contains("ambiguous duplicates"));
+        let mut ambiguous_plan = fixture_plan();
+        let MlxCalibrationConfig::Valid(ambiguous) = &mut ambiguous_plan.calibration else {
+            panic!("fixture calibration");
+        };
+        ambiguous.bindings.push(fixture_binding("q4", "packed-q4"));
+        assert!(evidence_admission_route(
+            &fixture_bundle(),
+            &ambiguous_plan,
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0)
+        )
+        .expect_err("more than one exact request match must fail closed")
+        .to_string()
+        .contains("ambiguous MLX calibration bindings"));
+
+        let mut bundle = fixture_bundle();
+        let mut second_cell_record = bundle.records[0].clone();
+        second_cell_record.target.geometry.width = 512;
+        second_cell_record.target.geometry.height = 512;
+        bundle.records.push(second_cell_record);
+
+        let q4_plan = MlxRequestPlan {
+            calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet {
+                bindings,
+                resolved: ResolvedArtifactIdentity {
+                    repository: "SceneWorks/fixture".to_owned(),
+                    revision: "c".repeat(40),
+                    variant: "packed-q4".to_owned(),
+                    fingerprint: format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
+                },
+            }),
+            ..fixture_plan()
+        };
+        assert_eq!(
+            evidence_admission_route(
+                &bundle,
+                &q4_plan,
+                &fixture_inputs(512, 512),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("the second exact cell is independently selectable")
+            .path,
+            AdmissionPath::Evidence
+        );
+    }
+
+    #[test]
+    fn load_spec_tier_and_resolved_artifact_variant_are_independent() {
+        let manifest = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            fixture_calibration_json("q8", "packed-q8"),
+        ]);
+        let q4 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q4, "packed-q4"),
+            Some(&manifest),
+        );
+        let MlxCalibrationConfig::Valid(q4_calibration) = &q4.calibration else {
+            panic!("q4 binding");
+        };
+        assert_eq!(plan_tier_key(q4.tier), "q4");
+        assert_eq!(q4_calibration.resolved.variant, "packed-q4");
+        assert_eq!(
+            evidence_admission_route(
+                &fixture_bundle(),
+                &q4,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("q4 packed artifact is independently verified")
+            .path,
+            AdmissionPath::Evidence
+        );
+
+        let wrong_variant = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q4, "different-packed-q4"),
+            Some(&manifest),
+        );
+        assert_eq!(
+            evidence_admission_route(
+                &fixture_bundle(),
+                &wrong_variant,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("unverified artifact variant uses legacy")
+            .fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+
+        let q8 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_model",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q8, "packed-q8"),
+            Some(&manifest),
+        );
+        let MlxCalibrationConfig::Valid(q8_calibration) = &q8.calibration else {
+            panic!("q8 binding");
+        };
+        assert_eq!(plan_tier_key(q8.tier), "q8");
+        assert_eq!(q8_calibration.resolved.variant, "packed-q8");
+
+        let mut q8_bundle = fixture_bundle();
+        let mut q8_record = q8_bundle.records[0].clone();
+        q8_record.target.tier = "q8".to_owned();
+        q8_record.artifact.variant = "packed-q8".to_owned();
+        q8_record.loadability.resolved_path_fingerprint =
+            sceneworks_core::memory_calibration::RequiredNullable::Value(format!(
+                "SceneWorks/fixture@{}:packed-q8",
+                "c".repeat(40)
+            ));
+        q8_bundle.records.push(q8_record);
+        assert_eq!(
+            evidence_admission_route(
+                &q8_bundle,
+                &q8,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("q8 record is selected independently of q4")
+            .path,
+            AdmissionPath::Evidence
+        );
+    }
+
+    #[test]
     fn decision_two_transition_paths_are_explicit_and_fail_closed_only_when_covered() {
         let bundle = fixture_bundle();
         let inputs = fixture_inputs(1024, 1024);
 
         let mut uncalibrated = fixture_plan();
-        uncalibrated.calibration = None;
+        uncalibrated.calibration = MlxCalibrationConfig::Absent;
         let route = evidence_admission_route(
             &bundle,
             &uncalibrated,
@@ -2162,12 +2986,10 @@ mod tests {
         );
 
         let mut drifted = fixture_plan();
-        drifted
-            .calibration
-            .as_mut()
-            .expect("binding")
-            .query
-            .fingerprint = "different".to_owned();
+        let MlxCalibrationConfig::Valid(calibration) = &mut drifted.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings[0].query.fingerprint = "different".to_owned();
         let drifted = evidence_admission_route(
             &bundle,
             &drifted,
@@ -2227,7 +3049,7 @@ mod tests {
         let inputs = fixture_inputs(1024, 1024);
 
         let mut wrong_tier = fixture_plan();
-        wrong_tier.calibration.as_mut().expect("binding").tier = "q8".to_owned();
+        wrong_tier.tier.quant = Some(gen_core::Quant::Q8);
         let wrong_tier = evidence_admission_route(
             &bundle,
             &wrong_tier,
@@ -2238,16 +3060,16 @@ mod tests {
         .expect("target-tier mismatch falls back");
         assert_eq!(
             wrong_tier.fallback_reason,
-            Some(LegacyAdmissionReason::NoRecord)
+            Some(LegacyAdmissionReason::StaleIdentity)
         );
 
         let mut wrong_artifact = fixture_plan();
-        wrong_artifact
-            .calibration
-            .as_mut()
-            .expect("binding")
-            .query
-            .artifact_variant = "q4".to_owned();
+        let MlxCalibrationConfig::Valid(calibration) = &mut wrong_artifact.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.resolved.variant = "different-packed-q4".to_owned();
+        calibration.resolved.fingerprint =
+            format!("SceneWorks/fixture@{}:different-packed-q4", "c".repeat(40));
         let wrong_artifact = evidence_admission_route(
             &bundle,
             &wrong_artifact,
@@ -2259,6 +3081,73 @@ mod tests {
         assert_eq!(
             wrong_artifact.fallback_reason,
             Some(LegacyAdmissionReason::StaleIdentity)
+        );
+    }
+
+    #[test]
+    fn covered_cell_selects_exact_strategy_cold_and_warm_without_resident_bypass() {
+        let bundle = fixture_bundle();
+        let generator = fixture_generator();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+        let expected = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: fixture_binding("q4", "packed-q4").selection_parameters,
+            tier: plan.tier,
+        };
+        let exact = evidence_admission_route(
+            &bundle,
+            &plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("covered route")
+        .evidence
+        .expect("exact evidence");
+        assert!(
+            exact.validation_errors().is_empty(),
+            "fixture evidence errors: {:?}",
+            exact.validation_errors()
+        );
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.validate_selection(&expected).is_ok(),
+            "fixture contract rejection: {:?}",
+            contract.validate_selection(&expected)
+        );
+        let evaluate = |cache_state, committed_bytes| {
+            evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &inputs,
+                cache_state,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    committed_bytes,
+                    ..fixture_budget(8.0)
+                },
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                Some(&bundle),
+            )
+            .expect("the exact covered request must select its verified rung")
+        };
+        let cold = evaluate(MemoryCacheState::Cold, 0);
+        let warm = evaluate(MemoryCacheState::Warm, gib_to_bytes(3.0));
+        assert_eq!(cold.context.selection, expected);
+        assert_eq!(warm.context.selection, expected);
+        assert!(cold.memory.tile_vae_decode && warm.memory.tile_vae_decode);
+        assert_eq!(cold.context.predicted_peak_bytes, gib_to_bytes(5.0));
+        assert_eq!(
+            warm.context.predicted_peak_bytes,
+            cold.context.predicted_peak_bytes,
+            "warm attribution credits resident assets in the budget without rewriting exact evidence"
+        );
+        assert_eq!(
+            warm.context.budget.committed_bytes, 0,
+            "the provider's three resident GiB are credited exactly once"
         );
     }
 
@@ -2481,7 +3370,7 @@ mod tests {
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
-            calibration: None,
+            calibration: MlxCalibrationConfig::Absent,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),

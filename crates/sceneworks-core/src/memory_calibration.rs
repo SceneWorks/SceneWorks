@@ -604,6 +604,21 @@ pub struct MlxAdmissionEnvelope {
     pub foreign_reserve_bytes: u64,
 }
 
+impl MlxAdmissionEnvelope {
+    /// Smallest physical unified-memory size that can satisfy this exact cell.
+    ///
+    /// This is the shared runtime/UI bridge: the worker compares exact evidence against the same
+    /// additive requirement that a later web consumer may display. Saturation fails conservative
+    /// for corrupt or impossible producer values.
+    pub fn required_host_bytes(self) -> u64 {
+        self.peak_bytes.saturating_add(self.foreign_reserve_bytes)
+    }
+
+    pub fn fits_host_bytes(self, host_bytes: u64) -> bool {
+        self.required_host_bytes() <= host_bytes
+    }
+}
+
 impl EvidenceRecord {
     /// Derive the verified MLX admission envelope from counters carried by the evidence contract.
     ///
@@ -1471,6 +1486,13 @@ mod tests {
         assert_eq!(small.foreign_reserve_bytes, 2 * gib);
         assert_eq!(small.observed_non_reclaimable_wired_bytes, 230);
         assert_eq!(small.peak_bytes, 230);
+        let required = 2 * gib + 230;
+        assert_eq!(small.required_host_bytes(), required);
+        assert!(small.fits_host_bytes(required), "exact equality fits");
+        assert!(
+            !small.fits_host_bytes(required - 1),
+            "one byte below the exact host requirement must fail"
+        );
 
         let mid = match load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
             .expect("valid mid-host evidence")
