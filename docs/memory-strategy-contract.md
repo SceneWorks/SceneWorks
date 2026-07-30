@@ -86,8 +86,9 @@ accelerator consumes** — a mapped read plus, where memory is not unified, a ho
 never a per-window format conversion. MLX satisfies it structurally, because there the mmap *is* the
 residency. A realization that does not may still ship, but only while saying what it converts and naming
 the story that removes it; `conformance_errors` refuses an undeclared one, and refuses an *unstated*
-realization with the fix it can actually perform. `candle-gen-krea` declares `HostFormatConversion` today
-with `owner_story: sc-16096`, which is the story that flips it to `DeviceFormatTransfer`.
+realization with the fix it can actually perform. `candle-gen-krea` now declares
+`DeviceFormatTransfer`: content-addressed sidecars hold the GGML bytes the accelerator consumes, so
+each rung-4 window maps and transfers those bytes without repeating the packed-weight conversion.
 
 It is declared on the backend realization and read through
 `MemoryProviderContract::window_materialization`, mirroring how `engages` layers over
@@ -114,9 +115,9 @@ The Krea capability-downtier consumes the ladder's verdict as a boolean: `KreaTu
 `KreaTurboFit::Fits` both collapse to `TierFit::Fits`
 (`crates/sceneworks-worker/src/image_jobs/base.rs`), and `choose_downtier` keeps the highest-fidelity
 tier that fits. So under **Auto** a tier whose *only* fit is rung 4 outranks a lower tier that fits
-resident, and the cost of that rung is what the higher tier is bought with — extrapolating z-image's
-measured q8 figure (~1466 ms/block), tens of seconds per step rather than a q4 resident render's
-low single digits.
+resident, and the cost of that rung is what the higher tier is bought with. After SC-16096 hoisted the
+packed repack, z-image's measured q8 block-materialization median is 101.7 ms; that is still additive
+streaming work, but no longer the pre-fix ~1.3–1.5 seconds per block.
 
 **That is intended, and is the same rule the rest of this epic applies.** Fidelity the user asked for is
 not a memory lever: tier integrity refuses to substitute precision, SC-15807 refuses to substitute
@@ -130,51 +131,53 @@ Two things this does **not** license:
   (`mlxQuantizeExplicit`) skips it outright, as does an NVFP4 selection, which is unrankable on purpose.
   The rule above is about Auto only.
 - **Accepting the cost is not the same as hiding it.** Nothing today tells a caller that its render is
-  slow *because* it is streaming blocks to hold the tier, and a render 1-2 orders of magnitude slower
-  than the same job at a lower tier is operationally indistinguishable from a hang. Disclosure is
-  SC-16104's remaining scope; the policy question it was filed to settle is settled here.
+  slower *because* it is streaming blocks to hold the tier. SC-16096 removed the dominant conversion,
+  but the remaining transfer cost is still material and should be visible. Disclosure is SC-16104's
+  remaining scope; the policy question it was filed to settle is settled here.
 
-One consequence to carry forward: this **declines** SC-15791's recommendation *"do not enable rung 4 on
-q8 until the repack is hoisted"*. Deliberately — gating q8 would be exactly the fidelity substitution the
-rule forbids. It does mean the per-window conversion is paid on the tier where it is worst, which raises
-the value of SC-16096 rather than lowering it.
+One historical consequence: this **declined** SC-15791's recommendation *"do not enable rung 4 on q8
+until the repack is hoisted"*. Deliberately — gating q8 would have been exactly the fidelity substitution
+the rule forbids. SC-16096 has now removed that per-window conversion, so the temporary cost that made
+the recommendation attractive is no longer paid.
 
 ### A rung declares no non-VRAM resource cost
 
-SC-15791 also asked how a rung declares a **host RAM** cost, because its recommended Candle fix — cache
-the repacked bytes host-side — holds ~3.16 GiB of host memory for the whole request, on exactly the
-low-RAM hosts rung 4 exists for, while MLX pays nothing host-side. (That 3.16 GiB is derived arithmetic
-for a *proposed* fix, not a measurement; nothing in the spike watched host RSS.) A rung whose resource
+SC-15791 also asked how a rung declares a **host RAM** cost, because one candidate Candle fix — retain
+all repacked bytes in anonymous host memory — would have held model-scale memory for the whole request,
+on exactly the low-RAM hosts rung 4 exists for, while MLX pays nothing host-side. A rung whose resource
 cost changes *kind* between backends cannot be expressed as one cost order or one saving figure.
 
 **No such axis is added, because the cost belongs to that one candidate fix rather than to the rung.** A
 realization that materializes windows from device-format bytes on disk holds its host copy as the mapped
-file — reclaimable page cache, the same *kind* of resource MLX's mmap is — and makes no anonymous
-per-request allocation at all. Adding a resource-kind axis for an implementation nobody has to write is
-the same mistake as (3) above, one layer down.
+file — reclaimable page cache, the same *kind* of resource MLX's mmap is — and requires no
+model-proportional anonymous host copy. Adding a resource-kind axis for an implementation nobody has to
+write is the same mistake as (3) above, one layer down.
 
-**What that leaves undeclared, stated rather than glossed.** The `HostFormatConversion` realization that
-ships today *does* have a host cost, and this decision does not surface its size. Its per-window
-conversion allocates anonymous host memory per projection and frees it again: the block's unpacked codes
-for q4, and for q8 a **full dense f32 grid** (`repack::dequant_mlx_q8_gs`), which for a 3840 × 15360
-projection is a few hundred MiB. Those are transients rather than request-held, and they are **not
-measured** — SC-15791 says plainly that q8 host memory is unverified. So on a low-RAM host a rung-4
-Candle selection today carries an unquantified host transient no gate sees. It is recorded here so it is
-not mistaken for zero; SC-16096 both removes the conversion and owes the measurement.
+**The implemented and measured result.** SC-16096 stores content-addressed q4/q8 device-format sidecars
+on disk and maps one projection at a time. The complete sidecar sets are 3,668.0 MiB for q4 and
+6,235.6 MiB for q8, but they are file-backed cache, not anonymous request-held memory; the largest
+per-projection mappings measured 23.4 MiB and 39.8 MiB. In steady-state rung-4 windows, host
+working-set/private-commit peak deltas were 23.1/128.3 MiB for q4 and 39.4/192.5 MiB for q8.
 
-**Revisit trigger — deliberately broad enough to catch that case.** The axis is owed if a realization is
-measured to need host memory proportional to the model that a fit gate would have to account for: held
-for the request or transient, reclaimable or not, device-format alternative or none. SC-16096 must raise
-it rather than absorb it. What is *not* owed is an axis built ahead of that measurement, on a figure
-derived for a fix nobody has written.
+First cache creation is intentionally separate from the window path. It streams the source mapping and
+builds one projection at a time; measured working-set/private-commit deltas were 3,439.9/155.5 MiB for
+q4 and 6,507.0/368.0 MiB for q8. The large working-set leg is file-backed and reclaimable, while the
+q8 dense-f32 private transient is bounded by one projection and is never repeated per window.
+
+**Revisit trigger.** A host-memory axis is still owed if a future realization needs model-proportional
+host memory that a fit gate must reserve or account for: held for the request or transient, reclaimable
+or not, device-format alternative or none. SC-16096 does not meet that trigger in steady state: its
+model-scale bytes are file-backed and reclaimable, and its anonymous transient is projection-bounded
+and hoisted out of rung-4 windows.
 
 ### What this decision does not settle
 
 The *prerequisite* axis was checked and needs nothing: SC-15791 confirmed rung 4's single edge (requires
 rung 1 engaged in the same request) holds on Candle for the same arithmetic reason, so
-`MemoryProviderContract::requires` stays unbuilt. Two things the spike left genuinely open are **not**
-answered here and are not preconditions for this decision: whether the ~26× survives the fix (SC-16096
-measures it), and whether the small-card behaviour rung 4 exists for can be validated at all on the dev
+`MemoryProviderContract::requires` stays unbuilt. SC-16096 has now answered the performance question:
+q4 block materialization fell from a 247.8 ms median to 56.2 ms, and q8 from 1,322.6 ms to 101.7 ms,
+with bit-exact device bytes and CUDA outputs across all eight sampled packed projections. The remaining
+open question is whether the small-card behaviour rung 4 exists for can be validated at all on the dev
 box — SC-15791 over-committed 3.41 GiB into 1.93 GiB of driver-visible free and completed at 1.07× wall
 time, so the ceiling is not enforced there and neither completion nor wall time detects a spill
 (SC-16091).
