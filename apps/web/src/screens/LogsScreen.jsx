@@ -4,6 +4,7 @@ import { apiFetch } from "../api.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { writeClipboardText } from "../clipboard.js";
 
 // In-app Logs viewer (sc-3452). Shows the current session's activity — most
 // importantly the GPU routing decisions (`gpu_route_decision`) and claim
@@ -52,6 +53,45 @@ const SEARCH_DEBOUNCE_MS = 250;
 // Events that answer the routing question get visual emphasis.
 const HIGHLIGHT_EVENTS = new Set(["gpu_route_decision", "claim_lock_contention"]);
 
+// How long the copy button reads "Copied" before reverting (#1966).
+const COPY_FEEDBACK_MS = 1500;
+// Sticky-offset fallback for the filter panel when the topbar can't be measured
+// (jsdom, or a shell that renders the Logs screen without the app chrome).
+// Roughly the topbar's natural height: 12px padding × 2 + a two-line title.
+const TOPBAR_FALLBACK_PX = 64;
+
+// What the per-entry copy button puts on the clipboard (#1966). The structured
+// event is what people actually paste into a bug report, so prefer its
+// pretty-printed form and fall back to the raw log line for entries the parser
+// didn't turn into an event.
+export function logEntryClipboardText(entry) {
+  if (!entry) return "";
+  if (entry.event) return JSON.stringify(entry.event, null, 2);
+  return entry.raw ?? entry.message ?? "";
+}
+
+// The filter panel pins below the global topbar rather than at the top of the
+// scroll box: `.workspace` is the scrolling ancestor and `.topbar` is already
+// sticky at its top edge, so a `top: 0` panel would slide underneath it. The
+// topbar's height is content-driven (its status pills wrap on narrow windows),
+// so measure it instead of hardcoding an offset.
+function useTopbarHeight() {
+  const [height, setHeight] = useState(TOPBAR_FALLBACK_PX);
+  useEffect(() => {
+    const topbar = globalThis.document?.querySelector(".topbar");
+    if (!topbar) return undefined;
+    const measure = () => {
+      setHeight(topbar.getBoundingClientRect().height || TOPBAR_FALLBACK_PX);
+    };
+    measure();
+    if (typeof ResizeObserver !== "function") return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(topbar);
+    return () => observer.disconnect();
+  }, []);
+  return height;
+}
+
 // Note: text `search` is intentionally NOT a fetch parameter. Source/level are
 // cheap, coarse toggles that legitimately change what the server returns, but
 // the full snapshot is already held in memory, so free-text search filters
@@ -87,11 +127,27 @@ export function LogsScreen() {
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(null);
+  // seq of the entry whose copy button just fired, plus whether it succeeded.
+  const [copied, setCopied] = useState(null);
 
   const lastSeqRef = useRef(undefined);
   const bottomRef = useRef(null);
+  const copyTimerRef = useRef(null);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+
+  const topbarHeight = useTopbarHeight();
+
+  // Clear the transient "Copied" flag on unmount so a late timer can't set
+  // state on a torn-down tree.
+  useEffect(() => () => clearTimeout(copyTimerRef.current), []);
+
+  const copyEntry = useCallback(async (entry) => {
+    const ok = await writeClipboardText(logEntryClipboardText(entry));
+    setCopied({ seq: entry.seq, ok });
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(null), COPY_FEEDBACK_MS);
+  }, []);
 
   // Full (re)load: source/level filters changed, or first mount. Text search is
   // deliberately absent from the deps so typing doesn't refetch (sc-8849).
@@ -219,7 +275,13 @@ export function LogsScreen() {
 
   return (
     <section className="page-frame logs-screen">
-      <WorkPanel eyebrow="Filter the stream">
+      {/* Pinned so the filters/pause control stay reachable while the tail
+          scrolls (#1966); `--logs-sticky-top` is the measured topbar height. */}
+      <WorkPanel
+        eyebrow="Filter the stream"
+        className="logs-panel"
+        style={{ "--logs-sticky-top": `${topbarHeight}px` }}
+      >
         <div className="logs-toolbar" role="toolbar" aria-label="Log filters">
         <div className="segmented-control" role="group" aria-label="Source">
           <button
@@ -307,8 +369,30 @@ export function LogsScreen() {
               <span className={`logs-chip source-${entry.source}`}>{entry.source}</span>
               <span className={`logs-chip level-${entry.level}`}>{entry.level}</span>
               <span className="logs-message">{entry.message}</span>
-              {isOpen && entry.event ? (
-                <pre className="logs-detail">{JSON.stringify(entry.event, null, 2)}</pre>
+              {isOpen ? (
+                <div className="logs-detail-panel">
+                  {/* Copying the expanded entry used to mean hand-selecting the
+                      JSON out of a live-tailing list (#1966). `stopPropagation`
+                      keeps the click off the row's expand/collapse toggle. */}
+                  <button
+                    type="button"
+                    className="logs-copy"
+                    aria-label="Copy log entry to clipboard"
+                    onClick={(clickEvent) => {
+                      clickEvent.stopPropagation();
+                      copyEntry(entry);
+                    }}
+                  >
+                    {copied?.seq === entry.seq
+                      ? copied.ok
+                        ? "Copied"
+                        : "Couldn’t copy"
+                      : "Copy"}
+                  </button>
+                  {entry.event ? (
+                    <pre className="logs-detail">{JSON.stringify(entry.event, null, 2)}</pre>
+                  ) : null}
+                </div>
               ) : null}
             </div>
           );

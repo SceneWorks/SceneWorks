@@ -15235,6 +15235,17 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 12px;
   min-height: 0;
 }
+/* The filter panel pins under the global topbar instead of scrolling away with
+   the tail (#1966). `.workspace` is the scroll container and `.topbar` is
+   already sticky at its top edge (z-index 5), so this sits just below it in
+   both offset and stacking order. `--logs-sticky-top` is set inline by
+   LogsScreen from the measured topbar height — the literal here is only the
+   fallback for a shell rendered without the app chrome. */
+.logs-screen > .logs-panel {
+  position: sticky;
+  top: var(--logs-sticky-top, 64px);
+  z-index: 4;
+}
 .logs-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -15330,9 +15341,35 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: pre-wrap;
   word-break: break-word;
 }
-.logs-detail {
+/* Expanded entry: a copy affordance above the structured event (#1966). Rows
+   without a parsed event still expand to the button so the raw line is
+   copyable. */
+.logs-detail-panel {
   flex: 1 1 100%;
-  margin: 6px 0 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.logs-copy {
+  align-self: flex-end;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  padding: 3px 10px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.logs-copy:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.logs-detail {
+  align-self: stretch;
+  margin: 0 0 2px;
   padding: 8px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
