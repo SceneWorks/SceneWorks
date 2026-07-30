@@ -27,11 +27,12 @@
 //! Writing is our own data. Reading is a file from a stranger — the whole point of the epic is
 //! that these images travel. So:
 //!
-//! * [`MAX_WORKFLOW_TEXT_BYTES`] caps the DECOMPRESSED text and the cap refuses rather than
-//!   allocates: `ITXtChunk::decompress_text_with_limit` inflates in bounded steps and gives up,
-//!   so a 1000:1 zip bomb costs kilobytes, not gigabytes.
-//! * [`MAX_METADATA_BYTES`] caps what the PNG decoder will buffer out of the file's ancillary
-//!   chunks at all, so a chunk header that *claims* 2 GiB refuses in the megabytes.
+//! * [`MAX_WORKFLOW_TEXT_BYTES`] caps the DECOMPRESSED text, so what an attacker's ratio buys is
+//!   our cap and not their claim: `ITXtChunk::decompress_text_with_limit` inflates in bounded steps
+//!   and gives up, so a 1000:1 zip bomb costs a megabyte, not gigabytes.
+//! * [`MAX_METADATA_BYTES`] bounds what the PNG decoder buffers out of the file's ancillary chunks
+//!   by OUR budget rather than by the length a chunk declares, so a chunk header that *claims*
+//!   2 GiB costs megabytes and is then refused.
 //! * A PNG with no workflow chunk is `Ok(None)`, never an error. That is the common case for every
 //!   image the user did not generate here, and sc-15952 must not shout about it.
 //! * Everything else — truncated, corrupt, non-PNG, duplicate chunk, non-UTF-8, JSON of the wrong
@@ -75,13 +76,21 @@ pub const WORKFLOW_CHUNK_KEYWORD: &str = "sceneworks:workflow";
 /// buys them 1 MiB of our memory no matter how large the payload claims to expand to.
 pub const MAX_WORKFLOW_TEXT_BYTES: usize = 1024 * 1024;
 
-/// Ceiling on what the PNG decoder may allocate while buffering an untrusted file's ancillary
-/// chunks. 8 MiB.
+/// Approximate ceiling on what the PNG decoder may allocate while buffering an untrusted file's
+/// ancillary chunks. 8 MiB.
 ///
 /// Distinct from [`MAX_WORKFLOW_TEXT_BYTES`] because it guards a different thing. A PNG chunk
 /// header can declare up to 2 GiB; without a limit the decoder would buffer whatever the header
 /// claims before anyone looked at the contents. `png` meters that against this budget and returns
 /// `LimitsExceeded` instead, so the refusal happens in the megabytes.
+///
+/// Approximate, not exact, and in a direction worth being honest about: `png` grows the buffer and
+/// only THEN finds it over budget, so the peak is reached rather than avoided, and the chunk's own
+/// framing rides above the ceiling. A measured refusal of an over-budget `iTXt` chunk peaks at
+/// 8,408,413 bytes live, including a single 8,388,709-byte allocation — `MAX_METADATA_BYTES` plus
+/// 101 bytes of keyword and separator framing. What the budget buys is a bound that follows OUR
+/// number instead of the attacker's (a chunk declaring 64 MiB peaks at the same ~8 MiB as one
+/// declaring 16 MiB), not the absence of the allocation.
 ///
 /// It is a *budget*, not a per-chunk size, and a CUMULATIVE one: `png`'s `Limits::reserve_bytes`
 /// only ever subtracts, so every ancillary chunk in the file draws down the same pool, and one
@@ -362,8 +371,10 @@ fn encode_png_with_text<W: Write>(
 /// extra place to look, and failing to look there cannot turn an absence into a failure.
 ///
 /// # Errors
-/// See [`WorkflowChunkError`]. Never panics, and never inflates more than
-/// [`MAX_WORKFLOW_TEXT_BYTES`] nor buffers more than [`MAX_METADATA_BYTES`] of metadata.
+/// See [`WorkflowChunkError`]. Never panics, never inflates more than
+/// [`MAX_WORKFLOW_TEXT_BYTES`], and buffers metadata bounded at approximately
+/// [`MAX_METADATA_BYTES`] — the budget plus the chunk framing that rides above it, rather than
+/// whatever length a chunk header declares.
 pub fn read_workflow_chunk(bytes: &[u8]) -> Result<Option<WorkflowShare>, WorkflowChunkError> {
     read_workflow_chunk_from(Cursor::new(bytes))
 }
@@ -511,7 +522,8 @@ fn select_workflow_chunk(info: &png::Info<'_>) -> Result<Option<ITXtChunk>, Work
 /// we were asked to read the metadata and could not. A budget exhausted by the time the TAIL is
 /// reached is an absence — the primary walk already answered "no workflow", and the tail is an extra
 /// place to look, not a second question. `MAX_METADATA_BYTES` still bounds what is buffered either
-/// way, which is the property that matters: the refusal happens instead of the allocation.
+/// way, which is the property that matters: the allocation is sized by our budget rather than by the
+/// length the chunk declares — a 64 MiB claim costs ~8 MiB — and only then is it refused.
 fn workflow_chunk_after_image_data<R: BufRead + Seek>(
     reader: &mut png::Reader<R>,
 ) -> Result<Option<ITXtChunk>, WorkflowChunkError> {
@@ -782,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_chunk_after_the_image_data_is_never_buffered_or_read() {
+    fn an_oversized_chunk_after_the_image_data_is_bounded_by_the_budget_and_never_read() {
         // The metadata budget has to apply out here too, or the tail would be an unbounded place to
         // put a chunk that the front of the file refuses. Over MAX_METADATA_BYTES of real data,
         // uncompressed so no ratio is involved and the size on disk is the size in memory.
@@ -798,11 +810,18 @@ mod tests {
             Ok(None),
             "an oversized post-IDAT chunk must be an absence, not a workflow and not an error"
         );
-        // And Ok(None) is itself the proof that the chunk was never buffered. Had the budget let it
-        // through, `select_workflow_chunk` would have matched our keyword and the 8 MiB of text
-        // would have come back as TextTooLarge — which is exactly what the neighbouring test with a
-        // 1 MiB chunk (under the metadata budget, over the text cap) gets. Reaching neither the text
-        // cap nor the parser means `png` refused it while framing.
+        // What Ok(None) proves is that the text reached neither the text cap nor the parser. Had the
+        // budget let the chunk through, `select_workflow_chunk` would have matched our keyword and
+        // the 8 MiB of text would have come back as TextTooLarge — which is exactly what the
+        // neighbouring test with a 1 MiB chunk (under the metadata budget, over the text cap) gets,
+        // and what this case itself returns once the decoder budget is widened to 64 MiB
+        // (TextTooLarge { bytes: 8388609 }). So `png` refused it while framing.
+        //
+        // It does NOT prove the chunk was never buffered — it was. `png` grows a buffer for the
+        // declared length and only then finds it over budget: measured, this case peaks at 8,408,413
+        // bytes live, including one 8,388,709-byte allocation. The property is that the cost follows
+        // MAX_METADATA_BYTES and not the header, so a 64 MiB declared chunk peaks at the same figure
+        // as a 16 MiB one.
     }
 
     /// Roughly `mib` MiB of uncompressed `iTXt` under a foreign keyword — the fat but legitimate
@@ -1103,9 +1122,14 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_chunk_refuses_before_it_is_buffered() {
+    fn an_oversized_chunk_is_bounded_by_the_budget_and_refused() {
         // An honestly-declared but absurd chunk: over MAX_METADATA_BYTES of real data, written
         // UNCOMPRESSED so the size on disk is the size in memory and no ratio is involved.
+        //
+        // The refusal does not precede the allocation. `png` grows a buffer for the declared length
+        // and only then finds it over budget — measured, the equivalent post-IDAT case peaks at
+        // 8,408,413 bytes live. What MAX_METADATA_BYTES buys is that the peak follows OUR number
+        // rather than the header's, which is what makes a 2 GiB claim (the test above) cheap.
         let huge = "A".repeat(MAX_METADATA_BYTES + 1);
         let png = png_with(&[ITXtChunk::new(WORKFLOW_CHUNK_KEYWORD, huge)]);
         assert_eq!(
