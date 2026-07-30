@@ -3388,8 +3388,10 @@ export function App() {
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
             accent={accent}
+            embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onEmbedWorkflowChange={changeEmbedWorkflow}
             onModeChange={setUiModeOverride}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
