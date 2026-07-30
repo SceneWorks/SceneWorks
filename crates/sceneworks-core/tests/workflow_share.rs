@@ -18,7 +18,8 @@ use sceneworks_core::workflow_share::{
     advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
     parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
     AdvancedKeySource, WorkflowAssetFacts, WorkflowShare, ADVANCED_BUILDERS, ADVANCED_KEY_RULES,
-    DEFERRED_ADVANCED_BUILDERS, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_SCHEMA_VERSION,
+    DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, PRODUCER_URL, PRODUCER_VERSION,
+    WORKFLOW_SHARE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 
@@ -571,7 +572,15 @@ fn every_source_tag_names_exactly_one_registered_builder() {
     }
 }
 
-/// Every deferral names a story, so "out of scope" cannot be a shrug (sc-15956 owns video).
+/// Every deferral either names a story or is an explicit permanent exemption, so "out of scope"
+/// cannot be a shrug (sc-15956 owns video; the training namespace is exempt).
+///
+/// The permanent category exists because the alternative is worse. `trainingConfigSnapshot` builds
+/// a ~20-key `advanced` map that no story will ever classify — it is trainer hyperparameters on a
+/// lane that embeds nothing, a different namespace that shares a name — and a deferral list that
+/// only accepts `sc-` ids would have forced either a fake story id or leaving the biggest
+/// unaccounted builder in the tree unaccounted. So a permanent reason must say what would have to
+/// change (an embedding write seam) and where the entry moves when it does.
 #[test]
 fn every_deferred_builder_names_the_story_that_owns_it() {
     assert!(
@@ -580,14 +589,30 @@ fn every_deferred_builder_names_the_story_that_owns_it() {
          and their keys must be in `ADVANCED_KEY_RULES`"
     );
     for deferred in DEFERRED_ADVANCED_BUILDERS {
+        let permanent = deferred.reason.starts_with(PERMANENT_EXEMPTION);
         assert!(
-            deferred.reason.contains("sc-"),
-            "the deferral for {} in {} must name the story that owns classifying its keys, got \
-             {:?}",
+            permanent || deferred.reason.contains("sc-"),
+            "the deferral for {} in {} must name the story that owns classifying its keys, or \
+             start with `{PERMANENT_EXEMPTION}` and say why no story ever will, got {:?}",
             deferred.function,
             deferred.path,
             deferred.reason
         );
+        if permanent {
+            // A permanent exemption is the one shape nobody will revisit on a story's schedule,
+            // so the reason has to carry the escape route itself.
+            assert!(
+                deferred.reason.contains("embed")
+                    && deferred.reason.contains("ADVANCED_BUILDERS")
+                    && deferred.reason.len() > 200,
+                "the permanent exemption for {} in {} must state what would have to change (a \
+                 write seam that EMBEDS) and that the entry then moves into `ADVANCED_BUILDERS`, \
+                 got {:?}",
+                deferred.function,
+                deferred.path,
+                deferred.reason
+            );
+        }
         assert!(
             !ADVANCED_BUILDERS
                 .iter()
@@ -600,8 +625,70 @@ fn every_deferred_builder_names_the_story_that_owns_it() {
     }
 }
 
-/// The trip-wire that closes the class: NOTHING in the web app builds an `advanced` map without
-/// being either classified or explicitly deferred (sc-15948).
+/// What to do about an `advanced` map nothing accounts for.
+///
+/// Three branches, and the third is not a formality. This sweep reads the NAME `advanced`, and
+/// nothing in the text separates a UI-state local called `advanced` from a payload map — a JSX prop
+/// and a parameter default can be recognized by their shape and are skipped, a plain local cannot
+/// be. Telling that author to "classify every key it can emit" would be wrong advice on a
+/// build-blocking failure, which is how a lint gets deleted instead of diagnosed. Renaming the local
+/// is the honest fix, and it is offered here rather than left to be guessed.
+const UNACCOUNTED_ADVANCED_ADVICE: &str = "\
+    Every place the web app fills `advanced` must be accounted for, because four of those places \
+    now feed a lane that embeds the map into the PNG (epic 15945). So either:\n\
+    * add the (file, function) pair to `ADVANCED_BUILDERS` in \
+    crates/sceneworks-core/src/workflow_share.rs and classify every key it can emit; or\n\
+    * if its lane does not embed yet, add it to `DEFERRED_ADVANCED_BUILDERS` with the story that \
+    owns turning it on; or\n\
+    * if this is not a job payload at all, RENAME THE LOCAL. This lint reads the name `advanced`, \
+    and a non-payload map that carries that name is indistinguishable from one that ships.";
+
+/// Call heads an indirect `advanced` expression may name WITHOUT being a declared builder.
+///
+/// (file, call head, why). One entry, and it is not a builder: `useCharacterAdvancedOptions` is the
+/// hook that returns the character panel's advanced-options CONTROLLER — the thing whose
+/// `buildAdvanced` is registered as [`AdvancedKeySource::CharacterBuilder`] and is called at
+/// `advanced.buildAdvanced(controller.advancedExtras)`. So `const advanced =
+/// useCharacterAdvancedOptions(…)` names a controller, not a map: there are no keys behind it for
+/// this lint to classify, and the keys that do exist are already covered by the entry for
+/// `buildAdvanced`.
+///
+/// Path-scoped on purpose. The same helper name called from another screen is a NEW indirection and
+/// has to be looked at rather than inherited.
+const ADVANCED_INDIRECTION_CALL_HEADS: &[(&str, &str, &str)] = &[(
+    "apps/web/src/screens/characterPanels.jsx",
+    "useCharacterAdvancedOptions",
+    "The hook that returns the CharacterAdvancedOptions controller. Its `buildAdvanced` is the \
+     registered builder; the local this initializes is the controller itself.",
+)];
+
+/// An exemption that no longer describes the tree is how a lint loses a subject quietly.
+///
+/// The same staleness check the registry and the deferral list get: if the hook call moves or is
+/// renamed, the entry must go rather than sit there excusing something that is not there.
+#[test]
+fn every_indirection_exemption_still_describes_the_tree() {
+    for (path, head, reason) in ADVANCED_INDIRECTION_CALL_HEADS {
+        assert!(
+            reason.len() > 40,
+            "the indirection exemption for `{head}` in {path} needs a real reason — it is the only \
+             thing telling the next author why an unreadable expression is allowed"
+        );
+        let stripped = scannable(&read_repo_file(path));
+        let found = advanced_map_signals(&stripped).into_iter().any(|signal| {
+            signal.kind == AdvancedSignalKind::Indirect && signal.called.as_deref() == Some(*head)
+        });
+        assert!(
+            found,
+            "`ADVANCED_INDIRECTION_CALL_HEADS` exempts `{head}` in {path}, but no `advanced` \
+             expression there comes from it any more — drop the exemption instead of leaving a \
+             hole open for whatever gets called `{head}` next"
+        );
+    }
+}
+
+/// The trip-wire that closes the class: every place `apps/web/src` builds an `advanced` map — or
+/// hands one in from a helper — is classified, deferred, or exempt by name (sc-15948).
 ///
 /// This is the assertion sc-15946 was missing. Its lint read one file, so the second builder
 /// (`buildDetailJobBody`) and then the third and fourth (`CharacterAdvancedOptions.buildAdvanced`
@@ -610,10 +697,42 @@ fn every_deferred_builder_names_the_story_that_owns_it() {
 /// this walks `apps/web/src` for every place an `advanced` map is built and demands that each one
 /// sit inside a registered builder or a declared deferral.
 ///
-/// A NEW builder therefore fails the build the moment it appears — whether it is a new file, a new
-/// function in a file that is already covered, or a new `advancedExtras` on a controller — and the
-/// author has to decide: classify its keys (move it into [`ADVANCED_BUILDERS`]) or state which
-/// story owns it (add it to [`DEFERRED_ADVANCED_BUILDERS`]).
+/// # Exactly what it proves
+///
+/// In every non-test `.js`/`.jsx` file under `apps/web/src`, each of these fails the build unless
+/// it falls inside the body of a function [`ADVANCED_BUILDERS`] or [`DEFERRED_ADVANCED_BUILDERS`]
+/// declares:
+///
+/// * an inline literal — `advanced: { … }`, `advancedExtras: { … }`;
+/// * an assigned literal — `advanced = { … }`;
+/// * a property assignment — `advanced.key = …`;
+/// * INDIRECTION — `advanced: buildFoo(state)`, `advanced: someVar`, `advanced =
+///   compactObject({ … })`. The map is assembled somewhere this scan cannot read, so the call has
+///   to name a declared builder (that builder's own entry accounts for the keys) or the signal
+///   stands. This is the hole the first cut of this sweep had: it matched only a literal `{`, so
+///   `trainingConfigSnapshot` built a ~20-key map through `compactObject` and the lint stayed
+///   green — a live counterexample to the "we found all the builders" premise sc-15946 died of.
+///
+/// Plus, in every file it reads and not merely inside a declared builder, a write it could not
+/// follow at all: `advanced["k"] = v`, `Object.assign(x.advanced, …)`, `advanced.push(…)`.
+///
+/// # What it does NOT prove
+///
+/// * That a declared builder's keys are classified. That is
+///   [`every_registered_builder_has_its_advanced_keys_classified`], which also refuses a SECOND,
+///   unread `advanced` map inside a declared span — a nested helper inside `DocumentStudio.submit`
+///   is not accounted for by `submit`'s entry, because the extractor never reads it.
+/// * That indirection is caught in assignment position when the right-hand side is not a call.
+///   `const advanced = defaults.advanced ?? {}` is a READ of someone else's map, not a build, and
+///   flagging member reads made this sweep fire on the training config's draft reader. Key
+///   position (`advanced:`) is strict about every non-brace expression; assignment position needs
+///   a call.
+/// * Anything about `advanced` maps assembled outside `apps/web/src`.
+///
+/// A NEW builder therefore fails the build the moment it appears — a new file, a new function in a
+/// file that is already covered, a new `advancedExtras` on a controller, or a new helper a payload
+/// calls — and the author has to decide: classify its keys (move it into [`ADVANCED_BUILDERS`]) or
+/// state which story owns it (add it to [`DEFERRED_ADVANCED_BUILDERS`]).
 #[test]
 fn every_advanced_builder_in_the_web_app_is_accounted_for() {
     // (path, function) → the declared body span, plus whether it is classified or deferred.
@@ -644,25 +763,35 @@ fn every_advanced_builder_in_the_web_app_is_accounted_for() {
         spans.push((path, function, start, end));
     }
 
+    let declared_functions = declared_builder_functions();
+
     let mut covered_by: Vec<(&str, &str)> = Vec::new();
     for relative in &files {
         let stripped = scannable(&read_repo_file(relative));
+        // Not only inside a declared builder: a write this lint cannot follow is invisible
+        // wherever it is, and `body.payload.advanced["k"] = v` in a brand-new file was green
+        // before this call moved out of the `AssignedObject` arm.
+        refuse_invisible_advanced_writes(&stripped, relative);
         for signal in advanced_map_signals(&stripped) {
-            let owner = spans.iter().find(|(path, _, start, end)| {
-                *path == relative.as_str() && signal.offset >= *start && signal.offset < *end
-            });
+            if signal.calls_a_declared_builder(relative, &declared_functions) {
+                continue;
+            }
+            // The INNERMOST declared span wins, so a nested helper that has been given its own
+            // registry entry is credited to that entry rather than to the function around it.
+            let owner = spans
+                .iter()
+                .filter(|(path, _, start, end)| {
+                    *path == relative.as_str() && signal.offset >= *start && signal.offset < *end
+                })
+                .min_by_key(|(_, _, start, end)| end - start);
             let (_, function, _, _) = owner.unwrap_or_else(|| {
                 let line = 1 + stripped[..signal.offset].matches('\n').count();
                 panic!(
                     "{relative}:{line} builds an `advanced` map ({}) inside no builder that \
-                     `ADVANCED_BUILDERS` or `DEFERRED_ADVANCED_BUILDERS` declares.\n\
-                     Every place the web app fills `advanced` must be accounted for, because \
-                     four of those places now feed a lane that embeds the map into the PNG \
-                     (epic 15945). Add the (file, function) pair to `ADVANCED_BUILDERS` in \
-                     crates/sceneworks-core/src/workflow_share.rs and classify every key it can \
-                     emit, or — if its lane does not embed yet — to \
-                     `DEFERRED_ADVANCED_BUILDERS` with the story that owns turning it on.",
-                    signal.kind
+                     `ADVANCED_BUILDERS` or `DEFERRED_ADVANCED_BUILDERS` declares.{}\n{}",
+                    signal.kind.describe(),
+                    signal.indirection_advice(),
+                    UNACCOUNTED_ADVANCED_ADVICE,
                 )
             });
             covered_by.push((relative.as_str(), function));
@@ -865,6 +994,261 @@ fn the_key_extractor_refuses_a_spread_with_no_object_literal_in_it() {
     emitted_advanced_keys(&builder_with_return_body(
         "    resolution,\n    ...(buildFutureKnobs(state)),",
     ));
+}
+
+// ---------------------------------------------------------------------------
+// The discovery scan's own unit tests: what it sees, and what it must not
+// ---------------------------------------------------------------------------
+
+/// Every signal `advanced_map_signals` reports for one snippet, as (kind, callee).
+fn signal_shapes(source: &str) -> Vec<(AdvancedSignalKind, Option<String>)> {
+    advanced_map_signals(&scannable(source))
+        .into_iter()
+        .map(|signal| (signal.kind, signal.called))
+        .collect()
+}
+
+/// Indirection is a signal, not silence — the hole that let `trainingConfigSnapshot` stay green.
+///
+/// The first cut of this sweep only ever matched a literal `{` after `advanced:`, so every one of
+/// these was invisible: the map was assembled in a helper, a variable or a ternary, and a ~20-key
+/// builder sat in neither the registry nor the deferral list with the lint reporting 27/27.
+#[test]
+fn the_discovery_scan_sees_a_map_handed_in_from_somewhere_else() {
+    for (source, called) in [
+        (
+            "const body = { advanced: probeExtrasMap(opts) };",
+            Some("probeExtrasMap"),
+        ),
+        ("const body = { advanced: someVar };", None),
+        (
+            "const body = { advanced: cond ? { a: 1 } : { b: 2 } };",
+            None,
+        ),
+        (
+            "const advanced = compactObject({ probeKnob: 1 });",
+            Some("compactObject"),
+        ),
+        ("const advanced = helpers.build(opts);", Some("build")),
+    ] {
+        assert_eq!(
+            signal_shapes(source),
+            vec![(AdvancedSignalKind::Indirect, called.map(str::to_owned))],
+            "indirection went unreported for {source:?}, which is how a builder stays invisible"
+        );
+    }
+}
+
+/// A call site of a REGISTERED builder stays exempt, or every screen would need an entry.
+#[test]
+fn the_discovery_scan_lets_a_declared_builders_call_site_through() {
+    let declared = declared_builder_functions();
+    for source in [
+        "const body = { advanced: buildImageJobAdvanced({ prompt }) };",
+        "const body = { advanced: advanced.buildAdvanced(controller.advancedExtras) };",
+    ] {
+        let signals = advanced_map_signals(&scannable(source));
+        assert_eq!(signals.len(), 1, "expected one signal for {source:?}");
+        assert!(
+            signals[0].calls_a_declared_builder("apps/web/src/imageJobRequest.js", &declared),
+            "{source:?} calls a registered builder, so demanding a registry entry for the SCREEN \
+             would say nothing about which keys exist"
+        );
+    }
+    // ... and an unregistered helper of the same shape is NOT exempt.
+    let signals = advanced_map_signals(&scannable("const b = { advanced: probeMap(o) };"));
+    assert!(
+        !signals[0].calls_a_declared_builder("apps/web/src/imageJobRequest.js", &declared),
+        "an indirection through an unregistered helper must stand as a signal"
+    );
+}
+
+/// A member READ is not a build, and flagging it fired on the training config's draft reader.
+#[test]
+fn the_discovery_scan_ignores_a_read_of_somebody_elses_advanced() {
+    assert!(
+        signal_shapes("const advanced = defaults.advanced ?? {};").is_empty(),
+        "`defaults.advanced ?? {{}}` reads a saved config; the sweep must not demand a registry \
+         entry for every screen that inspects one"
+    );
+}
+
+/// A JSX prop is not a payload, and a build-blocking lint that says otherwise gets deleted.
+///
+/// `advanced` appears in 59 non-test files under `apps/web/src`. Failing the BUILD on
+/// `<Child advanced={state.opts} />` with "classify every key it can emit" is advice that cannot be
+/// followed, on work that has nothing to do with sharing.
+#[test]
+fn the_discovery_scan_ignores_a_jsx_prop() {
+    for source in [
+        "const row = <Child advanced={state.opts} />;",
+        "const row = <Child title=\"a > b; not a tag\" advanced={{ open: false }} />;",
+        "const row = <ProbeRow advanced = {renamed} label=\"spaced\" />;",
+        "const row = <Outer>{items.map((item) => <Child advanced={item.opts} />)}</Outer>;",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} is a JSX prop, not a map this app builds"
+        );
+    }
+}
+
+/// A binding is not a build: a parameter default, and a destructuring rename.
+#[test]
+fn the_discovery_scan_ignores_a_binding_pattern() {
+    for source in [
+        "function Row({ advanced = {} }) { return advanced; }",
+        "function Row({ advanced = {} }, ref) { return ref ?? advanced; }",
+        "const Row = ({ advanced = {} }) => advanced;",
+        "const { advanced = {} } = props;",
+        "const { advanced: renamed } = props;",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} BINDS `advanced`, it does not build one"
+        );
+    }
+}
+
+/// A ternary's middle arm wears the same colon and builds nothing.
+#[test]
+fn the_discovery_scan_ignores_a_colon_that_is_not_a_key() {
+    assert!(
+        signal_shapes("const map = useSaved ? advanced : fallback;").is_empty(),
+        "`cond ? advanced : fallback` is not an object key"
+    );
+}
+
+/// Handing on a map that was already built is not building a second one.
+///
+/// `{ advanced: advanced }` is the long spelling of the `{ advanced }` shorthand three registered
+/// builders use. Reporting it would fail the build on a rewrite that changes nothing, and it can
+/// hide nothing: the map still has to be created somewhere, and creation is what this scan reads.
+#[test]
+fn the_discovery_scan_ignores_a_hand_on_of_the_same_map() {
+    for source in [
+        "const body = { mode, advanced: advanced };",
+        "return { advancedExtras: advancedExtras };",
+    ] {
+        assert!(
+            signal_shapes(source).is_empty(),
+            "{source:?} hands on a map this scan already saw being built"
+        );
+    }
+    // But a member read or a call on it is still indirection.
+    assert_eq!(
+        signal_shapes("const body = { advanced: advanced.buildAdvanced(extras) };"),
+        vec![(
+            AdvancedSignalKind::Indirect,
+            Some("buildAdvanced".to_owned())
+        )]
+    );
+}
+
+/// The one shape nothing in the text can settle, so the failure has to offer the rename.
+///
+/// A plain local named `advanced` holding UI state is indistinguishable from a payload map — the
+/// same `const advanced = { … }` that `buildEditJobBody` and `DocumentStudio.submit` use. Narrowing
+/// the signal to "locals that visibly flow into a request" would let `const advanced = { probeKnob:
+/// 1 }; body.advanced = advanced;` back through, so the signal stands and the message carries the
+/// third branch instead.
+#[test]
+fn a_plain_local_still_signals_and_the_advice_offers_the_rename() {
+    assert_eq!(
+        signal_shapes("const advanced = { open: false };"),
+        vec![(AdvancedSignalKind::AssignedLiteral, None)],
+    );
+    assert!(
+        UNACCOUNTED_ADVANCED_ADVICE.contains("RENAME THE LOCAL"),
+        "a local this lint cannot classify must be told the one fix that applies to it, or the \
+         next author deletes the lint rather than diagnosing it"
+    );
+}
+
+/// The literal shapes the sweep has always caught, pinned so a rewrite cannot drop one.
+#[test]
+fn the_discovery_scan_still_sees_every_literal_shape() {
+    assert_eq!(
+        signal_shapes("const body = { advanced: { steps: 4 } };"),
+        vec![(AdvancedSignalKind::InlineLiteral, None)]
+    );
+    assert_eq!(
+        signal_shapes("return { advancedExtras: { angleSet } };"),
+        vec![(AdvancedSignalKind::ExtrasLiteral, None)]
+    );
+    assert_eq!(
+        signal_shapes("const advanced = {};\nadvanced.steps = 4;"),
+        vec![
+            (AdvancedSignalKind::AssignedLiteral, None),
+            (AdvancedSignalKind::PropertyAssignment, None)
+        ]
+    );
+    // Never an equality test, and never a method call on the map.
+    assert!(signal_shapes("if (advanced == null) return;").is_empty());
+    assert!(signal_shapes("const n = advanced.steps;").is_empty());
+}
+
+#[test]
+#[should_panic(expected = "a computed key")]
+fn an_invisible_write_is_refused_through_any_object_path() {
+    refuse_invisible_advanced_writes(
+        &scannable("body.payload.advanced[\"probeKnob\"] = value;"),
+        "a probe",
+    );
+}
+
+#[test]
+#[should_panic(expected = "Object.assign(body.payload.advanced, …)")]
+fn an_object_assign_onto_a_nested_advanced_is_refused() {
+    // `Object.assign(advanced` as a literal substring missed this: the target was nested.
+    refuse_invisible_advanced_writes(
+        &scannable("Object.assign(body.payload.advanced, { probeKnob: 1 });"),
+        "a probe",
+    );
+}
+
+#[test]
+#[should_panic(expected = "`advanced.push(…)`")]
+fn an_array_mutator_on_advanced_is_refused() {
+    refuse_invisible_advanced_writes(&scannable("advanced.push(knob);"), "a probe");
+}
+
+/// The refusal must not fire on an `Object.assign` that has nothing to do with `advanced`.
+#[test]
+fn an_unrelated_object_assign_is_not_an_invisible_advanced_write() {
+    for source in [
+        "Object.assign(target, { a: 1 });",
+        "const merged = Object.assign({}, base, extra);",
+        "Object.assign(state.advancedOpen, { a: 1 });",
+    ] {
+        assert!(
+            invisible_advanced_writes(&scannable(source)).is_empty(),
+            "{source:?} does not write an `advanced` map"
+        );
+    }
+}
+
+/// A nested helper inside a declared span is not accounted for by that declaration.
+#[test]
+#[should_panic(expected = "builds a SECOND `advanced` map")]
+fn a_second_map_inside_a_declared_builder_is_refused() {
+    // Shaped like `DocumentStudio.submit`: the registered `AssignedObject` initializer, plus a
+    // nested helper with its own literal that the arm never reads. Verified against the real lint:
+    // inserting this into the real `submit` left 27/27 green before this refusal existed.
+    emitted_keys(
+        builder_for(AdvancedKeySource::InterleaveBuilder),
+        r#"
+async function submit(event) {
+  const advanced = {};
+  advanced.systemMessage = trimmedSystem;
+  advanced.imageGuidanceScale = referenceGuidance;
+  function probeNestedBody(probeKnob, probeSecret) {
+    return { advanced: { probeKnob, probeSecret } };
+  }
+  return probeNestedBody(1, 2);
+}
+"#,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1418,32 +1802,110 @@ fn web_source_files() -> Vec<String> {
     out
 }
 
+/// What a web file did with the name `advanced`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvancedSignalKind {
+    /// `advanced: { … }` — a map written inline into a request body.
+    InlineLiteral,
+    /// `advancedExtras: { … }` — a character-lane controller's contribution.
+    ExtrasLiteral,
+    /// `advanced = { … }` — the initializer half of an assignment-style builder.
+    AssignedLiteral,
+    /// `advanced.key = …` — the assignment half.
+    PropertyAssignment,
+    /// `advanced: buildFoo(state)`, `advanced: someVar`, `advanced = compactObject({ … })` — the
+    /// map exists but is assembled somewhere this scan cannot read.
+    Indirect,
+}
+
+impl AdvancedSignalKind {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::InlineLiteral => "an inline object literal",
+            Self::ExtrasLiteral => "an inline `advancedExtras` object literal",
+            Self::AssignedLiteral => "an assigned object literal",
+            Self::PropertyAssignment => "a property assignment",
+            Self::Indirect => "an expression this lint cannot read",
+        }
+    }
+}
+
 /// One place a web file builds an `advanced` map.
 struct AdvancedSignal {
     /// Offset into the [`scannable`] text of the `advanced` / `advancedExtras` identifier.
     offset: usize,
     /// What was matched, for the failure message.
-    kind: &'static str,
+    kind: AdvancedSignalKind,
+    /// For [`AdvancedSignalKind::Indirect`], the callee the map comes from:
+    /// `advanced: buildImageJobAdvanced({ … })` → `buildImageJobAdvanced`,
+    /// `advanced: advanced.buildAdvanced(extras)` → `buildAdvanced`. `None` when the expression is
+    /// not a call at all (`advanced: someVar`), which can never be a builder call site.
+    called: Option<String>,
 }
 
-/// Every place `stripped` builds an `advanced` map.
+impl AdvancedSignal {
+    /// True when this is indirection through a builder the registry already accounts for.
+    ///
+    /// `advanced: buildImageJobAdvanced({ … })` and `advanced: advanced.buildAdvanced(extras)` are
+    /// CALL SITES of a registered builder: demanding a registry entry for every screen that
+    /// submits a job would say nothing about which keys exist. The difference from before is that
+    /// the callee now has to be NAMED somewhere — an indirection through an unregistered helper is
+    /// a signal, not silence.
+    fn calls_a_declared_builder(&self, path: &str, declared: &BTreeSet<&str>) -> bool {
+        let Some(called) = self.called.as_deref() else {
+            return false;
+        };
+        declared.contains(called)
+            || ADVANCED_INDIRECTION_CALL_HEADS
+                .iter()
+                .any(|(exempt_path, head, _)| *exempt_path == path && *head == called)
+    }
+
+    /// The indirection-specific half of the failure message.
+    fn indirection_advice(&self) -> String {
+        if self.kind != AdvancedSignalKind::Indirect {
+            return String::new();
+        }
+        match self.called.as_deref() {
+            Some(called) => format!(
+                "\nThe map comes from `{called}(…)`, so its keys are assembled where this scan \
+                 never looks. Either build it inline (`advanced: {{ … }}`) inside a builder that \
+                 is declared, or declare `{called}` itself."
+            ),
+            None => "\nThe map comes from a bare expression (a variable, a member read, a \
+                     ternary), so its keys are assembled where this scan never looks. Build it \
+                     inline (`advanced: { … }`) inside a builder that is declared, or move the \
+                     assembly into a function and declare that."
+                .to_owned(),
+        }
+    }
+}
+
+/// Every place `stripped` builds an `advanced` map, or takes one from somewhere unreadable.
 ///
-/// Four shapes, which between them cover every builder in the tree today:
+/// Five shapes; see [`AdvancedSignalKind`]. The first four are literal writes. The fifth,
+/// [`AdvancedSignalKind::Indirect`], is what makes the sweep a class-closer rather than a
+/// pattern-matcher: any indirection is enough to hide a map, and this scan reports it so the
+/// caller can insist the callee be named.
 ///
-/// * `advanced: { … }` — a map written inline into a request body.
-/// * `advancedExtras: { … }` — a character-lane controller's contribution.
-/// * `advanced = { … }` — the initializer half of an assignment-style builder.
-/// * `advanced.key = …` — the assignment half.
+/// # Not every `advanced` is a payload
 ///
-/// Deliberately NOT matched: `advanced: buildImageJobAdvanced({ … })` and
-/// `advanced: advanced.buildAdvanced(extras)`, which are CALL SITES of a builder that is itself
-/// registered. Matching those would demand a registry entry for every screen that submits a job,
-/// which says nothing about which keys exist.
+/// Three ordinary React shapes carry the name and build nothing, and a build-blocking lint that
+/// misfires on them gets deleted rather than diagnosed:
 ///
-/// A computed write (`advanced["key"] = …`) or an `Object.assign(advanced, …)` would be invisible
-/// here, so [`emitted_keys`] refuses them inside a registered builder rather than reading past them.
+/// * a JSX prop — `<Child advanced={state.opts} />`;
+/// * a destructuring default or rename — `function Row({ advanced = {} })`,
+///   `const { advanced: opts } = props`;
+/// * (not suppressible) a plain local named `advanced` that holds something else. Nothing in the
+///   text distinguishes it from a payload map, so it still fails, and the failure message offers
+///   the only honest fix: rename the local.
+///
+/// A computed write (`advanced["key"] = …`) or an `Object.assign(x.advanced, …)` is invisible here
+/// no matter where it sits, so [`refuse_invisible_advanced_writes`] refuses those over every file
+/// the sweep reads rather than reading past them.
 fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
     let bytes = stripped.as_bytes();
+    let mask = string_literal_mask(bytes);
     let mut out = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
@@ -1461,18 +1923,47 @@ fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
                 if word != "advanced" && word != "advancedExtras" {
                     continue;
                 }
-                let mut lookahead = skip_ascii_whitespace(bytes, index);
+                let extras = word == "advancedExtras";
+                let lookahead = skip_ascii_whitespace(bytes, index);
+                let mut called = None;
                 let kind = match bytes.get(lookahead) {
-                    // `advanced: {` / `advancedExtras: {`
-                    Some(b':') => {
-                        lookahead = skip_ascii_whitespace(bytes, lookahead + 1);
-                        (bytes.get(lookahead) == Some(&b'{')).then_some("an inline object literal")
+                    // `advanced: {` / `advancedExtras: {`, or `advanced: <expression>`. Only in KEY
+                    // position: `cond ? advanced : fallback` wears the same colon and builds
+                    // nothing, and `const { advanced: opts } = props` is a rename, not a build.
+                    Some(b':')
+                        if is_object_key_position(bytes, &mask, start)
+                            && !is_binding_pattern_position(bytes, &mask, start) =>
+                    {
+                        let after = skip_ascii_whitespace(bytes, lookahead + 1);
+                        if bytes.get(after) == Some(&b'{') {
+                            Some(if extras {
+                                AdvancedSignalKind::ExtrasLiteral
+                            } else {
+                                AdvancedSignalKind::InlineLiteral
+                            })
+                        } else {
+                            called = call_head(bytes, stripped, after);
+                            (called.is_some() || !is_pass_through(bytes, stripped, after))
+                                .then_some(AdvancedSignalKind::Indirect)
+                        }
                     }
-                    // `advanced = {`, but never `advanced == …`.
-                    Some(b'=') if bytes.get(lookahead + 1) != Some(&b'=') => {
-                        lookahead = skip_ascii_whitespace(bytes, lookahead + 1);
-                        (bytes.get(lookahead) == Some(&b'{'))
-                            .then_some("an assigned object literal")
+                    // `advanced = {` or `advanced = someBuilder(…)`, but never `advanced == …`, a
+                    // JSX prop, or a parameter default.
+                    Some(b'=')
+                        if bytes.get(lookahead + 1) != Some(&b'=')
+                            && !is_jsx_attribute_position(bytes, &mask, start)
+                            && !is_binding_pattern_position(bytes, &mask, start) =>
+                    {
+                        let after = skip_ascii_whitespace(bytes, lookahead + 1);
+                        if bytes.get(after) == Some(&b'{') {
+                            Some(AdvancedSignalKind::AssignedLiteral)
+                        } else {
+                            // A CALL can build a map; `defaults.advanced ?? {}` and friends are
+                            // reads of someone else's, and flagging those fires on every screen
+                            // that merely inspects a saved config.
+                            called = call_head(bytes, stripped, after);
+                            called.is_some().then_some(AdvancedSignalKind::Indirect)
+                        }
                     }
                     // `advanced.key = …`, but never `advanced.key ==` or `advanced.key(…)`.
                     Some(b'.') if word == "advanced" => {
@@ -1486,7 +1977,7 @@ fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
                             && bytes.get(after) == Some(&b'=')
                             && bytes.get(after + 1) != Some(&b'=')
                             && bytes.get(after + 1) != Some(&b'>'))
-                        .then_some("a property assignment")
+                        .then_some(AdvancedSignalKind::PropertyAssignment)
                     }
                     _ => None,
                 };
@@ -1494,6 +1985,7 @@ fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
                     out.push(AdvancedSignal {
                         offset: start,
                         kind,
+                        called,
                     });
                 }
             }
@@ -1503,21 +1995,275 @@ fn advanced_map_signals(stripped: &str) -> Vec<AdvancedSignal> {
     out
 }
 
+/// True when the expression at `from` is just the tracked name again: `advanced: advanced`.
+///
+/// The long spelling of the `{ advanced }` shorthand every builder already uses. It hands on a map
+/// that had to be BUILT somewhere first — and building it is what this scan catches — so reporting
+/// the hand-on adds nothing and would fail the build on rewriting `advanced,` as `advanced:
+/// advanced` inside a builder that is already registered.
+fn is_pass_through(bytes: &[u8], text: &str, from: usize) -> bool {
+    let (name, end) = identifier_at(bytes, text, from);
+    if name != "advanced" && name != "advancedExtras" {
+        return false;
+    }
+    // `advanced: advanced.buildAdvanced(x)` and `advanced: advanced[key]` are not hand-ons.
+    !matches!(
+        bytes.get(skip_ascii_whitespace(bytes, end)),
+        Some(b'.') | Some(b'(') | Some(b'[') | Some(b'?')
+    )
+}
+
+/// The callee of a call expression starting at `from`: `buildFoo(x)` → `buildFoo`,
+/// `advanced.buildAdvanced(x)` → `buildAdvanced`. `None` when this is not a plain call.
+fn call_head(bytes: &[u8], text: &str, from: usize) -> Option<String> {
+    let mut index = from;
+    loop {
+        if index >= bytes.len() || !is_identifier_start(bytes[index] as char) {
+            return None;
+        }
+        let start = index;
+        while index < bytes.len() && is_identifier_char(bytes[index] as char) {
+            index += 1;
+        }
+        let next = skip_ascii_whitespace(bytes, index);
+        match bytes.get(next) {
+            // `Object.keys(x)` → keep walking, the callee is the LAST name in the chain.
+            Some(b'.') => index = skip_ascii_whitespace(bytes, next + 1),
+            Some(b'(') => return Some(text[start..index].to_owned()),
+            _ => return None,
+        }
+    }
+}
+
+/// Every position inside a string literal, so a BACKWARD scan can skip them.
+///
+/// The forward scanners skip strings by jumping over them; the context checks below walk backwards
+/// and cannot, so a `<` or a `;` inside a string would otherwise decide whether a signal fires.
+fn string_literal_mask(bytes: &[u8]) -> Vec<bool> {
+    let mut mask = vec![false; bytes.len()];
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                let end = skip_string_ascii(bytes, index).min(bytes.len());
+                for slot in mask[index..end].iter_mut() {
+                    *slot = true;
+                }
+                index = end.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    mask
+}
+
+/// The nearest significant character before `at`, skipping whitespace and string bodies.
+fn previous_significant(bytes: &[u8], mask: &[bool], at: usize) -> Option<u8> {
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            return Some(bytes[index]);
+        }
+        if !bytes[index].is_ascii_whitespace() {
+            return Some(bytes[index]);
+        }
+    }
+    None
+}
+
+/// True when the identifier at `at` starts an object-literal entry (`{ advanced:`, `, advanced:`).
+///
+/// The discriminator against a ternary's middle arm (`cond ? advanced : fallback`) and against a
+/// labelled statement, both of which put a colon after the name and build nothing.
+fn is_object_key_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    match previous_significant(bytes, mask, at) {
+        Some(b'{') | Some(b',') => true,
+        // A body slice can begin mid-literal, so "nothing before it" stays permissive.
+        None => true,
+        _ => false,
+    }
+}
+
+/// True when the identifier at `at` sits in JSX attribute position: `<Child advanced={…} />`.
+///
+/// Walks back to the tag that would own the attribute. Anything that cannot appear between a tag
+/// name and one of its attributes — a statement end, an open brace or paren at this level — means
+/// this is ordinary JS.
+fn is_jsx_attribute_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    let mut depth = 0_usize;
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            continue;
+        }
+        match bytes[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            b'(' | b')' | b';' | b',' if depth == 0 => return false,
+            // `=>` is an arrow, not a tag that just closed.
+            b'>' if depth == 0 && bytes.get(index.wrapping_sub(1)) != Some(&b'=') => return false,
+            b'<' if depth == 0 => {
+                return bytes
+                    .get(index + 1)
+                    .is_some_and(|next| is_identifier_start(*next as char));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when the identifier at `at` is being BOUND rather than built: a parameter destructuring
+/// default (`function Row({ advanced = {} })`, `({ advanced = {} }) => …`) or a destructuring
+/// declaration (`const { advanced = {} } = props`, `const { advanced: opts } = props`).
+///
+/// Decided by what follows the pattern, because what PRECEDES it cannot tell a parameter list from
+/// a call argument: `foo({ advanced: 1 })` and `function foo({ advanced = {} })` both put a `(`
+/// before the brace. A pattern's closing brace is followed by `=` (a binding), or by the `)` of a
+/// parameter list that a body or an `=>` follows.
+fn is_binding_pattern_position(bytes: &[u8], mask: &[bool], at: usize) -> bool {
+    let Some(open) = enclosing_open_brace(bytes, mask, at) else {
+        return false;
+    };
+    let Some(close) = matching_close_brace(bytes, open) else {
+        return false;
+    };
+    let after = skip_ascii_whitespace(bytes, close + 1);
+    match bytes.get(after) {
+        // `const { advanced = {} } = props`
+        Some(b'=') => bytes.get(after + 1) != Some(&b'=') && bytes.get(after + 1) != Some(&b'>'),
+        // `function Row({ advanced = {} }) {` / `({ advanced = {} }) => …`
+        Some(b')') => opens_a_function_body(bytes, after + 1),
+        // `function Row({ advanced = {} }, ref) {` — a non-final parameter.
+        Some(b',') => enclosing_close_paren(bytes, after + 1)
+            .is_some_and(|paren| opens_a_function_body(bytes, paren + 1)),
+        _ => false,
+    }
+}
+
+/// True when a function body (`{`) or an arrow (`=>`) starts at or after `from`.
+fn opens_a_function_body(bytes: &[u8], from: usize) -> bool {
+    let at = skip_ascii_whitespace(bytes, from);
+    match bytes.get(at) {
+        Some(b'{') => true,
+        Some(b'=') => bytes.get(at + 1) == Some(&b'>'),
+        _ => false,
+    }
+}
+
+/// The innermost `{` still open at `at`.
+fn enclosing_open_brace(bytes: &[u8], mask: &[bool], at: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = at;
+    while index > 0 {
+        index -= 1;
+        if mask[index] {
+            continue;
+        }
+        match bytes[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `}` that closes the `{` at `open`.
+fn matching_close_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The `)` that closes the parenthesis `from` is already inside.
+fn enclosing_close_paren(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            b')' => {
+                if depth == 0 {
+                    return Some(index);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// The offsets of `function <name>`'s body in `stripped` — the text BETWEEN its braces.
 ///
 /// Panics with instructions rather than returning nothing when the function is gone: a registry
 /// entry pointing at a renamed function must fail the lint, not quietly stop covering it.
 fn function_body_span(stripped: &str, function: &str, path: &str) -> (usize, usize) {
     let needle = format!("function {function}");
-    let occurrences = stripped.matches(needle.as_str()).count();
+    // On a NAME boundary, not a prefix: `function buildDetailJobBody` matches inside
+    // `function buildDetailJobBodyV2`, so a rename could leave the registry pointing at a
+    // different function while the lint reported one clean match.
+    let occurrences: Vec<usize> = stripped
+        .match_indices(needle.as_str())
+        .filter(
+            |(at, _)| match stripped[at + needle.len()..].chars().next() {
+                Some(next) => !is_identifier_char(next),
+                None => true,
+            },
+        )
+        .map(|(at, _)| at)
+        .collect();
     assert_eq!(
-        occurrences, 1,
-        "`{needle}` appears {occurrences} times in {path}; this coverage lint needs exactly one so \
-         it reads an unambiguous body. Either the function was renamed or moved — point the \
+        occurrences.len(),
+        1,
+        "`{needle}` appears {} times in {path}; this coverage lint needs exactly one so it reads an \
+         unambiguous body. Either the function was renamed or moved — point the \
          `ADVANCED_BUILDERS` entry at wherever that `advanced` map is built now — or a second \
-         function shares the name, in which case rename one."
+         function shares the name, in which case rename one.",
+        occurrences.len()
     );
-    let at = stripped.find(needle.as_str()).expect("just counted one");
+    let at = occurrences[0];
     let bytes = stripped.as_bytes();
 
     // Walk the parameter list first: a default value carries braces of its own
@@ -1619,14 +2365,21 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
     let body = &stripped[start..end];
     let what = format!("`{}` in {}", builder.function, builder.path);
 
-    match builder.shape {
+    // Every shape, not just `AssignedObject`: a `FlatAdvancedLiteral` builder can grow a computed
+    // write too, and reading past one is how a knob goes missing with the lint still green.
+    refuse_invisible_advanced_writes(body, &what);
+
+    // Which signals each arm actually READ. Anything left over is a second map the registry entry
+    // does not account for, refused below.
+    let signals = advanced_map_signals(body);
+    let (keys, consumed): (BTreeSet<String>, Vec<usize>) = match builder.shape {
         AdvancedBuilderShape::ReturnedObject => {
             let return_at = body
                 .find("return {")
                 .unwrap_or_else(|| panic!("{what} no longer returns an object literal"))
                 + "return ".len();
             let literal = object_literal_body(body, return_at, &what);
-            scan_object_literal(&literal, &what, false).0
+            (scan_object_literal(&literal, &what, false).0, Vec::new())
         }
         AdvancedBuilderShape::ExtrasLiteral => {
             let at = body.find("advancedExtras:").unwrap_or_else(|| {
@@ -1634,33 +2387,32 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
                     "{what} no longer carries an `advancedExtras:` literal, so this lint cannot \
                      see which knobs that form contributes"
                 )
-            }) + "advancedExtras:".len();
-            let literal = object_literal_body(body, at, &what);
-            scan_object_literal(&literal, &what, false).0
+            });
+            let literal = object_literal_body(body, at + "advancedExtras:".len(), &what);
+            (scan_object_literal(&literal, &what, false).0, vec![at])
         }
         AdvancedBuilderShape::FlatAdvancedLiteral => {
             let at = body
                 .find("advanced:")
-                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"))
-                + "advanced:".len();
-            let literal = object_literal_body(body, at, &what);
+                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"));
+            let literal = object_literal_body(body, at + "advanced:".len(), &what);
             assert!(
                 !literal.contains('{') && !literal.contains("..."),
                 "{what}'s `advanced` literal is no longer flat — re-tag its registry `shape` (the \
                  conditional-spread scanner reads that shape) rather than letting this arm \
                  misread it"
             );
-            literal
+            let keys = literal
                 .split(',')
                 // `key` and `key: value` alike — take the identifier before any colon.
                 .filter_map(|entry| entry.split(':').next())
                 .map(str::trim)
                 .filter(|key| !key.is_empty() && key.chars().all(is_identifier_char))
                 .map(str::to_owned)
-                .collect()
+                .collect();
+            (keys, vec![at])
         }
         AdvancedBuilderShape::AssignedObject => {
-            refuse_invisible_advanced_writes(body, &what);
             let at = body
                 .find("advanced =")
                 .unwrap_or_else(|| panic!("{what} no longer initializes an `advanced` object"));
@@ -1678,8 +2430,10 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
                  set of keys this lint cannot see — either point `spread_of` at it and register \
                  the builder that produces those keys, or stop spreading it."
             );
-            keys.extend(assigned_advanced_keys(body));
-            keys
+            let (assigned, mut consumed) = assigned_advanced_keys(body, &signals);
+            keys.extend(assigned);
+            consumed.push(at);
+            (keys, consumed)
         }
         AdvancedBuilderShape::NoAdvancedMap => {
             assert!(
@@ -1688,38 +2442,204 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
                  `advanced`. It feeds a lane that embeds the map into every PNG it writes, so \
                  give it a real registry `shape` and classify every key it can emit."
             );
-            BTreeSet::new()
+            (BTreeSet::new(), Vec::new())
         }
-    }
+    };
+    refuse_unread_advanced_signals(body, &what, builder, &signals, &consumed);
+    keys
 }
 
-/// A write this lint cannot follow must fail rather than be scanned past.
-fn refuse_invisible_advanced_writes(body: &str, what: &str) {
-    for invisible in ["advanced[", "Object.assign(advanced", "advanced.push("] {
-        assert!(
-            !body.contains(invisible),
-            "{what} writes `advanced` through `{invisible}…`, which this coverage lint cannot \
-             read — the keys it sets would be invisible here and silently dropped from every \
-             shared image. Write them as plain `advanced.key = …` assignments."
+/// A second `advanced` map inside a declared builder is NOT accounted for by that declaration.
+///
+/// [`every_advanced_builder_in_the_web_app_is_accounted_for`] credits every signal inside a declared
+/// function's body span to that function, but the extractors above read exactly one shape each — the
+/// one the registry names. So a nested helper declared inside `DocumentStudio.submit`, with its own
+/// `advanced: { probeKnob, probeSecret }`, counted as accounted for while its keys were never
+/// classified and the sweep stayed green. This is the refusal
+/// [`refuse_invisible_advanced_writes`] makes for a write it cannot follow, applied to a map the arm
+/// can see and did not read.
+fn refuse_unread_advanced_signals(
+    body: &str,
+    what: &str,
+    builder: &AdvancedBuilder,
+    signals: &[AdvancedSignal],
+    consumed: &[usize],
+) {
+    let declared = declared_builder_functions();
+    for signal in signals {
+        if consumed.contains(&signal.offset)
+            || signal.calls_a_declared_builder(builder.path, &declared)
+        {
+            continue;
+        }
+        let line = 1 + body[..signal.offset].matches('\n').count();
+        panic!(
+            "{what} builds a SECOND `advanced` map at line {line} of its body ({}), which the \
+             `{:?}` arm of this extractor never reads. Its keys are invisible here, so they would \
+             be dropped from every shared image exactly as if the builder were unregistered. A \
+             nested helper is not accounted for by the entry around it: fold those keys into the \
+             map this arm does read, or give the helper its own `ADVANCED_BUILDERS` entry — the \
+             innermost declared span wins, so a nested entry is credited to itself.",
+            signal.kind.describe(),
+            builder.shape,
         );
     }
 }
 
-/// Every `advanced.key = …` assignment in one function body.
-fn assigned_advanced_keys(body: &str) -> BTreeSet<String> {
-    advanced_map_signals(body)
-        .into_iter()
-        .filter(|signal| signal.kind == "a property assignment")
-        .map(|signal| {
-            let after_dot = signal.offset + "advanced.".len();
-            let bytes = body.as_bytes();
-            let mut end = after_dot;
-            while end < bytes.len() && is_identifier_char(bytes[end] as char) {
-                end += 1;
-            }
-            body[after_dot..end].to_owned()
-        })
+/// Every function name the registry declares, registered or deferred.
+fn declared_builder_functions() -> BTreeSet<&'static str> {
+    ADVANCED_BUILDERS
+        .iter()
+        .map(|builder| builder.function)
+        .chain(
+            DEFERRED_ADVANCED_BUILDERS
+                .iter()
+                .map(|deferred| deferred.function),
+        )
         .collect()
+}
+
+/// A write this lint cannot follow must fail rather than be scanned past.
+///
+/// Three shapes set keys without ever naming one: a computed key (`advanced["k"] = v`),
+/// `Object.assign(x.advanced, { … })`, and an array mutator. Called over EVERY file the sweep
+/// reads, not only inside an `AssignedObject` body: while this ran in that one arm,
+/// `body.payload.advanced["probeKnob"] = v` was green both in a brand-new file and inside
+/// `buildDetailJobBody`.
+///
+/// The `Object.assign` check reads the first ARGUMENT instead of matching the text
+/// `Object.assign(advanced`, which `Object.assign(body.payload.advanced, { … })` walked straight
+/// past.
+fn refuse_invisible_advanced_writes(text: &str, what: &str) {
+    if let Some((offset, how)) = invisible_advanced_writes(text).into_iter().next() {
+        let line = 1 + text[..offset].matches('\n').count();
+        panic!(
+            "{what} writes `advanced` through {how} at line {line}, which this coverage lint \
+             cannot read — the keys it sets are invisible here and would be silently dropped from \
+             every shared image. Write them as plain `advanced.key = …` assignments, or as an \
+             `advanced: {{ … }}` literal, inside a builder `ADVANCED_BUILDERS` declares."
+        );
+    }
+}
+
+/// Mutators that reshape a map/array without naming a key.
+const INVISIBLE_ADVANCED_MUTATORS: &[&str] = &["push", "unshift", "splice"];
+
+/// Every `advanced` write in `text` that this lint cannot follow, as (offset, how).
+fn invisible_advanced_writes(text: &str) -> Vec<(usize, String)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            byte if is_identifier_start(byte as char) => {
+                let start = index;
+                while index < bytes.len() && is_identifier_char(bytes[index] as char) {
+                    index += 1;
+                }
+                let word = &text[start..index];
+                let after = skip_ascii_whitespace(bytes, index);
+                match word {
+                    "advanced" | "advancedExtras" => match bytes.get(after) {
+                        Some(b'[') => out.push((start, format!("a computed key (`{word}[…]`)"))),
+                        Some(b'.') => {
+                            let (method, method_end) = identifier_at(bytes, text, after + 1);
+                            if INVISIBLE_ADVANCED_MUTATORS.contains(&method)
+                                && bytes.get(skip_ascii_whitespace(bytes, method_end))
+                                    == Some(&b'(')
+                            {
+                                out.push((start, format!("`{word}.{method}(…)`")));
+                            }
+                        }
+                        _ => {}
+                    },
+                    "Object" => {
+                        if bytes.get(after) != Some(&b'.') {
+                            continue;
+                        }
+                        let (method, method_end) = identifier_at(bytes, text, after + 1);
+                        let open = skip_ascii_whitespace(bytes, method_end);
+                        if method != "assign" || bytes.get(open) != Some(&b'(') {
+                            continue;
+                        }
+                        let Some(target) = first_argument(bytes, text, open + 1) else {
+                            continue;
+                        };
+                        let target = target.trim();
+                        if ["advanced", "advancedExtras"].contains(&target)
+                            || target.ends_with(".advanced")
+                            || target.ends_with(".advancedExtras")
+                        {
+                            out.push((start, format!("`Object.assign({target}, …)`")));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    out
+}
+
+/// The identifier starting at or after `from`, plus the offset just past it.
+fn identifier_at<'text>(bytes: &[u8], text: &'text str, from: usize) -> (&'text str, usize) {
+    let start = skip_ascii_whitespace(bytes, from);
+    let mut end = start;
+    while end < bytes.len() && is_identifier_char(bytes[end] as char) {
+        end += 1;
+    }
+    (&text[start..end], end)
+}
+
+/// The text of the first argument of a call whose `(` ends just before `from`.
+fn first_argument(bytes: &[u8], text: &str, from: usize) -> Option<String> {
+    let mut depth = 0_usize;
+    let mut index = from;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => {
+                index = skip_string_ascii(bytes, index);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' | b',' if depth == 0 => {
+                return (bytes[index] != b']' && bytes[index] != b'}')
+                    .then(|| text[from..index].to_owned());
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Every `advanced.key = …` assignment in one function body, with the signal offsets it read.
+fn assigned_advanced_keys(
+    body: &str,
+    signals: &[AdvancedSignal],
+) -> (BTreeSet<String>, Vec<usize>) {
+    let mut keys = BTreeSet::new();
+    let mut consumed = Vec::new();
+    for signal in signals
+        .iter()
+        .filter(|signal| signal.kind == AdvancedSignalKind::PropertyAssignment)
+    {
+        let after_dot = signal.offset + "advanced.".len();
+        let bytes = body.as_bytes();
+        let mut end = after_dot;
+        while end < bytes.len() && is_identifier_char(bytes[end] as char) {
+            end += 1;
+        }
+        keys.insert(body[after_dot..end].to_owned());
+        consumed.push(signal.offset);
+    }
+    (keys, consumed)
 }
 
 /// Every key an object literal built from conditional spreads can contribute, plus the bare

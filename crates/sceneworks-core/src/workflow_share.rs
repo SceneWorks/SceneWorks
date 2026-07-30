@@ -522,12 +522,27 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
 pub struct DeferredAdvancedBuilder {
     pub path: &'static str,
     pub function: &'static str,
-    /// Why it is not classified, naming the story that owns turning it on. The lint asserts this
-    /// names a `sc-` story, so a deferral cannot be a shrug.
+    /// Why it is not classified. Two categories, and the lint accepts nothing else, so a deferral
+    /// cannot be a shrug:
+    ///
+    /// * **Awaiting classification** — names the `sc-` story that owns turning its lane on.
+    /// * **Permanently exempt** — starts with [`PERMANENT_EXEMPTION`] and says why no story will
+    ///   ever own it, plus what would have to change for that to stop being true.
     pub reason: &'static str,
 }
 
-/// The VIDEO builders (sc-15956 owns the video envelope and these keys).
+/// The prefix that marks a [`DeferredAdvancedBuilder::reason`] as a PERMANENT exemption rather
+/// than a story-owned deferral.
+///
+/// A deferral normally names the story that will classify its keys. Some `advanced` maps are not
+/// waiting on anybody: they are a different namespace on a lane that embeds nothing, so there is no
+/// story to name and inventing a fake id would be worse than saying so. The lint requires a reason
+/// with this prefix to state what would have to change (an embedding write seam) and to name
+/// [`ADVANCED_BUILDERS`] as where the entry moves if it ever does.
+pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
+
+/// The VIDEO builders (sc-15956 owns the video envelope and these keys), plus one permanent
+/// exemption for an `advanced` map that is not an image payload at all.
 ///
 /// `VideoStudio.jsx` alone emits ~15 keys nothing here classifies. That is fine only for as long
 /// as no video write seam embeds: the moment sc-15956 threads a workflow into a video write, its
@@ -572,6 +587,19 @@ pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
         reason: "The Simple shell's VIDEO request. Its image sibling \
                  (`buildSimpleImageRequest`) delegates to `buildImageJobRequest` and so is \
                  covered by the studio builder; this one is a video lane — sc-15956.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/training/trainingConfig.js",
+        function: "trainingConfigSnapshot",
+        reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
+                 from the image payload's — trainer hyperparameters (networkType, lrScheduler, \
+                 sampleSteps, decomposeFactor) on a training job, not generation intent for an \
+                 image. No training write seam EMBEDS a workflow, nothing sanitizes these keys \
+                 through `ADVANCED_KEY_RULES`, and no story is waiting to classify them: this is \
+                 not a deferral with an owner, it is deliberately outside the allow-list. What \
+                 would have to change is a training write seam that embeds. Then, and only then, \
+                 this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
+                 allow/deny decision.",
     },
 ];
 
