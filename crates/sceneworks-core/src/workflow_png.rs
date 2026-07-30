@@ -348,6 +348,141 @@ fn encode_png_with_text<W: Write>(
 }
 
 // ---------------------------------------------------------------------------
+// Strip
+// ---------------------------------------------------------------------------
+
+/// The three PNG text-chunk types a keyword can appear under.
+///
+/// [`write_workflow_chunk`] only ever emits `iTXt`, and [`read_workflow_chunk`] only ever reads
+/// `iTXt` (`png` files a `tEXt` under `uncompressed_latin1_text` and a `zTXt` under
+/// `compressed_latin1_text`, neither of which the reader looks at). The stripper is broader than
+/// both on purpose: it is a privacy operation, and "we would not have read it back" is not a reason
+/// to hand a stranger a chunk with our keyword on it. Being broader can only ever remove more.
+const TEXT_CHUNK_TYPES: [&[u8; 4]; 3] = [b"iTXt", b"tEXt", b"zTXt"];
+
+/// Bytes of PNG chunk framing that are not the payload: the 4-byte length, the 4-byte type and the
+/// 4-byte CRC.
+const CHUNK_OVERHEAD: usize = 12;
+
+/// Excise every [`WORKFLOW_CHUNK_KEYWORD`] text chunk from PNG `bytes`, without re-encoding
+/// anything (sc-15953).
+///
+/// `Ok(None)` means there was nothing to take out and the caller should use the source bytes
+/// unchanged — a PNG with no workflow chunk, or a file that is not a PNG at all. The second case is
+/// not a failure: [`write_workflow_chunk`] only ever writes into a PNG, so a JPEG or an MP4 cannot
+/// be carrying one, and a "save without the workflow" of a video has nothing to do.
+///
+/// # Why excise rather than decode and re-encode
+///
+/// A re-encode is a *new* file that happens to have the same pixels. This is the old file minus a
+/// slice: the signature, IHDR, PLTE, every IDAT and IEND are copied through byte for byte, so the
+/// pixels are not merely equal — the compressed image data is the same bytes it was, and no encoder
+/// setting, filter choice or `image`/`png` version is in the path at all. Each PNG chunk carries its
+/// own CRC over its own type and data, so removing one whole chunk leaves every other chunk's CRC
+/// still correct; nothing is recomputed.
+///
+/// `strip_of_an_embedded_png_is_byte_identical_to_the_none_path` in `tests/workflow_png.rs` proves
+/// it the strongest way available: stripping the `Some` output yields the `None` output *byte for
+/// byte*, over both DEFLATE regimes and four sizes.
+///
+/// # Errors
+/// [`WorkflowChunkError::Png`] when `bytes` start with the PNG signature but the chunk framing
+/// could not be walked to the end. That is deliberately an error rather than a quiet "nothing to
+/// strip": for a file we cannot walk, "there is no workflow chunk in it" is not something we know,
+/// and a caller asking for a stripped copy must refuse rather than hand over the original.
+pub fn strip_workflow_chunk(bytes: &[u8]) -> Result<Option<Vec<u8>>, WorkflowChunkError> {
+    if bytes.len() < PNG_SIGNATURE.len() || bytes[..PNG_SIGNATURE.len()] != PNG_SIGNATURE {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&PNG_SIGNATURE);
+    let mut cursor = PNG_SIGNATURE.len();
+    let mut removed = 0_usize;
+    let mut past_iend = false;
+
+    while cursor < bytes.len() {
+        let Some(end) = chunk_end(bytes, cursor) else {
+            // Framing we cannot walk. Trailing bytes after IEND are not chunks under the spec and
+            // are copied through so a file with a tail we did not write survives the round trip;
+            // anything else means the PNG is malformed and the caller must not get a copy we
+            // cannot vouch for.
+            if past_iend {
+                out.extend_from_slice(&bytes[cursor..]);
+                break;
+            }
+            return Err(WorkflowChunkError::Png {
+                detail: format!("the chunk at byte {cursor} runs past the end of the file"),
+            });
+        };
+        let kind = &bytes[cursor + 4..cursor + 8];
+        if kind == b"IEND" {
+            past_iend = true;
+        }
+        if is_workflow_text_chunk(kind, &bytes[cursor + 8..end - 4]) {
+            removed += end - cursor;
+        } else {
+            out.extend_from_slice(&bytes[cursor..end]);
+        }
+        cursor = end;
+    }
+
+    if removed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+/// One past the CRC of the chunk starting at `cursor`, or `None` when the header or the payload it
+/// declares runs past the end of `bytes`.
+fn chunk_end(bytes: &[u8], cursor: usize) -> Option<usize> {
+    let header = bytes.get(cursor..cursor + 8)?;
+    let length = usize::try_from(u32::from_be_bytes(header[..4].try_into().ok()?)).ok()?;
+    let end = cursor.checked_add(CHUNK_OVERHEAD)?.checked_add(length)?;
+    (end <= bytes.len()).then_some(end)
+}
+
+/// Whether a chunk of type `kind` carrying `data` is a text chunk under our keyword.
+///
+/// All three text types lay their payload out as `keyword NUL …`, so the keyword is the payload up
+/// to its first NUL in every case. Matched byte-exactly: PNG keywords are case-sensitive, and
+/// [`read_workflow_chunk`] resolves the keyword the same way, so `Sceneworks:Workflow` is a
+/// different keyword to both halves.
+fn is_workflow_text_chunk(kind: &[u8], data: &[u8]) -> bool {
+    if !TEXT_CHUNK_TYPES.iter().any(|text| *text == kind) {
+        return false;
+    }
+    let keyword = data.split(|byte| *byte == 0).next().unwrap_or_default();
+    keyword == WORKFLOW_CHUNK_KEYWORD.as_bytes()
+}
+
+/// Copy `source` to `destination` with any [`WORKFLOW_CHUNK_KEYWORD`] chunk excised, and report
+/// whether one was there (sc-15953).
+///
+/// The "Save As without the workflow" seam. A file with nothing to strip is copied through
+/// [`std::fs::copy`] — the same call the plain Save As makes — so the two paths produce the same
+/// file for a source that never carried a chunk, rather than one of them rewriting it.
+///
+/// # Errors
+/// [`WorkflowChunkError::Io`] if the source cannot be read or the destination cannot be written,
+/// and whatever [`strip_workflow_chunk`] returns for a PNG whose framing cannot be walked.
+pub fn copy_without_workflow_chunk(
+    source: &Path,
+    destination: &Path,
+) -> Result<bool, WorkflowChunkError> {
+    let bytes = std::fs::read(source).map_err(|error| io_error(&error))?;
+    match strip_workflow_chunk(&bytes)? {
+        Some(stripped) => {
+            std::fs::write(destination, stripped).map_err(|error| io_error(&error))?;
+            Ok(true)
+        }
+        None => {
+            std::fs::copy(source, destination).map_err(|error| io_error(&error))?;
+            Ok(false)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Read
 // ---------------------------------------------------------------------------
 
@@ -1016,6 +1151,173 @@ mod tests {
             ITXtChunk::new("Sceneworks:Workflow", "case matters"),
         ];
         assert_eq!(read_workflow_chunk(&png_with(&foreign)), Ok(None));
+    }
+
+    // ---------------------------------------------------------------------
+    // Strip (sc-15953)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn stripping_removes_the_chunk_and_leaves_the_rest_of_the_file_alone() {
+        let embedded = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        let plain = png_with(&[]);
+        let stripped = strip_workflow_chunk(&embedded)
+            .expect("an embedded PNG strips")
+            .expect("and reports that something was taken out");
+
+        // The read side agrees the chunk is gone…
+        assert_eq!(read_workflow_chunk(&stripped), Ok(None));
+        // …and what is left is the same file the None arm writes for the same pixels, byte for
+        // byte. That is the pixel-identity proof: IHDR and every IDAT are the original's own bytes.
+        assert!(
+            stripped == plain,
+            "the stripped file is {} bytes and the plain one {}",
+            stripped.len(),
+            plain.len()
+        );
+    }
+
+    #[test]
+    fn a_png_with_nothing_of_ours_in_it_reports_nothing_to_strip() {
+        // Ok(None) is "use the source unchanged", which is what keeps the strip path from
+        // rewriting a file that never carried a chunk. A foreign writer's text chunks stay put:
+        // stripping ours is not a licence to scrub someone else's metadata out of their image.
+        let foreign = png_with(&[
+            ITXtChunk::new("parameters", "steps: 28, sampler: euler"),
+            ITXtChunk::new("prompt", "{\"1\":{\"class_type\":\"KSampler\"}}"),
+            ITXtChunk::new("Sceneworks:Workflow", "case matters"),
+        ]);
+        assert_eq!(strip_workflow_chunk(&foreign), Ok(None));
+        assert_eq!(strip_workflow_chunk(&png_with(&[])), Ok(None));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_png_has_nothing_to_strip() {
+        // The write path only ever writes into a PNG, so a JPEG or an MP4 cannot be carrying one of
+        // ours. "Save without the workflow" on a video is a plain copy, not an error.
+        for input in [
+            b"".as_slice(),
+            b"\x89PNG".as_slice(),
+            b"\xff\xd8\xff\xe0JFIF".as_slice(),
+            b"{\"sceneworksWorkflow\":\"image\"}".as_slice(),
+        ] {
+            assert_eq!(
+                strip_workflow_chunk(input),
+                Ok(None),
+                "{} bytes of non-PNG must be a clean no-op",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_png_whose_framing_cannot_be_walked_refuses_rather_than_returning_the_original() {
+        // The privacy-critical failure mode. Ok(None) means "use the source unchanged", so
+        // answering it for a file we could not walk would hand the user a copy that may still carry
+        // the chunk while telling them it does not. A truncated file must be an error.
+        let full = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        let truncated = &full[..full.len() - 6];
+        assert!(
+            matches!(
+                strip_workflow_chunk(truncated),
+                Err(WorkflowChunkError::Png { .. })
+            ),
+            "a truncated PNG must refuse, got {:?}",
+            strip_workflow_chunk(truncated)
+        );
+        // And a chunk header claiming more than the file holds, which is the same class through a
+        // different door.
+        let liar = splice_after_ihdr(
+            &png_with(&[]),
+            &framed_chunk(
+                b"iTXt",
+                &itxt_data(WORKFLOW_CHUNK_KEYWORD, false, b"{}"),
+                Some(0x7FFF_FFFF),
+            ),
+        );
+        assert!(matches!(
+            strip_workflow_chunk(&liar),
+            Err(WorkflowChunkError::Png { .. })
+        ));
+    }
+
+    #[test]
+    fn stripping_reaches_every_place_a_chunk_can_hide() {
+        // Post-IDAT is where sc-15949's foreign writers put theirs and where the reader's second
+        // pass looks, so the stripper has to go there too — a strip that only cleared the metadata
+        // proper would leave a readable workflow in the file it just promised had none.
+        let envelope = minimal_envelope_json("behind the image data");
+        let tail = splice_before_iend(&png_with(&[]), &framed(&workflow_chunk(envelope.clone())));
+        assert!(read_workflow_chunk(&tail).expect("reads").is_some());
+        let stripped = strip_workflow_chunk(&tail)
+            .expect("strips")
+            .expect("had something to strip");
+        assert_eq!(read_workflow_chunk(&stripped), Ok(None));
+        assert!(stripped == png_with(&[]), "the tail chunk was excised whole");
+
+        // Both at once — the duplicate case that reads as an error rather than a workflow. A file
+        // the reader refuses is still a file with our prompt in it, so it must strip clean.
+        let both = splice_before_iend(
+            &png_with_workflow_text(&envelope),
+            &framed(&workflow_chunk(envelope.clone())),
+        );
+        assert_eq!(
+            read_workflow_chunk(&strip_workflow_chunk(&both)
+                .expect("strips")
+                .expect("had something to strip")),
+            Ok(None)
+        );
+
+        // And under the other two text-chunk types, which our writer never emits and our reader
+        // never reads — the stripper is broader than both on purpose.
+        for kind in [b"tEXt", b"zTXt"] {
+            let mut data = WORKFLOW_CHUNK_KEYWORD.as_bytes().to_vec();
+            data.push(0);
+            data.extend_from_slice(b"whatever a foreign writer put here");
+            let spliced =
+                splice_after_ihdr(&png_with(&[]), &framed_chunk(kind, &data, None));
+            let stripped = strip_workflow_chunk(&spliced)
+                .expect("strips")
+                .unwrap_or_else(|| panic!("{} under our keyword must be taken out", String::from_utf8_lossy(kind)));
+            assert!(stripped == png_with(&[]));
+        }
+    }
+
+    #[test]
+    fn the_copy_helper_strips_or_copies_and_says_which() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let source = directory.path().join("embedded.png");
+        let destination = directory.path().join("shared.png");
+        let envelope =
+            parse_workflow_share_json(&minimal_envelope_json("a lighthouse")).expect("parses");
+
+        write_workflow_chunk(&rgb_fixture(), &source, Some(&envelope)).expect("writes");
+        assert!(read_workflow_chunk_file(&source)
+            .expect("reads")
+            .is_some());
+        assert_eq!(
+            copy_without_workflow_chunk(&source, &destination),
+            Ok(true),
+            "the source carried a chunk, so the copy reports removing one"
+        );
+        assert_eq!(read_workflow_chunk_file(&destination), Ok(None));
+
+        // The source is untouched: turning the switch off, or saving one copy without the
+        // workflow, changes nothing about files already written.
+        assert!(read_workflow_chunk_file(&source)
+            .expect("reads")
+            .is_some());
+
+        // A source with nothing to strip goes through `std::fs::copy`, so the plain and the
+        // without-workflow save produce the same file.
+        let plain = directory.path().join("plain.png");
+        let plain_copy = directory.path().join("plain-copy.png");
+        write_workflow_chunk(&rgb_fixture(), &plain, None).expect("writes");
+        assert_eq!(copy_without_workflow_chunk(&plain, &plain_copy), Ok(false));
+        assert_eq!(
+            std::fs::read(&plain).expect("reads"),
+            std::fs::read(&plain_copy).expect("reads")
+        );
     }
 
     // ---------------------------------------------------------------------

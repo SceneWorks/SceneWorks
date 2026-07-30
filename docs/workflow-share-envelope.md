@@ -566,9 +566,23 @@ the PNG write seam.
   than "not found" — a sharing violation, an ACL error — embedding is off. "Absent" and "unreadable"
   are different states, and collapsing them is how a deliberate opt-out silently inverts itself. A
   file that is present and readable but not parseable falls back to the default, which is on.
-- Turning it off changes nothing about images already written. The chunk is in those files.
+- Turning it off changes nothing about images already written. The chunk is in those files. To
+  share one of those without the block, use **Save a copy without the workflow** on the asset —
+  which excises the chunk from the copied bytes and leaves the asset alone. The browser and LAN
+  download does the same server-side, through `?stripWorkflow=true` on the file route.
 
-The settings UI and its first-run disclosure are sc-15953's, not this document's.
+The switch lives in **Settings → Settings → Sharing**, and the copy under it is the summary this
+document is the long form of. Two things keep the two from drifting: the summary links here, and
+the six path-exempt prose fields are rendered in the UI from a declared list that
+`the_settings_copy_names_exactly_the_path_exempt_prose_fields` pins against the `prose-fields`
+table above, in both directions — so a seventh prose field fails the settings copy as loudly as it
+fails this document.
+
+A one-time disclosure is shown the first time a generation is submitted while embedding is on. It
+is dismissible and never repeated; the "already told them" flag is `workflowEmbedNoticeSeen` in the
+same preference file, durable rather than browser-side because the desktop shell serves the UI from
+an origin that changes each launch. An absent flag means "not told", so an install upgrading into a
+build that embeds gets the notice once rather than never.
 
 ## How this document is kept honest
 

@@ -1925,8 +1925,19 @@ const GRID_THUMBNAIL_SIZE: u32 = 384;
 const PROJECT_MEDIA_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectFileQuery {
     thumbnail: Option<u32>,
+    /// Serve the file with any embedded `sceneworks:workflow` chunk removed (sc-15953).
+    ///
+    /// A query param on the existing route rather than a new endpoint, because the browser
+    /// "Save As without the workflow" is a bare `<a download>` and cannot transform bytes or set
+    /// headers. That constraint also decides the shape: in remote/LAN mode the anchor authenticates
+    /// with a `?ticket=` media ticket, whose allow-list (`auth::is_ticketed_media_path`) matches on
+    /// the PATH and is GET-only — so keeping the strip on this path means the download works
+    /// remotely with no change to the ticket rules at all. A separate endpoint would have needed a
+    /// new entry in that allow-list, which is the surface hardest to widen safely.
+    strip_workflow: Option<bool>,
 }
 
 async fn get_project_file(
@@ -1959,6 +1970,17 @@ async fn get_project_file(
             );
         }
     })?;
+
+    // "Download without the workflow" (sc-15953). Answered here, before the thumbnail and
+    // streaming branches, because it is the one variant whose body is not the file on disk.
+    if query.strip_workflow.unwrap_or(false) {
+        if query.thumbnail.is_some() {
+            return Err(ApiError::bad_request(
+                "stripWorkflow cannot be combined with thumbnail",
+            ));
+        }
+        return stripped_project_file_response(&project_file, &headers).await;
+    }
 
     // One fixed representation prevents unbounded cache variants. Derivatives
     // are generated on first use, so assets written before this route existed
@@ -2151,6 +2173,117 @@ fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<Pa
         }
     }
     Ok(target)
+}
+
+/// Serve a project file with any embedded workflow chunk excised (sc-15953).
+///
+/// The stripping itself is `sceneworks_core::workflow_png::strip_workflow_chunk` — a byte-level
+/// walk of the PNG chunk framing that copies IHDR, every IDAT and IEND through unchanged, so the
+/// served body is the file minus one slice rather than a re-encode. Nothing here decodes a pixel.
+///
+/// Three things this branch has to get right that the streaming path does not:
+///
+/// * **Only a PNG is read into memory.** The workflow chunk only ever exists in a PNG, so anything
+///   else is served by the ordinary path — a video does not get buffered because someone appended
+///   the flag to its URL. A non-PNG asked for stripped is not an error either: it genuinely carries
+///   no workflow, and saying so by serving it is the honest answer.
+/// * **The ETag must differ from the full file's.** `project_file_etag` is derived from the source
+///   metadata, and the route sets `immutable` caching — so reusing it would let a cache answer a
+///   strip request with the unstripped body it already holds. The variant tag is folded in.
+/// * **No byte ranges.** The body is a rewritten buffer whose offsets do not match the file on
+///   disk, so `Accept-Ranges: none` and a `Range` header is ignored rather than answered against
+///   the wrong length. This is a download, not a `<video src>`.
+async fn stripped_project_file_response(
+    project_file: &sceneworks_core::project_store::ProjectFile,
+    request_headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let path = project_file.path.clone();
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let last_modified = metadata.modified().ok();
+
+    if project_file.content_type != "image/png" {
+        // Nothing of ours can be in it. Fall back to the ordinary streaming response so a video or
+        // a JPEG is served exactly as it always was, under its own ETag.
+        let etag = project_file_etag(&metadata);
+        let headers =
+            project_file_response_headers(&project_file.content_type, metadata.len(), &etag, last_modified)?;
+        if project_file_is_not_modified(request_headers, &etag, last_modified) {
+            return Ok(not_modified_response(headers));
+        }
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
+        response.headers_mut().extend(headers);
+        return Ok(response);
+    }
+
+    let etag = variant_etag(&project_file_etag(&metadata), "nw");
+    if project_file_is_not_modified(request_headers, &etag, last_modified) {
+        let headers = project_file_response_headers(
+            &project_file.content_type,
+            metadata.len(),
+            &etag,
+            last_modified,
+        )?;
+        return Ok(not_modified_response(headers));
+    }
+
+    let bytes = tokio::task::spawn_blocking(move || {
+        let original = std::fs::read(&path)?;
+        // A PNG whose framing cannot be walked is an ERROR, never the original bytes: "here is your
+        // copy without the workflow" must not be answered with a file that may still carry one.
+        match sceneworks_core::workflow_png::strip_workflow_chunk(&original) {
+            // Nothing of ours in it — the file already is what was asked for.
+            Ok(None) => Ok(original),
+            Ok(Some(stripped)) => Ok(stripped),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?
+    .map_err(|error| {
+        tracing::debug!(
+            event = "project_file_strip_failed",
+            error = %error,
+            "could not serve a project file without its workflow"
+        );
+        ApiError::bad_request("This image could not be rewritten without its workflow.")
+    })?;
+
+    let mut headers = project_file_response_headers(
+        &project_file.content_type,
+        bytes.len() as u64,
+        &etag,
+        last_modified,
+    )?;
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().extend(headers);
+    Ok(response)
+}
+
+/// A 304 carrying `headers` minus the content length, which a body-less response must not declare.
+fn not_modified_response(headers: HeaderMap) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    *response.headers_mut() = headers;
+    response.headers_mut().remove(header::CONTENT_LENGTH);
+    response
+}
+
+/// Distinguish a derived representation's ETag from the source file's.
+///
+/// The route caches `immutable`, so two representations of one URL sharing a tag is a correctness
+/// bug and not a missed optimization: a client holding the full file would revalidate a strip
+/// request as `304 Not Modified` and reuse the body with the workflow still in it.
+fn variant_etag(base: &str, variant: &str) -> String {
+    match base.strip_suffix('"') {
+        Some(head) => format!("{head}-{variant}\""),
+        None => format!("{base}-{variant}"),
+    }
 }
 
 fn project_file_etag(metadata: &std::fs::Metadata) -> String {

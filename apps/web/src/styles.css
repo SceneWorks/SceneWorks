@@ -14541,6 +14541,29 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* The one-time embedded-workflow disclosure (sc-15953). Reuses the warn-bordered band, but
+   carries a title, several paragraphs and its own buttons rather than one line of text. */
+.workflow-embed-notice {
+  margin-bottom: var(--gap-3);
+}
+
+.workflow-embed-notice > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.workflow-embed-notice-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workflow-embed-notice .settings-button-row {
+  margin-top: 3px;
+}
+
 /*
  * WorkerProgressCard (sc-2083) — unified worker/job progress component.
  * See docs/design/worker-progress-card.md. Replaces .local-job-card, .job-row,

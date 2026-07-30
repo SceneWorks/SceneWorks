@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use image::{ImageFormat, Rgb, RgbImage};
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::workflow_png::{
-    read_workflow_chunk, read_workflow_chunk_file, workflow_chunk_size, write_workflow_chunk,
-    MAX_WORKFLOW_TEXT_BYTES, WORKFLOW_CHUNK_KEYWORD,
+    copy_without_workflow_chunk, read_workflow_chunk, read_workflow_chunk_file,
+    strip_workflow_chunk, workflow_chunk_size, write_workflow_chunk, MAX_WORKFLOW_TEXT_BYTES,
+    WORKFLOW_CHUNK_KEYWORD,
 };
 use sceneworks_core::workflow_share::{build_workflow_share, WorkflowShare};
 use serde_json::{json, Value};
@@ -457,6 +458,110 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save As without the workflow (sc-15953)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strip_of_an_embedded_png_is_byte_identical_to_the_none_path() {
+    // The AC asks the stripped output to be visually identical to the source, and this asserts the
+    // strongest form of that rather than a PSNR: the stripped file IS the file the `None` arm
+    // writes for the same pixels, byte for byte. Nothing re-encodes — IHDR and every IDAT are the
+    // embedded file's own bytes minus one slice — so "visually identical" is not a measurement, it
+    // is the same compressed image data it always was.
+    //
+    // The same two DEFLATE regimes and the same four sizes as
+    // `the_some_path_is_the_none_path_plus_the_chunk`, for the same reason: a stripper tested only
+    // on an incompressible 9x7 fixture would pass while silently re-encoding a real render.
+    type Fixture = fn(u32, u32) -> RgbImage;
+    let fixtures: [(&str, Fixture); 2] = [("noise", noisy_rgb), ("render", soft_render_rgb)];
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let envelope = golden_envelope();
+    let chunk_size = workflow_chunk_size(&envelope).expect("the chunk encodes");
+
+    for (label, build) in fixtures {
+        for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
+            let rgb = build(width, height);
+            let name = format!("{label}-{width}x{height}");
+            let embedded = directory.path().join(format!("embedded-{name}.png"));
+            let plain = directory.path().join(format!("plain-{name}.png"));
+            write_workflow_chunk(&rgb, &embedded, Some(&envelope)).expect("writes with a chunk");
+            write_workflow_chunk(&rgb, &plain, None).expect("writes without one");
+
+            let embedded_bytes = fs::read(&embedded).expect("reads");
+            let plain_bytes = fs::read(&plain).expect("reads");
+            let stripped = strip_workflow_chunk(&embedded_bytes)
+                .expect("an embedded PNG strips")
+                .expect("and had a chunk to take out");
+
+            assert_eq!(
+                embedded_bytes.len() - stripped.len(),
+                chunk_size,
+                "on {name} the strip removed {} bytes but the chunk measures {chunk_size}",
+                embedded_bytes.len() - stripped.len()
+            );
+            assert!(
+                stripped == plain_bytes,
+                "on {name} the stripped file is not the None-path file: {} bytes against {}",
+                stripped.len(),
+                plain_bytes.len()
+            );
+            // The production stripper and the hand-rolled one this file already uses to prove the
+            // write path must agree; two independent walks of the same framing is what stops a
+            // subtle off-by-one in either being invisible.
+            let (by_hand, removed_by_hand) = strip_workflow_chunks(&embedded_bytes);
+            assert_eq!(removed_by_hand, chunk_size);
+            assert!(stripped == by_hand, "the two strippers disagree on {name}");
+
+            // And the AC's own assertion, stated in its own terms: read the output back with the
+            // sc-15947 reader and find no workflow, while the source still has one.
+            let out = directory.path().join(format!("stripped-{name}.png"));
+            fs::write(&out, &stripped).expect("writes");
+            assert_eq!(read_workflow_chunk_file(&out), Ok(None));
+            assert!(read_workflow_chunk_file(&embedded)
+                .expect("the source still reads")
+                .is_some());
+
+            // Pixels, decoded, for the reader who wants it said in pixels rather than in bytes.
+            assert_eq!(
+                image::open(&out).expect("decodes").to_rgb8().as_raw(),
+                rgb.as_raw(),
+                "on {name} the stripped image does not decode to the source pixels"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_save_as_seam_strips_without_touching_the_source() {
+    // What the desktop "Save As without the workflow" command does, end to end: the copy on disk
+    // has no chunk, and the asset the user still owns is untouched. Turning the feature off — or
+    // sharing one copy without it — changes nothing about files already written, and the UI says
+    // so because this is what the code does.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let source = directory.path().join("asset.png");
+    let shared = directory.path().join("shared.png");
+    let rgb = soft_render_rgb(256, 256);
+    write_workflow_chunk(&rgb, &source, Some(&golden_envelope())).expect("writes");
+    let before = fs::read(&source).expect("reads");
+
+    assert_eq!(copy_without_workflow_chunk(&source, &shared), Ok(true));
+    assert_eq!(read_workflow_chunk_file(&shared), Ok(None));
+    assert_eq!(
+        image::open(&shared).expect("decodes").to_rgb8().as_raw(),
+        rgb.as_raw()
+    );
+    assert_eq!(
+        fs::read(&source).expect("reads"),
+        before,
+        "the source asset must be byte-for-byte what it was"
+    );
+    assert!(read_workflow_chunk_file(&source)
+        .expect("reads")
+        .is_some());
 }
 
 // ---------------------------------------------------------------------------

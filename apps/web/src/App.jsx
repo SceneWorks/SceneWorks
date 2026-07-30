@@ -31,6 +31,13 @@ import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
 import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
+import { WorkflowEmbedNotice } from "./components/WorkflowEmbedNotice.jsx";
+import {
+  readEmbedWorkflowInImages,
+  readWorkflowEmbedNoticeSeen,
+  writeEmbedWorkflowInImages,
+  writeWorkflowEmbedNoticeSeen,
+} from "./workflowEmbed.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
@@ -731,6 +738,46 @@ export function App() {
     writeStoredSimpleDefault(next);
     putUiPreferences({ simpleUi: next }).catch(() => {});
   }, []);
+  // Embedded workflow (sc-15953, epic 15945). `embedWorkflow` is the durable
+  // `embedWorkflowInImages` preference; the WORKER reads it off ui-preferences.json at the PNG
+  // write seam on every job, so a flip here lands on the next generation with no restart. Same
+  // durable contract as theme/accent, and for a sharper reason: the desktop shell's per-launch
+  // origin wipes localStorage, so a preference stored only there would silently revert to the ON
+  // default on the next launch — turning a deliberate privacy opt-out back on.
+  const [embedWorkflow, setEmbedWorkflow] = useState(readEmbedWorkflowInImages);
+  // Whether the one-time disclosure has been shown and dismissed, and whether it is on screen now.
+  // `seen` is durable for the same reason; `open` is this session's.
+  const [workflowEmbedNoticeSeen, setWorkflowEmbedNoticeSeen] = useState(
+    readWorkflowEmbedNoticeSeen,
+  );
+  const [workflowEmbedNoticeOpen, setWorkflowEmbedNoticeOpen] = useState(false);
+  // Read by the generation trigger below, which is memoized and would otherwise close over stale
+  // values — and gated on the durable GET having landed, so a generation submitted in the first
+  // few hundred milliseconds after a desktop relaunch cannot re-show a notice already dismissed.
+  const workflowEmbedRef = useRef({ hydrated: false, embed: true, seen: false });
+  workflowEmbedRef.current.embed = embedWorkflow;
+  workflowEmbedRef.current.seen = workflowEmbedNoticeSeen;
+  const changeEmbedWorkflow = useCallback((next) => {
+    setEmbedWorkflow(next);
+    writeEmbedWorkflowInImages(next);
+    putUiPreferences({ embedWorkflowInImages: next }).catch(() => {});
+  }, []);
+  const dismissWorkflowEmbedNotice = useCallback(() => {
+    setWorkflowEmbedNoticeOpen(false);
+    setWorkflowEmbedNoticeSeen(true);
+    writeWorkflowEmbedNoticeSeen(true);
+    putUiPreferences({ workflowEmbedNoticeSeen: true }).catch(() => {});
+  }, []);
+  // The observable event the disclosure hangs off: a generation was accepted while embedding is
+  // on. Submission rather than completion, so the user is told BEFORE the files with their prompt
+  // in them exist — and only on a job the API actually took, so a failed POST does not burn it.
+  const noteGenerationForWorkflowEmbed = useCallback((job) => {
+    const state = workflowEmbedRef.current;
+    if (!job || !state.hydrated || !state.embed || state.seen) {
+      return;
+    }
+    setWorkflowEmbedNoticeOpen(true);
+  }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
   const localGenerationJobIdsRef = useRef(localGenerationJobIds);
@@ -1381,6 +1428,19 @@ export function App() {
           // doesn't throw away what they typed while the GET was in flight.
           setStudioRestoreEpoch((epoch) => epoch + 1);
         }
+        // The embedded-workflow preference and its disclosure flag (sc-15953). Both ABSENT
+        // states are meaningful and both are the permissive one: absent embedding means ON (the
+        // worker's own reader agrees), and an absent notice flag means the user has never been
+        // told — which is exactly the state an install upgrading into this build is in, so the
+        // disclosure fires once for them rather than only for fresh installs.
+        if (typeof prefs?.embedWorkflowInImages === "boolean") {
+          setEmbedWorkflow(prefs.embedWorkflowInImages);
+          writeEmbedWorkflowInImages(prefs.embedWorkflowInImages);
+        }
+        if (typeof prefs?.workflowEmbedNoticeSeen === "boolean") {
+          setWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
+          writeWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
+        }
         const persistedView = prefs?.activeView;
         if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
           setActiveView(persistedView);
@@ -1388,7 +1448,12 @@ export function App() {
       })
       .catch(() => {})
       .finally(() => {
-        if (!cancelled) setNavigationHydrated(true);
+        if (!cancelled) {
+          // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
+          // which on the desktop shell is a fresh empty store every launch.
+          workflowEmbedRef.current.hydrated = true;
+          setNavigationHydrated(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -2143,8 +2208,12 @@ export function App() {
         requestedGpu,
         setJobs,
         setError,
+        // sc-15953: the one image-generation choke point every studio goes through (Image Studio,
+        // Simple, and the Character studio's angle/pose forms all call this), so the first-run
+        // disclosure hangs off it rather than off each lane's submit button.
+        afterCreate: noteGenerationForWorkflowEmbed,
       }),
-    [token, activeProject, requestedGpu, setError],
+    [token, activeProject, requestedGpu, setError, noteGenerationForWorkflowEmbed],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -3462,6 +3531,16 @@ export function App() {
           <p className="notice error" key={notice.kind}>{notice.message}</p>
         ))}
 
+        {workflowEmbedNoticeOpen ? (
+          <WorkflowEmbedNotice
+            onDismiss={dismissWorkflowEmbedNotice}
+            onOpenSettings={() => {
+              dismissWorkflowEmbedNotice();
+              setActiveView("Settings");
+            }}
+          />
+        ) : null}
+
         {showSetupWizard ? (
           <SetupWizard
             jobs={jobs}
@@ -3489,8 +3568,10 @@ export function App() {
         {activeView === "Settings" ? (
           <SettingsScreen
             accent={accent}
+            embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
             simpleDefault={simpleUiDefault}
           />

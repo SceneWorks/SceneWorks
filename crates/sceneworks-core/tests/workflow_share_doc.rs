@@ -761,6 +761,66 @@ fn the_doc_lists_exactly_the_path_exempt_prose_fields() {
     }
 }
 
+/// The web module that holds the Settings copy's one machine-checkable claim (sc-15953).
+const SETTINGS_COPY_PATH: &str = "apps/web/src/workflowEmbed.js";
+
+#[test]
+fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
+    // The settings toggle's copy is the most user-visible place a claim about this contract can be
+    // wrong, and "your prompt travels as you wrote it" is the claim a user acts on before sharing.
+    // So the six fields are not written out as a sentence in the JSX — they are rendered from a
+    // declared list, and this pins that list against the same `prose-fields` table the sanitizer
+    // itself is pinned to. A seventh prose field added to `PROSE_KEYS` therefore fails three
+    // things: the doc, the sanitizer's own lint, and the copy that would otherwise have gone on
+    // naming six.
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let anchor = "EMBEDDED_PROSE_FIELDS = Object.freeze([";
+    let start = source.find(anchor).unwrap_or_else(|| {
+        panic!(
+            "{SETTINGS_COPY_PATH} no longer declares {anchor:?}. The settings copy's field list is \
+             pinned to the {DOC_PATH} `prose-fields` table; if it moved, teach this lint where."
+        )
+    }) + anchor.len();
+    let rest = &source[start..];
+    let end = rest
+        .find("]);")
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: EMBEDDED_PROSE_FIELDS is never closed"));
+
+    let mut listed: BTreeSet<String> = BTreeSet::new();
+    for line in rest[..end].lines() {
+        let Some(open) = line.trim().strip_prefix("[\"") else {
+            continue;
+        };
+        let Some(close) = open.find('"') else { continue };
+        listed.insert(open[..close].to_owned());
+    }
+    let documented = pinned_set(&doc(), "prose-fields", 0);
+
+    let missing: Vec<&String> = documented.difference(&listed).collect();
+    assert!(
+        missing.is_empty(),
+        "{SETTINGS_COPY_PATH} does not list {missing:?}, which the `prose-fields` table in \
+         {DOC_PATH} says travels exactly as the user typed it. The settings copy would be telling \
+         someone their prompt is safe while a field that carries a filesystem path is not named."
+    );
+    let invented: Vec<&String> = listed.difference(&documented).collect();
+    assert!(
+        invented.is_empty(),
+        "{SETTINGS_COPY_PATH} lists {invented:?} as travelling verbatim, which the `prose-fields` \
+         table in {DOC_PATH} does not. The copy is claiming something about the file that is not \
+         true of it."
+    );
+
+    // And the copy points at the document this test reads, so the "what travels, exactly" link is
+    // the contract rather than a page that happens to exist.
+    let link_target = DOC_PATH.replace('\\', "/");
+    assert!(
+        source.contains(&link_target),
+        "{SETTINGS_COPY_PATH} must link to {link_target} — the copy is a summary, and the summary \
+         has to be able to send the user to the exact list"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The ceilings, found by experiment
 // ---------------------------------------------------------------------------
