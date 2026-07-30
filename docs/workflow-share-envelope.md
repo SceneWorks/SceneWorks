@@ -566,9 +566,40 @@ the PNG write seam.
   than "not found" — a sharing violation, an ACL error — embedding is off. "Absent" and "unreadable"
   are different states, and collapsing them is how a deliberate opt-out silently inverts itself. A
   file that is present and readable but not parseable falls back to the default, which is on.
-- Turning it off changes nothing about images already written. The chunk is in those files.
+- Turning it off changes nothing about images already written. The chunk is in those files. To
+  share one of those without the block, use **Save a copy without the workflow** on the asset —
+  which excises the chunk from the copied bytes and leaves the asset alone. The browser and LAN
+  download does the same server-side, through `?stripWorkflow=true` on the file route.
 
-The settings UI and its first-run disclosure are sc-15953's, not this document's.
+That control is named by exactly one constant, `SAVE_WITHOUT_WORKFLOW_LABEL`, and it is reachable
+from three places rather than one: a button beside **Save As…** in the advanced preview, the
+right-click context menu there, and a second download button in the Simple shell. All three, because
+the copy above tells a user to go and find it — and the Simple shell is the default on a phone,
+where a right-click does not exist.
+
+The switch lives in **Settings → Settings → Sharing** and, in the Simple shell, under **Sharing** on
+its Settings screen. The copy under it is the summary this document is the long form of. What keeps
+the two from drifting is that the summary links here and that its three lists — the path-exempt prose
+fields, what is in the file, and what is not — are rendered in the UI from declared lists that
+[How this document is kept honest](#how-this-document-is-kept-honest) pins against the tables above,
+in both directions.
+
+The strip itself refuses rather than guesses. A PNG whose chunk framing cannot be walked to an IEND,
+or whose unwalkable trailing bytes carry `sceneworks:workflow`, is an error and not a copy: "here is
+your file without the workflow" answered with the original, or with a truncated file that does not
+decode, are both worse than saying no. The server route bounds what one request may cost — it serves
+the kept spans as views into the single buffer it read, behind a small semaphore and a size cap — and
+revalidates the stripped representation on its own ETag alone, because it shares a modification date
+with the full file and a date cannot tell the two apart.
+
+A one-time disclosure is shown the first time a generation is submitted while embedding is on. It
+is dismissible and never repeated; the "already told them" flag is `workflowEmbedNoticeSeen` in the
+same preference file, durable rather than browser-side because the desktop shell serves the UI from
+an origin that changes each launch. An absent flag means "not told", so an install upgrading into a
+build that embeds gets the notice once rather than never. The durable write retries and then reports
+its failure rather than swallowing it — a dropped PUT does not degrade to "saved locally" when the
+mirror is wiped every launch — and a dismissal in one browser tab carries to the others through the
+mirror's `storage` event, so "once" is per user rather than per tab.
 
 ## How this document is kept honest
 
@@ -589,6 +620,17 @@ code does not have fails, and a thing the code has that is not a row here fails 
 | `builder-fields` | The fields of the `AdvancedBuilder` struct, so a registry entry that grows a field a contributor is never told to fill fails. |
 | `rule-helpers` | The `const fn … -> AdvancedKeyRule` constructors in `workflow_share.rs`, so a helper this section does not mention fails. |
 | `lints` | Each named test exists in `crates/sceneworks-core/tests/workflow_share.rs`. |
+
+The web copy is pinned against the same blocks, so the summary a user reads before sharing cannot
+outrun the contract:
+
+| Claim in `apps/web/src/workflowEmbed.js` | Pinned against |
+| --- | --- |
+| `EMBEDDED_PROSE_FIELDS` — the fields that travel exactly as typed | `prose-fields`, both directions. |
+| `WORKFLOW_FIELDS_IN_FILE` — the "Also in the file" list | `envelope-fields` plus `advanced-shared` (prefixed `advanced.`), both directions. A new allow-listed setting cannot reach a shared image until someone decides, in the copy, what to say about it. |
+| `WORKFLOW_FIELDS_NOT_IN_FILE` — the "Not in the file" list | Every `advanced-withheld` key must appear, and **no** key it names may appear in either table above. That second half is the direction that is a leak rather than an omission: it fires the day a withheld key becomes shared and the paragraph goes on promising it stays home. |
+| `SAVE_WITHOUT_WORKFLOW_LABEL` | This document must name the control with the same string the UI does. |
+| `PRODUCER_URL` / `WORKFLOW_SHARE_DOC_URL` | The Rust `PRODUCER_URL`, whole; the doc link is derived from it rather than written out beside it. |
 
 Three claims outside a pinned block are checked too, because each had a way to drift silently:
 

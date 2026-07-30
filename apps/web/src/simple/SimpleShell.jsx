@@ -75,6 +75,8 @@ const PERSIST_DEBOUNCE_MS = 400;
 export function SimpleShell({
   accent,
   onAccentChange,
+  embedWorkflow = true,
+  onEmbedWorkflowChange,
   simpleDefault,
   onSimpleDefaultChange,
   onModeChange,
@@ -363,8 +365,10 @@ export function SimpleShell({
               {screen === "settings" ? (
                 <SimpleSettings
                   accent={accent}
+                  embedWorkflow={embedWorkflow}
                   lockedToSimple={lockedToSimple}
                   onAccentChange={onAccentChange}
+                  onEmbedWorkflowChange={onEmbedWorkflowChange}
                   onSimpleDefaultChange={onSimpleDefaultChange}
                   simpleDefault={simpleDefault}
                 />

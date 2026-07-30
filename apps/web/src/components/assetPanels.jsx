@@ -2,7 +2,8 @@ import React from "react";
 import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
-import { saveAssetAs, revealAsset } from "../assetActions.js";
+import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
 import {
   AssetMedia,
@@ -1118,6 +1119,19 @@ function FullscreenPreviewComponent({
       const items = [
         { key: "save-as", label: "Save As…", onSelect: () => saveAssetAs(displayedAsset) },
       ];
+      // sc-15953: a copy with the embedded recipe removed, for sharing an image without the
+      // prompt that made it. Offered only for PNGs, the one format the envelope rides in. The
+      // asset itself is untouched — this writes one copy differently, it does not clean the
+      // library, which is why the label says "Save a copy". The label is the shared constant so
+      // the menu, the button beside Save As and the settings copy that tells you to use it cannot
+      // name three different controls.
+      if (assetCanCarryWorkflow(displayedAsset)) {
+        items.push({
+          key: "save-as-without-workflow",
+          label: `${SAVE_WITHOUT_WORKFLOW_LABEL}…`,
+          onSelect: () => saveAssetAs(displayedAsset, { withoutWorkflow: true }),
+        });
+      }
       if (isDesktop) {
         items.push({ key: "reveal", label: "Reveal in Finder/Explorer", onSelect: () => revealAsset(displayedAsset) });
       }
@@ -1320,6 +1334,20 @@ function FullscreenPreviewComponent({
             <button onClick={() => saveAssetAs(displayedAsset)} type="button">
               Save As…
             </button>
+            {/* Its without-the-recipe sibling (sc-15953). The option existed only behind a
+                right-click, which makes "discoverable" untrue for the one action a user takes
+                specifically because they are about to send the file to someone else. PNGs only —
+                the envelope rides in no other format, and offering it elsewhere would imply the
+                file might be carrying one. */}
+            {assetCanCarryWorkflow(displayedAsset) ? (
+              <button
+                onClick={() => saveAssetAs(displayedAsset, { withoutWorkflow: true })}
+                title="Write one copy with the embedded recipe removed. The asset itself is left alone."
+                type="button"
+              >
+                {SAVE_WITHOUT_WORKFLOW_LABEL}…
+              </button>
+            ) : null}
             {/* Videos re-run from their recipe exactly as images do, seed and all (sc-12324) —
                 the affordance follows the recipe, not the media type. */}
             {hasRecordedRecipe ? (

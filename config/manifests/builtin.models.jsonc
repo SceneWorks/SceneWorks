@@ -1497,6 +1497,17 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
+      // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024²
+      // with the shipping base and strict-control providers. Base peaks were q4 17.821,
+      // q8 23.256, and bf16 31.981 GB; bf16 strict control raised the family high-water
+      // to 40.573 GB. The resident providers do not stage phases, so there is no honest
+      // sequentialPeakGb row. Packed q4/q8 strict-control loading is owned by sc-16170;
+      // those control cells remain unverified rather than borrowing the base measurements.
+      "candle": {
+        "minMemoryGb": 20,
+        "vramGbByTier": { "q4": 17.9, "q8": 23.3, "bf16": 40.6 },
+        "measured": true
+      },
       "ui": {
         // img2img reference-guided t2i (epic 8588 A4.5, sc-10193): base Z-Image is NOT in the worker's
         // z_image_turbo|z_image_edit reference arm, so this `ui.img2img` flag routes it straight through
@@ -4380,7 +4391,7 @@
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "85b8aa7afbfabafea43b7354f526ceb5133d99a3",
+            "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",
@@ -4398,7 +4409,7 @@
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "85b8aa7afbfabafea43b7354f526ceb5133d99a3",
+            "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",
@@ -6156,6 +6167,17 @@
         "minMemoryGb": 24,
         "quantize": 4,
         "repo": "SceneWorks/kolors-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024².
+      // Base peaks were q4 26.681, q8 30.372, and bf16 55.102 GB. The shipping bf16
+      // providers raised the family high-water to 63.658 GB for strict control and
+      // 61.343 GB for IP-Adapter. These resident providers do not stage phases, so no
+      // sequentialPeakGb row is declared. Packed q4/q8 conditioned loading is owned by
+      // sc-16171; its matrix cells remain unverified rather than borrowing base evidence.
+      "candle": {
+        "minMemoryGb": 29,
+        "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },
+        "measured": true
       },
       "ui": {
         "label": "Kolors",
