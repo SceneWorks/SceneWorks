@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
-import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
 import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -36,7 +36,7 @@ export function SimpleModelManager() {
     visibleWorkers = [],
   } = useAppContext();
   const { toast, openInAdvanced } = useSimpleUi();
-  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const hostMemory = useHostMemory();
   const [tab, setTab] = useState("image");
   // Which lane's memory evidence the rows quote. Same derivation as ImageStudio / SimpleImageStudio —
   // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
@@ -161,8 +161,10 @@ export function SimpleModelManager() {
         <p className="su-empty">No {TABS.find((entry) => entry.id === tab)?.label.toLowerCase()} entries in the catalog.</p>
       )}
 
-      {unifiedMemoryGb ? (
-        <p className="su-empty">This machine reports {unifiedMemoryGb.toFixed(0)} GB of usable memory.</p>
+      {hostMemory ? (
+        <p className="su-empty">
+          This machine reports {hostMemory.gb.toFixed(0)} GB of {hostMemory.kind} memory.
+        </p>
       ) : null}
     </div>
   );
