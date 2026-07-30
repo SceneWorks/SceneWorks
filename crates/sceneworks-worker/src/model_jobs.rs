@@ -232,6 +232,20 @@ pub(crate) async fn run_model_download_job(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    let calibration_opt_in = job
+        .payload
+        .get("memoryCalibrationProvenanceRequired")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let artifact_tree_stamp = if calibration_opt_in {
+        Some(resolved_files_tree_stamp(
+            &repo_dir.join("snapshots").join(&snapshot_revision),
+            &resolved_files,
+        )?)
+    } else {
+        None
+    };
+    let resolved_tier = download_payload_resolved_tier(&job.payload);
     write_model_download_receipt(
         &target_dir,
         &job.payload,
@@ -239,6 +253,10 @@ pub(crate) async fn run_model_download_job(
         &job.id,
         &resolved_files,
         Some(&snapshot_revision),
+        crate::imports::DownloadArtifactReceipt {
+            resolved_tier: resolved_tier.as_deref(),
+            tree_stamp: artifact_tree_stamp.as_deref(),
+        },
     )
     .await?;
 
@@ -456,6 +474,7 @@ pub(crate) async fn run_lora_download_job(
         &job.id,
         &resolved_files,
         Some(&resolved_revision),
+        crate::imports::DownloadArtifactReceipt::default(),
     )
     .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
@@ -1620,6 +1639,56 @@ pub(crate) async fn run_model_convert_job(
     if plan_is_ltx {
         provision_ltx_eros_gemma(api, settings, job).await?;
     }
+    let calibration_opt_in = job
+        .payload
+        .get("memoryCalibrationProvenanceRequired")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if calibration_opt_in {
+        let source_revision = checkpoint_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|revision| !revision.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "converted artifact source {} has no immutable snapshot revision",
+                    checkpoint_dir.display()
+                ))
+            })?;
+        let tier_dirs = ["q4", "q8", "nvfp4", "bf16", "fp32"]
+            .into_iter()
+            .filter_map(|tier| {
+                let dir = final_dir.join(tier);
+                dir.is_dir().then_some((tier, dir))
+            })
+            .collect::<Vec<_>>();
+        if tier_dirs.is_empty() {
+            let resolved_tier = match quantize_bits {
+                Some(bits) if bits <= 4 => "q4",
+                Some(_) => "q8",
+                None => "bf16",
+            };
+            let artifact_variant = format!("converted-{model_id}-{resolved_tier}");
+            write_app_managed_artifact_receipt(
+                &final_dir,
+                &source_repo,
+                source_revision,
+                &artifact_variant,
+                resolved_tier,
+            )?;
+        } else {
+            for (tier, tier_dir) in tier_dirs {
+                let artifact_variant = format!("converted-{model_id}-{tier}");
+                write_app_managed_artifact_receipt(
+                    &tier_dir,
+                    &source_repo,
+                    source_revision,
+                    &artifact_variant,
+                    tier,
+                )?;
+            }
+        }
+    }
 
     let mut result = JsonObject::new();
     result.insert("modelId".to_owned(), Value::String(model_id));
@@ -2025,6 +2094,681 @@ pub(crate) fn resolve_optional_component(
 /// when every recorded file exists in one snapshot directory; a torn set returns `None` atomically.
 /// `model_id` narrows primary-model receipts, while the repo-wide fallback also covers co-requisite
 /// downloads whose marker directory is not known to the loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedArtifactIdentity {
+    pub(crate) repository: String,
+    pub(crate) revision: String,
+    pub(crate) variant: String,
+    pub(crate) fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedArtifactProvenance {
+    pub(crate) identity: ResolvedArtifactIdentity,
+    pub(crate) fixed_artifact_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedWeights {
+    pub(crate) path: PathBuf,
+    pub(crate) provenance: Option<ResolvedArtifactProvenance>,
+}
+
+const ARTIFACT_PROVENANCE_MARKER: &str = ".sceneworks-artifact-provenance.json";
+const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppManagedArtifactReceipt {
+    schema_version: u32,
+    repository: String,
+    revision: String,
+    variant: String,
+    tier: String,
+    resolved_path_fingerprint: String,
+    tree_stamp: String,
+}
+
+pub(crate) fn resolved_artifact_fingerprint(
+    repository: &str,
+    revision: &str,
+    variant: &str,
+) -> String {
+    format!("{repository}@{revision}:{variant}")
+}
+
+fn supported_artifact_tier(tier: &str) -> Option<String> {
+    matches!(tier, "q4" | "q8" | "nvfp4" | "bf16" | "fp32").then(|| tier.to_owned())
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn receipt_tier(variant: &str) -> Option<String> {
+    supported_artifact_tier(variant.rsplit('-').next().unwrap_or(variant))
+}
+
+pub(crate) fn download_payload_resolved_tier(payload: &JsonObject) -> Option<String> {
+    payload
+        .get("variant")
+        .and_then(Value::as_str)
+        .and_then(receipt_tier)
+}
+
+fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        active_dirs: &mut Vec<PathBuf>,
+        files: &mut Vec<PathBuf>,
+    ) -> WorkerResult<()> {
+        let canonical_dir = std::fs::canonicalize(dir)?;
+        if active_dirs.contains(&canonical_dir) {
+            return Ok(());
+        }
+        active_dirs.push(canonical_dir);
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|_| {
+                WorkerError::InvalidPayload(format!(
+                    "artifact entry {} escaped {}",
+                    path.display(),
+                    root.display()
+                ))
+            })?;
+            if relative == Path::new(ARTIFACT_PROVENANCE_MARKER) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_dir() {
+                visit(root, &path, active_dirs, files)?;
+            } else {
+                files.push(path.clone());
+                if metadata.file_type().is_symlink() && std::fs::metadata(&path)?.is_dir() {
+                    // Converted layouts legitimately expose component directories through links
+                    // into a shared cache. Walk the loader-visible alias while retaining the link
+                    // itself in the digest. `active_dirs` breaks ancestor cycles without suppressing
+                    // a second independent alias of the same component.
+                    visit(root, &path, active_dirs, files)?;
+                }
+            }
+        }
+        active_dirs.pop();
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut Vec::new(), &mut files)?;
+    files.sort_by(|left, right| {
+        left.strip_prefix(root)
+            .unwrap_or(left)
+            .cmp(right.strip_prefix(root).unwrap_or(right))
+    });
+    Ok(files)
+}
+
+fn update_metadata_stamp(digest: &mut Sha256, metadata: &std::fs::Metadata) {
+    digest.update(metadata.len().to_le_bytes());
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    digest.update(
+        modified
+            .map_or(0, |duration| duration.as_secs())
+            .to_le_bytes(),
+    );
+    digest.update(
+        modified
+            .map_or(0, |duration| duration.subsec_nanos())
+            .to_le_bytes(),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.dev().to_le_bytes());
+        digest.update(metadata.ino().to_le_bytes());
+        digest.update(metadata.ctime().to_le_bytes());
+        digest.update(metadata.ctime_nsec().to_le_bytes());
+    }
+}
+
+fn artifact_tree_stamp(root: &Path) -> WorkerResult<String> {
+    let mut digest = Sha256::new();
+    for path in artifact_files(root)? {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            WorkerError::InvalidPayload(format!(
+                "artifact entry {} escaped {}",
+                path.display(),
+                root.display()
+            ))
+        })?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        update_metadata_stamp(&mut digest, &metadata);
+        if metadata.file_type().is_symlink() {
+            digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
+            digest.update(b"followed-target");
+            update_metadata_stamp(&mut digest, &std::fs::metadata(&path)?);
+        }
+        digest.update([0xff]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+pub(crate) fn resolved_files_tree_stamp(
+    root: &Path,
+    files: &[impl AsRef<str>],
+) -> WorkerResult<String> {
+    let mut names = files.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    names.sort_unstable();
+    let mut digest = Sha256::new();
+    for name in names {
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "artifact receipt contains unsafe resolved file {name:?}"
+            )));
+        }
+        let path = root.join(relative);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        update_metadata_stamp(&mut digest, &metadata);
+        if metadata.file_type().is_symlink() {
+            digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
+            digest.update(b"followed-target");
+            update_metadata_stamp(&mut digest, &std::fs::metadata(&path)?);
+        }
+        digest.update([0xff]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
+    use std::io::Read;
+
+    let mut digest = Sha256::new();
+    for path in artifact_files(root)? {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            WorkerError::InvalidPayload(format!(
+                "artifact entry {} escaped {}",
+                path.display(),
+                root.display()
+            ))
+        })?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        if metadata.file_type().is_symlink() {
+            digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
+            if std::fs::metadata(&path)?.is_file() {
+                let mut file = std::fs::File::open(&path)?;
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..read]);
+                }
+            }
+        } else if metadata.is_file() {
+            let mut file = std::fs::File::open(&path)?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+            }
+        }
+        digest.update([0xff]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+/// Write worker-owned provenance while an app-managed artifact is being installed or converted.
+/// The strong content digest is paid once on that cold path. Generation validates only the
+/// metadata tree stamp, keeping the admission hot path O(file-count), not O(model-bytes).
+pub(crate) fn write_app_managed_artifact_receipt(
+    root: &Path,
+    repository: &str,
+    revision: &str,
+    variant: &str,
+    tier: &str,
+) -> WorkerResult<ResolvedArtifactProvenance> {
+    if [repository, revision, variant]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(WorkerError::InvalidPayload(
+            "app-managed artifact provenance requires nonempty repository, revision, and variant"
+                .to_owned(),
+        ));
+    }
+    let tier = supported_artifact_tier(tier).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("unsupported app-managed artifact tier {tier:?}"))
+    })?;
+    let fingerprint = artifact_content_fingerprint(root)?;
+    let tree_stamp = artifact_tree_stamp(root)?;
+    let receipt = AppManagedArtifactReceipt {
+        schema_version: ARTIFACT_PROVENANCE_SCHEMA_VERSION,
+        repository: repository.to_owned(),
+        revision: revision.to_owned(),
+        variant: variant.to_owned(),
+        tier: tier.clone(),
+        resolved_path_fingerprint: fingerprint.clone(),
+        tree_stamp,
+    };
+    let marker = root.join(ARTIFACT_PROVENANCE_MARKER);
+    let temporary = root.join(format!("{ARTIFACT_PROVENANCE_MARKER}.tmp"));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&receipt)?)?;
+    std::fs::rename(temporary, marker)?;
+    Ok(ResolvedArtifactProvenance {
+        identity: ResolvedArtifactIdentity {
+            repository: repository.to_owned(),
+            revision: revision.to_owned(),
+            variant: variant.to_owned(),
+            fingerprint,
+        },
+        fixed_artifact_tier: Some(tier),
+    })
+}
+
+/// Read only worker-owned app-managed provenance and prove that the actual file tree is still the
+/// one stamped at install/convert time. Request and manifest payload provenance are never consulted.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn app_managed_artifact_provenance(
+    root: &Path,
+) -> WorkerResult<Option<ResolvedArtifactProvenance>> {
+    let marker = root.join(ARTIFACT_PROVENANCE_MARKER);
+    let bytes = match std::fs::read(&marker) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let receipt: AppManagedArtifactReceipt = serde_json::from_slice(&bytes).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "invalid app-managed artifact provenance at {}: {error}",
+            marker.display()
+        ))
+    })?;
+    if receipt.schema_version != ARTIFACT_PROVENANCE_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    if [&receipt.repository, &receipt.revision, &receipt.variant]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        || !is_sha256_fingerprint(&receipt.resolved_path_fingerprint)
+    {
+        return Ok(None);
+    }
+    let Some(tier) = supported_artifact_tier(&receipt.tier) else {
+        return Ok(None);
+    };
+    if artifact_tree_stamp(root)? != receipt.tree_stamp {
+        return Ok(None);
+    }
+    Ok(Some(ResolvedArtifactProvenance {
+        identity: ResolvedArtifactIdentity {
+            repository: receipt.repository,
+            revision: receipt.revision,
+            variant: receipt.variant,
+            fingerprint: receipt.resolved_path_fingerprint,
+        },
+        fixed_artifact_tier: Some(tier),
+    }))
+}
+
+#[cfg(test)]
+mod artifact_provenance_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn app_managed_receipt_detects_same_path_mutation_and_rejects_bad_identity() {
+        let data = tempfile::tempdir().expect("artifact dir");
+        let weights = data.path().join("weights.safetensors");
+        std::fs::write(&weights, b"before").expect("weights");
+        let written = write_app_managed_artifact_receipt(
+            data.path(),
+            "SceneWorks/local",
+            "immutable-revision",
+            "converted-q4",
+            "q4",
+        )
+        .expect("receipt");
+        assert_eq!(
+            app_managed_artifact_provenance(data.path()).expect("read"),
+            Some(written)
+        );
+
+        std::fs::write(&weights, b"after-with-different-size").expect("mutate same path");
+        assert_eq!(
+            app_managed_artifact_provenance(data.path()).expect("read after mutation"),
+            None,
+            "metadata tree-stamp drift must invalidate same-path artifact replacement"
+        );
+
+        let no_revision = tempfile::tempdir().expect("invalid artifact dir");
+        std::fs::write(no_revision.path().join("weights.safetensors"), b"weights")
+            .expect("weights");
+        assert!(write_app_managed_artifact_receipt(
+            no_revision.path(),
+            "SceneWorks/local",
+            "",
+            "converted-q4",
+            "q4",
+        )
+        .expect_err("an unresolved source revision cannot publish provenance")
+        .to_string()
+        .contains("nonempty"));
+        assert!(
+            !no_revision.path().join(ARTIFACT_PROVENANCE_MARKER).exists(),
+            "failed receipt creation must not publish a marker"
+        );
+    }
+
+    #[test]
+    fn app_managed_receipt_reader_rejects_malformed_strong_fingerprint() {
+        let data = tempfile::tempdir().expect("artifact dir");
+        std::fs::write(data.path().join("weights.safetensors"), b"weights").expect("weights");
+        write_app_managed_artifact_receipt(
+            data.path(),
+            "SceneWorks/local",
+            "revision",
+            "converted-q8",
+            "q8",
+        )
+        .expect("receipt");
+        let marker = data.path().join(ARTIFACT_PROVENANCE_MARKER);
+        let mut receipt: Value =
+            serde_json::from_slice(&std::fs::read(&marker).expect("marker")).expect("json");
+        receipt["resolvedPathFingerprint"] = json!("sha256:NOT-A-DIGEST");
+        std::fs::write(&marker, serde_json::to_vec(&receipt).expect("json")).expect("marker");
+        assert_eq!(
+            app_managed_artifact_provenance(data.path()).expect("read"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_managed_symlink_receipt_hashes_and_stamps_the_followed_target() {
+        use std::os::unix::fs::symlink;
+
+        let data = tempfile::tempdir().expect("data dir");
+        let artifact = data.path().join("artifact");
+        let blob = data.path().join("blob.safetensors");
+        std::fs::create_dir_all(&artifact).expect("artifact");
+        std::fs::write(&blob, b"original-blob").expect("blob");
+        symlink(&blob, artifact.join("weights.safetensors")).expect("symlink");
+        let written = write_app_managed_artifact_receipt(
+            &artifact,
+            "SceneWorks/local",
+            "revision",
+            "converted-q4",
+            "q4",
+        )
+        .expect("receipt");
+        assert_eq!(
+            app_managed_artifact_provenance(&artifact).expect("read"),
+            Some(written)
+        );
+        std::fs::write(&blob, b"mutated-underlying-blob").expect("mutate target");
+        assert_eq!(
+            app_managed_artifact_provenance(&artifact).expect("read after mutation"),
+            None,
+            "unchanged link metadata/path must not hide followed-target mutation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_managed_receipt_walks_symlinked_directories_and_terminates_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let data = tempfile::tempdir().expect("data dir");
+        let artifact = data.path().join("artifact");
+        let shared_component = data.path().join("shared-component");
+        std::fs::create_dir_all(&artifact).expect("artifact");
+        std::fs::create_dir_all(shared_component.join("nested")).expect("component");
+        let weights = shared_component.join("nested/weights.safetensors");
+        std::fs::write(&weights, b"original-component").expect("weights");
+        symlink(&shared_component, artifact.join("text_encoder")).expect("component symlink");
+        symlink(
+            &shared_component,
+            shared_component.join("cycle-to-component"),
+        )
+        .expect("cycle symlink");
+
+        let written = write_app_managed_artifact_receipt(
+            &artifact,
+            "SceneWorks/local",
+            "revision",
+            "converted-q8",
+            "q8",
+        )
+        .expect("cycle-safe receipt");
+        assert_eq!(
+            app_managed_artifact_provenance(&artifact).expect("read"),
+            Some(written),
+            "a shipped-style symlinked component directory must be provenance-capable"
+        );
+
+        std::fs::write(&weights, b"mutated-component-beneath-the-same-link")
+            .expect("mutate component");
+        assert_eq!(
+            app_managed_artifact_provenance(&artifact).expect("read after mutation"),
+            None,
+            "mutation beneath an unchanged directory symlink must invalidate provenance"
+        );
+    }
+
+    fn write_hf_receipt(
+        data_dir: &Path,
+        repo: &str,
+        model_id: &str,
+        revision: &str,
+        variant: &str,
+        resolved_tier: Option<&str>,
+        files: &[&str],
+    ) {
+        let marker = data_dir.join("models").join(safe_download_dir(model_id));
+        std::fs::create_dir_all(&marker).expect("marker dir");
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .expect("cache")
+            .join("snapshots")
+            .join(revision);
+        let artifact_tree_stamp =
+            resolved_files_tree_stamp(&snapshot, files).expect("artifact stamp");
+        std::fs::write(
+            marker.join(INSTALL_MARKER),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "repo": repo,
+                "modelId": model_id,
+                "variant": variant,
+                "resolvedTier": resolved_tier,
+                "snapshotRevision": revision,
+                "resolvedFiles": files,
+                "artifactTreeStamp": artifact_tree_stamp,
+            }))
+            .expect("receipt json"),
+        )
+        .expect("receipt");
+    }
+
+    #[test]
+    fn hf_receipt_handoff_covers_tiered_and_flat_default_snapshots() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+
+        let tiered_repo = "owner/tiered";
+        let tiered = huggingface_repo_cache_path(data.path(), tiered_repo)
+            .expect("cache")
+            .join("snapshots/rev-tiered/q4");
+        std::fs::create_dir_all(&tiered).expect("tier dir");
+        std::fs::write(tiered.join("weights.safetensors"), b"q4").expect("weights");
+        write_hf_receipt(
+            data.path(),
+            tiered_repo,
+            "tiered-model",
+            "rev-tiered",
+            "q4",
+            Some("q4"),
+            &["q4/weights.safetensors"],
+        );
+        let tiered_resolved =
+            huggingface_receipt_weights(data.path(), tiered_repo, Some("tiered-model"), Some("q4"))
+                .expect("tiered receipt");
+        assert_eq!(tiered_resolved.path, tiered);
+        let tiered_provenance = tiered_resolved.provenance.expect("tiered provenance");
+        assert_eq!(tiered_provenance.fixed_artifact_tier.as_deref(), Some("q4"));
+        assert_eq!(tiered_provenance.identity.variant, "q4");
+        std::fs::write(
+            tiered.join("weights.safetensors"),
+            b"q4-mutated-at-same-path",
+        )
+        .expect("mutate tiered weights");
+        assert_eq!(
+            huggingface_receipt_weights(data.path(), tiered_repo, Some("tiered-model"), Some("q4"))
+                .expect("path remains usable")
+                .provenance,
+            None,
+            "same-snapshot content-state drift must invalidate HF calibration provenance"
+        );
+
+        let flat_repo = "owner/flat";
+        let flat = huggingface_repo_cache_path(data.path(), flat_repo)
+            .expect("cache")
+            .join("snapshots/rev-flat");
+        std::fs::create_dir_all(&flat).expect("flat snapshot");
+        std::fs::write(flat.join("weights.safetensors"), b"flat").expect("weights");
+        write_hf_receipt(
+            data.path(),
+            flat_repo,
+            "flat-model",
+            "rev-flat",
+            "default",
+            Some("q8"),
+            &["weights.safetensors"],
+        );
+        let flat_resolved = huggingface_receipt_weights(
+            data.path(),
+            flat_repo,
+            Some("flat-model"),
+            Some("default"),
+        )
+        .expect("flat receipt");
+        assert_eq!(flat_resolved.path, flat);
+        let flat_provenance = flat_resolved.provenance.expect("flat provenance");
+        assert_eq!(flat_provenance.fixed_artifact_tier.as_deref(), Some("q8"));
+        assert_eq!(flat_provenance.identity.variant, "default");
+        assert_eq!(flat_provenance.identity.revision, "rev-flat");
+
+        let marker = data
+            .path()
+            .join("models")
+            .join(safe_download_dir("flat-model"))
+            .join(INSTALL_MARKER);
+        let mut unknown_tier: Value =
+            serde_json::from_slice(&std::fs::read(&marker).expect("marker")).expect("json");
+        unknown_tier
+            .as_object_mut()
+            .expect("receipt object")
+            .remove("resolvedTier");
+        std::fs::write(&marker, serde_json::to_vec(&unknown_tier).expect("json")).expect("marker");
+        assert_eq!(
+            huggingface_receipt_weights(
+                data.path(),
+                flat_repo,
+                Some("flat-model"),
+                Some("default")
+            )
+            .expect("flat path remains usable")
+            .provenance
+            .and_then(|provenance| provenance.fixed_artifact_tier),
+            None,
+            "an old flat/default receipt leaves artifact tier unconstrained"
+        );
+
+        let mut mismatched = unknown_tier;
+        mismatched["snapshotRevision"] = json!("different-revision");
+        std::fs::write(&marker, serde_json::to_vec(&mismatched).expect("json")).expect("marker");
+        assert!(
+            huggingface_receipt_weights(
+                data.path(),
+                flat_repo,
+                Some("flat-model"),
+                Some("default")
+            )
+            .is_none(),
+            "receipt/snapshot revision mismatch must not manufacture provenance"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hf_tree_stamp_detects_in_place_blob_mutation_beneath_unchanged_snapshot_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "owner/symlinked";
+        let cache = huggingface_repo_cache_path(data.path(), repo).expect("cache");
+        let blob = cache.join("blobs/blob-id");
+        let tier = cache.join("snapshots/revision/q4");
+        std::fs::create_dir_all(blob.parent().expect("blob parent")).expect("blobs");
+        std::fs::create_dir_all(&tier).expect("tier");
+        std::fs::write(&blob, b"original-blob").expect("blob");
+        symlink("../../../blobs/blob-id", tier.join("weights.safetensors")).expect("snapshot link");
+        write_hf_receipt(
+            data.path(),
+            repo,
+            "symlinked-model",
+            "revision",
+            "q4",
+            Some("q4"),
+            &["q4/weights.safetensors"],
+        );
+        assert!(huggingface_receipt_weights(
+            data.path(),
+            repo,
+            Some("symlinked-model"),
+            Some("q4")
+        )
+        .expect("receipt path")
+        .provenance
+        .is_some());
+        std::fs::write(&blob, b"mutated-underlying-blob").expect("mutate blob in place");
+        assert_eq!(
+            huggingface_receipt_weights(data.path(), repo, Some("symlinked-model"), Some("q4"))
+                .expect("path remains usable")
+                .provenance,
+            None
+        );
+    }
+}
+
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights_dir(
     data_dir: &Path,
@@ -2032,6 +2776,16 @@ pub(crate) fn huggingface_receipt_weights_dir(
     model_id: Option<&str>,
     variant: Option<&str>,
 ) -> Option<PathBuf> {
+    huggingface_receipt_weights(data_dir, repo, model_id, variant).map(|resolved| resolved.path)
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn huggingface_receipt_weights(
+    data_dir: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+    variant: Option<&str>,
+) -> Option<ResolvedWeights> {
     let models_dir = data_dir.join("models");
     let repo_marker = models_dir
         .join(safe_download_dir(repo))
@@ -2078,7 +2832,7 @@ fn receipt_weights_dir_from_marker(
     repo: &str,
     model_id: Option<&str>,
     variant: Option<&str>,
-) -> Option<PathBuf> {
+) -> Option<ResolvedWeights> {
     #[cfg(test)]
     RECEIPT_MARKERS_READ.with(|count| count.set(count.get() + 1));
     let bytes = std::fs::read(marker).ok()?;
@@ -2142,16 +2896,64 @@ fn receipt_weights_dir_from_marker(
             continue;
         }
         if let Some(snapshot) = matching.into_iter().next() {
+            let receipt_tree_stamp = receipt
+                .get("artifactTreeStamp")
+                .and_then(Value::as_str)
+                .filter(|stamp| is_sha256_fingerprint(stamp));
+            let tree_stamp_matches = receipt_tree_stamp.is_some_and(|expected| {
+                resolved_files_tree_stamp(&snapshot, &files).is_ok_and(|actual| actual == expected)
+            });
             // Tier receipts are self-contained below a tier directory. Only descend when every
             // file belongs to that same recorded tier; otherwise return the snapshot root.
             if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
                 let tier = snapshot.join(variant);
                 let prefix = format!("{variant}/");
                 if files.iter().all(|file| file.starts_with(&prefix)) && tier.is_dir() {
-                    return Some(tier);
+                    let revision = snapshot.file_name()?.to_str()?.to_owned();
+                    let variant = variant.to_owned();
+                    return Some(ResolvedWeights {
+                        path: tier,
+                        provenance: tree_stamp_matches.then(|| ResolvedArtifactProvenance {
+                            identity: ResolvedArtifactIdentity {
+                                repository: repo.to_owned(),
+                                revision: revision.clone(),
+                                variant: variant.clone(),
+                                fingerprint: resolved_artifact_fingerprint(
+                                    repo, &revision, &variant,
+                                ),
+                            },
+                            fixed_artifact_tier: receipt_tier(&variant).or_else(|| {
+                                receipt
+                                    .get("resolvedTier")
+                                    .and_then(Value::as_str)
+                                    .and_then(supported_artifact_tier)
+                            }),
+                        }),
+                    });
                 }
             }
-            return Some(snapshot);
+            let revision = snapshot.file_name()?.to_str()?.to_owned();
+            let variant = receipt
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .to_owned();
+            return Some(ResolvedWeights {
+                path: snapshot,
+                provenance: tree_stamp_matches.then(|| ResolvedArtifactProvenance {
+                    identity: ResolvedArtifactIdentity {
+                        repository: repo.to_owned(),
+                        revision: revision.clone(),
+                        variant: variant.clone(),
+                        fingerprint: resolved_artifact_fingerprint(repo, &revision, &variant),
+                    },
+                    fixed_artifact_tier: receipt
+                        .get("resolvedTier")
+                        .and_then(Value::as_str)
+                        .and_then(supported_artifact_tier)
+                        .or_else(|| receipt_tier(&variant)),
+                }),
+            });
         }
     }
     None

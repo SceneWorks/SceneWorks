@@ -1129,6 +1129,208 @@ pub(crate) fn resolve_weights_dir(
     Ok(snapshot)
 }
 
+#[cfg(target_os = "macos")]
+fn resolved_mlx_artifact_tier(
+    weights_dir: &Path,
+    quant_bits: Option<i64>,
+) -> Option<&'static str> {
+    tier_key_from_resolved_dir(weights_dir).or_else(|| {
+        quant_bits.map(|bits| if bits <= 4 { "q4" } else { "q8" })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn fixed_artifact_tier_matches(
+    fixed_artifact_tier: Option<&str>,
+    effective_tier: Option<&str>,
+) -> bool {
+    match (fixed_artifact_tier, effective_tier) {
+        (Some(fixed), Some(actual)) => fixed == actual,
+        _ => true,
+    }
+}
+
+/// Resolve immutable provenance beside the exact artifact the MLX loader will open. HF identity is
+/// supplied by a completed download receipt; local/converted identity is supplied only by the
+/// worker-owned install receipt. Request and manifest provenance fields are intentionally ignored.
+#[cfg(target_os = "macos")]
+fn resolved_mlx_artifact_provenance(
+    request: &ImageRequest,
+    settings: &Settings,
+    repo: &str,
+    weights_dir: &Path,
+    effective_tier: Option<&'static str>,
+) -> WorkerResult<Option<crate::model_jobs::ResolvedArtifactProvenance>> {
+    if let Some(model_path) = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let managed_root = resolve_app_managed_model_dir(settings, model_path, "Image modelPath")?;
+        let resolved_weights_dir = std::fs::canonicalize(weights_dir)?;
+        if !resolved_weights_dir.starts_with(&managed_root) {
+            return Ok(None);
+        }
+        let provenance =
+            crate::model_jobs::app_managed_artifact_provenance(&resolved_weights_dir)?;
+        return Ok(provenance.and_then(|mut provenance| {
+            if provenance.fixed_artifact_tier.is_none() {
+                provenance.fixed_artifact_tier =
+                    tier_key_from_resolved_dir(&resolved_weights_dir).map(str::to_owned);
+            }
+            let matches = fixed_artifact_tier_matches(
+                provenance.fixed_artifact_tier.as_deref(),
+                effective_tier,
+            );
+            matches.then_some(provenance)
+        }));
+    }
+
+    let requested_variant = requested_receipt_variant(request);
+    let mut variants = vec![requested_variant, effective_tier.map(str::to_owned), None];
+    variants.dedup();
+    for variant in variants {
+        let Some(resolved) = crate::model_jobs::huggingface_receipt_weights(
+            &settings.data_dir,
+            repo,
+            Some(&request.model),
+            variant.as_deref(),
+        ) else {
+            continue;
+        };
+        if !weights_dir.starts_with(&resolved.path) {
+            continue;
+        }
+        if let Some(mut provenance) = resolved.provenance {
+            if provenance.fixed_artifact_tier.is_none() {
+                provenance.fixed_artifact_tier =
+                    tier_key_from_resolved_dir(weights_dir).map(str::to_owned);
+            }
+            if fixed_artifact_tier_matches(
+                provenance.fixed_artifact_tier.as_deref(),
+                effective_tier,
+            ) {
+                return Ok(Some(provenance));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod resolved_artifact_provenance_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    fn request(model_path: &Path, spoofed_tier: &str) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "model": "fixture_model",
+                "advanced": {
+                    "modelPath": model_path,
+                    "modelPathProvenance": {
+                        "repository": "attacker/spoof",
+                        "revision": "attacker",
+                        "variant": "attacker",
+                        "tier": spoofed_tier,
+                        "resolvedPathFingerprint": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    }
+                }
+            })
+            .as_object()
+            .expect("request object"),
+        )
+    }
+
+    #[test]
+    fn local_resolver_uses_only_worker_receipt_and_requires_its_exact_tier() {
+        let data = tempfile::tempdir().expect("data dir");
+        let installed = data.path().join("models/mlx/fixture/q4");
+        std::fs::create_dir_all(&installed).expect("artifact dir");
+        std::fs::write(installed.join("weights.safetensors"), b"trusted").expect("weights");
+        let written = crate::model_jobs::write_app_managed_artifact_receipt(
+            &installed,
+            "SceneWorks/fixture",
+            "c0ffee",
+            "converted-fixture-q4",
+            "q4",
+        )
+        .expect("worker receipt");
+        let settings = settings(data.path());
+        let spoofed = request(&installed, "q8");
+
+        assert_eq!(
+            resolved_mlx_artifact_provenance(
+                &spoofed,
+                &settings,
+                "ignored/repo",
+                &installed,
+                Some("q4")
+            )
+            .expect("resolver"),
+            Some(written),
+            "request-supplied provenance must not replace the worker receipt"
+        );
+        assert_eq!(
+            resolved_mlx_artifact_provenance(
+                &spoofed,
+                &settings,
+                "ignored/repo",
+                &installed,
+                Some("q8")
+            )
+            .expect("resolver"),
+            None,
+            "the trusted q4 receipt must never be rewritten into a q8 identity"
+        );
+
+        let unstamped = data.path().join("models/mlx/unstamped/q8");
+        std::fs::create_dir_all(&unstamped).expect("unstamped artifact");
+        std::fs::write(unstamped.join("weights.safetensors"), b"untrusted").expect("weights");
+        assert_eq!(
+            resolved_mlx_artifact_provenance(
+                &request(&unstamped, "q8"),
+                &settings,
+                "ignored/repo",
+                &unstamped,
+                Some("q8")
+            )
+            .expect("resolver"),
+            None,
+            "a spoofed payload cannot manufacture missing worker-owned provenance"
+        );
+    }
+}
+
 /// Models that ship the standard SceneWorks quant-matrix turnkey layout: self-contained `q4/`
 /// (manifest default) + `q8/` + `bf16/` subdirs, each a complete `from_snapshot`-loadable tree
 /// (packed or dense `transformer/` + the dense text encoder(s)/VAE/tokenizer). Registering a model
@@ -4609,6 +4811,24 @@ async fn generate_stream(
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
+    let calibration_opt_in = request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("calibrations"))
+        .and_then(Value::as_array)
+        .is_some_and(|calibrations| !calibrations.is_empty());
+    let resolved_artifact = if calibration_opt_in {
+        let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+        resolved_mlx_artifact_provenance(
+            request,
+            settings,
+            &repo,
+            &weights_dir,
+            effective_tier,
+        )?
+    } else {
+        None
+    };
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -4624,6 +4844,7 @@ async fn generate_stream(
         &request.model,
         &spec,
         Some(&request.model_manifest_entry),
+        resolved_artifact,
     );
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
