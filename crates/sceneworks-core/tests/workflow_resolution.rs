@@ -466,6 +466,45 @@ fn a_blank_lora_label_matches_nothing() {
 }
 
 #[test]
+fn an_envelope_that_names_no_model_says_so_rather_than_quoting_an_empty_slug() {
+    // The user-facing half of the blank-slug guard. There is no slug to have missed with, so the
+    // generic sentence would render "No model matching `` is in this install's catalog" — which
+    // reads to a person as a bug in the reader rather than as a fact about the file.
+    let report = build_resolution_report(
+        &envelope(json!({ "model": "C:\\models\\theirs\\weights.safetensors" })),
+        &StaticCatalogs::default(),
+    );
+    assert_eq!(
+        report.model.slug, "",
+        "the parser scrubs a path-shaped model"
+    );
+    assert_eq!(report.model.state, RequirementState::Missing);
+    assert!(
+        !report.model.detail.contains("``"),
+        "an empty slug must not be quoted back at the user: {}",
+        report.model.detail
+    );
+    assert!(
+        report
+            .model
+            .detail
+            .starts_with("This image does not name a model."),
+        "detail: {}",
+        report.model.detail
+    );
+    // A slug that IS present keeps the sentence that names it.
+    let named = build_resolution_report(
+        &envelope(json!({ "model": "krea_2_turbo" })),
+        &StaticCatalogs::default(),
+    );
+    assert!(
+        named.model.detail.contains("`krea_2_turbo`"),
+        "detail: {}",
+        named.model.detail
+    );
+}
+
+#[test]
 fn nothing_resolves_to_something_the_envelope_did_not_name() {
     // The substitution sweep, in one place: every near-miss shape that could plausibly tempt a
     // match. A resolved requirement must carry a `catalogId` the envelope's own label maps to,

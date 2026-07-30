@@ -668,10 +668,11 @@ fn classify_model(slug: &str, catalogs: &dyn WorkflowCatalogs) -> ModelRequireme
     // `model` to the empty string, and consulting the catalog with it once resolved against an
     // id-less catalog row — reporting a model the envelope never named as "installed on this
     // machine". The catalog is not asked at all rather than being asked a question with no answer.
-    let entry = if slug.trim().is_empty() {
-        None
-    } else {
+    let names_a_model = !slug.trim().is_empty();
+    let entry = if names_a_model {
         catalogs.model(slug)
+    } else {
+        None
     };
     let state = state_for(entry.as_ref());
     let install = install_for(entry.as_ref(), state);
@@ -689,6 +690,16 @@ fn classify_model(slug: &str, catalogs: &dyn WorkflowCatalogs) -> ModelRequireme
             "{label} is in the model catalog but this install has no way to fetch it, so this \
              workflow cannot be reproduced here."
         ),
+        // The envelope named no model AT ALL. `workflow_share` reduces an unshareable value — a
+        // local file path, an over-long label — to the empty string, so there is no slug to have
+        // missed with. "No model matching ``" would report a catalog miss for something that was
+        // never a catalog key, and it reads to a user like a bug in the reader.
+        RequirementState::Missing | RequirementState::UserSupplied if !names_a_model => {
+            "This image does not name a model. The sender's model was a local file path or was \
+             otherwise not shareable, so it was left out of the file and the recipe cannot be \
+             reproduced here."
+                .to_owned()
+        }
         RequirementState::Missing | RequirementState::UserSupplied => format!(
             "No model matching `{slug}` is in this install's catalog, so this workflow cannot be \
              reproduced here."
