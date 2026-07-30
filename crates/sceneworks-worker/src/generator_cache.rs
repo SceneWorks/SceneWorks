@@ -256,10 +256,10 @@ pub(crate) fn clamp_wired_limit(requested: usize, device_ceiling: usize) -> usiz
 /// reaching it MLX frees its cache and waits for in-flight GPU work to drain instead of climbing —
 /// so a limit set *below* physical RAM is exactly the mechanism that keeps the pressure recoverable.
 ///
-/// The derived default is `total − OS_RESERVE_GB`, reusing the fit gate's own OS floor
-/// ([`crate::mlx_fit_gate::OS_RESERVE_GB`]) rather than a second, independent number. That agreement
+/// The derived default is `total − legacy_unified_reserve(total)`, reusing the fit gate's typed
+/// fallback policy rather than a second, independent number. That agreement
 /// is load-bearing in both directions: the fit gate's weights-fit floor (sc-12179, GitHub #1544)
-/// admits a model whose weights fit `budget − OS_RESERVE_GB`, so a runtime ceiling derived the same
+/// admits a model whose weights fit the same legacy ceiling, so a runtime ceiling derived the same
 /// way can never refuse to hold a tier the gate just admitted. On an 8 GB Mac that is a 6 GiB
 /// ceiling, which still clears the 5.49 GiB z-image-turbo q4 baseline the floor is anchored on.
 ///
@@ -275,7 +275,9 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
     let Some(total) = total_unified_bytes else {
         return 0;
     };
-    let reserve = (crate::mlx_fit_gate::OS_RESERVE_GB * crate::fit_gate::BYTES_PER_GIB) as u64;
+    let total_gb = total as f64 / crate::fit_gate::BYTES_PER_GIB;
+    let reserve = (crate::fit_gate::legacy_unified_reserve(total_gb).gb
+        * crate::fit_gate::BYTES_PER_GIB) as u64;
     total.saturating_sub(reserve)
 }
 
@@ -341,6 +343,55 @@ fn set_gpu_memory_limit_inner(requested: u64) {
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn apply_gpu_memory_limit(bytes: u64) {
     set_gpu_memory_limit_inner(bytes);
+}
+
+/// Restores the process-global MLX soft limit after one exact evidence-covered request.
+///
+/// Jobs are serialized on the generator thread, so this guard cannot race another generation. It
+/// intentionally never calls `set_wired_limit`: #1947 established that a derived path must not raise
+/// pinned residency.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) struct RequestGpuMemoryLimitGuard {
+    previous: usize,
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+impl Drop for RequestGpuMemoryLimitGuard {
+    fn drop(&mut self) {
+        mlx_rs::memory::set_memory_limit(self.previous);
+    }
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) struct RequestGpuMemoryLimitGuard;
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn apply_request_gpu_memory_limit(
+    evidence_ceiling_bytes: u64,
+) -> Option<RequestGpuMemoryLimitGuard> {
+    if evidence_ceiling_bytes == 0 {
+        return None;
+    }
+    let previous = mlx_rs::memory::get_memory_limit();
+    let evidence_ceiling = usize::try_from(evidence_ceiling_bytes).unwrap_or(usize::MAX);
+    let applied = previous.min(evidence_ceiling);
+    mlx_rs::memory::set_memory_limit(applied);
+    tracing::info!(
+        event = "mlx_request_memory_limit_applied",
+        evidenceCeilingBytes = evidence_ceiling,
+        appliedBytes = applied,
+        previousBytes = previous,
+        wiredLimitChanged = false,
+        "applied request-scoped MLX soft limit from verified memory evidence"
+    );
+    Some(RequestGpuMemoryLimitGuard { previous })
+}
+
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn apply_request_gpu_memory_limit(
+    evidence_ceiling_bytes: u64,
+) -> Option<RequestGpuMemoryLimitGuard> {
+    (evidence_ceiling_bytes > 0).then_some(RequestGpuMemoryLimitGuard)
 }
 
 /// Re-read the live GPU-memory-limit handoff file and apply it if it changed since the last applied
@@ -734,7 +785,7 @@ mod tests {
     #[test]
     fn unset_gpu_ceiling_derives_a_default_that_reserves_memory_for_the_os() {
         let gib = 1024 * 1024 * 1024_u64;
-        let reserve = 2 * gib; // mlx_fit_gate::OS_RESERVE_GB
+        let reserve = 2 * gib; // fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB
 
         // An 8 GB Mac (the #1932 machine): 6 GiB, which still clears the 5.49 GiB z-image-turbo q4
         // baseline the fit gate's weights-fit floor admits — the ceiling never refuses a tier the
@@ -750,6 +801,34 @@ mod tests {
             resolve_gpu_memory_limit(0, Some(128 * gib)),
             128 * gib - reserve
         );
+
+        // Load-bearing #1947 invariant, through both real decision functions: every synthetic tier
+        // admitted only by the Decision 2 legacy override has a resident/staged weight set no larger
+        // than the process ceiling derived from the same typed reserve.
+        for (host_gib, total_weights_gib, text_encoder_gib) in
+            [(8_u64, 5_u64, 2_u64), (32, 28, 12), (128, 124, 60)]
+        {
+            let admitted = crate::mlx_fit_gate::decide_residency(
+                total_weights_gib * gib,
+                text_encoder_gib * gib,
+                Some(crate::mlx_fit_gate::MlxMemoryBudget {
+                    total_gb: host_gib as f64,
+                }),
+                true,
+            );
+            assert!(
+                !matches!(
+                    admitted,
+                    crate::mlx_fit_gate::ResidencyOutcome::Reject { .. }
+                ),
+                "fixture must exercise an admitted legacy tier"
+            );
+            let staged_weights = text_encoder_gib.max(total_weights_gib - text_encoder_gib) * gib;
+            assert!(
+                staged_weights <= resolve_gpu_memory_limit(0, Some(host_gib * gib)),
+                "an admitted staged working set cannot exceed the derived process ceiling"
+            );
+        }
 
         // A configured ceiling always wins unchanged; the derived default only fills the unset case.
         assert_eq!(resolve_gpu_memory_limit(4 * gib, Some(8 * gib)), 4 * gib);

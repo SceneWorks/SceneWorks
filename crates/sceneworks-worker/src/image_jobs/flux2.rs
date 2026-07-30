@@ -273,12 +273,12 @@ fn flux2_dev_edit_memory_guard(
     let Some(available_gb) = available_gb else {
         return Ok(());
     };
-    // Headroom for the OS + other apps + MLX Metal transient allocations on top of the (accurate,
-    // chunked) estimate. 12 GB passes the canonical two-reference 1024² edit (~81 GB) on a 96 GB Mac
-    // while rejecting the genuinely-too-tight three+/high-resolution combinations.
-    const HEADROOM_GB: f64 = 12.0;
+    // This 12 GiB is the edit graph's measured activation/transient allowance on top of the chunked
+    // estimate. It is NOT the shared-pool OS/foreign reserve and must not feed the MLX process
+    // ceiling; naming it explicitly prevents the two different quantities from being folded.
+    const EDIT_ACTIVATION_TRANSIENT_GB: f64 = 12.0;
     let needed_gb = flux2_dev_edit_peak_gb(reference_count, width, height);
-    if available_gb + f64::EPSILON < needed_gb + HEADROOM_GB {
+    if available_gb + f64::EPSILON < needed_gb + EDIT_ACTIVATION_TRANSIENT_GB {
         return Err(WorkerError::InvalidPayload(format!(
             "FLUX.2-dev multi-reference edit at {width}×{height} with {reference_count} reference \
              images needs ~{needed} GB of unified memory (with headroom) but this machine has \

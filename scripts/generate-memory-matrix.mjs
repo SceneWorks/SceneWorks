@@ -315,7 +315,13 @@ function sortedUnique(values) {
 function runtimeStrategyParameters(parameters) {
   return Object.fromEntries(
     Object.entries(parameters).filter(([key]) =>
-      ["decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key),
+      [
+        "decodeTileEdge",
+        "decodeOverlap",
+        "attentionChunkSize",
+        "transformerWindowSize",
+        "transformerWindowComponent",
+      ].includes(key),
     ),
   );
 }
@@ -347,6 +353,26 @@ export function calibrationBinding(record, cell) {
     !record.loadability.resolvedPathFingerprint
   ) reasons.push("loadability-not-passed");
   return { eligible: reasons.length === 0, reasons };
+}
+
+// Derive the exact additive host requirement used by the Rust MLX admission envelope.
+// This is a generated-data bridge only. It does not suggest a tier or add model-specific policy.
+export function mlxRequiredHostBytes(record) {
+  if (record?.backend !== "mlx") return null;
+  const memoryBytes = record.hardware?.memoryBytes;
+  const mlxLimit = record.hardware?.mlxMemoryLimitBytes;
+  const wiredLimit = record.hardware?.wiredLimitBytes;
+  const predicted = record.predictedPeakBytes?.overall;
+  const wired = record.observedMemory?.overall?.wiredBytes;
+  const reclaimable = record.observedMemory?.overall?.reclaimableBytes;
+  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
+  if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
+
+  const processCeiling = Math.min(memoryBytes, mlxLimit, wiredLimit);
+  const foreignReserve = memoryBytes - processCeiling;
+  const nonReclaimableWired = Math.max(0, wired - reclaimable);
+  const required = Math.max(predicted, nonReclaimableWired) + foreignReserve;
+  return Number.isSafeInteger(required) ? required : null;
 }
 
 function parseExpectedImageIds(source) {
@@ -798,6 +824,7 @@ export async function buildMatrix() {
               );
               const runSummary = (record) => {
                 const overall = record.observedMemory?.overall?.deviceBytes;
+                const requiredHostBytes = mlxRequiredHostBytes(record);
                 return {
                   source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
                   hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
@@ -806,6 +833,7 @@ export async function buildMatrix() {
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
                   ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
+                  ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
                   parity: {
                     contract: record.quality.contract,
                     result: record.quality.result === "not_run" ? "not_run" : record.quality.result,

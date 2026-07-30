@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   CANDLE_HEADROOM_GB,
   DISK_TO_RESIDENT_MULTIPLIER,
@@ -8,6 +10,8 @@ import {
   cheapestDeclaredTierPeakGb,
   declaredFloorHostGb,
   declaredTiers,
+  evidenceRequiredHostBytes,
+  evidenceRunFitsHostBytes,
   hostGbForPeakGb,
   installedFloorHostGb,
   installedTierPeakGb,
@@ -18,6 +22,17 @@ import {
 } from "./tierSuggestion.js";
 
 const GB = 1024 * 1024 * 1024;
+
+describe("exact evidence host seam", () => {
+  it("fits at equality and rejects one byte below without adding UI policy", () => {
+    const run = { requiredHostBytes: 7 * GB };
+    expect(evidenceRequiredHostBytes(run)).toBe(7 * GB);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB)).toBe(true);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB - 1)).toBe(false);
+    expect(evidenceRequiredHostBytes({ requiredHostBytes: "7 GiB" })).toBeNull();
+    expect(evidenceRunFitsHostBytes({}, 128 * GB)).toBe(false);
+  });
+});
 
 // Build a /models-shaped quant-matrix model. Each entry in `tiers` may be a bare tier key (which
 // gets a disk-only footprint sized from `diskGb`) or an object { variant, diskGb, residentGb } to
@@ -309,6 +324,26 @@ describe("per-tier memory floor: headroom conversion", () => {
       expect(shown).toBeGreaterThanOrEqual(peak + CANDLE_HEADROOM_GB);
       expect(shown - 1).toBeLessThan(peak + CANDLE_HEADROOM_GB);
     }
+  });
+
+  it("keeps the web and both Rust dedicated-VRAM consumers on one checked reserve", () => {
+    const fitGate = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/fit_gate.rs"),
+      "utf8",
+    );
+    const vramGate = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/vram_gate.rs"),
+      "utf8",
+    );
+    const kreaControl = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/krea_control_fit.rs"),
+      "utf8",
+    );
+    const owner = fitGate.match(/DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = ([0-9.]+);/);
+    expect(owner, "Rust dedicated-VRAM policy constant").not.toBeNull();
+    expect(Number(owner[1])).toBe(CANDLE_HEADROOM_GB);
+    expect(vramGate).toContain("crate::fit_gate::dedicated_vram_reserve().gb");
+    expect(kreaControl).toContain("crate::vram_gate::HEADROOM_GB");
   });
 
   it("returns null for a missing or nonsensical peak rather than 0 or NaN", () => {

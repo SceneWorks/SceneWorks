@@ -10,6 +10,7 @@ import {
   buildStoryBackendScope,
   canonicalSourceText,
   familyStory,
+  mlxRequiredHostBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
 
@@ -18,6 +19,34 @@ test("memory-strategy source hashing is independent of platform line endings", (
   assert.equal(canonicalSourceText(canonical), canonical);
   assert.equal(canonicalSourceText("alpha\r\nbeta\r\ngamma\r\n"), canonical);
   assert.equal(canonicalSourceText("alpha\rbeta\rgamma\r"), canonical);
+});
+
+test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
+  const record = {
+    backend: "mlx",
+    hardware: {
+      memoryBytes: 8 * 1024 ** 3,
+      mlxMemoryLimitBytes: 6 * 1024 ** 3,
+      wiredLimitBytes: 7 * 1024 ** 3,
+    },
+    predictedPeakBytes: { overall: 5 * 1024 ** 3 },
+    observedMemory: {
+      overall: {
+        wiredBytes: 4 * 1024 ** 3,
+        reclaimableBytes: 1 * 1024 ** 3,
+      },
+    },
+  };
+  assert.equal(mlxRequiredHostBytes(record), 7 * 1024 ** 3);
+  assert.equal(mlxRequiredHostBytes({ ...record, backend: "candle" }), null);
+  assert.equal(
+    mlxRequiredHostBytes({
+      ...record,
+      observedMemory: { overall: { wiredBytes: 9 * 1024 ** 3, reclaimableBytes: 0 } },
+    }),
+    11 * 1024 ** 3,
+    "observed non-reclaimable wired peak wins when it exceeds prediction",
+  );
 });
 
 // SC-15510: `z_image_edit` is a catalog id, not a provider. Both backends serve it from the
