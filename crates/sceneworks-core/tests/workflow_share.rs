@@ -19,7 +19,7 @@ use sceneworks_core::workflow_share::{
     parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
     AdvancedKeySource, WorkflowAssetFacts, WorkflowShare, ADVANCED_BUILDERS, ADVANCED_KEY_RULES,
     DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, PRODUCER_URL, PRODUCER_VERSION,
-    WORKFLOW_SHARE_SCHEMA_VERSION,
+    WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 
@@ -1813,6 +1813,173 @@ fn no_real_request_is_truncated_by_the_collection_bounds() {
             "a real envelope must survive its own reader"
         );
     }
+}
+
+/// Nothing legitimate is anywhere near the recording ceiling.
+///
+/// A ceiling is only correct if no real envelope reaches it, and getting that wrong is silent in the
+/// worst way: the image simply arrives with no recipe. So the four widest real shapes are measured
+/// against it in ABSOLUTE bytes, and the margin is printed rather than described.
+#[test]
+fn no_legitimate_envelope_comes_close_to_the_recording_ceiling() {
+    let mut widest = 0;
+    let mut measure = |label: &str, share: &WorkflowShare| {
+        let bytes = serde_json::to_string(share).expect("serializes").len();
+        println!(
+            "sc-15949: {label} is {bytes} bytes, {:.0}x under the {WORKFLOW_SHARE_MAX_BYTES} byte \
+             ceiling",
+            WORKFLOW_SHARE_MAX_BYTES as f64 / bytes as f64
+        );
+        assert!(
+            bytes * 4 < WORKFLOW_SHARE_MAX_BYTES,
+            "{label} is {bytes} bytes, within 4x of the {WORKFLOW_SHARE_MAX_BYTES} byte ceiling — \
+             the ceiling has stopped having real headroom over what this app produces"
+        );
+        assert!(
+            share.omitted.is_empty(),
+            "{label} lost something: {share:?}"
+        );
+        widest = widest.max(bytes);
+    };
+
+    // 1. The golden fixture, both as the builder makes it and as it sits on disk.
+    measure(
+        "the golden envelope",
+        &build_workflow_share(&golden_asset(), &golden_payload()),
+    );
+    let parsed = parse_workflow_share(&load_golden_fixture()).expect("the golden fixture parses");
+    measure("the golden fixture on disk", &parsed);
+
+    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, a full 5-LoRA stack,
+    //    every phase naming every LoRA.
+    let mut krea = golden_payload();
+    krea.insert("model".to_owned(), json!("krea_2_turbo"));
+    krea.insert(
+        "loras".to_owned(),
+        json!((0..5)
+            .map(|index| json!({
+                "id": format!("lora_{index}"),
+                "name": format!("Foggy Coast {index}"),
+                "weight": 0.6,
+                "source": { "provider": "huggingface", "repo": format!("acme/foggy-{index}") }
+            }))
+            .collect::<Vec<Value>>()),
+    );
+    krea.insert(
+        "advanced".to_owned(),
+        json!({
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "sampler": "euler",
+            "scheduler": "beta",
+            "phases": (0..8)
+                .map(|index| json!({
+                    "steps": index + 2,
+                    "guidance": 3.5,
+                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                }))
+                .collect::<Vec<Value>>(),
+        }),
+    );
+    measure(
+        "a Krea multi-phase recipe at the validators' ceiling",
+        &build_workflow_share(&golden_asset(), &krea),
+    );
+
+    // 3. A multi-reference FLUX.2 request: ten reference images, all four input kinds in play.
+    let mut flux = golden_payload();
+    flux.insert("model".to_owned(), json!("flux2_dev"));
+    flux.insert(
+        "referenceAssetIds".to_owned(),
+        json!((0..10)
+            .map(|index| json!(format!("asset_ref_{index}")))
+            .collect::<Vec<Value>>()),
+    );
+    measure(
+        "a multi-reference FLUX.2 request",
+        &build_workflow_share(&golden_asset(), &flux),
+    );
+
+    // 4. A realistic long non-Latin prompt — the case a BYTE bound on prose could have truncated
+    //    where a character bound would not. 3 bytes per character, at a length people really type.
+    let cjk = "霧の中の灯台、シネマティック、レンズに雨、35mmフィルムで撮影、\
+               ボリューメトリックライト、夜明けの海岸線、遠くの汽笛、"
+        .repeat(12);
+    assert!(
+        cjk.chars().count() > 700 && cjk.len() > 2_000,
+        "the fixture must be a long non-Latin prompt: {} chars, {} bytes",
+        cjk.chars().count(),
+        cjk.len()
+    );
+    let mut japanese = golden_payload();
+    japanese.insert("prompt".to_owned(), json!(cjk.clone()));
+    japanese.insert("negativePrompt".to_owned(), json!(cjk.clone()));
+    let advanced = japanese
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .expect("advanced object");
+    advanced.insert("stylePrompt".to_owned(), json!(cjk.clone()));
+    advanced.insert("systemMessage".to_owned(), json!(cjk.clone()));
+    let japanese_share = build_workflow_share(&golden_asset(), &japanese);
+    measure("a long CJK prompt in every prose slot", &japanese_share);
+    // Character for character, not "roughly the same length": a byte bound must not have cut it.
+    assert_eq!(japanese_share.prompt, cjk);
+    assert_eq!(japanese_share.negative_prompt, cjk);
+    assert_eq!(japanese_share.advanced["stylePrompt"], json!(cjk));
+    assert_eq!(japanese_share.advanced["systemMessage"], json!(cjk));
+
+    // Every one of them round-trips through the reader unchanged, so the ceiling and the marker are
+    // not asymmetric between the direction that wrote the file and the direction that reads it.
+    for share in [
+        build_workflow_share(&golden_asset(), &golden_payload()),
+        build_workflow_share(&golden_asset(), &krea),
+        build_workflow_share(&golden_asset(), &flux),
+        japanese_share,
+    ] {
+        let envelope = serde_json::to_value(&share).expect("serializes");
+        assert_eq!(
+            parse_workflow_share(&envelope).expect("a real envelope survives its own reader"),
+            share
+        );
+    }
+    println!("sc-15949: the widest legitimate envelope measured here is {widest} bytes");
+}
+
+/// Every write seam goes through the GATED builder.
+///
+/// `build_workflow_share_from` does not run the recording ceiling — `embeddable_workflow_share` is
+/// the form that does, and it is the one the worker must call. A seam that called the ungated builder
+/// would embed a chunk our own reader then refuses with `TooLarge`, which is the writer-and-reader
+/// drift every guard in `workflow_share.rs` is arranged to prevent. Pinned as source structure
+/// because `sceneworks-worker` depends on this crate and cannot be inspected any other way.
+#[test]
+fn every_write_seam_embeds_through_the_gated_builder() {
+    for relative in [
+        "crates/sceneworks-worker/src/image_jobs.rs",
+        "crates/sceneworks-worker/src/image_jobs/detail.rs",
+        "crates/sceneworks-worker/src/upscale_jobs.rs",
+        "crates/sceneworks-worker/src/single_child_asset.rs",
+    ] {
+        let source = read_repo_file(relative);
+        // Only the code: the prose in these files names the function it does not call.
+        let code: String = source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        assert!(
+            !code.contains("build_workflow_share_from("),
+            "{relative} builds an embedded envelope with `build_workflow_share_from`, which does \
+             not run the recording ceiling. Call `embeddable_workflow_share` and treat `None` as \
+             `write the file exactly as today`."
+        );
+    }
+    let worker = read_repo_file("crates/sceneworks-worker/src/image_jobs.rs");
+    assert!(
+        worker.contains("embeddable_workflow_share("),
+        "the worker stopped building envelopes through the gated builder"
+    );
 }
 
 // ---------------------------------------------------------------------------

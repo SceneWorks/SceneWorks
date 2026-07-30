@@ -1112,7 +1112,7 @@ pub(crate) async fn run_image_upscale_job(
     // pass and inherits nothing from whatever generated the source image. `engine_id` and `factor`
     // are the APPLIED values (canonicalized and validated above), not the requested ones, and
     // `softness` only travels for the engine that has the knob.
-    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).map(|payload| {
+    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).and_then(|payload| {
         crate::image_jobs::standalone_upscale_workflow_share(
             &payload,
             engine_id,

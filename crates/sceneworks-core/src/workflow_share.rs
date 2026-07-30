@@ -217,6 +217,75 @@ pub struct WorkflowShare {
     /// The allow-listed subset of the request's `advanced` map. See [`ADVANCED_KEY_RULES`].
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub advanced: JsonObject,
+    /// The collections this envelope declared but could not record whole. See [`OMITTED_FIELDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// The omission marker
+// ---------------------------------------------------------------------------
+
+/// `loras`, dropped or thinned.
+pub const OMITTED_LORAS: &str = "loras";
+/// `inputs`, dropped or thinned.
+pub const OMITTED_INPUTS: &str = "inputs";
+/// `advanced.poses`, dropped.
+pub const OMITTED_POSES: &str = "advanced.poses";
+/// `advanced.phases`, dropped.
+pub const OMITTED_PHASES: &str = "advanced.phases";
+/// A phase's own `loras` schedule, dropped.
+pub const OMITTED_PHASE_LORAS: &str = "advanced.phases[].loras";
+
+/// Every name [`WorkflowShare::omitted`] may hold, and nothing else.
+///
+/// The marker exists because the drop-vs-truncate doctrine [`over_cap`] documents rested
+/// on a premise that is empirically false. It argued a reader "cannot tell a plausible subset from
+/// the real thing but can tell an absence" — and an absence is exactly what it cannot tell:
+/// `loras` carries `skip_serializing_if = "Vec::is_empty"`, so a 6-LoRA envelope whose LoRAs were
+/// dropped over the cap and a genuinely LoRA-free one serialize BYTE-IDENTICALLY. Same for
+/// `advanced.poses` and `advanced.phases`, which are simply absent keys. sc-15952 would render "no
+/// LoRAs" and offer one-click "Use this recipe" for a recipe that had five.
+///
+/// Dropping is still right (truncating fabricates a specific membership, which is worse), so the
+/// fix is to make the drop SELF-DESCRIBING rather than to stop dropping. With this field the reader
+/// can say "this file declared more LoRAs than a job can have; they were not recorded" and withhold
+/// the replay.
+///
+/// A closed vocabulary of FIELD NAMES rather than free text, deliberately: it adds no new attack
+/// surface — the parse side keeps only members of this list, so the worst an envelope can put here
+/// is a subset of five short constants — and it is bounded by construction rather than by another
+/// cap that would have to compose with the rest.
+///
+/// Emitted in BOTH directions. On the build side it is the difference between a silently lost
+/// 70-pose selection ([`MAX_SHARE_POSES`]) and a visible one, which is the only thing standing
+/// between our own writer and the silent-loss failure this epic exists to prevent.
+///
+/// Scoped to collections, and to entries that had something shareable to say. A `loras` entry
+/// carrying only a local `id` is not an omission — the id was never going to travel and the entry
+/// declared nothing else — where an entry count over [`MAX_SHARE_LORAS`] is, because the recipe
+/// named LoRAs and the envelope records none of them.
+pub const OMITTED_FIELDS: &[&str] = &[
+    OMITTED_LORAS,
+    OMITTED_INPUTS,
+    OMITTED_POSES,
+    OMITTED_PHASES,
+    OMITTED_PHASE_LORAS,
+];
+
+/// The marker, reduced to the closed vocabulary: unknown names dropped, duplicates collapsed,
+/// sorted so the field is a SET rather than an order an envelope could carry information in.
+///
+/// Sanitized on parse like everything else. Sorting also makes it deterministic across the two
+/// `serde_json` map-ordering configurations the workspace builds under.
+fn reduce_omitted(names: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = names
+        .into_iter()
+        .filter(|name| OMITTED_FIELDS.contains(&name.as_str()))
+        .collect();
+    kept.sort_unstable();
+    kept.dedup();
+    kept
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +315,11 @@ pub enum WorkflowShareError {
     UnsupportedSchemaVersion { file: u32, supported: u32 },
     /// A declared field is present but the wrong shape.
     Malformed { field: String, detail: String },
+    /// The envelope is bigger than this reader records (see [`WORKFLOW_SHARE_MAX_BYTES`]).
+    ///
+    /// Measured on the SANITIZED envelope, after every per-field bound has already run — because
+    /// per-field bounds are what did not compose. `bytes` is what it reduced to, not what arrived.
+    TooLarge { bytes: usize, limit: usize },
 }
 
 impl fmt::Display for WorkflowShareError {
@@ -277,6 +351,10 @@ impl fmt::Display for WorkflowShareError {
             Self::Malformed { field, detail } => write!(
                 f,
                 "This SceneWorks workflow is malformed: `{field}` {detail}."
+            ),
+            Self::TooLarge { bytes, limit } => write!(
+                f,
+                "This SceneWorks workflow is {bytes} bytes of settings, over the {limit} bytes {PRODUCER_NAME} records, so no recipe was read from it."
             ),
         }
     }
@@ -1106,17 +1184,29 @@ fn shareable_label(value: &str) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
-/// The longest an authored prose field may be — `prompt`, `negativePrompt`, `stylePrompt` and
-/// the structured prompt's `intent` / `runtimePrompt`.
+/// The longest an authored prose field may be, **in bytes** — `prompt`, `negativePrompt`,
+/// `stylePrompt`, `systemMessage` and the structured prompt's `intent` / `runtimePrompt`.
 ///
-/// Distinct from and 100× [`LABEL_MAX_CHARS`] on purpose: a label is a slug and prose is
-/// paragraphs. 20,000 characters is roughly 3,000 words. The longest thing this field class
-/// legitimately holds is `runtimePrompt`, the serialized structured-prompt recipe, which runs to
-/// a few kilobytes at its most verbose; a hand-typed prompt is two orders of magnitude shorter.
-/// So the cap cannot truncate anything real, while still bounding what an envelope from a
-/// stranger can hand sc-15952 to render: five prose fields × 20 k is ~100 kB worst case, which
-/// keeps a PNG text chunk a text chunk rather than a payload.
-const PROSE_MAX_CHARS: usize = 20_000;
+/// Bytes, not characters, and that is the whole point of the number. The bound used to be 20,000
+/// CHARACTERS, which is 20 kB of English and 80 kB of any 4-byte scalar — so six prose slots of
+/// U+1F600 were 480 kB of prose in one envelope, four times the "~120 kB worst case" the old
+/// comment claimed and enough on its own to make a 3 kB PNG a 480 kB row in the asset index. A
+/// character count cannot bound a serialized size, and a serialized size is what
+/// [`WORKFLOW_SHARE_MAX_BYTES`] has to compose out of.
+///
+/// 16 KiB is the widest UTF-8 encoding of the API's own ceiling on this field class:
+/// `MAX_PROMPT_CHARS` in `apps/rust-api/src/lib.rs` rejects a `prompt` or `negativePrompt` over
+/// 4,000 characters, and 4,000 characters is at most 16,000 bytes. So a prompt this app accepted
+/// cannot be truncated here, in any script — but a non-Latin prompt does get fewer CHARACTERS than a
+/// Latin one out of the same allowance (5,461 for 3-byte CJK, 4,096 for 4-byte scalars), which is
+/// the cost of bounding the thing that is actually persisted. All four are above the API's own
+/// 4,000, so the bound the user can hit is still the API's, not this one.
+///
+/// The four `advanced` slots have no per-field validator of their own — they are bounded only by
+/// `MAX_ADVANCED_JSON_BYTES`, the API's 64 KiB ceiling on the whole serialized `advanced` map — so
+/// they take the same 16 KiB. `runtimePrompt`, the longest of them, is a serialized structured
+/// prompt running to a few kilobytes at its most verbose.
+const PROSE_MAX_BYTES: usize = 16 * 1024;
 
 /// Authored prose, reduced. Unlike [`shareable_label`] this keeps what the user typed —
 /// including a path, which is the deliberate exemption [`is_path_shaped`] documents — and only
@@ -1128,15 +1218,22 @@ const PROSE_MAX_CHARS: usize = 20_000;
 /// arrive intact. Newlines and tabs survive — a multi-line prompt is normal and mangling it would
 /// be the very harm the prose exemption exists to prevent — but every other control character and
 /// every invisible formatting character is dropped.
+///
+/// Truncation is per CHARACTER against a BYTE budget, so the result can never be split UTF-8: a
+/// character is pushed only if it fits whole, and the loop stops at the first that does not. A
+/// `String` cannot hold invalid UTF-8 anyway — what this avoids is the byte-slicing form of the
+/// same bound, which panics on a multi-byte boundary rather than producing invalid output.
 fn shareable_prose(value: &str) -> String {
-    let stripped: String = value
-        .chars()
-        .filter(|&character| {
-            matches!(character, '\n' | '\t')
-                || !(character.is_control() || is_invisible_formatting(character))
-        })
-        .take(PROSE_MAX_CHARS)
-        .collect();
+    let mut stripped = String::new();
+    for character in value.chars().filter(|&character| {
+        matches!(character, '\n' | '\t')
+            || !(character.is_control() || is_invisible_formatting(character))
+    }) {
+        if stripped.len() + character.len_utf8() > PROSE_MAX_BYTES {
+            break;
+        }
+        stripped.push(character);
+    }
     stripped.trim().to_owned()
 }
 
@@ -1150,7 +1247,8 @@ fn shareable_prose(value: &str) -> String {
 /// other than what is stored; U+200B and U+FEFF are the same trick without the reversal, splitting
 /// a word the reader believes is whole. Both survived into a recorded envelope before this guard.
 ///
-/// The ranges are the whole `Cf` class (Unicode 15.1) rather than the handful demonstrated,
+/// The ranges are the whole `Cf` class (Unicode 16.0 — 16.0 added no `Cf`, so the list is exact for
+/// 15.1 as well) rather than the handful demonstrated,
 /// because a class is what closes a class. Enumerated instead of taken from a crate because `std`
 /// exposes no general-category API and pulling a Unicode table in for one predicate is a poor
 /// trade: `Cf` additions are rare, additive, and — being new invisible formatting characters — are
@@ -1160,6 +1258,12 @@ fn shareable_prose(value: &str) -> String {
 /// presentation is prompt content. The tag characters at U+E0020..U+E007F are `Cf` and do go, which
 /// costs subdivision-flag emoji (🏴󠁧󠁢󠁳󠁣󠁴󠁿) in a prompt — the right side of that trade, since the same
 /// range is the standard way to smuggle hidden text through a display.
+///
+/// FOLLOW-UP (not this story): `Cf` is not the whole display-spoof class. U+3164 HANGUL FILLER,
+/// U+115F / U+1160 (the jamo fillers), U+2800 BRAILLE PATTERN BLANK and U+FFA0 HALFWIDTH HANGUL
+/// FILLER all render blank and are `Lo` / `So`, so they survive this guard. Same trick, different
+/// general category — a separate decision from "close the `Cf` class", because `Lo` is where real
+/// prompt content lives and a range list there needs its own justification.
 fn is_invisible_formatting(character: char) -> bool {
     matches!(
         character,
@@ -1342,7 +1446,33 @@ pub fn build_workflow_share_from(
         loras: sanitize_loras(job_payload.get("loras")),
         inputs: describe_inputs(job_payload),
         advanced,
+        // Nothing to carry in: the marker is derived by `reduce_workflow_share` from what the
+        // sanitizer actually dropped, in this direction exactly as in the other.
+        omitted: Vec::new(),
     })
+}
+
+/// The envelope to EMBED for one generated image, or `None` when there is none to embed.
+///
+/// The write seam's entry point, and the only one that runs the recording gate — so a writer cannot
+/// produce a file its own reader would refuse with [`WorkflowShareError::TooLarge`]. `None` means
+/// "write the file exactly as today", which is a shape the seams already have: the worker's
+/// `workflow_source` already collapses "the user opted out" and "there is no payload to describe"
+/// into the same `Option`, and this is a third reason with the same handling.
+///
+/// Unreachable for a request that came through the API, and that is the intent rather than an
+/// accident: `MAX_PROMPT_CHARS` and `MAX_ADVANCED_JSON_BYTES` bound the payload well under
+/// [`WORKFLOW_SHARE_MAX_BYTES`] (see the derivation there), and
+/// `no_real_request_is_truncated_by_the_collection_bounds` in
+/// `crates/sceneworks-core/tests/workflow_share.rs` measures the widest real requests against it.
+/// It is here so that the ceiling is a property of the envelope rather than of the reader.
+#[must_use]
+pub fn embeddable_workflow_share(
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> Option<WorkflowShare> {
+    let share = build_workflow_share_from(facts, job_payload);
+    within_recording_ceiling(&share).ok().map(|()| share)
 }
 
 /// Input images by shape. Reads the ids only to count them; no id ever reaches the envelope.
@@ -1477,23 +1607,35 @@ pub const INPUT_KINDS: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Collection bounds
+// Collection bounds and the recording ceiling
 // ---------------------------------------------------------------------------
 //
-// [`LABEL_MAX_CHARS`] and [`PROSE_MAX_CHARS`] bound every individual STRING an envelope can carry.
-// They said nothing about how MANY of them it can carry, and the only remaining ceiling was
-// sc-15947's 1 MiB cap on the decompressed chunk text — which a compressible envelope turns into
-// enormous leverage. Measured before these bounds existed: an 8,897-byte PNG carrying 8,000
-// `inputs` + 8,000 `loras` + three 20 k prose fields produced a 988,271-byte
-// `extra.importedWorkflow`, a 988 kB sidecar, a 988 kB `assets.asset_json` row, and a
-// 989,210-byte `list_assets` response for ONE asset — 111x amplification, persistent, in the
-// Library's hottest read path (sc-14797 / sc-14798). Before sc-15949 nothing wrote a stranger's
-// megabyte into the asset index; reading the chunk is what exposed it.
+// [`LABEL_MAX_CHARS`] and [`PROSE_MAX_BYTES`] bound every individual STRING an envelope can carry
+// and the caps below bound how MANY of them it can carry. The only ceiling before either existed
+// was sc-15947's 1 MiB cap on the decompressed chunk text, which a compressible envelope turns
+// into enormous leverage: what an attacker pays for is the COMPRESSED chunk and what we pay is the
+// decompressed envelope, persisted into the sidecar, the `assets.asset_json` row and every
+// `list_assets` response for that asset (sc-14797 / sc-14798) forever.
 //
-// So every collection is bounded, and — like every other guard in this file — bounded in ONE place
-// that both directions run, so the write side cannot drift away from the read side. Each cap below
-// is derived from the contract that already limits the thing, in the same style
-// [`PROSE_MAX_CHARS`] was: a number nothing legitimate can exceed, whose worst case is stated.
+// PER-FIELD BOUNDS DO NOT COMPOSE, and that is the lesson this section was rewritten around. The
+// first attempt was per-collection caps, and each new measurement found a new way to spend what the
+// caps left: 200,000 `null` coordinates cost nothing against a budget that counted only numbers;
+// 200,000 empty arrays cost nothing against either; six prose slots of a 4-byte scalar were 480 kB
+// under a bound written in characters. Measured at that point, from a real import: a 3,070-byte PNG
+// became a 480,321-byte `extra.importedWorkflow`, and a 4,043-byte PNG became 720,347 bytes — worse
+// than the 111x the caps were introduced to remove.
+//
+// So there are two kinds of bound here, and the second is the one that closes the class:
+//
+// * the per-collection caps, each derived from the validator that already limits the thing, so an
+//   envelope claiming more did not come from a run here; and
+// * [`WORKFLOW_SHARE_MAX_BYTES`], ONE ceiling on the serialized envelope, checked after every
+//   per-field rule has run. It composes by construction — it is a bound on the thing we actually
+//   persist — so a new field or a new leak inside an existing one cannot walk around it the way
+//   each new vector walked around the caps.
+//
+// Everything here runs in ONE place both directions share, so the write side cannot drift from the
+// read side.
 
 /// The most LoRAs an envelope may name — [`crate::lora_family::MAX_JOB_LORAS`] exactly.
 ///
@@ -1521,32 +1663,99 @@ const MAX_SHARE_PHASES: usize = 8;
 
 /// The most pose entries an envelope may carry.
 ///
-/// The one collection with no server-side ceiling to inherit: the pose lane renders one image per
-/// pose and nothing clamps how many a user may select. So the derivation is the library they are
+/// The one collection with NO upstream validator to inherit, and the review that added it said so:
+/// the pose lane renders one image per pose and nothing in the worker's `pose_entries` or in
+/// `apps/web/src` clamps how many a user may select. So the derivation is the library they are
 /// selected FROM — `apps/web/public/poses/index.json` ships 46 poses — and 64 clears an
-/// all-of-the-library selection with room for user-created poses on top.
+/// all-of-the-library selection with room for user-created Key Point Library entries on top.
 ///
-/// This bounds the ENTRY count only, which on its own would still admit a quarter of a million
-/// empty `{}` poses; [`MAX_SHARE_POSE_NUMBERS`] is what bounds the volume.
+/// Because there is no upstream ceiling, this cap can fire on OUR OWN WRITE SIDE: a user who
+/// selects 65 poses gets an envelope with no `advanced.poses` in it. That is why
+/// [`OMITTED_FIELDS`] exists and is emitted on the build side too — a 70-pose selection that is
+/// not recorded says so, instead of arriving as an absence indistinguishable from "no poses".
+/// Clamping the selection at the source is the better fix and is not this story's to make.
+///
+/// This bounds the ENTRY count only; [`MAX_SHARE_POSE_SLOTS`] is what bounds the volume.
 const MAX_SHARE_POSES: usize = 64;
 
-/// The most numbers the whole `advanced.poses` array may carry, across every entry and field.
+/// The most coordinate SLOTS the whole `advanced.poses` array may carry, across every entry and
+/// field: a number, or a `null` standing in for one.
+///
+/// Slots rather than numbers, and that distinction is a fixed bug rather than a nicety. The budget
+/// counted `Value::Number` only, while [`is_coordinate_tree`] accepted `Value::Null` as a
+/// coordinate — so 200,000 nulls under one `keypoints` key cost nothing against a 6,144-number
+/// budget and serialized to 1,000,027 bytes. Nulls are counted because they ARE coordinate slots
+/// (the worker's `normalize_points` fills a missing one), not because they are hostile. Empty
+/// arrays were the same hole from the other side and are refused outright by
+/// [`is_coordinate_tree`]: an array with nothing in it is not a point.
 ///
 /// A budget rather than a per-entry cap, because that is what admits the real cases while still
 /// bounding the worst one. One sanitized pose is at most 18 body keypoints + 42 hand + 68 face =
 /// 128 points (the worker's `normalize_keypoints` / `normalize_hands` / `normalize_face` truncate
-/// to exactly those counts), and a point is `[x, y]` or `[x, y, confidence]` — so 384 numbers,
-/// and this budget is 16 full whole-body skeletons' worth. 16 is also twice
+/// to exactly those counts), and a point is `[x, y]` or `[x, y, confidence]` — so 384 slots, and
+/// this budget is 16 full whole-body skeletons' worth. 16 is also twice
 /// [`crate::image_request::MAX_COUNT`], the payload-sanity ceiling on how many images one image
 /// job may produce, which a pose set is the pose lane's version of.
 ///
 /// Checked against the real cases rather than asserted: all 46 built-in poses are body keypoints
 /// only (18 points, no hands, no face), so selecting the entire library spends 46 x 36 = 1,656
-/// numbers — 27% of the budget. What the budget does refuse is a set of dozens of poses each
-/// carrying full hands and face, which is where the worst case lives: 6,144 numbers is ~147 kB of
-/// JSON at the widest a `f64` serializes, the same order as the ~120 kB the six prose fields are
-/// already allowed, so the envelope stays a text chunk rather than a payload.
-const MAX_SHARE_POSE_NUMBERS: usize = 16 * (18 + 42 + 68) * 3;
+/// slots — 27% of the budget. What it refuses is dozens of poses each carrying full hands and face,
+/// and what backstops IT — because 6,144 slots is ~147 kB of JSON at the widest an `f64` serializes,
+/// which is over the whole envelope's allowance — is [`WORKFLOW_SHARE_MAX_BYTES`].
+const MAX_SHARE_POSE_SLOTS: usize = 16 * (18 + 42 + 68) * 3;
+
+/// The ceiling on the SERIALIZED envelope — the one bound that composes, and the reason the
+/// per-collection caps above are no longer the last line.
+///
+/// Derived from the widest envelope this app can legitimately produce, which is an arithmetic sum
+/// of validators rather than an estimate. Every term is a hard ceiling something else already
+/// enforces:
+///
+/// | term | bytes | where it comes from |
+/// |------|-------|---------------------|
+/// | `prompt` + `negativePrompt` | 32,000 | `MAX_PROMPT_CHARS` (4,000) x 4 bytes, twice |
+/// | `advanced` | 65,536 | `MAX_ADVANCED_JSON_BYTES`, the API's ceiling on the serialized map |
+/// | `loras` | 8,250 | [`MAX_SHARE_LORAS`] x (name + repo at [`LABEL_MAX_CHARS`] x 4 + weight) |
+/// | labels + `upscale` + `producer` + scalars | ~15,000 | [`LABEL_MAX_CHARS`] x 4, per field |
+/// | | **~113,900** | |
+///
+/// 160 KiB leaves 44% headroom over that, which the measured real cases make look enormous: the
+/// golden fixture is 1,239 bytes, a Krea multi-phase recipe at the validators' own ceiling is
+/// ~2 kB, and a long CJK prompt is ~2 kB — all two orders of magnitude under. What the ceiling
+/// refuses is the composition the caps could not: the sanitizer's own per-field bounds still admit
+/// ~400 kB in total (six 16 KiB prose slots, ~40 allow-listed scalar labels, and a 6,144-slot pose
+/// budget), and this is what stops that from being persisted.
+///
+/// Over the ceiling degrades to NO WORKFLOW — [`WorkflowShareError::TooLarge`] on the read side, a
+/// `None` from [`embeddable_workflow_share`] on the write side — rather than to a partial record.
+/// Shedding the biggest field instead would mean recording a recipe missing exactly the part that
+/// made it too large, and the reader has no way to know which one that was.
+pub const WORKFLOW_SHARE_MAX_BYTES: usize = 160 * 1024;
+
+/// How many bytes an envelope serializes to: the unit [`WORKFLOW_SHARE_MAX_BYTES`] is spent in, and
+/// the same measurement the sidecar row and the `list_assets` payload will pay.
+fn workflow_share_bytes(share: &WorkflowShare) -> usize {
+    // A serialization failure is not reachable for this type (no map with non-string keys, no
+    // non-finite float — `reduce_workflow_share` filters those). Treating it as "over the ceiling"
+    // is still the right fallback: an envelope we cannot serialize is one we cannot record.
+    serde_json::to_string(share).map_or(usize::MAX, |text| text.len())
+}
+
+/// The recording gate, run by BOTH directions.
+///
+/// One function rather than a check at each end, for the same reason every other guard in this file
+/// is one function: a ceiling the reader enforces and the writer does not is a writer that produces
+/// files its own reader refuses.
+fn within_recording_ceiling(share: &WorkflowShare) -> Result<(), WorkflowShareError> {
+    let bytes = workflow_share_bytes(share);
+    if bytes > WORKFLOW_SHARE_MAX_BYTES {
+        return Err(WorkflowShareError::TooLarge {
+            bytes,
+            limit: WORKFLOW_SHARE_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
 
 /// One bounded collection: kept whole, or dropped whole. Never truncated.
 ///
@@ -1554,18 +1763,18 @@ const MAX_SHARE_POSE_NUMBERS: usize = 16 * (18 + 42 + 68) * 3;
 /// over-long label — by dropping, because a collection's MEMBERSHIP is its identity in exactly the
 /// way a slug's spelling is. "The first 5 of these 8,000 LoRAs" is not the recipe that made the
 /// image, and sc-15952 offers what survives here to the user as "Use this recipe": a plausible
-/// subset is worse than an absence, because a reader cannot tell it is a subset. So an over-cap
-/// collection travels as absent, which the reader renders as "none recorded", and the rest of the
-/// envelope — model, prompt, size, steps — still travels.
+/// subset is worse than a stated absence, because a reader cannot tell it is a subset.
+///
+/// A stated absence, now: the original form of this argument claimed a reader "can tell an
+/// absence", and it cannot — see [`OMITTED_FIELDS`], which is what makes the drop legible.
 ///
 /// [`shareable_prose`] truncates instead, and the difference is the point: prose still means what
 /// it said after its tail is cut, and a list does not.
-fn bounded_collection<T>(values: Vec<T>, max: usize) -> Vec<T> {
-    if values.len() > max {
-        Vec::new()
-    } else {
-        values
-    }
+///
+/// Takes the length rather than the values, so an over-cap array is refused without being cloned
+/// first — the 8,000-entry case allocated 8,000 `Value`s to decide it wanted none of them.
+fn over_cap(len: usize, max: usize) -> bool {
+    len > max
 }
 
 /// Reduce every VALUE in an envelope to what the contract allows.
@@ -1596,7 +1805,39 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         loras,
         inputs,
         advanced,
+        omitted,
     } = share;
+
+    // Every collection's loss is derived by COMPARING what came in with what the sanitizer let out,
+    // rather than reported by the rules themselves. One derivation instead of a marker push at every
+    // `return None`, and it cannot go stale against a rule it does not know about: a new reason to
+    // drop `advanced.poses` is a new reason this records it.
+    let declared_loras = loras.len();
+    let declared_inputs = inputs.len();
+    let loras: Vec<WorkflowLora> = if over_cap(declared_loras, MAX_SHARE_LORAS) {
+        // Bounded BEFORE reduction, not after: an envelope that declares 8,000 LoRAs is
+        // disqualified by declaring them, and capping the survivors instead would let 7,995 junk
+        // entries carry 5 real ones through.
+        Vec::new()
+    } else {
+        loras.into_iter().filter_map(reduce_lora).collect()
+    };
+    let inputs: Vec<WorkflowInput> = if over_cap(declared_inputs, MAX_SHARE_INPUTS) {
+        Vec::new()
+    } else {
+        inputs.into_iter().filter_map(reduce_input).collect()
+    };
+    let sanitized_advanced = sanitize_advanced(&advanced);
+
+    let mut lost: Vec<String> = reduce_omitted(omitted);
+    if loras.len() < declared_loras {
+        lost.push(OMITTED_LORAS.to_owned());
+    }
+    if inputs.len() < declared_inputs {
+        lost.push(OMITTED_INPUTS.to_owned());
+    }
+    lost.extend(advanced_omissions(&advanced, &sanitized_advanced));
+
     WorkflowShare {
         kind,
         schema_version,
@@ -1621,19 +1862,55 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
             engine: upscale.engine.as_deref().and_then(shareable_label),
             softness: upscale.softness.filter(|value| value.is_finite()),
         }),
-        // Bounded BEFORE reduction, not after: an envelope that declares 8,000 LoRAs is
-        // disqualified by declaring them, and capping the survivors instead would let 7,995 junk
-        // entries carry 5 real ones through.
-        loras: bounded_collection(loras, MAX_SHARE_LORAS)
-            .into_iter()
-            .filter_map(reduce_lora)
-            .collect(),
-        inputs: bounded_collection(inputs, MAX_SHARE_INPUTS)
-            .into_iter()
-            .filter_map(reduce_input)
-            .collect(),
-        advanced: sanitize_advanced(&advanced),
+        loras,
+        inputs,
+        advanced: sanitized_advanced,
+        omitted: reduce_omitted(lost),
     }
+}
+
+/// Which `advanced` collections went missing between the raw map and the sanitized one.
+///
+/// Read off the two maps rather than pushed by the rules, so it stays true when a rule changes: a
+/// non-empty array that the allow-list, the entry cap, the slot budget or a shape check reduced to
+/// nothing is a loss whatever caused it, and an input that was already empty is an absence rather
+/// than an omission.
+fn advanced_omissions(raw: &JsonObject, sanitized: &JsonObject) -> Vec<String> {
+    let mut lost = Vec::new();
+    let declared = |key: &str| {
+        raw.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    };
+    for (key, name) in [("poses", OMITTED_POSES), ("phases", OMITTED_PHASES)] {
+        if declared(key) && !sanitized.contains_key(key) {
+            lost.push(name.to_owned());
+        }
+    }
+    // Phase LoRA schedules are the substance of a Krea multi-phase recipe, and a phase's `loras`
+    // going missing is invisible in exactly the way the whole marker exists for: over the cap the
+    // key is omitted, so the phase reads as "applies no LoRAs". Counted rather than index-matched
+    // because a malformed phase does not occupy a slot in the output the way a malformed pose does.
+    let with_loras = |map: &JsonObject| -> usize {
+        map.get("phases")
+            .and_then(Value::as_array)
+            .map(|phases| {
+                phases
+                    .iter()
+                    .filter(|phase| {
+                        phase
+                            .get("loras")
+                            .and_then(Value::as_array)
+                            .is_some_and(|loras| !loras.is_empty())
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    if sanitized.contains_key("phases") && with_loras(sanitized) < with_loras(raw) {
+        lost.push(OMITTED_PHASE_LORAS.to_owned());
+    }
+    lost
 }
 
 /// One LoRA reference, reduced. An entry left with nothing to say is dropped entirely.
@@ -1797,7 +2074,13 @@ fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
 const POSE_FIELDS: &[&str] = &["keypoints", "hands", "face"];
 
 fn sanitize_poses(value: &Value) -> Option<Value> {
-    let poses = bounded_collection(value.as_array()?.clone(), MAX_SHARE_POSES);
+    let poses = value.as_array()?;
+    // Checked against the length before anything is cloned: the 8,000-entry case used to allocate
+    // 8,000 `Value`s to decide it wanted none of them, which is work done precisely in the case the
+    // guard exists to make cheap.
+    if over_cap(poses.len(), MAX_SHARE_POSES) {
+        return None;
+    }
     // The entry count is load-bearing (poses replace `count` variations), so an entry whose
     // coordinates are missing or malformed still occupies its slot as an empty object.
     let sanitized: Vec<Value> = poses
@@ -1806,49 +2089,65 @@ fn sanitize_poses(value: &Value) -> Option<Value> {
             let mut out = JsonObject::new();
             if let Some(pose) = pose.as_object() {
                 for field in POSE_FIELDS {
-                    if let Some(numbers) = pose.get(*field).filter(|value| is_numeric_tree(value)) {
-                        out.insert((*field).to_owned(), numbers.clone());
+                    // An array, and a coordinate tree: a bare number or a bare `null` under
+                    // `keypoints` is not a skeleton, and letting one through would record a
+                    // positive claim about a pose nobody made.
+                    if let Some(points) = pose
+                        .get(*field)
+                        .filter(|value| value.is_array() && is_coordinate_tree(value))
+                    {
+                        out.insert((*field).to_owned(), points.clone());
                     }
                 }
             }
             Value::Object(out)
         })
         .collect();
-    // Entry count is not volume: a numeric tree is otherwise unbounded in both length and depth, so
-    // 64 poses of a million coordinates each would walk straight through the cap above. Budgeted
-    // across the WHOLE array (see `MAX_SHARE_POSE_NUMBERS`) rather than per entry, so a large set
-    // of plain body skeletons — which is what the shipped library is — still travels whole.
-    let numbers: usize = sanitized.iter().map(count_numbers).sum();
-    if numbers > MAX_SHARE_POSE_NUMBERS {
+    // Entry count is not volume: a coordinate tree is otherwise unbounded in both length and depth,
+    // so 64 poses of a million coordinates each would walk straight through the cap above. Budgeted
+    // across the WHOLE array (see `MAX_SHARE_POSE_SLOTS`) rather than per entry, so a large set of
+    // plain body skeletons — which is what the shipped library is — still travels whole.
+    let slots: usize = sanitized.iter().map(count_coordinate_slots).sum();
+    if slots > MAX_SHARE_POSE_SLOTS {
         return None;
     }
     (!sanitized.is_empty()).then_some(Value::Array(sanitized))
 }
 
-/// True when `value` is made only of numbers, nulls and arrays of them — the shape pose
-/// keypoints have. Anything with a string in it is not keypoints and does not travel.
-fn is_numeric_tree(value: &Value) -> bool {
+/// True when `value` is made only of coordinate slots — numbers, `null`s standing in for a missing
+/// one, and NON-EMPTY arrays of them. Anything with a string in it is not keypoints and does not
+/// travel.
+///
+/// The emptiness rule is a closed hole rather than pedantry: `[]` is vacuously "all coordinates",
+/// so 200,000 empty arrays under one `keypoints` key passed this check and cost nothing against the
+/// slot budget, serializing to 600,027 bytes. An array with nothing in it is not a point, so it is
+/// not a coordinate tree.
+fn is_coordinate_tree(value: &Value) -> bool {
     match value {
         Value::Number(_) | Value::Null => true,
-        Value::Array(values) => values.iter().all(is_numeric_tree),
+        Value::Array(values) => !values.is_empty() && values.iter().all(is_coordinate_tree),
         _ => false,
     }
 }
 
-/// How many numbers a value's tree holds, at any depth. The unit [`MAX_SHARE_POSE_NUMBERS`] is
-/// spent in — a coordinate is a number whether it arrived as `[[x, y]]` or `[[[x, y]]]`, and both
-/// forms are legal for `hands`.
-fn count_numbers(value: &Value) -> usize {
+/// How many coordinate slots a value's tree holds, at any depth. The unit
+/// [`MAX_SHARE_POSE_SLOTS`] is spent in — a coordinate is one slot whether it arrived as
+/// `[[x, y]]` or `[[[x, y]]]` (both forms are legal for `hands`), and a `null` is a slot too,
+/// because it is a coordinate the worker's `normalize_points` fills in.
+fn count_coordinate_slots(value: &Value) -> usize {
     match value {
-        Value::Number(_) => 1,
-        Value::Array(values) => values.iter().map(count_numbers).sum(),
-        Value::Object(map) => map.values().map(count_numbers).sum(),
+        Value::Number(_) | Value::Null => 1,
+        Value::Array(values) => values.iter().map(count_coordinate_slots).sum(),
+        Value::Object(map) => map.values().map(count_coordinate_slots).sum(),
         _ => 0,
     }
 }
 
 fn sanitize_phases(value: &Value) -> Option<Value> {
-    let phases = bounded_collection(value.as_array()?.clone(), MAX_SHARE_PHASES);
+    let phases = value.as_array()?;
+    if over_cap(phases.len(), MAX_SHARE_PHASES) {
+        return None;
+    }
     let sanitized: Vec<Value> = phases
         .iter()
         .filter_map(Value::as_object)
@@ -1863,22 +2162,32 @@ fn sanitize_phases(value: &Value) -> Option<Value> {
             // carry no id and stay meaningful next to the sanitized `loras` above — and they take
             // the same bound, for the same reason: a phase cannot reference more LoRAs than a job
             // is allowed to have.
+            //
+            // The key is written only when there is a schedule to write. An unconditional insert
+            // turned an over-cap schedule into `"loras": []`, which is not an absence — it is the
+            // positive claim "this phase applies no LoRAs", the exact plausible-and-unfalsifiable
+            // record the drop doctrine above exists to refuse. `advanced_omissions` names it.
             if let Some(loras) = phase.get("loras").and_then(Value::as_array) {
-                let entries: Vec<Value> = bounded_collection(loras.clone(), MAX_SHARE_LORAS)
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .filter_map(|lora| {
-                        let mut entry = JsonObject::new();
-                        for field in ["index", "weight"] {
-                            if let Some(number) = lora.get(field).filter(|value| value.is_number())
-                            {
-                                entry.insert(field.to_owned(), number.clone());
+                if !over_cap(loras.len(), MAX_SHARE_LORAS) {
+                    let entries: Vec<Value> = loras
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .filter_map(|lora| {
+                            let mut entry = JsonObject::new();
+                            for field in ["index", "weight"] {
+                                if let Some(number) =
+                                    lora.get(field).filter(|value| value.is_number())
+                                {
+                                    entry.insert(field.to_owned(), number.clone());
+                                }
                             }
-                        }
-                        entry.contains_key("index").then_some(Value::Object(entry))
-                    })
-                    .collect();
-                out.insert("loras".to_owned(), Value::Array(entries));
+                            entry.contains_key("index").then_some(Value::Object(entry))
+                        })
+                        .collect();
+                    if !entries.is_empty() {
+                        out.insert("loras".to_owned(), Value::Array(entries));
+                    }
+                }
             }
             Value::Object(out)
         })
@@ -1959,7 +2268,13 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
     // An envelope that arrived from outside is reduced on the way IN by the same function that
     // reduced ours on the way OUT — at VALUE granularity, not only key granularity. Dropping
     // the keys we do not declare says nothing about the strings under the keys we do.
-    Ok(reduce_workflow_share(share))
+    let reduced = reduce_workflow_share(share);
+    // Last, on the reduced envelope, and refusing the WHOLE thing rather than shedding a field:
+    // what gets persisted is this value, and an envelope over the ceiling is one whose recipe we
+    // cannot record without also recording the payload attached to it. See
+    // `WORKFLOW_SHARE_MAX_BYTES` — this is the bound the per-field caps could not compose into.
+    within_recording_ceiling(&reduced)?;
+    Ok(reduced)
 }
 
 /// Best-effort field name out of a serde error, so the message names something the user can
@@ -2170,7 +2485,16 @@ mod tests {
         let phases = sanitized["phases"].as_array().expect("array");
         assert_eq!(phases[0]["loras"][0]["index"], json!(0));
         assert!(phases[0].get("note").is_none());
-        assert_eq!(phases[1]["loras"].as_array().expect("array").len(), 0);
+        // The second phase named a LoRA by local id and nothing else, so there is no schedule left
+        // to record — and the key is ABSENT rather than `[]`. sc-15949 review: an empty array is not
+        // an absence, it is the positive claim "this phase applies no LoRAs", which for a Krea
+        // multi-phase recipe is the substance of the thing. `advanced_omissions` names the loss;
+        // `an_over_cap_phase_lora_schedule_is_omitted_not_emptied` covers that half.
+        assert!(
+            phases[1].get("loras").is_none(),
+            "{:?}",
+            phases[1].get("loras")
+        );
         let encoded = serde_json::to_string(&sanitized).expect("serializes");
         assert!(!encoded.contains("lora_local_uuid"));
     }
@@ -2495,12 +2819,45 @@ mod tests {
         let absurd = "x".repeat(4 * 1024 * 1024);
         let share = parse_workflow_share(&hostile(&absurd)).expect("parses");
         for value in prose_fields(&share) {
-            assert_eq!(value.chars().count(), PROSE_MAX_CHARS);
+            assert_eq!(value.len(), PROSE_MAX_BYTES);
         }
 
-        // The bound is prose-sized, not label-sized: the two must never be conflated.
-        assert_eq!(PROSE_MAX_CHARS, 20_000);
-        assert_eq!(PROSE_MAX_CHARS, LABEL_MAX_CHARS * 100);
+        // The same field in BYTES, which is the review's finding: a character count bounds nothing
+        // that is measured in bytes, and every persisted copy of this envelope is. Four megabytes of
+        // a 4-byte scalar used to come back as 20,000 characters — 80 kB, four times what the old
+        // comment claimed the whole envelope's prose could be.
+        let absurd = "\u{1F600}".repeat(1024 * 1024);
+        let share = parse_workflow_share(&hostile(&absurd)).expect("parses");
+        for value in prose_fields(&share) {
+            assert!(
+                value.len() <= PROSE_MAX_BYTES,
+                "{} bytes, over the {PROSE_MAX_BYTES} byte bound",
+                value.len()
+            );
+            // Truncated on a CHARACTER boundary: 16,384 is a multiple of 4, so this lands exactly,
+            // and every scalar is intact. `String` cannot hold a split sequence, so the assertion
+            // that matters is that no character was lost to a partial one.
+            assert_eq!(value.chars().count(), PROSE_MAX_BYTES / 4);
+            assert!(value.chars().all(|character| character == '\u{1F600}'));
+        }
+
+        // A 3-byte script does not divide the budget evenly, which is the case that would split a
+        // sequence if the bound were applied to bytes rather than to whole characters.
+        let cjk = "霧".repeat(100_000);
+        let share = parse_workflow_share(&hostile(&cjk)).expect("parses");
+        for value in prose_fields(&share) {
+            assert_eq!(value.chars().count(), PROSE_MAX_BYTES / 3);
+            assert_eq!(value.len(), (PROSE_MAX_BYTES / 3) * 3);
+            assert!(value.chars().all(|character| character == '霧'));
+        }
+
+        // The number itself: 16 KiB is the widest UTF-8 encoding of the API's own 4,000-character
+        // ceiling on this field class (`MAX_PROMPT_CHARS` in `apps/rust-api/src/lib.rs`), so a
+        // prompt this app accepted cannot be truncated here in ANY script.
+        assert_eq!(PROSE_MAX_BYTES, 16 * 1024);
+        const _: () = assert!(PROSE_MAX_BYTES >= 4_000 * 4);
+        // And prose-sized rather than label-sized: the two must never be conflated.
+        const _: () = assert!(PROSE_MAX_BYTES > LABEL_MAX_CHARS * 4);
     }
 
     /// The other half: a bound this blunt must not touch anything real. A prompt far longer than
@@ -2513,7 +2870,7 @@ mod tests {
             "a lighthouse in heavy fog, cinematic, rain on the lens, ".repeat(30)
         );
         assert!(prompt.chars().count() > 1_500, "the fixture must be long");
-        assert!(prompt.chars().count() < PROSE_MAX_CHARS);
+        assert!(prompt.len() < PROSE_MAX_BYTES);
 
         let mut payload = payload_fixture();
         payload.insert("prompt".to_owned(), json!(prompt));
@@ -2899,9 +3256,9 @@ mod tests {
         // The pose budget is 16 whole-body skeletons, and 16 is twice the payload-sanity ceiling on
         // images per job — the thing a pose set is the pose lane's version of. If that ceiling
         // moves, the budget is a decision to re-make, not a number to follow.
-        assert_eq!(MAX_SHARE_POSE_NUMBERS, 6_144);
+        assert_eq!(MAX_SHARE_POSE_SLOTS, 6_144);
         assert_eq!(
-            MAX_SHARE_POSE_NUMBERS,
+            MAX_SHARE_POSE_SLOTS,
             2 * crate::image_request::MAX_COUNT as usize * (18 + 42 + 68) * 3
         );
     }
@@ -3020,8 +3377,11 @@ mod tests {
         let built_poses = built.advanced["poses"].as_array().expect("poses");
         assert_eq!(built_poses.len(), 16);
         assert_eq!(
-            built_poses.iter().map(count_numbers).sum::<usize>(),
-            MAX_SHARE_POSE_NUMBERS * 2 / 3,
+            built_poses
+                .iter()
+                .map(count_coordinate_slots)
+                .sum::<usize>(),
+            MAX_SHARE_POSE_SLOTS * 2 / 3,
             "16 skeletons of [x, y] pairs is two thirds of a budget sized for [x, y, confidence]"
         );
 
@@ -3044,7 +3404,7 @@ mod tests {
         let sanitized = sanitize_advanced(&advanced);
         assert!(
             sanitized.get("poses").is_none(),
-            "one pose held {} numbers, over the {MAX_SHARE_POSE_NUMBERS} budget",
+            "one pose held {} numbers, over the {MAX_SHARE_POSE_SLOTS} budget",
             8_000
         );
         assert_eq!(sanitized["steps"], json!(8));
@@ -3066,7 +3426,402 @@ mod tests {
             .as_array()
             .expect("the whole library travels");
         assert_eq!(poses.len(), 46);
-        assert_eq!(poses.iter().map(count_numbers).sum::<usize>(), 46 * 36);
+        assert_eq!(
+            poses.iter().map(count_coordinate_slots).sum::<usize>(),
+            46 * 36
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Volume that is not a number (sc-15949 review)
+    // -----------------------------------------------------------------------------------------
+
+    /// A `null` is a coordinate SLOT and costs one, and an empty array is not a coordinate at all.
+    ///
+    /// The budget counted `Value::Number` while the shape check accepted `Value::Null`, so the two
+    /// disagreed about what a coordinate is and the gap between them was free volume: 200,000 nulls
+    /// under one `keypoints` key survived and serialized to a megabyte. Empty arrays were the same
+    /// hole from the other side — `[]` is vacuously "all coordinates" — at 600 kB.
+    #[test]
+    fn a_null_costs_a_slot_and_an_empty_array_is_not_a_coordinate() {
+        // 1. Nulls, over the budget: the field is dropped, and the size the envelope would have
+        //    carried is asserted rather than described.
+        let nulls: Vec<Value> = (0..200_000).map(|_| Value::Null).collect();
+        let unbounded = serde_json::to_string(&json!([{ "keypoints": nulls.clone() }]))
+            .expect("serializes")
+            .len();
+        assert!(
+            unbounded > 900_000,
+            "the fixture must be a payload to be worth guarding: {unbounded} bytes"
+        );
+        let advanced = json!({ "steps": 8, "poses": [{ "keypoints": nulls }] })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        assert!(sanitized.get("poses").is_none(), "{:?}", sanitized);
+        assert_eq!(sanitized["steps"], json!(8), "the rest still travels");
+
+        // 2. Empty arrays: refused by the shape check, so the field never occupies the budget at all.
+        let empties: Vec<Value> = (0..200_000).map(|_| json!([])).collect();
+        let advanced = json!({ "steps": 8, "poses": [{ "keypoints": empties }] })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        let poses = sanitized["poses"].as_array().expect("the slot is kept");
+        assert_eq!(poses.len(), 1, "a pose entry still occupies its slot");
+        assert!(
+            poses[0].as_object().expect("object").is_empty(),
+            "an array with nothing in it is not a point: {:?}",
+            poses[0]
+        );
+        assert!(!is_coordinate_tree(&json!([])));
+        assert!(!is_coordinate_tree(&json!([[0.1, 0.2], []])));
+
+        // 3. Nulls WITHIN the budget still travel: they are the missing-coordinate form the worker's
+        //    `normalize_points` fills in, so counting them is a bound and not a ban.
+        let advanced = json!({ "poses": [{ "keypoints": [[0.1, null], [null, null]] }] })
+            .as_object()
+            .cloned()
+            .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        assert_eq!(
+            sanitized["poses"][0]["keypoints"],
+            json!([[0.1, null], [null, null]])
+        );
+        assert_eq!(count_coordinate_slots(&sanitized["poses"]), 4);
+
+        // 4. And a bare scalar under a pose field is not a skeleton: `keypoints: 5` used to pass the
+        //    shape check and record a positive claim about a pose nobody made.
+        for shape in [json!(5), Value::Null, json!("keypoints")] {
+            let advanced = json!({ "poses": [{ "keypoints": shape }] })
+                .as_object()
+                .cloned()
+                .expect("object");
+            let sanitized = sanitize_advanced(&advanced);
+            assert!(
+                sanitized["poses"][0]
+                    .as_object()
+                    .expect("object")
+                    .is_empty(),
+                "{:?} travelled as a keypoint set",
+                sanitized["poses"][0]
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The recording ceiling (sc-15949 review)
+    // -----------------------------------------------------------------------------------------
+
+    /// The bound that composes: per-field bounds, all satisfied, adding up to an envelope nobody
+    /// would record.
+    ///
+    /// Every value here is legal on its own — six prose slots inside [`PROSE_MAX_BYTES`], every
+    /// allow-listed scalar inside [`LABEL_MAX_CHARS`], a pose set exactly at
+    /// [`MAX_SHARE_POSE_SLOTS`] — and their sum is ~220 kB. That is the shape each round of
+    /// per-field caps kept missing, and the ceiling is what closes it rather than another cap.
+    #[test]
+    fn an_envelope_over_the_recording_ceiling_is_no_workflow_at_all() {
+        let prose = "z".repeat(PROSE_MAX_BYTES);
+        let label = "L".repeat(LABEL_MAX_CHARS);
+        let point = json!([0.123_456_789_012_345_67, 0.987_654_321_098_765_4, 0.55]);
+        let skeleton: Vec<Value> = (0..(18 + 42 + 68)).map(|_| point.clone()).collect();
+        let mut advanced = JsonObject::new();
+        for key in [
+            "sampler",
+            "scheduler",
+            "guidanceMethod",
+            "pidTarget",
+            "controlMode",
+            "styleId",
+            "angleSet",
+            "resolution",
+        ] {
+            advanced.insert(key.to_owned(), json!(label));
+        }
+        advanced.insert("stylePrompt".to_owned(), json!(prose));
+        advanced.insert("systemMessage".to_owned(), json!(prose));
+        advanced.insert(
+            "structuredPrompt".to_owned(),
+            json!({ "intent": prose, "runtimePrompt": prose }),
+        );
+        advanced.insert(
+            "poses".to_owned(),
+            json!((0..16)
+                .map(|_| json!({ "keypoints": skeleton.clone() }))
+                .collect::<Vec<Value>>()),
+        );
+        let envelope = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": prose,
+            "negativePrompt": prose,
+            "advanced": Value::Object(advanced),
+        });
+
+        let error = parse_workflow_share(&envelope)
+            .expect_err("an envelope over the recording ceiling must not be recorded");
+        let WorkflowShareError::TooLarge { bytes, limit } = error else {
+            panic!("wrong error: {error}");
+        };
+        assert_eq!(limit, WORKFLOW_SHARE_MAX_BYTES);
+        assert!(
+            bytes > WORKFLOW_SHARE_MAX_BYTES,
+            "{bytes} is not over {WORKFLOW_SHARE_MAX_BYTES}"
+        );
+        // Every per-field bound held: this is a composition failure, not a field failure.
+        assert!(
+            bytes < 4 * WORKFLOW_SHARE_MAX_BYTES,
+            "{bytes} — the per-field bounds should have kept this to a few hundred kB"
+        );
+        // NO workflow, not a partial one. Shedding the biggest field would record a recipe missing
+        // exactly the part that made it too large, and nothing in the file would say which.
+        let message = WorkflowShareError::TooLarge { bytes, limit }.to_string();
+        assert!(message.contains("no recipe was read"), "{message}");
+
+        // The same envelope minus the poses is under the ceiling and travels whole, so the ceiling is
+        // a bound on the sum and not a refusal of prose.
+        let mut smaller = envelope.clone();
+        smaller["advanced"]
+            .as_object_mut()
+            .expect("object")
+            .remove("poses");
+        let share = parse_workflow_share(&smaller).expect("under the ceiling");
+        assert_eq!(share.prompt.len(), PROSE_MAX_BYTES);
+        assert!(
+            workflow_share_bytes(&share) <= WORKFLOW_SHARE_MAX_BYTES,
+            "{}",
+            workflow_share_bytes(&share)
+        );
+    }
+
+    /// The ceiling's figure, against the validators it is derived from.
+    #[test]
+    fn the_recording_ceiling_clears_every_upstream_validator() {
+        assert_eq!(WORKFLOW_SHARE_MAX_BYTES, 160 * 1024);
+        // The arithmetic maximum a legitimate envelope can reach: two prompt fields at the API's
+        // 4,000-character cap in the widest encoding, the API's own ceiling on the serialized
+        // `advanced` map, and the bounded labels/LoRAs around them. See the constant's own table.
+        const LEGITIMATE_MAX: usize = 2 * 4_000 * 4 + 64 * 1024 + 8_250 + 15_000;
+        const _: () = assert!(LEGITIMATE_MAX < WORKFLOW_SHARE_MAX_BYTES);
+        // With real headroom, rather than a number that only just clears the sum.
+        const _: () = assert!(LEGITIMATE_MAX * 4 / 3 < WORKFLOW_SHARE_MAX_BYTES);
+        // And the write side runs the same gate as the read side, so a writer cannot produce a file
+        // its own reader refuses.
+        let payload = payload_fixture();
+        let facts = WorkflowAssetFacts::from_asset(&asset_fixture());
+        let embedded = embeddable_workflow_share(&facts, &payload).expect("a real envelope embeds");
+        assert_eq!(embedded, build_workflow_share_from(&facts, &payload));
+        assert!(workflow_share_bytes(&embedded) < 4 * 1024, "{embedded:?}");
+    }
+
+    /// The write side's half: an envelope the ceiling refuses is not embedded, rather than embedded
+    /// for our own reader to refuse on the way back in.
+    #[test]
+    fn the_write_side_refuses_what_the_read_side_would() {
+        let prose = "z".repeat(PROSE_MAX_BYTES);
+        let point = json!([0.123_456_789_012_345_67, 0.987_654_321_098_765_4, 0.55]);
+        let skeleton: Vec<Value> = (0..(18 + 42 + 68)).map(|_| point.clone()).collect();
+        let mut payload = payload_fixture();
+        payload.insert("prompt".to_owned(), json!(prose));
+        payload.insert("negativePrompt".to_owned(), json!(prose));
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "stylePrompt": prose,
+                "systemMessage": prose,
+                "structuredPrompt": { "intent": prose, "runtimePrompt": prose },
+                "poses": (0..16).map(|_| json!({ "keypoints": skeleton.clone() })).collect::<Vec<Value>>(),
+            }),
+        );
+        let facts = WorkflowAssetFacts::from_asset(&asset_fixture());
+        assert!(
+            embeddable_workflow_share(&facts, &payload).is_none(),
+            "the write seam must embed nothing rather than a file our own reader refuses"
+        );
+        // And the reader agrees about the same envelope, which is the property one shared gate buys.
+        let built = build_workflow_share_from(&facts, &payload);
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        assert!(matches!(
+            parse_workflow_share(&envelope),
+            Err(WorkflowShareError::TooLarge { .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The omission marker (sc-15949 review)
+    // -----------------------------------------------------------------------------------------
+
+    /// A dropped collection says so, in both directions.
+    ///
+    /// The premise the drop doctrine rested on — "a reader can tell an absence" — is false: `loras`
+    /// carries `skip_serializing_if = "Vec::is_empty"`, so this test starts by proving that a 6-LoRA
+    /// envelope whose LoRAs were dropped and a genuinely LoRA-free one would otherwise be BYTE
+    /// IDENTICAL, and then that the marker is what tells them apart.
+    #[test]
+    fn a_dropped_collection_is_self_describing_in_both_directions() {
+        let with_loras = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "a lighthouse",
+            "loras": (0..6).map(|index| json!({ "name": format!("Lora {index}"), "weight": 0.5 })).collect::<Vec<Value>>(),
+        });
+        let mut without_loras = with_loras.clone();
+        without_loras
+            .as_object_mut()
+            .expect("object")
+            .remove("loras");
+
+        let dropped = parse_workflow_share(&with_loras).expect("parses");
+        let never_had_any = parse_workflow_share(&without_loras).expect("parses");
+        assert!(dropped.loras.is_empty());
+        assert!(never_had_any.loras.is_empty());
+        assert_eq!(dropped.omitted, vec![OMITTED_LORAS.to_owned()]);
+        assert!(never_had_any.omitted.is_empty());
+        assert_ne!(
+            serde_json::to_string(&dropped).expect("serializes"),
+            serde_json::to_string(&never_had_any).expect("serializes"),
+            "without the marker these two serialize identically, which is the whole finding"
+        );
+
+        // The BUILD side too, which is where it matters most: `MAX_SHARE_POSES` has no upstream
+        // validator, so our own writer can drop a 70-pose selection — and this is what makes that
+        // visible instead of silent.
+        let mut payload = payload_fixture();
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "steps": 8,
+                "poses": (0..70).map(|_| json!({ "keypoints": [[0.1, 0.2]] })).collect::<Vec<Value>>(),
+            }),
+        );
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert!(built.advanced.get("poses").is_none());
+        assert_eq!(built.omitted, vec![OMITTED_POSES.to_owned()]);
+        assert_eq!(built.advanced["steps"], json!(8));
+
+        // And it survives its own round trip, so a shared file carries the knowledge onward.
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        assert_eq!(parse_workflow_share(&envelope).expect("parses"), built);
+    }
+
+    /// The marker is a closed vocabulary, so it adds no surface of its own.
+    #[test]
+    fn the_omission_marker_admits_only_field_names_it_defined() {
+        let hostile = json!({
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "a lighthouse",
+            "omitted": [
+                "loras",
+                "loras",
+                "advanced.poses",
+                "C:\\Users\\Victim\\secrets.txt",
+                "../../etc/passwd",
+                "\u{1b}[31mred",
+                "x".repeat(100_000),
+                "everything",
+            ],
+        });
+        let share = parse_workflow_share(&hostile).expect("parses");
+        // Sorted, deduplicated, and nothing that is not a name this contract defined.
+        assert_eq!(
+            share.omitted,
+            vec![OMITTED_POSES.to_owned(), OMITTED_LORAS.to_owned()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<String>>()
+                .into_iter()
+                .collect::<Vec<String>>()
+        );
+        for name in &share.omitted {
+            assert!(
+                OMITTED_FIELDS.contains(&name.as_str()),
+                "`{name}` is not in the vocabulary"
+            );
+        }
+        // Bounded by construction: the vocabulary IS the bound, so no cap has to compose with it.
+        assert!(share.omitted.len() <= OMITTED_FIELDS.len());
+        assert!(
+            serde_json::to_string(&share.omitted)
+                .expect("serializes")
+                .len()
+                < 200
+        );
+        // Every name is a plain field path — nothing here can be a label, a path or free text.
+        for name in OMITTED_FIELDS {
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '[' | ']')),
+                "{name}"
+            );
+        }
+    }
+
+    /// An over-cap phase LoRA schedule omits the KEY, and says so.
+    ///
+    /// `"loras": []` is not an absence: it is the positive claim "this phase applies no LoRAs", and
+    /// the phase schedule is the substance of a Krea multi-phase recipe. This is the same
+    /// plausible-and-unfalsifiable record the drop doctrine refuses everywhere else.
+    #[test]
+    fn an_over_cap_phase_lora_schedule_is_omitted_not_emptied() {
+        let advanced = json!({
+            "phases": [
+                { "steps": 4, "loras": (0..6).map(|index| json!({ "index": index, "weight": 0.5 })).collect::<Vec<Value>>() },
+                { "steps": 6, "loras": [{ "index": 0, "weight": 0.4 }] },
+            ]
+        })
+        .as_object()
+        .cloned()
+        .expect("object");
+        let sanitized = sanitize_advanced(&advanced);
+        let phases = sanitized["phases"].as_array().expect("phases");
+        assert!(
+            phases[0].get("loras").is_none(),
+            "an over-cap schedule became {:?}, which reads as `applies no LoRAs`",
+            phases[0].get("loras")
+        );
+        assert_eq!(
+            phases[0]["steps"],
+            json!(4),
+            "the phase itself still travels"
+        );
+        assert_eq!(
+            phases[1]["loras"].as_array().expect("array").len(),
+            1,
+            "the phase that was within the cap keeps its schedule"
+        );
+        assert_eq!(
+            advanced_omissions(&advanced, &sanitized),
+            vec![OMITTED_PHASE_LORAS.to_owned()]
+        );
+
+        // Through the reducer, in both directions, so the marker is on the envelope and not only in
+        // a helper's return value.
+        let mut payload = payload_fixture();
+        payload.insert("advanced".to_owned(), Value::Object(advanced));
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(built.omitted, vec![OMITTED_PHASE_LORAS.to_owned()]);
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        assert_eq!(parse_workflow_share(&envelope).expect("parses"), built);
+
+        // A phase that declared NO schedule is an absence rather than an omission, so the marker
+        // stays quiet — it has to mean something when it does appear.
+        let quiet = json!({ "phases": [{ "steps": 4 }, { "steps": 6, "loras": [] }] })
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert!(advanced_omissions(&quiet, &sanitize_advanced(&quiet)).is_empty());
     }
 
     /// sc-15949 review: `char::is_control` is `Cc` only, so a bidi override and the zero-width

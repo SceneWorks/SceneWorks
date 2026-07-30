@@ -526,7 +526,8 @@ fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
     .unwrap();
     let applied = json!({ "enabled": true, "engine": "seedvr2", "factor": 2, "softness": 0.25 });
 
-    let share = upscaled_workflow_share(&req, &base_fact, &payload, &applied);
+    let share = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
     let upscale = share.upscale.as_ref().expect("the pass is recorded");
     assert!(upscale.enabled);
     assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
@@ -546,7 +547,8 @@ fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
     let mut geometry_less = payload.clone();
     geometry_less.remove("width");
     geometry_less.remove("height");
-    let share = upscaled_workflow_share(&req, &base_fact, &geometry_less, &applied);
+    let share = upscaled_workflow_share(&req, &base_fact, &geometry_less, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
     assert_eq!((share.width, share.height), (Some(320), Some(256)));
 }
 
@@ -606,7 +608,8 @@ fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
     // The derived variant is where the pass lives, in APPLIED terms: `apply_inline_upscale` clamps
     // 3 to 2 and normalizes `aura-sr` to `real-esrgan` before upscaling.
     let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
-    let variant = upscaled_workflow_share(&req, &base_fact, &payload, &applied);
+    let variant = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("a fixture envelope is far under the recording ceiling");
     let upscale = variant
         .upscale
         .as_ref()
@@ -640,7 +643,8 @@ fn the_detail_pass_describes_itself_and_not_the_source_generation() {
         7,
         1536,
         1024,
-    );
+    )
+    .expect("a fixture envelope is far under the recording ceiling");
 
     assert_eq!(share.mode, "image_detail");
     assert_eq!(share.model, "realvisxl");

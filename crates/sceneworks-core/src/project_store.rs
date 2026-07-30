@@ -10268,141 +10268,299 @@ mod tests {
         assert_upload_stub_recipe(&asset, "hostile.png");
     }
 
+    /// Every string in these envelopes is legitimate; only the volume is hostile.
+    ///
+    /// sc-15947's 1 MiB cap is on the DECOMPRESSED chunk text, and a repetitive envelope compresses
+    /// ~100x — so what an attacker pays is the compressed chunk and what we pay is the decompressed
+    /// envelope, persisted into the sidecar, the `assets.asset_json` row and every `list_assets`
+    /// response for that asset (sc-14797 / sc-14798) forever.
+    ///
+    /// The history is why this is a table of cases rather than one fixture. The first fix was
+    /// per-collection caps, measured on a fixture whose own size fell with the fix — so the reported
+    /// "111x -> 8x" was an artifact of a shrinking denominator, and the real worst case at that point
+    /// was WORSE than before. Each row below is a vector found after the caps were in place, and each
+    /// is measured in ABSOLUTE bytes at both ends:
+    ///
+    /// | case | PNG | recorded before | recorded after |
+    /// |------|-----|-----------------|----------------|
+    /// | six prose slots of U+1F600 x the cap | 3,633 | 480,321 | 98,654 |
+    /// | 112,128 `null` coordinates over 64 poses | 5,630 | 681,995 | 98,671 |
+    /// | six ASCII prose slots, nothing over any cap | 1,668 | 120,321 | 98,654 |
+    /// | 200,000 empty arrays under one `keypoints` | 4,589 | 720,347 | 98,667 |
+    /// | every bound at once, poses at the slot budget | 3,045 | 221,407 | none recorded |
+    ///
+    /// Measured by running THIS test with the guards reverted one set at a time, not from a separate
+    /// harness, so the "before" column is the same fixture as the "after" one. The `list_assets`
+    /// payload for one asset tracks the recorded envelope within a kilobyte in every row.
+    ///
+    /// The ratio is deliberately not the assertion. The PNG carries the COMPRESSED envelope, so a
+    /// repetitive payload will always have a large ratio; what is bounded is the absolute size of
+    /// what we persist, by `workflow_share::WORKFLOW_SHARE_MAX_BYTES`, and that is what is asserted.
     #[test]
     fn a_chunk_cannot_amplify_itself_into_the_asset_index() {
-        // The other half of the trust boundary, and the one the path guards said nothing about: not
-        // what the values ARE but how MANY of them there are. Every string in the envelope below is
-        // legitimate; only the counts are hostile.
-        //
-        // sc-15947's 1 MiB cap is on the DECOMPRESSED chunk text, and a repetitive envelope
-        // compresses ~100x — so before the collection bounds, the 8,897-byte PNG built here
-        // produced a 988,271-byte `extra.importedWorkflow`, an equally large sidecar, an equally
-        // large `assets.asset_json` row, and a 989,210-byte `list_assets` response for ONE asset.
-        // Persistent, and in the Library's hottest read path (sc-14797 / sc-14798): 100 of these
-        // 9 kB files, 0.9 MB on disk, made the listing ~100 MB. Reading the chunk is what exposed
-        // it, so it is bounded here.
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
-        let project = store.create_project("Amplify").expect("project creates");
+        /// The recorded envelope must stay under this many bytes, in every case below.
+        ///
+        /// `WORKFLOW_SHARE_MAX_BYTES` plus the sidecar's own fields, asserted against the shipped
+        /// constant rather than chosen — a ceiling this test picked for itself would drift away from
+        /// the one the reader enforces. The old form of this assertion was 200 KiB and passed for the
+        /// wrong reason: the fixture used three ASCII prose slots, so the six-slot multi-byte case it
+        /// was meant to cover was 480 kB and never ran.
+        const CEILING: usize = crate::workflow_share::WORKFLOW_SHARE_MAX_BYTES + 4 * 1024;
 
-        let prose = "z".repeat(20_000);
-        let envelope = json!({
-            "sceneworksWorkflow": "image",
-            "schemaVersion": 1,
-            "producer": { "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" },
-            "mode": "text_to_image",
-            "model": "z_image_turbo",
-            "prompt": prose,
-            "negativePrompt": prose,
-            // Identical entries, because that is the shape that maximizes the compression ratio and
-            // so the amplification: the attacker's cost is the COMPRESSED chunk and ours is the
-            // decompressed envelope we then persist forever.
-            "loras": (0..8_000)
-                .map(|_| json!({ "name": "Ghibli watercolor", "repo": "acme/ghibli", "weight": 0.8 }))
-                .collect::<Vec<Value>>(),
-            "inputs": (0..8_000)
-                .map(|_| json!({ "kind": "reference", "count": 1 }))
-                .collect::<Vec<Value>>(),
-            "advanced": {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        // 4-byte scalars, so the six prose slots are as wide in BYTES as the bound allows. This is
+        // the case the char-counted bound missed entirely.
+        let emoji = "\u{1F600}".repeat(20_000);
+        let ascii = "z".repeat(20_000);
+        // 1,752 nulls x 64 poses = 112,128 coordinate slots, none of which cost anything against a
+        // budget that counted only `Value::Number`.
+        let nulls: Vec<Value> = (0..1_752).map(|_| Value::Null).collect();
+        let null_poses: Vec<Value> = (0..64)
+            .map(|_| json!({ "keypoints": nulls.clone() }))
+            .collect();
+        // `[]` is vacuously "all coordinates", so it passed the shape check AND cost nothing.
+        let empty_arrays: Vec<Value> = (0..200_000).map(|_| json!([])).collect();
+        // Every bound at once: six prose slots, every allow-listed scalar label at its own cap, a
+        // pose set at the slot budget, a full phase schedule. Each field is individually legal, and
+        // together they are what per-field bounds cannot see.
+        let label = "L".repeat(200);
+        let point = json!([0.123_456_789_012_345_67, 0.987_654_321_098_765_4, 0.55]);
+        let skeleton: Vec<Value> = (0..128).map(|_| point.clone()).collect();
+        let mut maxed = crate::contracts::JsonObject::new();
+        for key in [
+            "resolution",
+            "sampler",
+            "scheduler",
+            "schedulerShift",
+            "steps",
+            "guidanceScale",
+            "guidanceMethod",
+            "enhancePrompt",
+            "usePid",
+            "pidTarget",
+            "ipAdapterScale",
+            "controlnetConditioningScale",
+            "trueCfgScale",
+            "strength",
+            "textStyleGain",
+            "viewAngle",
+            "faceRestore",
+            "controlMode",
+            "controlScale",
+            "styleId",
+            "cnScale",
+            "angleSet",
+            "imageGuidanceScale",
+        ] {
+            maxed.insert(key.to_owned(), json!(label));
+        }
+        maxed.insert(
+            "poses".to_owned(),
+            json!((0..16)
+                .map(|_| json!({ "keypoints": skeleton.clone() }))
+                .collect::<Vec<Value>>()),
+        );
+        maxed.insert(
+            "phases".to_owned(),
+            json!((0..8)
+                .map(|_| json!({
+                    "steps": 4,
+                    "guidance": 3.5,
+                    "loras": (0..5)
+                        .map(|index| json!({ "index": index, "weight": 0.123_456_789 }))
+                        .collect::<Vec<Value>>()
+                }))
+                .collect::<Vec<Value>>()),
+        );
+
+        let cases: Vec<(&str, &String, crate::contracts::JsonObject)> = vec![
+            (
+                "six 4-byte prose slots",
+                &emoji,
+                crate::contracts::JsonObject::new(),
+            ),
+            (
+                "112,128 null coordinates",
+                &ascii,
+                json!({ "poses": null_poses })
+                    .as_object()
+                    .cloned()
+                    .expect("object"),
+            ),
+            (
+                "six ASCII prose slots",
+                &ascii,
+                crate::contracts::JsonObject::new(),
+            ),
+            (
+                "200,000 empty arrays",
+                &ascii,
+                json!({ "poses": [{ "keypoints": empty_arrays }] })
+                    .as_object()
+                    .cloned()
+                    .expect("object"),
+            ),
+            ("every bound at once", &ascii, maxed),
+        ];
+
+        for (label, prose, extra) in cases {
+            // A store per case, so the `list_assets` figure is what ONE asset costs a listing rather
+            // than the running total of every case before it.
+            let store = ProjectStore::new(
+                temp_dir
+                    .path()
+                    .join(crate::store_util::random_hex(6).expect("hex")),
+                "test-version",
+            );
+            let project = store.create_project("Amplify").expect("project creates");
+            let mut advanced = json!({
                 "steps": 8,
                 "stylePrompt": prose,
-                // Smaller counts than the two above only because the whole envelope has to stay
-                // under sc-15947's 1 MiB text cap to reach these bounds at all; 100 is still well
-                // over both caps, and the unit tests in `workflow_share` run the 8,000 case.
-                "poses": (0..100).map(|_| json!({ "keypoints": [[0.1, 0.2]] })).collect::<Vec<Value>>(),
-                "phases": (0..100).map(|_| json!({ "steps": 4, "guidance": 3.5 })).collect::<Vec<Value>>(),
-            },
-        })
-        .to_string();
-        assert!(
-            envelope.len() < crate::workflow_png::MAX_WORKFLOW_TEXT_BYTES,
-            "the fixture must be UNDER the text cap ({} bytes) or the reader refuses it and these \
-             bounds are never reached",
-            envelope.len()
-        );
-        let bytes = splice_after_ihdr(
-            &sceneworks_png(None),
-            &framed_itxt(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, &envelope, true),
-        );
-        let source = temp_dir.path().join("amplify.png");
-        std::fs::write(&source, &bytes).expect("staged upload writes");
-        let asset = store
-            .import_asset(
-                &project.id,
-                UploadAsset {
-                    filename: "amplify.png".to_owned(),
-                    content_type: Some("image/png".to_owned()),
-                    source_path: source,
-                    source_asset_id: None,
-                    provenance: None,
-                },
+                "systemMessage": prose,
+                "structuredPrompt": { "intent": prose, "runtimePrompt": prose },
+            })
+            .as_object()
+            .cloned()
+            .expect("object");
+            advanced.extend(extra);
+            let envelope = json!({
+                "sceneworksWorkflow": "image",
+                "schemaVersion": 1,
+                "producer": { "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" },
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "prompt": prose,
+                "negativePrompt": prose,
+                // Identical entries, because that is the shape that maximizes the compression ratio
+                // and so the leverage.
+                // 500 rather than 8,000 only so the widest prose case still fits under sc-15947's
+                // 1 MiB text cap; 500 is 100x `MAX_SHARE_LORAS` and 125x `MAX_SHARE_INPUTS`, and the
+                // unit tests in `workflow_share` run the 8,000 case.
+                "loras": (0..500)
+                    .map(|_| json!({ "name": "Ghibli watercolor", "repo": "acme/ghibli", "weight": 0.8 }))
+                    .collect::<Vec<Value>>(),
+                "inputs": (0..500)
+                    .map(|_| json!({ "kind": "reference", "count": 1 }))
+                    .collect::<Vec<Value>>(),
+                "advanced": advanced,
+            })
+            .to_string();
+            assert!(
+                envelope.len() < crate::workflow_png::MAX_WORKFLOW_TEXT_BYTES,
+                "{label}: the fixture must be UNDER the text cap ({} bytes) or the reader refuses it \
+                 and these bounds are never reached",
+                envelope.len()
+            );
+            let bytes = splice_after_ihdr(
+                &sceneworks_png(None),
+                &framed_itxt(crate::workflow_png::WORKFLOW_CHUNK_KEYWORD, &envelope, true),
+            );
+            let source = temp_dir.path().join(format!(
+                "{}.png",
+                crate::store_util::random_hex(6).expect("hex")
+            ));
+            std::fs::write(&source, &bytes).expect("staged upload writes");
+            let asset = store
+                .import_asset(
+                    &project.id,
+                    UploadAsset {
+                        filename: "amplify.png".to_owned(),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: source,
+                        source_asset_id: None,
+                        provenance: None,
+                    },
+                )
+                .expect("a bounded envelope still imports");
+
+            let recorded = &asset["extra"][IMPORTED_WORKFLOW_KEY];
+            // Measured and PRINTED before anything is asserted, so reverting a bound to check this
+            // test still bites also reports what the amplification was.
+            let recorded_bytes = serde_json::to_string(recorded).expect("serializes").len();
+            let payload_bytes = serde_json::to_string(
+                &store
+                    .list_assets(&project.id, false, false, AssetScope::All)
+                    .expect("lists"),
             )
-            .expect("a bounded envelope still imports");
+            .expect("serializes")
+            .len();
+            let asset_json_bytes: String = Connection::open(
+                store
+                    .find_project_path(&project.id)
+                    .expect("project path")
+                    .join("project.db"),
+            )
+            .expect("opens project.db")
+            .query_row(
+                "select asset_json from assets where id = ?1",
+                params![asset["id"].as_str().expect("id")],
+                |row| row.get(0),
+            )
+            .expect("the row is indexed");
+            println!(
+                "sc-15949 [{label}]: {} byte PNG -> {recorded_bytes} byte workflow, {} byte \
+                 asset_json, {payload_bytes} byte list_assets payload",
+                bytes.len(),
+                asset_json_bytes.len()
+            );
 
-        let recorded = &asset["extra"][IMPORTED_WORKFLOW_KEY];
-        // Measured and PRINTED before anything is asserted, so reverting a bound to check this test
-        // still bites also reports what the amplification was.
-        let recorded_bytes = serde_json::to_string(recorded).expect("serializes").len();
-        let payload_bytes = serde_json::to_string(
-            &store
-                .list_assets(&project.id, false, false, AssetScope::All)
-                .expect("lists"),
-        )
-        .expect("serializes")
-        .len();
-        let asset_json_bytes: String = Connection::open(
-            store
-                .find_project_path(&project.id)
-                .expect("project path")
-                .join("project.db"),
-        )
-        .expect("opens project.db")
-        .query_row(
-            "select asset_json from assets where id = ?1",
-            params![asset["id"].as_str().expect("id")],
-            |row| row.get(0),
-        )
-        .expect("the row is indexed");
-        println!(
-            "sc-15949: {} byte PNG -> {recorded_bytes} byte workflow, {} byte asset_json, \
-             {payload_bytes} byte list_assets payload",
-            bytes.len(),
-            asset_json_bytes.len()
-        );
+            for (what, measured) in [
+                ("the recorded envelope", recorded_bytes),
+                ("asset_json", asset_json_bytes.len()),
+                ("the list_assets payload for one asset", payload_bytes),
+            ] {
+                assert!(
+                    measured < CEILING,
+                    "{label}: {what} is {measured} bytes, over the {CEILING} byte ceiling"
+                );
+            }
 
-        // Every unbounded collection is gone; the recipe around them still travels, so this is not
-        // passing by refusing the envelope wholesale.
-        assert!(
-            recorded.get("loras").is_none(),
-            "{:?}",
-            recorded.get("loras")
-        );
-        assert!(recorded.get("inputs").is_none());
-        assert!(recorded["advanced"].get("poses").is_none());
-        assert!(recorded["advanced"].get("phases").is_none());
-        assert_eq!(recorded["advanced"]["steps"], json!(8));
-        assert_eq!(recorded["model"], json!("z_image_turbo"));
-
-        // What is left is the prose allowance, which is the documented ceiling this file already
-        // accepted (`PROSE_MAX_CHARS`: three 20 k fields here). An upper bound rather than an
-        // equality, so this is a REGRESSION guard and not a fixture: what it catches is a new
-        // unbounded collection appearing later. The same fixture with the bounds reverted:
-        // 817,592 bytes recorded, 818,485 in `asset_json`, 818,551 in the `list_assets` payload —
-        // from a 7,389-byte PNG, so 111x.
-        const CEILING: usize = 200 * 1024;
-        assert!(
-            recorded_bytes < CEILING,
-            "the recorded envelope is {recorded_bytes} bytes, over the {CEILING} byte ceiling"
-        );
-        assert!(
-            asset_json_bytes.len() < CEILING,
-            "asset_json is {} bytes",
-            asset_json_bytes.len()
-        );
-        assert!(
-            payload_bytes < CEILING,
-            "the list_assets payload is {payload_bytes} bytes for a single asset"
-        );
+            if recorded.is_null() {
+                // "Every bound at once" is over `WORKFLOW_SHARE_MAX_BYTES` and degrades to NO
+                // workflow rather than to a partial record, which is the whole point of a ceiling on
+                // the envelope instead of another cap on a field.
+                assert!(
+                    asset["extra"].get(IMPORTED_WORKFLOW_KEY).is_none(),
+                    "an over-ceiling envelope must leave the key absent, not record a fragment"
+                );
+                continue;
+            }
+            // Every unbounded collection is gone; the recipe around them still travels, so this is
+            // not passing by refusing the envelope wholesale.
+            assert!(
+                recorded.get("loras").is_none(),
+                "{label}: {:?}",
+                recorded.get("loras")
+            );
+            assert!(recorded.get("inputs").is_none());
+            // `advanced.poses` is bounded rather than absent, because a pose entry whose coordinates
+            // were refused still occupies its slot as `{}` — the entry count is load-bearing (poses
+            // replace `count` variations). What must not survive is the VOLUME.
+            // `advanced.poses` is bounded rather than absent, because a pose entry whose coordinates
+            // were refused still occupies its slot as `{}` — the entry count is load-bearing (poses
+            // replace `count` variations). What must not survive is the VOLUME.
+            if let Some(poses) = recorded["advanced"].get("poses") {
+                let poses_bytes = serde_json::to_string(poses).expect("serializes").len();
+                assert!(
+                    poses_bytes < 4 * 1024,
+                    "{label}: advanced.poses is {poses_bytes} bytes"
+                );
+            }
+            assert_eq!(recorded["advanced"]["steps"], json!(8));
+            assert_eq!(recorded["model"], json!("z_image_turbo"));
+            // And the drops are LEGIBLE rather than silent: an absent `loras` and a genuinely
+            // LoRA-free recipe serialize identically, so the envelope says which one this is.
+            let omitted: Vec<&str> = recorded["omitted"]
+                .as_array()
+                .expect("the omission marker travels")
+                .iter()
+                .map(|name| name.as_str().expect("a name"))
+                .collect();
+            assert!(
+                omitted.contains(&"loras") && omitted.contains(&"inputs"),
+                "{label}: {omitted:?}"
+            );
+        }
     }
 
     /// The measurement behind the table in [`the_workflow_scan_reads_chunks_and_never_the_pixels`].
