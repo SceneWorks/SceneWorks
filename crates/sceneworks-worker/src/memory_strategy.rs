@@ -371,7 +371,7 @@ mod tests {
                 // reads as a declaration. This is a synthetic fixture (`provider_id: "test"`) with no
                 // loader behind it, so the value is a choice about coverage rather than a claim — the
                 // conforming one keeps the rest of this module reading as the steady state, and
-                // `a_declared_host_conversion_is_still_selectable` covers the other arm.
+                // `a_declared_host_conversion_remains_selectable` covers the compatibility arm.
                 block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
             },
         );
@@ -1318,11 +1318,12 @@ mod tests {
     ///    then `Unverified`, which is still no render. What never happens is rung 4 beating a cheaper
     ///    rung that is *selectable*.
     ///
-    /// Which is why the fix belongs in the Candle realization
-    /// (`gen_core::memory_strategy::MemoryWindowMaterialization`, story sc-16096) and not in a forked
-    /// cost order. **Scope warning:** this is a statement about the ladder only. One layer up, the Krea
-    /// capability-downtier collapses "fits resident" and "fits only via rung 4" into the same
-    /// `TierFit::Fits`, and there the magnitude genuinely does decide — sc-16104.
+    /// The fix therefore belongs in the Candle realization
+    /// (`gen_core::memory_strategy::MemoryWindowMaterialization`), where Krea now declares
+    /// `DeviceFormatTransfer`, not in a forked cost order. **Scope warning:** this is a statement about
+    /// the ladder only. One layer up, the Krea capability-downtier collapses "fits resident" and "fits
+    /// only via rung 4" into the same `TierFit::Fits`, and there the magnitude genuinely does decide —
+    /// sc-16104.
     #[test]
     fn the_cheapest_selectable_rung_wins_and_rung_four_never_beats_one_that_fits() {
         // Peaks in GiB, descending with the ladder: 40 / 30 / 20 / 10 / 2.
@@ -1444,11 +1445,12 @@ mod tests {
 
     /// **SC-16090 — declaring a non-conforming window realization must not veto it.**
     ///
-    /// The contract lets a provider ship a rung-4 realization that converts formats per window, so
-    /// long as it says what it converts and names the story removing it. That is the shape
-    /// `candle-gen-krea` ships today (`HostFormatConversion { owner_story: "sc-16096" }`), and it is a
-    /// deliberate decision rather than an oversight: within this ladder rung 4 is reached only when
-    /// nothing cheaper fits, so refusing it would trade a slow render for no render.
+    /// The contract still lets a provider ship a rung-4 realization that converts formats per window,
+    /// so long as it says what it converts and names the story removing it. Krea no longer needs that
+    /// compatibility arm: its content-addressed sidecars make the steady-state realization a
+    /// `DeviceFormatTransfer`. The generic arm remains a deliberate contract choice because within
+    /// this ladder rung 4 is reached only when nothing cheaper fits, so refusing it would trade a slow
+    /// render for no render.
     ///
     /// gen-core pins that such a contract is conformance-CLEAN. Nothing pinned that it is still
     /// SELECTED, and that half is this repo's: `select_strategy` bails to
@@ -1458,7 +1460,7 @@ mod tests {
     ///
     /// The undeclared arm is asserted alongside it, so the test cannot pass by the rule being absent.
     #[test]
-    fn a_declared_host_conversion_is_still_selectable() {
+    fn a_declared_host_conversion_remains_selectable() {
         let converting = |owner_story: &str| MemoryBackendRealization::CandleCuda {
             device_residency: true,
             host_backed_weights: true,
@@ -1496,7 +1498,7 @@ mod tests {
         };
 
         let mut declared = contract();
-        declared.backend = converting("sc-16096");
+        declared.backend = converting("sc-fixture-remediation");
         assert!(
             matches!(
                 select(&declared),
