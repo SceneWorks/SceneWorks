@@ -29,8 +29,10 @@
 //!
 //! What stays in core is everything that must not drift between callers: the matching ORDER (a
 //! Hugging Face repo id before a display name, because a repo id is unambiguous and a name is
-//! not), the name normalization ([`normalized_label`]), the mapping from
-//! (known, installed, fetchable) to a state, and the sentences.
+//! not; then the display name before the catalog id, because the envelope's `name` IS a display
+//! name), the rule that an ambiguous pass resolves to NOTHING (see [`unique_match`]), the name
+//! normalization ([`normalized_label`]), the mapping from (known, installed, fetchable) to a
+//! state, and the sentences.
 //!
 //! # "In the catalog" and "on disk" are different answers
 //!
@@ -200,8 +202,9 @@ pub trait WorkflowCatalogs {
 /// A [`WorkflowCatalogs`] over plain lists, for a caller that already holds its rows in memory
 /// (the API's cached catalog snapshots) and for tests.
 ///
-/// Name matching goes through [`normalized_label`] against both `name` and `id`, so a LoRA a
-/// sender displayed as `"Film Grain"` matches a local row whose id is `film_grain`.
+/// Name matching goes through [`normalized_label`] in TWO passes — display name first, catalog id
+/// only if no row matched by name — and a pass that matches more than one row resolves to nothing.
+/// See [`unique_match`] for why.
 #[derive(Debug, Clone, Default)]
 pub struct StaticCatalogs {
     pub models: Vec<CatalogEntry>,
@@ -210,8 +213,66 @@ pub struct StaticCatalogs {
     pub recipe_presets: Vec<CatalogEntry>,
 }
 
+/// The outcome of one matching pass over a catalog.
+///
+/// Three answers, not two, because "nothing matched" and "several matched" must lead to different
+/// places: the first may fall through to the next, weaker pass, the second must not — a weaker key
+/// cannot disambiguate what a stronger one already found ambiguous.
+enum Match<'a> {
+    None,
+    One(&'a CatalogEntry),
+    /// More than one row matched. Resolves to nothing: see [`unique_match`].
+    Ambiguous,
+}
+
+/// The single row matching `predicate`, or nothing when zero or MORE THAN ONE row does.
+///
+/// The "more than one" half is the doctrine, not a nicety. `Iterator::find` returns the first row
+/// in catalog order, which is an accident of manifest merge order — so with two rows a sender's
+/// label could plausibly mean, picking one is a coin flip presented to the user as a fact, and
+/// sc-15952 would offer one-click replay with an adapter the file never named. There is no honest
+/// way to choose, so the entry is reported [`RequirementState::Missing`] and NAMED instead. Import
+/// what resolves, name what does not, never silently substitute.
+fn unique_match<'a>(
+    entries: &'a [CatalogEntry],
+    mut predicate: impl FnMut(&CatalogEntry) -> bool,
+) -> Match<'a> {
+    let mut found: Option<&CatalogEntry> = None;
+    for entry in entries {
+        if !predicate(entry) {
+            continue;
+        }
+        if found.is_some() {
+            return Match::Ambiguous;
+        }
+        found = Some(entry);
+    }
+    found.map_or(Match::None, Match::One)
+}
+
+/// An exact-id lookup, with a blank id matching NOTHING.
+///
+/// The blank guard is load-bearing: `workflow_share` scrubs an unshareable (path-shaped) `model`
+/// to the empty string, and a catalog row whose manifest omitted `id` used to read as `id: ""` —
+/// so an envelope that named no model at all matched a row the file never mentioned and was
+/// reported "installed on this machine". Both ends are now closed; this is the reader's half.
+///
+/// Deliberately first-match rather than [`unique_match`]: `id` is the catalogs' primary key
+/// (`merge_entries_by_id`), and the live resolvers this report describes — `style_text_for_id`,
+/// the preset lookup in `apply_recipe_preset_to_image_payload` — also take the first row. Being
+/// STRICTER than the resolver would report a style as missing that the app would in fact apply,
+/// which is its own kind of lie.
 fn find_by_id(entries: &[CatalogEntry], id: &str) -> Option<CatalogEntry> {
-    entries.iter().find(|entry| entry.id == id).cloned()
+    // The guard is here rather than only at the two call sites so a THIRD id-keyed lookup cannot be
+    // added without it. A row is dropped upstream when its manifest carried no id, so a blank here
+    // can only come from a scrubbed envelope field — a question with no answer, not a key.
+    if id.trim().is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .find(|entry| !entry.id.trim().is_empty() && entry.id == id)
+        .cloned()
 }
 
 impl WorkflowCatalogs for StaticCatalogs {
@@ -221,15 +282,20 @@ impl WorkflowCatalogs for StaticCatalogs {
 
     fn lora_by_repo(&self, repo: &str) -> Option<CatalogEntry> {
         let wanted = repo.trim().to_ascii_lowercase();
-        self.loras
-            .iter()
-            .find(|entry| {
-                entry
-                    .repo
-                    .as_deref()
-                    .is_some_and(|candidate| candidate.trim().to_ascii_lowercase() == wanted)
-            })
-            .cloned()
+        if wanted.is_empty() {
+            return None;
+        }
+        match unique_match(&self.loras, |entry| {
+            entry
+                .repo
+                .as_deref()
+                .is_some_and(|candidate| candidate.trim().to_ascii_lowercase() == wanted)
+        }) {
+            Match::One(entry) => Some(entry.clone()),
+            // Two rows off one repo (two adapter FILES from the same Hugging Face repo) are two
+            // different adapters. The repo id no longer identifies one, so it identifies none.
+            Match::None | Match::Ambiguous => None,
+        }
     }
 
     fn lora_by_name(&self, name: &str) -> Option<CatalogEntry> {
@@ -237,16 +303,27 @@ impl WorkflowCatalogs for StaticCatalogs {
         if wanted.is_empty() {
             return None;
         }
-        self.loras
-            .iter()
-            .find(|entry| {
-                entry
-                    .name
-                    .as_deref()
-                    .is_some_and(|candidate| normalized_label(candidate) == wanted)
-                    || normalized_label(&entry.id) == wanted
-            })
-            .cloned()
+        // Pass 1: the DISPLAY NAME, which is what the envelope's `name` actually is. A single
+        // predicate over `name || id` let a row whose id happened to equal the sender's name win
+        // over the row actually CALLED that, purely because it came first in the catalog.
+        match unique_match(&self.loras, |entry| {
+            entry
+                .name
+                .as_deref()
+                .is_some_and(|candidate| normalized_label(candidate) == wanted)
+        }) {
+            Match::One(entry) => return Some(entry.clone()),
+            // An ambiguous name pass stops here rather than falling through: an id match is the
+            // WEAKER key, so it cannot break a tie the stronger one could not.
+            Match::Ambiguous => return None,
+            Match::None => {}
+        }
+        // Pass 2: the catalog id, so a name slugged on one install (`film_grain`) still matches a
+        // row that carries no display name. Only reached when NOTHING is called `wanted`.
+        match unique_match(&self.loras, |entry| normalized_label(&entry.id) == wanted) {
+            Match::One(entry) => Some(entry.clone()),
+            Match::None | Match::Ambiguous => None,
+        }
     }
 
     fn style(&self, id: &str) -> Option<CatalogEntry> {
@@ -414,16 +491,36 @@ pub struct ResolutionReport {
     pub inputs: Vec<InputRequirement>,
     /// Collections the envelope declared but did not record.
     pub omitted: Vec<OmittedCollection>,
-    /// Whether a one-click "use this recipe" may be offered: every classified requirement
-    /// [`RequirementState::Resolved`], no input image outstanding, and nothing omitted.
+    /// **Nothing is missing or omitted — this install can run it.** Every requirement this report
+    /// had to look UP ([`model`](Self::model), [`loras`](Self::loras), [`styles`](Self::styles)) is
+    /// [`RequirementState::Resolved`], and no collection was dropped on the way into the envelope.
     ///
-    /// Deliberately strict. Every `false` here is a case where replaying would quietly produce
-    /// something other than what the file describes, which is the one thing this report exists to
-    /// prevent.
-    pub replayable: bool,
+    /// Deliberately says nothing about input images. They are not a resolution failure — nothing
+    /// on this machine could ever have supplied them — so folding them in here would report every
+    /// `edit_image` share as unrunnable even when the model and every LoRA are installed and the
+    /// user has the source image open. Ask [`input_images_required`](Self::input_images_required)
+    /// for that, and [`one_click_replayable`](Self::one_click_replayable) for both at once.
+    pub runnable: bool,
+    /// **How many images the user must supply before this can run**, summed over
+    /// [`inputs`](Self::inputs). `0` for a text-to-image recipe.
+    ///
+    /// The other half of the old conflated `replayable`: a share this install can run but that
+    /// needs one more click is a different answer from one it cannot reproduce at all, and a
+    /// single boolean could not tell sc-15952 which it was holding.
+    pub input_images_required: u32,
 }
 
 impl ResolutionReport {
+    /// Both flags at once: this install can run it AND there is nothing left for the user to
+    /// supply. The condition under which sc-15952 may offer a true one-click "use this recipe".
+    ///
+    /// Provided so the composition lives here rather than being re-derived (and eventually
+    /// re-derived DIFFERENTLY) by each reader.
+    #[must_use]
+    pub const fn one_click_replayable(&self) -> bool {
+        self.runnable && self.input_images_required == 0
+    }
+
     /// Every requirement that is not [`RequirementState::Resolved`], as sentences — the "name what
     /// does not resolve" half of the doctrine, in the order a reader would present them.
     #[must_use]
@@ -521,11 +618,18 @@ pub fn build_resolution_report(
         })
         .collect::<Vec<_>>();
 
-    let replayable = !model.state.blocks_replay()
+    // "This install can run it" — the LOOKED-UP requirements only. Input images are counted
+    // separately rather than folded in; see `ResolutionReport::runnable`.
+    let runnable = !model.state.blocks_replay()
         && loras.iter().all(|lora| !lora.state.blocks_replay())
         && styles.iter().all(|style| !style.state.blocks_replay())
-        && inputs.is_empty()
         && omitted.is_empty();
+    // `classify_input` floors a zero/absent count at 1, and the same floor is used here so the
+    // total never says "0 images" for an input the report is simultaneously describing.
+    let input_images_required = inputs
+        .iter()
+        .map(|input| input.count.max(1))
+        .fold(0u32, u32::saturating_add);
 
     ResolutionReport {
         model,
@@ -533,7 +637,8 @@ pub fn build_resolution_report(
         styles,
         inputs,
         omitted,
-        replayable,
+        runnable,
+        input_images_required,
     }
 }
 
@@ -559,7 +664,15 @@ fn install_for(entry: Option<&CatalogEntry>, state: RequirementState) -> Option<
 }
 
 fn classify_model(slug: &str, catalogs: &dyn WorkflowCatalogs) -> ModelRequirement {
-    let entry = catalogs.model(slug);
+    // A blank slug names nothing, so it must MATCH nothing. `workflow_share` scrubs a path-shaped
+    // `model` to the empty string, and consulting the catalog with it once resolved against an
+    // id-less catalog row — reporting a model the envelope never named as "installed on this
+    // machine". The catalog is not asked at all rather than being asked a question with no answer.
+    let entry = if slug.trim().is_empty() {
+        None
+    } else {
+        catalogs.model(slug)
+    };
     let state = state_for(entry.as_ref());
     let install = install_for(entry.as_ref(), state);
     let label = entry
@@ -837,6 +950,133 @@ mod tests {
             let serialized = serde_json::to_string(&state).expect("state serializes");
             assert_eq!(serialized, format!("\"{}\"", state.as_str()));
         }
+    }
+
+    /// The reviewer's exact collision: row A's ID is row B's NAME. `Iterator::find` over
+    /// `name || id` returned row A — the wrong adapter, reported as installed, with a one-click
+    /// replay offered on top of it.
+    fn colliding_loras() -> Vec<CatalogEntry> {
+        vec![
+            CatalogEntry::new("film_grain")
+                .with_name("Vintage Filmstock")
+                .installed(),
+            CatalogEntry::new("vintage_1")
+                .with_name("Film Grain")
+                .installed(),
+        ]
+    }
+
+    #[test]
+    fn the_display_name_pass_runs_before_the_id_pass() {
+        let catalogs = StaticCatalogs {
+            loras: colliding_loras(),
+            ..StaticCatalogs::default()
+        };
+        // `film_grain` is one row's ID and another row's NAME. The row actually CALLED "Film
+        // Grain" wins, whatever order the catalog merged them in.
+        let matched = catalogs
+            .lora_by_name("Film Grain")
+            .expect("one row matches");
+        assert_eq!(matched.id, "vintage_1");
+        assert_eq!(matched.name.as_deref(), Some("Film Grain"));
+        // Reversing the catalog order must not change the answer — that is the whole bug.
+        let reversed = StaticCatalogs {
+            loras: colliding_loras().into_iter().rev().collect(),
+            ..StaticCatalogs::default()
+        };
+        assert_eq!(
+            reversed.lora_by_name("Film Grain").map(|entry| entry.id),
+            Some("vintage_1".to_owned()),
+            "the winner must not be an accident of catalog order"
+        );
+    }
+
+    #[test]
+    fn a_name_matched_by_two_rows_resolves_to_nothing() {
+        let catalogs = StaticCatalogs {
+            loras: vec![
+                CatalogEntry::new("film_grain_a")
+                    .with_name("Film Grain")
+                    .installed(),
+                CatalogEntry::new("film_grain_b")
+                    .with_name("film-grain")
+                    .installed(),
+            ],
+            ..StaticCatalogs::default()
+        };
+        assert!(
+            catalogs.lora_by_name("Film Grain").is_none(),
+            "two rows share the name, so neither may be presented as the answer"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_name_pass_does_not_fall_through_to_the_id_pass() {
+        // Two rows are CALLED "Film Grain" and a third has it as an id. The weaker key cannot
+        // break a tie the stronger one could not, so nothing resolves.
+        let catalogs = StaticCatalogs {
+            loras: vec![
+                CatalogEntry::new("a").with_name("Film Grain").installed(),
+                CatalogEntry::new("b").with_name("Film Grain").installed(),
+                CatalogEntry::new("film_grain").installed(),
+            ],
+            ..StaticCatalogs::default()
+        };
+        assert!(catalogs.lora_by_name("film grain").is_none());
+    }
+
+    #[test]
+    fn two_rows_off_one_repo_resolve_to_nothing() {
+        let catalogs = StaticCatalogs {
+            loras: vec![
+                CatalogEntry::new("union")
+                    .with_repo("acme/pack")
+                    .installed(),
+                CatalogEntry::new("hdr").with_repo("Acme/Pack").installed(),
+            ],
+            ..StaticCatalogs::default()
+        };
+        assert!(
+            catalogs.lora_by_repo("acme/pack").is_none(),
+            "two adapter files from one repo are two adapters"
+        );
+    }
+
+    #[test]
+    fn a_blank_id_matches_nothing_even_when_a_catalog_row_carries_one() {
+        // The scrubbed-`model` case: an id-less catalog row used to read as `id: ""` and match an
+        // envelope that named no model at all.
+        let entries = vec![CatalogEntry::new("")
+            .with_name("Some Other Model")
+            .installed()];
+        assert!(find_by_id(&entries, "").is_none());
+        assert!(find_by_id(&entries, "   ").is_none());
+    }
+
+    #[test]
+    fn a_blank_model_slug_never_consults_the_catalog() {
+        struct Exploding;
+        impl WorkflowCatalogs for Exploding {
+            fn model(&self, _: &str) -> Option<CatalogEntry> {
+                panic!("a blank slug must not reach the catalog");
+            }
+            fn lora_by_repo(&self, _: &str) -> Option<CatalogEntry> {
+                None
+            }
+            fn lora_by_name(&self, _: &str) -> Option<CatalogEntry> {
+                None
+            }
+            fn style(&self, _: &str) -> Option<CatalogEntry> {
+                None
+            }
+            fn recipe_preset(&self, _: &str) -> Option<CatalogEntry> {
+                None
+            }
+        }
+        let requirement = classify_model("", &Exploding);
+        assert_eq!(requirement.state, RequirementState::Missing);
+        assert!(requirement.catalog_id.is_none());
+        assert!(requirement.name.is_none());
     }
 
     #[test]

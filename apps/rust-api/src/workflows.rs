@@ -14,7 +14,20 @@
 //!   workflow: null, resolution: null, detail }`. **This is the common case** (any foreign PNG) and
 //!   it must not look like a failure; sc-15951 branches on `status`.
 //! * The file is not a PNG at all, or claims a workflow this build refuses to guess at → a typed
-//!   4xx carrying a machine-readable `code` and the reader's own sentence. Never a 500.
+//!   4xx carrying a machine-readable `code` and a sentence fit to show the user.
+//!
+//! # Every failure carries a `code`
+//!
+//! Including the ones that never reach the handler body: a malformed multipart request (an empty
+//! body, a JSON body, a `Content-Type` with no `boundary`) is rejected by the extractor before the
+//! handler runs, and axum's own rejection is a PLAIN-TEXT body with no `code` at all. So the
+//! handler takes `Result<Multipart, MultipartRejection>` and maps it itself
+//! ([`INSPECT_CODE_BAD_MULTIPART`]) rather than letting sc-15951 parse a body that is not JSON.
+//!
+//! One failure is deliberately a 5xx: [`WorkflowChunkError::Io`] fires when OUR OWN staged temp
+//! cannot be opened or read — the caller's bytes were written successfully by then, so an AV
+//! sharing violation on `cache/uploads` or a disk fault is a server fault. Reporting it as "this
+//! file is not a PNG" would be exactly the mislabeling this epic exists to stop.
 //!
 //! The resolution report itself is `sceneworks_core::workflow_resolution` — shared with the import
 //! path (sc-15949) and the web (sc-15951 / sc-15952) rather than owned here. This module's whole
@@ -45,6 +58,65 @@ pub(crate) const INSPECT_CODE_NOT_PNG: &str = "workflow_inspect_not_png";
 /// two workflow chunks, a zip bomb, a newer schema version, a video envelope).
 pub(crate) const INSPECT_CODE_UNREADABLE: &str = "workflow_inspect_unreadable";
 
+/// `code` on the 500 for a SERVER-side read failure of our own staged temp.
+///
+/// Split out of [`INSPECT_CODE_NOT_PNG`] because the two are not the same fact and the user-facing
+/// consequence of confusing them is a lie: `Io` is raised after the caller's bytes were written to
+/// `cache/uploads` successfully, so it says nothing about the file. On Windows an antivirus
+/// sharing violation on the staging directory is the likely cause, and telling the user their PNG
+/// is malformed sends them to fix a file that is fine.
+pub(crate) const INSPECT_CODE_READ_FAILED: &str = "workflow_inspect_read_failed";
+
+/// `code` on the 4xx for a request that is not a usable multipart with exactly one `file` field —
+/// an empty body, a JSON body, a missing `boundary`, a missing or duplicated `file`.
+///
+/// A `boundary` failure is rejected by the EXTRACTOR, before the handler body runs, and axum's own
+/// rejection is plain text with no `code` at all — unparseable by a reader that branches on one.
+pub(crate) const INSPECT_CODE_BAD_MULTIPART: &str = "workflow_inspect_bad_multipart";
+
+/// `code` on the typed 413 for a body over [`MAX_WORKFLOW_INSPECT_BYTES`].
+pub(crate) const INSPECT_CODE_TOO_LARGE: &str = "workflow_inspect_too_large";
+
+/// `code` on the 5xx for a failure to WRITE the upload into `cache/uploads`.
+pub(crate) const INSPECT_CODE_STAGE_FAILED: &str = "workflow_inspect_stage_failed";
+
+/// `code` on the 5xx for a failure to read this install's catalogs, which the report is built
+/// against. Distinct from the file-side codes: the caller's image was fine.
+pub(crate) const INSPECT_CODE_CATALOG_FAILED: &str = "workflow_inspect_catalog_failed";
+
+/// Stamp a machine-readable `code` on an error produced by a shared helper that has no per-route
+/// vocabulary — the multipart machinery, `stream_multipart_field_to_file`, the catalog readers.
+///
+/// Every failure this route returns has to carry one, or sc-15951's `code` branch is handed an
+/// envelope it cannot classify. A 413 is recognized by status wherever it comes from, since
+/// "too large" is the same fact whichever layer noticed it. An error that already carries a code
+/// keeps it.
+fn coded(mut error: ApiError, fallback: &'static str) -> ApiError {
+    if error.code.is_none() {
+        error.code = Some(if error.status == StatusCode::PAYLOAD_TOO_LARGE {
+            INSPECT_CODE_TOO_LARGE
+        } else {
+            fallback
+        });
+    }
+    error
+}
+
+/// A `multer` failure surfaced by `next_field`/`Field::text`, given this route's vocabulary.
+///
+/// The status is the one `multer` chose (a field over an inner limit is a 413, malformed framing a
+/// 400) rather than a flattened 400, so the caller is told which it was.
+fn multipart_error(error: &axum::extract::multipart::MultipartError) -> ApiError {
+    coded(
+        ApiError {
+            status: error.status(),
+            detail: error.body_text(),
+            code: None,
+        },
+        INSPECT_CODE_BAD_MULTIPART,
+    )
+}
+
 /// The `{ workflow, resolution }` contract, plus the `status` discriminator.
 ///
 /// `workflow` and `resolution` are always PRESENT — `null` in the no-workflow case — so a reader
@@ -68,22 +140,33 @@ pub(crate) struct WorkflowInspectResponse {
 /// project's `loras/manifest.jsonc`, and neither is created if absent.
 pub(crate) async fn inspect_workflow(
     State(state): State<AppState>,
-    mut multipart: Multipart,
+    multipart: Result<Multipart, axum::extract::multipart::MultipartRejection>,
 ) -> Result<Json<WorkflowInspectResponse>, ApiError> {
+    // Taken as a `Result` so the EXTRACTOR's failure is mapped here too. Left to axum it renders a
+    // plain-text body with no `code`, which is the one shape sc-15951 cannot parse.
+    let mut multipart = multipart.map_err(|rejection| ApiError {
+        status: rejection.status(),
+        detail: rejection.body_text(),
+        code: Some(INSPECT_CODE_BAD_MULTIPART),
+    })?;
     let mut file: Option<PathBuf> = None;
     let mut project_id: Option<String> = None;
     // Same shape as `assets::import_asset`: the `file` field is staged before a later field can
     // error, so collection happens inside a fallible block whose error path removes the temp.
     let collect_result = async {
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
+        while let Some(field) = multipart.next_field().await.map_err(|error| {
+            // An EMPTY body reaches here rather than the extractor — `Multipart` is lazy, so it is
+            // the first `next_field` that discovers there is no framing to read.
+            multipart_error(&error)
+        })? {
             match field.name() {
                 Some("file") => {
                     if file.is_some() {
-                        return Err(ApiError::bad_request("Only one file field is allowed"));
+                        return Err(ApiError {
+                            status: StatusCode::BAD_REQUEST,
+                            detail: "Only one file field is allowed".to_owned(),
+                            code: Some(INSPECT_CODE_BAD_MULTIPART),
+                        });
                     }
                     file = Some(stage_inspect_upload(&state, field).await?);
                 }
@@ -91,7 +174,7 @@ pub(crate) async fn inspect_workflow(
                     let value = field
                         .text()
                         .await
-                        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+                        .map_err(|error| multipart_error(&error))?;
                     let value = value.trim();
                     if !value.is_empty() {
                         project_id = Some(value.to_owned());
@@ -110,19 +193,28 @@ pub(crate) async fn inspect_workflow(
         return Err(error);
     }
 
-    let temp_path = file.ok_or_else(|| ApiError::bad_request("Upload file field is required"))?;
+    let temp_path = file.ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        detail: "Upload file field is required".to_owned(),
+        code: Some(INSPECT_CODE_BAD_MULTIPART),
+    })?;
     // The chunk read is bounded but synchronous (`workflow_png` walks chunk headers off the
     // executor's thread otherwise). The temp file is removed whether it succeeded, failed, or the
     // task itself panicked — nothing about the outcome may leave an upload behind.
     let read_path = temp_path.clone();
     let read = tokio::task::spawn_blocking(move || read_workflow_chunk_file(&read_path)).await;
     let _ = tokio::fs::remove_file(&temp_path).await;
-    let read =
-        read.map_err(|error| ApiError::internal(format!("Workflow chunk read failed: {error}")))?;
+    let read = read.map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        detail: format!("Workflow chunk read failed: {error}"),
+        code: Some(INSPECT_CODE_READ_FAILED),
+    })?;
 
     match read {
         Ok(Some(share)) => {
-            let catalogs = inspect_catalogs(&state, project_id.as_deref()).await?;
+            let catalogs = inspect_catalogs(&state, project_id.as_deref())
+                .await
+                .map_err(|error| coded(error, INSPECT_CODE_CATALOG_FAILED))?;
             let resolution = build_resolution_report(&share, &catalogs);
             Ok(Json(WorkflowInspectResponse {
                 status: INSPECT_STATUS_WORKFLOW,
@@ -144,8 +236,9 @@ pub(crate) async fn inspect_workflow(
     }
 }
 
-/// The per-field upload cap. `MAX_UPLOAD_BYTES` in production; overridable in tests, because the
-/// real cap is 2 GiB and no test can send that (the `max_lora_upload_bytes` pattern).
+/// The per-field upload cap. [`MAX_WORKFLOW_INSPECT_BYTES`] in production; overridable in tests,
+/// because even the reduced cap is 512 MiB and no test wants to send that (the
+/// `max_lora_upload_bytes` pattern).
 fn max_inspect_upload_bytes() -> usize {
     #[cfg(test)]
     {
@@ -154,7 +247,23 @@ fn max_inspect_upload_bytes() -> usize {
             return limit;
         }
     }
-    MAX_UPLOAD_BYTES
+    MAX_WORKFLOW_INSPECT_BYTES
+}
+
+/// The route's `DefaultBodyLimit` — the per-field cap PLUS multipart framing headroom.
+///
+/// Derived rather than fixed for two reasons. It cannot drift back into equality with the field
+/// cap, which is the bug: with the two equal, a body AT the cap plus its boundaries and part
+/// headers exceeds the router limit, so axum rejects it before `stage_inspect_upload` ever counts
+/// a byte and the caller sees a plain 400 from `field.chunk()` instead of the typed 413. And it
+/// tracks the test override, so the real boundary — a body one byte over the cap, framing included
+/// — is reachable at a size a test can actually send.
+pub(crate) fn max_inspect_multipart_body_bytes() -> usize {
+    let cap = max_inspect_upload_bytes();
+    if cap == MAX_WORKFLOW_INSPECT_BYTES {
+        return MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES;
+    }
+    cap.saturating_add(MULTIPART_FRAMING_HEADROOM_BYTES)
 }
 
 /// Stream the uploaded image into the SAME `cache/uploads` staging area asset import uses, so the
@@ -168,7 +277,12 @@ async fn stage_inspect_upload(
     let upload_dir = state.settings.data_dir.join("cache").join("uploads");
     tokio::fs::create_dir_all(&upload_dir)
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| {
+            coded(
+                ApiError::internal(error.to_string()),
+                INSPECT_CODE_STAGE_FAILED,
+            )
+        })?;
     let temp_path = upload_dir.join(format!("upload-{}.tmp", Uuid::new_v4().simple()));
     stream_multipart_field_to_file(
         field,
@@ -179,13 +293,36 @@ async fn stage_inspect_upload(
             let _ = tokio::fs::remove_file(&temp_path).await;
         },
     )
-    .await?;
+    .await
+    // The shared streamer has no per-route vocabulary, so the `code` is stamped here. `coded`
+    // recognizes the 413 by status; everything else it can return is a failure to WRITE the temp.
+    .map_err(|error| coded(error, INSPECT_CODE_STAGE_FAILED))?;
     Ok(temp_path)
 }
 
-/// Map a reader failure onto a typed 4xx. Never a 500: every variant here is a fact about the
-/// bytes the caller sent, and each carries the reader's own user-facing sentence.
+/// Map a reader failure onto a typed status, a machine-readable `code`, and a sentence fit to show
+/// a person.
+///
+/// Two rules the naive `error.to_string()` broke:
+///
+/// * **Whose fault is it?** Every variant but [`WorkflowChunkError::Io`] is a fact about the bytes
+///   the caller sent, so it is a 4xx. `Io` is raised when our OWN staged temp cannot be opened or
+///   read — the upload already succeeded by then — so it is a 5xx, with its own code. Calling a
+///   disk fault "this file is not a PNG" is the mislabeling epic 15945 exists to stop.
+/// * **Is the sentence showable?** The variants that carry an upstream `detail` inline it into
+///   their `Display`, and for a garbage chunk that upstream text is the `png` crate's `Debug`
+///   output (`ChunkType { type: ageg, critical: false, … }`). That is diagnostic, not a sentence.
+///   Those variants get a human one here and the raw text goes to the LOG, which is where a
+///   developer reading a bug report will look for it.
 fn inspect_error(error: &WorkflowChunkError) -> ApiError {
+    // The full Display — upstream detail and all — always lands here, so nothing is lost by
+    // showing the user a cleaner sentence. `Io` is the server's problem, hence the higher level.
+    match error {
+        WorkflowChunkError::Io { .. } => {
+            tracing::error!(event = "workflow_inspect_read_failed", error = %error);
+        }
+        _ => tracing::debug!(event = "workflow_inspect_rejected", error = %error),
+    }
     match error {
         // Not an image we can carry a workflow in. Distinct from "no workflow" on purpose: a JPEG
         // could never have one, where a PNG might.
@@ -194,24 +331,48 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
             detail: error.to_string(),
             code: Some(INSPECT_CODE_NOT_PNG),
         },
-        // Reading the FILE failed (unreadable temp). The caller's bytes did not describe an
-        // openable file, so it is still their request that is at fault — and 500 would hide it.
+        // OUR staged temp could not be opened or read. The caller's bytes were written
+        // successfully before this point, so nothing is known to be wrong with their file and the
+        // sentence must not imply otherwise.
         WorkflowChunkError::Io { .. } => ApiError {
-            status: StatusCode::BAD_REQUEST,
-            detail: error.to_string(),
-            code: Some(INSPECT_CODE_NOT_PNG),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: "SceneWorks could not read the uploaded image back off disk, so its workflow \
+                     could not be checked. Nothing is known to be wrong with the file — try again."
+                .to_owned(),
+            code: Some(INSPECT_CODE_READ_FAILED),
         },
-        // A PNG that claims a workflow we will not guess at: truncated framing, two workflow
-        // chunks, oversized metadata, a zip bomb, a newer schema version, a video envelope.
-        WorkflowChunkError::Png { .. }
-        | WorkflowChunkError::DuplicateChunk { .. }
+        // A PNG whose framing never got as far as our keyword. The upstream `detail` is `png`'s
+        // Debug output; it goes to the log above, not to the user.
+        WorkflowChunkError::Png { .. } => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            detail: "This PNG could not be read far enough to look for a workflow, so it may be \
+                     truncated or damaged."
+                .to_owned(),
+            code: Some(INSPECT_CODE_UNREADABLE),
+        },
+        // Same treatment, same reason: a corrupt zlib stream's message is not a sentence.
+        WorkflowChunkError::UnreadableChunk { limit, .. } => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            detail: format!(
+                "This PNG's workflow text could not be read as text within {limit} bytes, so the \
+                 recipe it claims cannot be shown."
+            ),
+            code: Some(INSPECT_CODE_UNREADABLE),
+        },
+        // `Encode` is unreachable on a read; given a sentence rather than left to a catch-all so a
+        // new variant has to be classified here instead of silently inheriting one.
+        WorkflowChunkError::Encode { .. } => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            detail: "This image's workflow could not be processed.".to_owned(),
+            code: Some(INSPECT_CODE_UNREADABLE),
+        },
+        // The remaining variants' own sentences are already written FOR a person and name a
+        // concrete number the user can act on (two chunks, N bytes over the limit, an envelope
+        // this build will not read) — no upstream text is inlined into any of them.
+        WorkflowChunkError::DuplicateChunk { .. }
         | WorkflowChunkError::MetadataTooLarge { .. }
         | WorkflowChunkError::TextTooLarge { .. }
-        | WorkflowChunkError::UnreadableChunk { .. }
-        | WorkflowChunkError::Envelope(_)
-        // `Encode` is unreachable on a read; folded in rather than left to a catch-all so a new
-        // variant has to be classified here instead of silently becoming a 422.
-        | WorkflowChunkError::Encode { .. } => ApiError {
+        | WorkflowChunkError::Envelope(_) => ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             detail: error.to_string(),
             code: Some(INSPECT_CODE_UNREADABLE),
@@ -224,18 +385,31 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
 /// Every read here is one the existing endpoints already do, and all four are read-only:
 /// `model_catalog` is the shared install-state snapshot behind `GET /models`, `lora_catalog` is the
 /// builtin → global → external → project merge, `styles_catalog` reads `builtin.styles.jsonc`, and
-/// `recipe_preset_catalog` is the three-scope preset merge.
+/// `recipe_preset_catalog_with` is the three-scope preset merge.
+///
+/// ONE [`JobCatalogSnapshot`] is threaded through both model readers (sc-8819). The preset merge
+/// needs the model catalog too, so without the snapshot this request read it twice — two full deep
+/// clones of the cached value, and two values that could DISAGREE if a model write landed between
+/// them, leaving the report's `model` row classified against a different catalog than the presets.
 async fn inspect_catalogs(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<StaticCatalogs, ApiError> {
-    let models = crate::models::model_catalog(state).await?;
-    let loras = crate::loras::lora_catalog(state, project_id).await?;
+    let snapshot = crate::generation::JobCatalogSnapshot::default();
+    let models = snapshot.models(state).await?;
+    let loras = snapshot.loras(state, project_id).await?;
     let styles = crate::styles::styles_catalog(state).await?;
-    let presets = crate::recipe_presets::recipe_preset_catalog(state, project_id).await?;
+    let presets =
+        crate::recipe_presets::recipe_preset_catalog_with(state, project_id, Some(&snapshot))
+            .await?;
     Ok(StaticCatalogs {
-        models: models.iter().map(model_catalog_entry).collect(),
-        loras: loras.iter().map(lora_catalog_entry).collect(),
+        // `filter_map`, not `map`: a row with no usable `id` is DROPPED rather than reduced to a
+        // matchable `id: ""`. A manifest may omit `id` entirely (`load_manifest_entries` validates
+        // nothing and `apply_model_catalog_entry` never inserts one), and a blank id used to match
+        // an envelope whose `model` had been scrubbed to `""` — reporting a model the file never
+        // named as installed. Same rule the styles/presets already followed through `named_entry`.
+        models: models.iter().filter_map(model_catalog_entry).collect(),
+        loras: loras.iter().filter_map(lora_catalog_entry).collect(),
         styles: style_catalog_entries(&styles),
         recipe_presets: presets.iter().filter_map(named_entry).collect(),
     })
@@ -266,27 +440,29 @@ fn named_entry(entry: &Value) -> Option<CatalogEntry> {
     })
 }
 
-/// One model catalog row.
+/// One model catalog row, or `None` for a row with no usable `id`.
 ///
 /// `installed` is the `installState` the shared snapshot computed — the whole point of the
 /// distinction the report draws, since a cache-only resolver never auto-downloads. The install
 /// action is offered only when the row is `downloadable`, which is the same predicate
 /// `create_model_download_job` needs to find a Hugging Face download to enqueue.
-fn model_catalog_entry(entry: &Value) -> CatalogEntry {
-    let id = entry_str(entry, "id").unwrap_or_default();
+fn model_catalog_entry(entry: &Value) -> Option<CatalogEntry> {
+    // An id-less row is unmatchable and unactionable — the download route is keyed by id — so it
+    // is dropped rather than carried as `id: ""`. See `inspect_catalogs`.
+    let id = entry_str(entry, "id")?;
     let installed = is_installed(entry);
     let downloadable = entry.get("downloadable").and_then(Value::as_bool) == Some(true);
-    let install = (!installed && downloadable && !id.is_empty()).then(|| InstallAction {
+    let install = (!installed && downloadable).then(|| InstallAction {
         method: "POST".to_owned(),
         path: format!("/api/v1/models/{id}/download"),
     });
-    CatalogEntry {
+    Some(CatalogEntry {
         id,
         name: entry_str(entry, "name"),
         repo: None,
         installed,
         install,
-    }
+    })
 }
 
 /// One LoRA catalog row.
@@ -295,8 +471,10 @@ fn model_catalog_entry(entry: &Value) -> CatalogEntry {
 /// `create_lora_download_job` refuses a row with no `huggingface` provider, and it looks the row up
 /// with `lora_catalog(.., None)` — so a PROJECT-scoped row can never be fetched through it and is
 /// deliberately left without an action rather than pointed at a route that would 404.
-fn lora_catalog_entry(entry: &Value) -> CatalogEntry {
-    let id = entry_str(entry, "id").unwrap_or_default();
+fn lora_catalog_entry(entry: &Value) -> Option<CatalogEntry> {
+    // Same drop as `model_catalog_entry`: an id-less row could only ever be matched by a blank
+    // label, and nothing this report is asked about is blank on purpose.
+    let id = entry_str(entry, "id")?;
     let source = entry.get("source").and_then(Value::as_object);
     let is_huggingface = source
         .and_then(|source| source.get("provider"))
@@ -313,18 +491,17 @@ fn lora_catalog_entry(entry: &Value) -> CatalogEntry {
         .map(str::to_owned);
     let installed = is_installed(entry);
     let fetchable = entry.get("scope").and_then(Value::as_str) != Some("project");
-    let install =
-        (!installed && repo.is_some() && fetchable && !id.is_empty()).then(|| InstallAction {
-            method: "POST".to_owned(),
-            path: format!("/api/v1/loras/{id}/download"),
-        });
-    CatalogEntry {
+    let install = (!installed && repo.is_some() && fetchable).then(|| InstallAction {
+        method: "POST".to_owned(),
+        path: format!("/api/v1/loras/{id}/download"),
+    });
+    Some(CatalogEntry {
         id,
         name: entry_str(entry, "name"),
         repo,
         installed,
         install,
-    }
+    })
 }
 
 /// Flatten the Style catalog into its one id-space: every group id and every sub-style id, which is
@@ -357,7 +534,8 @@ mod tests {
             "name": "Krea 2 Turbo",
             "installState": "missing",
             "downloadable": true
-        }));
+        }))
+        .expect("a row with an id survives");
         assert!(!entry.installed);
         assert_eq!(
             entry.install.as_ref().map(|action| action.path.as_str()),
@@ -370,7 +548,8 @@ mod tests {
     fn an_installed_model_row_publishes_no_download() {
         let entry = model_catalog_entry(&json!({
             "id": "krea_2_turbo", "installState": "installed", "downloadable": true
-        }));
+        }))
+        .expect("a row with an id survives");
         assert!(entry.installed);
         assert!(entry.install.is_none());
     }
@@ -381,7 +560,8 @@ mod tests {
         // rather than offer a button `create_model_download_job` would refuse.
         let entry = model_catalog_entry(&json!({
             "id": "external_base_x", "installState": "missing", "downloadable": false
-        }));
+        }))
+        .expect("a row with an id survives");
         assert!(entry.install.is_none());
     }
 
@@ -393,7 +573,8 @@ mod tests {
             "scope": "builtin",
             "installState": "missing",
             "source": { "provider": "huggingface", "repo": "acme/film-grain", "file": "x.safetensors" }
-        }));
+        }))
+        .expect("a row with an id survives");
         assert_eq!(entry.repo.as_deref(), Some("acme/film-grain"));
         assert_eq!(
             entry.install.as_ref().map(|action| action.path.as_str()),
@@ -409,7 +590,8 @@ mod tests {
             "scope": "global",
             "installState": "installed",
             "source": { "provider": "local", "path": "loras/aurora_v3" }
-        }));
+        }))
+        .expect("a row with an id survives");
         assert!(entry.repo.is_none());
         assert!(entry.install.is_none());
         assert!(entry.installed);
@@ -424,7 +606,8 @@ mod tests {
             "scope": "project",
             "installState": "missing",
             "source": { "provider": "huggingface", "repo": "acme/x" }
-        }));
+        }))
+        .expect("a row with an id survives");
         assert_eq!(entry.repo.as_deref(), Some("acme/x"));
         assert!(entry.install.is_none());
     }
@@ -460,11 +643,9 @@ mod tests {
         let duplicate = inspect_error(&WorkflowChunkError::DuplicateChunk { count: 2 });
         assert_eq!(duplicate.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(duplicate.code, Some(INSPECT_CODE_UNREADABLE));
-        // Never a 500, whatever the variant.
+        // Every variant that IS a fact about the caller's bytes is a typed 4xx. `Io` is not one of
+        // them — see `a_server_side_read_failure_is_not_reported_as_a_bad_file`.
         for error in [
-            WorkflowChunkError::Io {
-                detail: "x".to_owned(),
-            },
             WorkflowChunkError::Png {
                 detail: "x".to_owned(),
             },
@@ -488,6 +669,114 @@ mod tests {
                 mapped.status
             );
             assert!(!mapped.detail.is_empty(), "{error:?} needs a sentence");
+            assert!(mapped.code.is_some(), "{error:?} needs a machine code");
         }
+    }
+
+    #[test]
+    fn a_server_side_read_failure_is_not_reported_as_a_bad_file() {
+        // `WorkflowChunkError::Io` fires when OUR staged temp cannot be opened or read — the
+        // caller's bytes were written successfully before that point. On Windows an antivirus
+        // sharing violation on `cache/uploads` is the plausible cause. Calling that "not a PNG"
+        // sends the user to fix a file that is fine.
+        let mapped = inspect_error(&WorkflowChunkError::Io {
+            detail: "The process cannot access the file because it is being used by another \
+                     process. (os error 32)"
+                .to_owned(),
+        });
+        assert_eq!(mapped.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.code, Some(INSPECT_CODE_READ_FAILED));
+        assert_ne!(mapped.code, Some(INSPECT_CODE_NOT_PNG));
+        assert!(
+            !mapped.detail.contains("not a PNG"),
+            "detail: {}",
+            mapped.detail
+        );
+        // The OS message is diagnostic, not a sentence — it goes to the log, not the response.
+        assert!(
+            !mapped.detail.contains("os error"),
+            "detail: {}",
+            mapped.detail
+        );
+    }
+
+    #[test]
+    fn a_garbage_chunks_sentence_does_not_leak_the_png_crates_debug_output() {
+        // The first time sc-15947's reader failure is shown to a person. `Png`/`UnreadableChunk`
+        // inline the upstream text into their `Display`, and for a corrupt chunk that text is a
+        // `Debug` dump of a `ChunkType` struct.
+        let leaky = "ChunkType { type: ageg, critical: false, private: true, reserved: true, \
+                     safecopy: true }";
+        for error in [
+            WorkflowChunkError::Png {
+                detail: leaky.to_owned(),
+            },
+            WorkflowChunkError::UnreadableChunk {
+                limit: 262_144,
+                detail: leaky.to_owned(),
+            },
+        ] {
+            let mapped = inspect_error(&error);
+            assert_eq!(mapped.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(mapped.code, Some(INSPECT_CODE_UNREADABLE));
+            assert!(
+                !mapped.detail.contains("ChunkType") && !mapped.detail.contains("safecopy"),
+                "{error:?} leaked its upstream debug text: {}",
+                mapped.detail
+            );
+            assert!(
+                mapped.detail.ends_with('.'),
+                "{error:?} must read as a sentence: {}",
+                mapped.detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_row_with_no_usable_id_is_dropped_rather_than_carried_as_a_blank() {
+        // A manifest may omit `id` entirely — `load_manifest_entries` validates nothing and
+        // `apply_model_catalog_entry` defaults it. A blank id used to be matchable, and
+        // `workflow_share` scrubs an unshareable `model` to exactly that.
+        for row in [
+            json!({ "name": "Some Other Model", "installState": "installed" }),
+            json!({ "id": "", "name": "Some Other Model", "installState": "installed" }),
+            json!({ "id": "   ", "name": "Some Other Model", "installState": "installed" }),
+        ] {
+            assert!(model_catalog_entry(&row).is_none(), "row: {row}");
+            assert!(lora_catalog_entry(&row).is_none(), "row: {row}");
+        }
+        // A row that DOES have one still survives, so the guard drops only the unmatchable.
+        assert!(model_catalog_entry(&json!({ "id": "krea_2_turbo" })).is_some());
+        assert!(lora_catalog_entry(&json!({ "id": "film_grain" })).is_some());
+    }
+
+    #[test]
+    fn the_route_body_limit_sits_above_the_per_field_cap() {
+        // Issue 4: with the two EQUAL, a body at the cap plus multipart framing trips axum's own
+        // limit first and surfaces as a plain 400 from `field.chunk()`, so the typed 413 is
+        // unreachable at the only boundary that matters. Same headroom as the LoRA route.
+        const {
+            assert!(
+                MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES > MAX_WORKFLOW_INSPECT_BYTES,
+                "the router limit must leave room for boundaries and part headers"
+            );
+            assert!(
+                MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES - MAX_WORKFLOW_INSPECT_BYTES
+                    == MULTIPART_FRAMING_HEADROOM_BYTES
+            );
+            // Issue 8: inspect stages the body, throws it away and returns a small JSON report, so
+            // it does not buy the asset route's 2 GiB. The cap must still clear any PNG a user
+            // would plausibly drop.
+            assert!(MAX_WORKFLOW_INSPECT_BYTES < MAX_UPLOAD_BYTES);
+            assert!(
+                MAX_WORKFLOW_INSPECT_BYTES >= 512 * 1024 * 1024,
+                "a 16384² 8-bit RGB PNG (4096² through a 4x upscale) has to fit"
+            );
+        }
+        // The production value the derived accessor yields, with no test override in force.
+        assert_eq!(
+            max_inspect_multipart_body_bytes(),
+            MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES
+        );
     }
 }

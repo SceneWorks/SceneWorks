@@ -138,7 +138,8 @@ async fn inspect_returns_the_workflow_and_its_resolution_report() {
         body["resolution"]["loras"][0]["name"],
         json!("Aurora Portrait v3")
     );
-    assert!(body["resolution"]["replayable"].is_boolean());
+    assert!(body["resolution"]["runnable"].is_boolean());
+    assert!(body["resolution"]["inputImagesRequired"].is_u64());
     // `stylePreset: "cinematic"` is the inert wire default EVERY generated image carries, so it is
     // not a style requirement — otherwise every shared image would report an unresolved style.
     assert_eq!(body["resolution"]["styles"], json!([]));
@@ -339,8 +340,8 @@ async fn inspect_rejects_a_png_whose_workflow_this_build_will_not_read_with_a_ty
 
 #[tokio::test]
 async fn inspect_rejects_an_oversized_body_with_413_and_leaves_no_temp() {
-    // The real cap is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the branch is reached
-    // through the same lowered-cap override the LoRA import uses.
+    // The real cap is `MAX_WORKFLOW_INSPECT_BYTES` (512 MiB), which no test wants to send, so the
+    // branch is reached through the same lowered-cap override the LoRA import uses.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
@@ -356,7 +357,104 @@ async fn inspect_rejects_an_oversized_body_with_413_and_leaves_no_temp() {
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "body: {body}");
     assert_eq!(body["detail"], json!("Uploaded image is too large"));
+    assert_eq!(body["code"], json!("workflow_inspect_too_large"));
     assert!(staged_uploads(&data_dir).is_empty());
+}
+
+#[tokio::test]
+async fn the_typed_413_wins_at_the_real_cap_boundary_not_just_far_under_it() {
+    // The test above lowers the field cap to 8 bytes — far under the ROUTER limit, so it proves
+    // nothing about the boundary that actually matters. With `DefaultBodyLimit` equal to the field
+    // cap, a body AT the cap plus its multipart framing (boundaries, part headers, the trailing
+    // CRLF — ~200 bytes here) exceeds the router limit, axum rejects the body first, and
+    // `field.chunk()` surfaces it as a plain 400 with no typed code at all.
+    //
+    // `max_inspect_multipart_body_bytes` derives the router limit from the live per-field cap, so
+    // lowering the cap BEFORE `create_app` scales the router limit with it and the same
+    // cap-plus-framing relationship is exercised at a sendable size.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let png = sceneworks_png(
+        &temp_dir,
+        Some(&image_envelope("krea_2_turbo", "a lighthouse")),
+    );
+    // The cap is set to the PNG's exact length, so the file field lands precisely ON it and the
+    // framing is the only thing that could push the request over a router limit.
+    let cap = png.len();
+
+    TEST_MAX_WORKFLOW_INSPECT_BYTES.with(|limit| limit.set(cap));
+    let app = create_app(settings).expect("app creates");
+    let (at_cap, at_cap_body) = inspect(app.clone(), "exact.png", &png, &[]).await;
+    // One byte over: the field cap is the thing that must reject it, with the typed 413.
+    let mut over = png.clone();
+    over.push(0);
+    let (over_cap, over_cap_body) = inspect(app, "over.png", &over, &[]).await;
+    TEST_MAX_WORKFLOW_INSPECT_BYTES.with(|limit| limit.set(0));
+
+    assert_eq!(
+        at_cap,
+        StatusCode::OK,
+        "a body exactly at the cap must reach the handler, framing and all: {at_cap_body}"
+    );
+    assert_eq!(at_cap_body["status"], json!("workflow"));
+    assert_eq!(
+        over_cap,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "one byte over the cap is the typed 413, not axum's plain 400: {over_cap_body}"
+    );
+    assert_eq!(over_cap_body["code"], json!("workflow_inspect_too_large"));
+    assert!(staged_uploads(&data_dir).is_empty());
+}
+
+#[tokio::test]
+async fn a_malformed_multipart_request_still_carries_a_machine_readable_code() {
+    // The extractor rejects these before the handler body runs. Left to axum the response is a
+    // PLAIN-TEXT body — so sc-15951, which branches on `code`, would be handed something it cannot
+    // parse as JSON at all. Every shape that fails at the extractor is covered here.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    for (label, content_type, body) in [
+        (
+            "an empty body",
+            "multipart/form-data; boundary=B",
+            Vec::new(),
+        ),
+        (
+            "a JSON body",
+            "application/json",
+            br#"{"file":"nope"}"#.to_vec(),
+        ),
+        (
+            "a boundary-less content type",
+            "multipart/form-data",
+            b"--B\r\n\r\n--B--\r\n".to_vec(),
+        ),
+    ] {
+        let (status, _, response) = request_raw(
+            app.clone(),
+            "POST",
+            INSPECT_ROUTE,
+            body,
+            &[("content-type", content_type)],
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "{label} must be a typed 4xx, got {status}"
+        );
+        let value: Value = serde_json::from_slice(&response)
+            .unwrap_or_else(|error| panic!("{label} must render a JSON envelope: {error}"));
+        assert_eq!(
+            value["code"],
+            json!("workflow_inspect_bad_multipart"),
+            "{label}: {value}"
+        );
+        assert!(
+            value["detail"].as_str().is_some_and(|d| !d.is_empty()),
+            "{label} needs a sentence: {value}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -383,6 +481,7 @@ async fn inspect_requires_a_file_field() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let value: Value = serde_json::from_slice(&response).expect("json body parses");
     assert_eq!(value["detail"], json!("Upload file field is required"));
+    assert_eq!(value["code"], json!("workflow_inspect_bad_multipart"));
 }
 
 #[tokio::test]
@@ -419,6 +518,7 @@ async fn inspect_rejects_a_duplicate_file_field_and_cleans_the_first_temp() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let value: Value = serde_json::from_slice(&response).expect("json body parses");
     assert_eq!(value["detail"], json!("Only one file field is allowed"));
+    assert_eq!(value["code"], json!("workflow_inspect_bad_multipart"));
     assert!(
         staged_uploads(&data_dir).is_empty(),
         "the first staged temp must not be orphaned"
@@ -461,7 +561,7 @@ async fn inspect_reports_a_catalog_known_but_absent_model_as_installable() {
         json!({ "method": "POST", "path": "/api/v1/models/fixture_model/download" }),
         "the middle case must name the existing Model Manager flow"
     );
-    assert_eq!(body["resolution"]["replayable"], json!(false));
+    assert_eq!(body["resolution"]["runnable"], json!(false));
     // The user-trained LoRA the envelope names resolves to nothing here, and is LISTED.
     assert_eq!(body["resolution"]["loras"][0]["state"], json!("missing"));
     assert!(staged_uploads(&data_dir).is_empty());
@@ -535,7 +635,10 @@ async fn inspect_reports_an_input_image_the_recipe_needs_by_shape() {
     assert_eq!(inputs[0]["state"], json!("userSupplied"));
     assert_eq!(inputs[0]["detail"], json!("Needs a source image."));
     assert_eq!(inputs[1]["detail"], json!("Needs 2 reference images."));
-    assert_eq!(body["resolution"]["replayable"], json!(false));
+    // The two answers, separately: this install cannot RUN it (the model is unknown here) and it
+    // would additionally need three images from the user.
+    assert_eq!(body["resolution"]["runnable"], json!(false));
+    assert_eq!(body["resolution"]["inputImagesRequired"], json!(3));
 }
 
 #[tokio::test]
@@ -570,10 +673,71 @@ async fn inspect_surfaces_a_dropped_collection_so_replay_can_be_withheld() {
         .as_str()
         .is_some_and(|detail| detail.contains("NOT a LoRA-free recipe")));
     assert_eq!(
-        body["resolution"]["replayable"],
+        body["resolution"]["runnable"],
         json!(false),
         "an omitted collection withholds one-click replay"
     );
+}
+
+#[tokio::test]
+async fn inspect_never_matches_a_scrubbed_model_to_a_catalog_row_that_has_no_id() {
+    // `workflow_share` scrubs a path-shaped `model` to `""` (it is unshareable), and a manifest may
+    // omit `id` entirely — `load_manifest_entries` validates nothing and `apply_model_catalog_entry`
+    // defaults it. Reduced to `id: ""`, the row matched an envelope that named NO model, and the
+    // report said a model the file never mentioned was on this machine.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let config_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&config_dir);
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [{
+            "name": "Some Other Model", "type": "image", "family": "test",
+            "downloads": [{ "provider": "huggingface", "repo": "acme/some-other-model" }]
+        }] }"#,
+    )
+    .expect("id-less models manifest writes");
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+
+    let share = sceneworks_core::workflow_share::parse_workflow_share_json(
+        r#"{
+            "sceneworksWorkflow": "image",
+            "schemaVersion": 1,
+            "producer": { "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" },
+            "mode": "text_to_image",
+            "model": "C:\\models\\theirs\\weights.safetensors",
+            "prompt": "a lighthouse"
+        }"#,
+    )
+    .expect("the envelope parses");
+    assert_eq!(share.model, "", "the parser scrubbed the path-shaped model");
+
+    let (status, body) = inspect(
+        app,
+        "scrubbed.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let model = &body["resolution"]["model"];
+    assert_eq!(model["state"], json!("missing"), "model: {model}");
+    assert!(
+        model.get("catalogId").is_none(),
+        "a blank slug matched a row: {model}"
+    );
+    assert!(model.get("install").is_none(), "model: {model}");
+    assert!(
+        !model["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("Some Other Model"),
+        "the sentence names a model the envelope never did: {model}"
+    );
+    assert_eq!(body["resolution"]["runnable"], json!(false));
 }
 
 #[tokio::test]
