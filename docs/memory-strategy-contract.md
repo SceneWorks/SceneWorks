@@ -31,6 +31,56 @@ needs tolerance must include it in the provider estimate and golden evidence.
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.
 
+## Tier integrity
+
+**No component is resident above the user's selected quant tier unless a declared, measured exception
+says otherwise.** (SC-15799.)
+
+Choosing q8 or q4 *is* a memory decision. If a user picks q4 because bf16 does not fit, carrying any
+component at bf16 defeats the choice they made. This is a rule about the catalog, not a per-entry
+observation: it applies to every entry, on every hosted tier, on both backends.
+
+Three things follow, and they are not negotiable individually:
+
+1. **The packing tier is not a memory lever.** A component's precision is decided by the tier the user
+   selected, before any budget is read, and it is identical on a 16 GB card and a 96 GB one. Packing
+   something to the tier the user already asked for is not a concession to a tight budget, so it must
+   never sit in an escalation ladder. `gen_core::tier_integrity` is the executable rule;
+   `gen_core::mempolicy` no longer has a `BranchQuant` lever.
+2. **Every above-tier residency is declared.** `config/tier-integrity.jsonc` is the complete ledger:
+   per entry, per component, the precision it is actually resident at, the selected tiers on which that
+   is above tier, why, and what it costs. `scripts/check-tier-integrity.mjs` validates it on the
+   `parity` lane and generates the audit table at
+   [`docs/generated/tier-integrity.md`](generated/tier-integrity.md). A declaration is not optional
+   paperwork — an exception the shared decision cannot see is the defect, not the residency itself.
+3. **An undeclared or unmeasured exception is a defect.** A declared one carries the measurement that
+   justifies it. Where the catalog has above-tier residency whose isolated cost is not yet measured, the
+   row says so and names the story that owes it; the checker permits that **only** for the entries
+   grandfathered when the ledger was created, so a new model cannot add one.
+
+The exceptions divide by *cause*, and the causes have different fixes. A **packing exception** is a
+deliberate quality decision (a precision-sensitive decoder, a control residual that drifts) and needs a
+measurement. A **backend capability** gap means the backend cannot serve the on-disk format and upcasts;
+packing cannot fix it, so it needs a compute path or a different published dtype and is tracked
+separately. A **structural** case has nothing quantizable at all. Reading them as one bucket is how a
+capability gap gets mistaken for a packing choice and "fixed" by repackaging that cannot help.
+
+Two mechanisms are load-bearing today. `mlx.denseTextEncoderTier` is the only way an entry obtains a
+dense text encoder on a packed tier, and setting it requires a matching ledger row — the hardcoded
+worker registry it used to mirror is deleted, because ids living in Rust while the catalog declared
+nothing is exactly the invisible carve-out this rule exists to remove. `candle.control.branchTierByBaseTier`
+declares the Krea pose-control branch's tier per base tier: q8 follows the tier, bf16 is already at
+tier, and **q4 floors its branch at q8** — the one declared, measured exception, because a q4 control
+residual measures "pose-locked; non-pose details drift" and the residual is the thing the user asked
+for. That floor is the rule working, not a hole in it.
+
+**Repacking invalidates measurements.** A component's resident precision is an input to every peak
+measured against it, so changing it makes those peaks stale even though every provenance field still
+looks valid. Evidence captured before a repack must be renamed or fingerprint-bumped so it cannot read
+as green — SC-15799 renamed the Krea control-lane rows to `bf16Branch*` and set
+`candle.control.measured: false` for exactly this reason. **Tier integrity therefore precedes
+calibration**: calibrating first means paying for those measurements twice.
+
 ## Lifecycle and telemetry
 
 A provider capability declaration is selectable only when cancel and error transitions are safe:

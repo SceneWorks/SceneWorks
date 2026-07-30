@@ -640,7 +640,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // recorded there — a family in `STANDARD_TIER_MODELS` with a `candle.vramGbByTier` block that is not
     // in `CANDLE_QUANT_MODELS`. NOT `candle_quant_lora`: neither advertises candle inference LoRA.
     //
-    // The load `Quant` stays `None` on klein regardless (`DENSE_TE_TIER_MODELS` keeps its bf16 Qwen3 text
+    // The load `Quant` stays `None` on klein regardless (its `mlx.denseTextEncoderTier` declaration keeps its bf16 Qwen3 text
     // encoder full-precision); `mlxQuantize` here is a turnkey tier-SELECT — which pre-quantized subdir
     // `standard_tier_subdir` descends into — not an on-the-fly quantize.
     ModelCaps::new("flux2_klein_9b", true, true, true, false, false),

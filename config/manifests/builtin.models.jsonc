@@ -4762,45 +4762,73 @@
         },
         "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
-        // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
-        // (the end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
+        // the base at the installed tier PLUS the trained control branch, so its render peak (the
+        // end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
         // its own numbers. The worker's Krea control fit-gate (`krea_control_fit`) reads these vs live/capped
         // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
         // on an RTX PRO 6000 (Blackwell sm_120).
+        //
+        // ── sc-15799 (TIER INTEGRITY): THIS WHOLE BLOCK IS SUPERSEDED EVIDENCE. ───────────────────────
+        // Every peak below was captured with a **bf16** control branch. The branch now packs to the tier
+        // the base tier implies (`branchTierByBaseTier`), so on q4 and q8 those rows describe a
+        // configuration that NO LONGER SHIPS. `measured` is therefore FALSE and no calibration record may
+        // read these as current evidence: the control lane owes a re-measure on CUDA hardware (sc-16013).
+        // The rows are RENAMED (`bf16Branch*`) rather than deleted because they remain a sound UPPER BOUND
+        // on the packed configuration — a lighter branch can only lower the peak — and the worker derives
+        // its admission estimate as `row − branchPackSaveGb[branch tier]`, which is exactly the arithmetic
+        // the shipped ladder already performed when its branch-quant rung engaged. That keeps a
+        // constrained card protected without letting a stale row masquerade as a measurement.
         "control": {
-          // Trusted two-process rendered-device probe (sc-12176), 1024², bf16 control branch, no deeper
+          // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
+          // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
+          // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.
+          //   q8 → q8   : the branch follows the selected tier exactly.
+          //   q4 → q8   : the one DECLARED, MEASURED exception. Packing the branch to q4 measures
+          //               "pose-locked; non-pose details drift" (candle-gen #483, sc-11743), and the
+          //               control residual is the thing the user asked for, so it floors at q8. Costs
+          //               ~1.8 GB of the 10.2 GB a q4 branch would have saved. Declared with its evidence
+          //               in `config/tier-integrity.jsonc`.
+          //   bf16 → bf16: already at tier; nothing to pack.
+          "branchTierByBaseTier": { "q4": "q8", "q8": "q8", "bf16": "bf16" },
+          // Trusted two-process rendered-device probe (sc-12176), 1024², **bf16 control branch**, no deeper
           // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
           // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
           // byte-identical within every tier; q4/q8 used one denoise step (the working set is step-count
-          // invariant), bf16 used the production 8 steps. The fit gate tries Sequential first and uses
-          // its row for the clean second-stage reject before composing the deeper savings below.
-          "peakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
-          "sequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
+          // invariant), bf16 used the production 8 steps. SUPERSEDED for q4/q8 by the branch repack — read
+          // only through the branch-packing correction, never as a current measurement.
+          "bf16BranchPeakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
+          "bf16BranchSequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
           // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
-          // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost. The
-          // fit-gate engages it BEFORE branch-quant. GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120),
-          // 1024²/8-step: the monolithic decode peaks at +6.7 GiB over the tiled tail (40.2 → 33.4 GiB
-          // whole-render), at a decode cost of +0.14 s (0.56 → 0.71 s, +26%). Seam-free: the tiled render
-          // is bit-near-identical to monolithic (mean |Δ| 0.05/255, no tile-boundary spike). Keyed to the
-          // q4 BASE tier, where the ~30.9 GB decode spike IS the render peak; 6.7 brings it to ~24.2 GB,
-          // essentially the denoise steady floor. Higher tiers omit it (their denoise steady-state, not the
-          // decode, is the peak — tiling there recovers little, so branch-quant is the operative rung).
+          // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost.
+          // GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120), 1024²/8-step: the monolithic decode peaks
+          // at +6.7 GiB over the tiled tail (40.2 → 33.4 GiB whole-render), at a decode cost of +0.14 s
+          // (0.56 → 0.71 s, +26%). Seam-free: the tiled render is bit-near-identical to monolithic (mean
+          // |Δ| 0.05/255, no tile-boundary spike). Keyed to the q4 BASE tier, where the decode spike IS the
+          // render peak. CARRIED ACROSS sc-15799: it is a delta between two arms of the SAME load, so the
+          // resident branch is present in both and cancels; a lighter branch lowers the denoise floor the
+          // spike is measured against, which cannot shrink the delta. Higher tiers omit it (their denoise
+          // steady-state, not the decode, is the peak — tiling there recovers little).
           "decodeTileSaveGb": { "q4": 6.7 },
-          // MIDDLE rung (sc-11745, candle-gen #496): the peak reduction (GB) from engaging sc-6217-style
+          // DEEPEST rung (sc-11745, candle-gen #496): the peak reduction (GB) from engaging sc-6217-style
           // query-row attention chunking on the composable base stack + control branch
           // (`Krea2ControlPaths.chunk_attention`) — a SPEED cost, no quality cost (the chunked forward is
-          // byte-identical to the unchunked one). Bounds the DENOISE-phase activation peak, so it slots
-          // between VAE-decode tiling (decode-phase) and the last-resort branch quant. GPU-MEASURED on an
-          // RTX PRO 6000 (Blackwell sm_120), dense bf16 base, 1024²/8-step: the ~11 GB-of-activations denoise
-          // steady-state peak drops −2.43 GiB, at a cost of +2.6 s (~+6%). A SCALAR (not tier-keyed): the
-          // activation peak is bf16 regardless of the base weight tier, so the saving is tier-independent.
+          // byte-identical to the unchunked one). Bounds the DENOISE-phase activation peak. GPU-MEASURED on
+          // an RTX PRO 6000 (Blackwell sm_120), dense bf16 base, 1024²/8-step: the ~11 GB-of-activations
+          // denoise steady-state peak drops −2.43 GiB, at a cost of +2.6 s (~+6%). A SCALAR (not
+          // tier-keyed): the activation peak is bf16 regardless of the base weight tier, so the saving is
+          // tier-independent — and for the same reason it is unaffected by the branch repack.
           "chunkAttnSaveGb": 2.43,
-          // Last-resort rung: the peak reduction (GB) from quantizing the control branch bf16 → q8/q4
-          // (candle-gen #483, sc-11743), MEASURED (dense base holds the rest fixed to isolate the branch):
-          // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
-          // before q4, and composes it with the two cheaper (speed-only) rungs above — tiling then chunking.
-          "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
-          "measured": true
+          // The measured WEIGHT-side delta of packing the bf16 branch to q8/q4 (candle-gen #483, sc-11743;
+          // dense base holds the rest fixed to isolate the branch): q8 −8.4 (near-lossless), q4 −10.2
+          // (pose-locked; non-pose details drift). Formerly `branchQuantSaveGb`, read as a RUNG's budget.
+          // It is now the correction that turns the superseded `bf16Branch*` rows into the configuration
+          // that ships, plus the evidence behind the q4 → q8 floor above. Renamed so no stale reader can
+          // keep spending it as a lever.
+          "branchPackSaveGb": { "q8": 8.4, "q4": 10.2 },
+          // FALSE since sc-15799: the peaks above were captured against a branch tier that no longer
+          // ships. Re-measure owed by sc-16013 (needs CUDA hardware).
+          "measured": false,
+          "supersededBy": "sc-15799"
         }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
@@ -5108,7 +5136,7 @@
           // default), q8/, bf16/. UNLIKE flux2-dev, only the transformer is packed in q4/q8 — the
           // 8B Qwen3 text encoder stays DENSE bf16 in every tier (epic 8506: quantize the
           // transformer, keep the TE bf16), so the worker loads each tier with Quant::None
-          // (`DENSE_TE_TIER_MODELS`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
+          // (`mlx.denseTextEncoderTier`). Replaces the old gated 49 GiB whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-mlx",
           "revision": "acf05e8d5103838baba6a5e32dc91d6997a56023",
@@ -5164,10 +5192,17 @@
       // default q4 footprint with headroom; the dense TE (~16 GB) dominates the floor, and
       // generate is activation-bound at 1024²/4-step. The bf16 tier needs more — per-tier memory
       // tracking is sc-8508/8509. `quantize: 4` records the DEFAULT tier; the actual load Quant is
-      // forced to None (`DENSE_TE_TIER_MODELS`) so the dense bf16 TE is preserved.
+      // forced to None by `denseTextEncoderTier` below so the dense bf16 TE is preserved.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 4
+        "quantize": 4,
+        // sc-15799 (tier integrity): DECLARED here, not in a hardcoded worker id list. On the q4 and q8
+        // tiers this entry's Qwen3 text encoder is resident ABOVE the selected tier — an exception to
+        // "no component is resident above the user's selected tier" — so it must be visible to the
+        // catalog, the audit table, and the parity lane, not just to `tier_resolver.rs`. The exception
+        // row (cause, evidence, owing story) lives in `config/tier-integrity.jsonc`;
+        // `scripts/check-tier-integrity.mjs` fails if this flag is set without one.
+        "denseTextEncoderTier": true
       },
       // candle/CUDA VRAM gate (epic 10765). ALL TIERS DIRECTLY MEASURED on an RTX PRO 6000 (Blackwell
       // sm_120) at 1024²/4-step CFG-free via the candle-gen-flux2 klein offload A/B harness
@@ -5270,7 +5305,7 @@
           // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): public/ungated re-host of
           // black-forest-labs/FLUX.2-klein-9b-kv. Per-tier subdirs q4/ (default), q8/, bf16/ — only
           // the transformer is packed; the Qwen3 TE stays DENSE bf16 in every tier (Quant::None at
-          // load via `DENSE_TE_TIER_MODELS`). Replaces the old gated whole-repo + load-time quantize.
+          // load via `mlx.denseTextEncoderTier`). Replaces the old gated whole-repo + load-time quantize.
           "provider": "huggingface",
           "repo": "SceneWorks/flux2-klein-9b-kv-mlx",
           "revision": "406265beebe141024a06e24038c3713cf7af87d8",
@@ -5319,10 +5354,14 @@
         "types": ["style", "enhance", "character"]
       },
       // Default tier q4 (packed transformer + dense bf16 Qwen3 TE); the actual load Quant is forced
-      // to None (`DENSE_TE_TIER_MODELS`) so the dense TE is preserved. Per-tier memory: sc-8508/8509.
+      // to None by `denseTextEncoderTier` below so the dense TE is preserved. Per-tier memory:
+      // sc-8508/8509.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 4
+        "quantize": 4,
+        // sc-15799 (tier integrity): the above-tier text-encoder residency is DECLARED in the catalog —
+        // see the base 9B entry above and `config/tier-integrity.jsonc` for the exception row.
+        "denseTextEncoderTier": true
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
@@ -6033,7 +6072,7 @@
       "mlx": {
         // Standard q4/q8/bf16 turnkey tiers (sc-9946, epic 8506). q4 default; the ChatGLM3-6B TE is
         // packed (not dense) like flux1/sana, so the load-time quant is a harmless no-op on the
-        // already-packed weights and bf16 resolves to Quant::None — no DENSE_TE_TIER_MODELS guard.
+        // already-packed weights and bf16 resolves to Quant::None — no `mlx.denseTextEncoderTier` declaration.
         "minMemoryGb": 24,
         "quantize": 4,
         "repo": "SceneWorks/kolors-mlx"

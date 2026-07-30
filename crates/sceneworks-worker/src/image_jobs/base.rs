@@ -1152,7 +1152,7 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "z_image_edit",
     // FLUX.2-klein (sc-8711): the two distilled weight variants ship the standard q4/q8/bf16
     // turnkey, but with a DENSE bf16 Qwen3 text encoder in every tier (only the transformer is
-    // packed) — so they additionally appear in [`DENSE_TE_TIER_MODELS`], which forces the load
+    // packed) — so they additionally carry its `mlx.denseTextEncoderTier` declaration, which forces the load
     // Quant to None so the dense TE is never re-quantized. `_true_v2` stays on its install-time
     // single-file→diffusers convert (candle-only) and is not a turnkey yet.
     "flux2_klein_9b",
@@ -1161,7 +1161,7 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // q4/q8/bf16 turnkey. Like FLUX.2-klein only the transformer is packed (the Qwen2.5-VL text
     // encoder is skip_quantization, the VAE is all-conv), so the TE/VAE stay dense bf16 in every
     // tier — but, UNLIKE klein, the qwen loader never quantizes the TE regardless of the load
-    // Quant, so these do NOT need a DENSE_TE_TIER_MODELS guard: the q4/q8 load-quant is a harmless
+    // Quant, so these do NOT declare `mlx.denseTextEncoderTier`: the q4/q8 load-quant is a harmless
     // no-op on the already-packed transformer, and the bf16 tier resolves to Quant::None anyway.
     // `qwen_image_edit_2511` + `_2511_lightning` share one repo (same Edit-2511 checkpoint).
     "qwen_image",
@@ -1169,7 +1169,7 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "qwen_image_edit_2511_lightning",
     // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
     // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
-    // hence NOT in DENSE_TE_TIER_MODELS (the q4/q8 load-quant is a harmless no-op on already-packed
+    // hence no `mlx.denseTextEncoderTier` (the q4/q8 load-quant is a harmless no-op on already-packed
     // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
@@ -1197,7 +1197,7 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
     // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
     // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
-    // NOT need a DENSE_TE_TIER_MODELS guard. The SANA descriptor now advertises supported_quants
+    // need a `mlx.denseTextEncoderTier` declaration. The SANA descriptor now advertises supported_quants
     // Q4/Q8 (mlx-gen #654), so `supports_quant()` is true and they flow through the same
     // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
     "sana_1600m",
@@ -1207,17 +1207,18 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
     // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
     // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
-    // DENSE_TE_TIER_MODELS guard. The kolors descriptor already advertises supported_quants Q4/Q8,
+    // `mlx.denseTextEncoderTier` declaration. The kolors descriptor already advertises supported_quants Q4/Q8,
     // so it flows through the same resolve_quant + reconcile path as every other matrix model.
     "kolors",
 ];
 
-/// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
-/// quantize the transformer, keep the TE bf16). Their pre-packed transformer self-describes its
-/// quant on load, so [`resolve_quant`] must return `None` for them — otherwise the load-time
-/// `.quantize()` would re-quantize the dense bf16 TE down to Q4/Q8. Contrast flux2_dev / sd3.5 /
-/// z-image, whose text encoders are packed too, so their Q4/Q8 load-quant is a harmless no-op on
-/// already-packed weights.
+// The paragraph that used to sit here documented `DENSE_TE_TIER_MODELS` — a const that had already
+// moved to `tier_resolver.rs` and is DELETED entirely by sc-15799, so its doc block was orphaned onto
+// `dense_tier_subdir` below and read as that function's documentation. The rationale it carried
+// (quantize the transformer, keep the text encoder bf16; `resolve_quant` must therefore return `None`)
+// now lives with `tier_resolver::is_dense_te_tier`, beside the manifest flag that is the only way to
+// request it.
+
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
@@ -1865,7 +1866,7 @@ fn resolve_quant_gated(
     // quant regardless. Tier selection (q4/q8/bf16) is driven by the resolved subdir, not this.
     //
     // Ordered FIRST, ahead of the NVFP4 arm (sc-11042): `flux2_klein_9b`/`_kv` are BOTH in
-    // `DENSE_TE_TIER_MODELS` and on the candle txt2img lane (whose `resolve_quant` call is gated only
+    // declared dense-TE (`mlx.denseTextEncoderTier`) and on the candle txt2img lane (whose `resolve_quant` call is gated only
     // by `model.supports_quant()`), so an NVFP4 arm placed above this could return `Some(Nvfp4)` for a
     // crafted `quantTier: "nvfp4"` on a dense-TE turnkey and skip the carve-out — re-quantizing the
     // bf16 text encoder sc-8711/sc-9362 deliberately kept dense. The carve-out is the wider invariant
@@ -1902,8 +1903,9 @@ fn resolve_quant_gated(
     }
 }
 
-/// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein, the [`DENSE_TE_TIER_MODELS`]
-/// class) actually asked for, derived from `advanced.mlxQuantize` the SAME way [`standard_tier_subdir`]
+/// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein — a declared
+/// `mlx.denseTextEncoderTier` entry) actually asked for, derived from `advanced.mlxQuantize` the SAME
+/// way [`standard_tier_subdir`]
 /// picks its `bf16`/`q8`/`q4` tier (no explicit pick → `q8`; `<=0 → bf16`; `>4 → q8`; else `q4`).
 /// Returns the recipe bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`. Kept in
 /// lockstep with the q8 default (sc-10726) so a straight default dense-TE job that resolves the q8 tier
@@ -7840,7 +7842,7 @@ mod standard_tier_tests {
 
     /// sc-11042 — **the dense-TE carve-out outranks the NVFP4 tier** (sc-8711 / sc-9362).
     ///
-    /// `flux2_klein_9b`/`_kv` are in [`DENSE_TE_TIER_MODELS`] AND ride the candle txt2img lane, whose
+    /// `flux2_klein_9b`/`_kv` declare `mlx.denseTextEncoderTier` AND ride the candle txt2img lane, whose
     /// `resolve_quant` call is gated only by `model.supports_quant()`. With the NVFP4 arm ordered ahead
     /// of the carve-out, a crafted `quantTier: "nvfp4"` returned `Some(Nvfp4)` and skipped it — which
     /// would re-quantize the bf16 text encoder those stories deliberately kept dense. The carve-out is
@@ -7852,10 +7854,18 @@ mod standard_tier_tests {
     #[test]
     fn the_nvfp4_arm_never_short_circuits_the_dense_te_carve_out() {
         let nvfp4_dir = PathBuf::from("/models/klein").join(NVFP4_TIER);
-        // Both the registry form and the manifest-flag form of a dense-TE turnkey, with EVERY gate for
-        // the NVFP4 arm satisfied: explicit pick, Blackwell host, and the `nvfp4/` tier resolved.
-        let mut by_id = request(json!({ "quantTier": "nvfp4" }));
-        by_id.model = "flux2_klein_9b".to_owned();
+        // The declared dense-TE turnkey (sc-15799: the manifest flag is the only form) and a novel
+        // manifest-flag model, with EVERY gate for the NVFP4 arm satisfied: explicit pick, Blackwell
+        // host, and the `nvfp4/` tier resolved.
+        let by_id = ImageRequest::from_payload(
+            json!({
+                "model": "flux2_klein_9b",
+                "advanced": { "quantTier": "nvfp4" },
+                "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } }
+            })
+            .as_object()
+            .unwrap(),
+        );
         let by_manifest = ImageRequest::from_payload(
             json!({
                 "model": "some_matrix_model",
@@ -8409,12 +8419,22 @@ mod standard_tier_tests {
         )));
     }
 
-    /// sc-8508: the dense-TE guard is manifest-driven too — registry members
-    /// (`DENSE_TE_TIER_MODELS`) stay true and a novel id opts in via `mlx.denseTextEncoderTier`.
+    /// sc-15799: the dense-TE guard is MANIFEST-ONLY. An above-tier residency the shared decision cannot
+    /// see is the defect that story removes, so the id alone must no longer grant the carve-out —
+    /// `flux2_klein_9b` gets it from the catalog (pinned against the shipped manifest by
+    /// `tests/gpu_and_manifest.rs`) or not at all.
     #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     #[test]
-    fn dense_te_tier_is_manifest_driven_with_registry_backcompat() {
-        assert!(is_dense_te_tier(&manifest_request("flux2_klein_9b", json!({}))));
+    fn dense_te_tier_is_declared_only_in_the_manifest() {
+        assert!(
+            !is_dense_te_tier(&manifest_request("flux2_klein_9b", json!({}))),
+            "a bare id must NOT grant the carve-out any more — the deleted hardcoded registry is \
+             exactly the invisible exception sc-15799 removes"
+        );
+        assert!(is_dense_te_tier(&manifest_request(
+            "flux2_klein_9b",
+            json!({ "denseTextEncoderTier": true })
+        )));
         assert!(is_dense_te_tier(&manifest_request(
             "some_dense_te_model",
             json!({ "denseTextEncoderTier": true })
@@ -9286,13 +9306,13 @@ mod quant_tier_reconcile_tests {
     fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
         let req = |mlx_quantize: serde_json::Value| {
             ImageRequest::from_payload(
-                json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": mlx_quantize } })
+                json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": mlx_quantize }, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                     .as_object()
                     .unwrap(),
             )
         };
         let default = ImageRequest::from_payload(
-            json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
+            json!({ "model": "flux2_klein_9b", "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } }).as_object().unwrap(),
         );
         // No selection → the q8 default (matches standard_tier_subdir's preferred, sc-10726).
         assert_eq!(dense_te_requested_tier_bits(&default), Some(8));
@@ -9321,7 +9341,7 @@ mod quant_tier_reconcile_tests {
         }
 
         let req = ImageRequest::from_payload(
-            json!({ "model": "flux2_klein_9b", "advanced": {} })
+            json!({ "model": "flux2_klein_9b", "advanced": {}, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                 .as_object()
                 .unwrap(),
         );
@@ -9356,7 +9376,7 @@ mod quant_tier_reconcile_tests {
     #[test]
     fn dense_te_genuine_fallback_records_resolved_tier() {
         let req = ImageRequest::from_payload(
-            json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": 8 } })
+            json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": 8 }, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                 .as_object()
                 .unwrap(),
         );

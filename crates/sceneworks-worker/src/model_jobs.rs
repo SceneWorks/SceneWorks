@@ -4326,7 +4326,7 @@ mod tier_builder {
                 // layer names, so on klein the Qwen3 TE stays DENSE bf16 — exactly epic 8506's
                 // "quantize the transformer, keep the TE bf16" for a non-standard TE (sc-8711).
                 // The same call yields a packed transformer + dense bf16 Qwen3 TE; the worker loads
-                // it with Quant::None (`DENSE_TE_TIER_MODELS`) so the dense TE is never re-quantized.
+                // it with Quant::None (`mlx.denseTextEncoderTier`) so the dense TE is never re-quantized.
                 "flux2_dev_quant" | "flux2_klein_quant" => {
                     convert_flux2_dev_prequant(&src, &out, bits, group_size)
                 }

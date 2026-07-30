@@ -263,7 +263,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     // `.scales` sibling. dev still resolves a `Quant` (it is the value `resolve_quant` records on the
     // recipe, and it drives the dense CPU-stage → quantize-onto-GPU fallback when the resolved dir is a
     // dense/`modelPath` tree rather than a packed turnkey). klein keeps a hardcoded `(None, None)`: it is
-    // a DENSE-TE turnkey (`DENSE_TE_TIER_MODELS`) whose bf16 Qwen3 text encoder must never be
+    // a DENSE-TE turnkey (`mlx.denseTextEncoderTier`) whose bf16 Qwen3 text encoder must never be
     // re-quantized — `resolve_quant`'s `is_dense_te_tier` carve-out returns exactly this for
     // `flux2_klein_9b`, and the hardcode additionally keeps `_true_v2` (a convert-at-install dense dir,
     // NOT in that list) on the dense load it has always used.

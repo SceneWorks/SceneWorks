@@ -528,6 +528,31 @@ hole in the rule; it is the rule working.
 - `should_quantize_control_branch` — deleted. The branch's tier is decided by the installed artifact.
 - The q4→q8 floor — declared in the manifest with its quality evidence attached.
 
+### As shipped (SC-15799, inference PR #326 / SceneWorks PR #1959)
+
+All three, plus more than the section anticipated.
+
+- `gen_core::tier_integrity` is the shared executable rule (`control_branch_tier`,
+  `is_above_selected_tier`, `fidelity_rank`), consumed by mlx-gen-krea, candle-gen-krea's provider
+  contract, and the worker's control fit gate — one decision, three consumers.
+- `Lever::BranchQuant` and `should_quantize_control_branch` are gone; `mempolicy`'s ladder is now
+  residency → decode tiling → resolution, and `MemoryPlan` has no `quantize_branch`. The worker's
+  control fit ladder lost its fifth rung and rejects below attention chunking rather than spending
+  quality the user did not ask for.
+- The q4→q8 floor is declared at `candle.control.branchTierByBaseTier` with its measured evidence, and
+  cross-checked against the shared rule by a test that reads the shipped manifest.
+- **The audit changed the picture.** The section assumed a handful of exceptions. The real count is 61,
+  across most of the catalog — on a packed tier the great majority of entries keep a VAE, a text
+  encoder, or both at bf16/f32, decided inside providers where the shared decision could not see it.
+  `config/tier-integrity.jsonc` declares all of them; `scripts/check-tier-integrity.mjs` enforces
+  well-formedness, evidence, and a ratchet that forbids a *new* entry from adding an unmeasured one.
+  19 are measured from in-tree numbers; 42 are declared-but-unmeasured and owned by SC-16015.
+- Two consequences the section did not name: `mlx.denseTextEncoderTier` is now the only route to a
+  dense text encoder (the hardcoded `DENSE_TE_TIER_MODELS` worker registry is deleted), and the
+  control-lane peaks are renamed `bf16Branch*` with `measured: false`, because they were captured
+  against a branch tier that no longer ships. SC-16013 owns the re-measure; SC-16014 owns the
+  lens-turbo mxfp4 upcast, which is a backend capability gap and cannot be fixed by repacking.
+
 ---
 
 ## 8. `mempolicy` is deleted entirely

@@ -1216,21 +1216,26 @@ fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
     );
 }
 
-/// sc-11754 + sc-11744 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the
-/// pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling
-/// of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control`
-/// block makes `predicted_control_peak_gb` return `None` → the control fit-gate goes INERT (bf16 branch
-/// always, the pre-sc-11754 behavior). Exercises the `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation via
-/// `apply_vram_cap` across the cost-ordered rungs: big card → resident untiled bf16 branch (no penalty);
-/// sequential residency (sc-12176) first; then VAE tiling, chunking, branch quant, and reject-before-OOM.
-/// Expectations are expressed relative to the
-/// SHIPPED deltas (a manifest edit that drifts `decodeTileSaveGb` / `branchQuantSaveGb` fails here) rather
-/// than hard-coded arithmetic.
+/// sc-11754 + sc-11744 + sc-15799 (epic 8459 → epic 10765 → epic 15448): the Krea 2 Turbo
+/// `candle.control` block drives the pose-ControlNet VRAM fit LADDER end-to-end against the SHIPPED
+/// manifest bytes. The control-lane sibling of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards
+/// the DATA half — dropping the `control` block makes `predicted_control_peak_gb` return `None` → the
+/// control fit-gate goes INERT (the pre-sc-11754 behavior). Exercises the `SCENEWORKS_CUDA_VRAM_CAP_GB`
+/// small-card emulation via `apply_vram_cap` across the cost-ordered rungs: big card → resident untiled
+/// (no penalty); sequential residency (sc-12176) first; then VAE tiling, attention chunking, and
+/// reject-before-OOM. Expectations are expressed relative to the SHIPPED deltas (a manifest edit that
+/// drifts `decodeTileSaveGb` / `branchPackSaveGb` fails here) rather than hard-coded arithmetic.
+///
+/// sc-15799 changed two things this test now pins:
+///   * there is NO branch-quant rung — the branch's tier comes from the base tier, so the ladder's
+///     deepest rung is attention chunking and below that it rejects;
+///   * every peak is read through the branch-packing correction, because the shipped rows were captured
+///     with a bf16 branch that no longer ships.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn krea_control_candle_block_drives_the_fit_ladder() {
     use crate::krea_control_fit::{
-        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
+        chunk_attn_save_gb, control_branch_tier_for_key, decode_tile_save_gb, fit_ladder,
         predicted_control_peak_gb, predicted_control_sequential_peak_gb, KreaControlFit,
     };
     use crate::vram_gate::apply_vram_cap;
@@ -1242,38 +1247,85 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         .get("candle")
         .and_then(Value::as_object)
         .expect("krea_2_turbo candle block");
-    assert!(
-        candle.get("control").and_then(Value::as_object).is_some(),
-        "krea_2_turbo candle.control block present (absent ⇒ control fit-gate inert → always bf16 branch)"
+    let control = candle
+        .get("control")
+        .and_then(Value::as_object)
+        .expect("krea_2_turbo candle.control block (absent ⇒ control fit-gate inert)");
+
+    // TIER INTEGRITY (sc-15799). The manifest DECLARES the branch tier per base tier, and the shared rule
+    // must agree with it — a declaration the code does not honor is the invisible carve-out this story
+    // exists to remove. The q4 → q8 row is the one declared exception (a q4 control residual measures
+    // "pose-locked; non-pose details drift"); q8 → q8 and bf16 → bf16 simply follow the tier.
+    let declared = control
+        .get("branchTierByBaseTier")
+        .and_then(Value::as_object)
+        .expect("shipped branchTierByBaseTier (sc-15799)");
+    for (base_tier, branch_tier) in declared {
+        let expected = match branch_tier.as_str().expect("branch tier string") {
+            "bf16" => None,
+            "q8" => Some(Quant::Q8),
+            "q4" => Some(Quant::Q4),
+            other => panic!("unexpected declared branch tier {other}"),
+        };
+        assert_eq!(
+            control_branch_tier_for_key(base_tier),
+            expected,
+            "the shared tier-integrity rule must agree with the catalog for base tier {base_tier}"
+        );
+    }
+    assert_eq!(
+        control_branch_tier_for_key("q4"),
+        Some(Quant::Q8),
+        "a q4 base must FLOOR its branch at q8, never carry it at bf16 (the sc-11748 defect) and never \
+         follow to q4 (the measured drift)"
     );
 
-    // Shipped MEASURED branch-quant deltas (sc-11743): q8 −8.4 (near-lossless), q4 −10.2 (pose-locked).
-    let q8 = branch_quant_save_gb(entry, "q8");
-    let q4 = branch_quant_save_gb(entry, "q4");
-    assert_eq!(q8, Some(8.4));
-    assert_eq!(q4, Some(10.2));
+    // The shipped rows are the SUPERSEDED bf16-branch captures, renamed to say so (sc-15799). Their
+    // presence under the old names would mean a stale reader is still treating them as current evidence.
+    assert!(
+        control.get("peakGbByTier").is_none() && control.get("branchQuantSaveGb").is_none(),
+        "the pre-sc-15799 key names must be gone, not aliased — they described a bf16 branch that no \
+         longer ships"
+    );
+    assert_eq!(
+        control.get("measured").and_then(Value::as_bool),
+        Some(false),
+        "the control block's peaks were captured against a branch tier that no longer ships, so it must \
+         NOT claim to be measured until sc-16013 re-measures"
+    );
+    assert_eq!(
+        control.get("supersededBy").and_then(Value::as_str),
+        Some("sc-15799"),
+        "a superseded block must name what superseded it, so no calibration reads it as green"
+    );
 
-    // Shipped MEASURED activation-chunking delta (sc-11745): the denoise-peak rung between tiling and
-    // branch-quant — a SCALAR (tier-independent), speed-only, byte-identical output.
+    // Shipped MEASURED activation-chunking delta (sc-11745): the DEEPEST rung — a SCALAR
+    // (tier-independent), speed-only, byte-identical output, and unaffected by the branch repack.
     let chunk = chunk_attn_save_gb(entry);
     let chunk_save = chunk.expect("chunkAttnSaveGb shipped (the sc-11745 chunking rung)");
     assert!(chunk_save > 0.0, "chunking must recover VRAM, got {chunk_save}");
 
-    // The common small-card install: q4 BASE tier. Resident and Sequential are both measured; every
-    // deeper rung composes from the Sequential baseline because residency is the cheapest adaptation.
+    // The common small-card install: q4 BASE tier. Both peaks are the bf16-branch rows LESS the measured
+    // q8 packing delta, because that is the configuration the loader will actually hold.
     let q4_peak = predicted_control_peak_gb(entry, "q4");
     let peak = q4_peak.expect("q4 control peak");
-    assert!((peak - 38.2).abs() < 1e-6);
+    assert!(
+        (peak - 29.8).abs() < 1e-6,
+        "36.2 bf16-branch row − 8.4 packing delta + 2.0 headroom, got {peak}"
+    );
     let q4_sequential = predicted_control_sequential_peak_gb(entry, "q4");
     let sequential_peak = q4_sequential.expect("q4 sequential control peak");
-    assert!((sequential_peak - 34.5).abs() < 1e-6);
+    assert!(
+        (sequential_peak - 26.1).abs() < 1e-6,
+        "32.5 − 8.4 + 2.0, got {sequential_peak}"
+    );
     let tile = decode_tile_save_gb(entry, "q4");
     let tile_save = tile.expect("q4 decodeTileSaveGb shipped (the sc-11744 tiling rung)");
     assert!(tile_save > 0.0, "tiling must recover VRAM, got {tile_save}");
     let tiled_peak = sequential_peak - tile_save;
     let chunked_peak = tiled_peak - chunk_save;
 
-    // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed bf16 branch.
+    // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed decode.
     assert_eq!(
         fit_ladder(
             q4_peak,
@@ -1281,15 +1333,29 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             apply_vram_cap(None, Some(96.0)),
             tile,
             chunk,
-            q8,
-            q4,
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
         }
+    );
+    // What the repack BUYS on this lane: a 32 GB card now clears the monolithic peak with nothing
+    // engaged, where the uncorrected bf16-branch row (38.2) would have forced staging.
+    assert_eq!(
+        fit_ladder(
+            q4_peak,
+            q4_sequential,
+            apply_vram_cap(None, Some(32.0)),
+            tile,
+            chunk,
+        ),
+        KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
+            tile_vae_decode: false,
+            chunk_attention: false,
+        },
+        "a 32 GB card fits the packed-branch peak (29.8) resident"
     );
     // A card that fits the measured Sequential peak but not Resident engages residency only.
     assert_eq!(
@@ -1299,17 +1365,14 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             apply_vram_cap(None, Some(sequential_peak)),
             tile,
             chunk,
-            q8,
-            q4,
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
         }
     );
-    // A card at the staged+tiled peak engages Sequential then VAE tiling, keeping the bf16 branch.
+    // A card at the staged+tiled peak engages Sequential then VAE tiling — both speed-only.
     assert_eq!(
         fit_ladder(
             q4_peak,
@@ -1317,18 +1380,14 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             apply_vram_cap(None, Some(tiled_peak)),
             tile,
             chunk,
-            q8,
-            q4,
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
-            branch_quant: None,
         }
     );
-    // Just below the tiled peak: tiling alone no longer fits, but the next speed-only rung (chunking) does
-    // (chunked_peak fits) ⇒ tiling + chunking, STILL a bf16 branch — sc-11745's win over dropping to q8.
+    // Just below the tiled peak: the deepest rung (chunking) engages, still with zero quality cost.
     assert_eq!(
         fit_ladder(
             q4_peak,
@@ -1336,78 +1395,39 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             apply_vram_cap(None, Some(tiled_peak - 0.5)),
             tile,
             chunk,
-            q8,
-            q4,
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: true,
-            branch_quant: None,
         }
     );
-    // Just below the chunked peak: both speed rungs stay on and q8 composes (chunked_peak − 8.4 fits) ⇒
-    // tiling + chunking + q8, near-lossless — a shallower quant than the chunk-less ladder would have taken.
-    assert_eq!(
-        fit_ladder(
-            q4_peak,
-            q4_sequential,
-            apply_vram_cap(None, Some(chunked_peak - 0.5)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(Quant::Q8),
-        }
-    );
-    // A card between (…+q8) and (…+q4): tiling + chunking + q4 (chunked_peak − 10.2) fits ⇒ the deepest rung.
-    assert_eq!(
-        fit_ladder(
-            q4_peak,
-            q4_sequential,
-            apply_vram_cap(None, Some(chunked_peak - 8.9)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(Quant::Q4),
-        }
-    );
-    // A card below even (tiling + chunking + q4) ⇒ reject-before-OOM at the best-case peak.
+    // Below the chunked peak there is nothing left to trade — sc-15799 deleted the branch-quant rung, so
+    // the honest outcome is reject-before-OOM rather than a quality cost the user did not ask for.
     match fit_ladder(
         q4_peak,
         q4_sequential,
-        apply_vram_cap(None, Some(chunked_peak - 11.0)),
+        apply_vram_cap(None, Some(chunked_peak - 0.5)),
         tile,
         chunk,
-        q8,
-        q4,
     ) {
         KreaControlFit::TooBig { needed_gb, .. } => {
             assert!(
-                (needed_gb - (chunked_peak - 10.2)).abs() < 1e-6,
-                "best-case (tiling + chunking + q4) peak, got {needed_gb}"
+                (needed_gb - chunked_peak).abs() < 1e-6,
+                "best-case (staged + tiling + chunking) peak, got {needed_gb}"
             );
         }
-        other => panic!("below tiling+chunking+q4 → reject, got {other:?}"),
+        other => panic!("below staged+tiling+chunking → reject, got {other:?}"),
     }
 
-    // The bf16 BASE tier carries no tiling saving (its denoise
-    // steady-state, not the decode, is the peak), but the SCALAR chunking rung applies to every tier: a
-    // 41 GB card engages chunking (speed-only) then q8 (48.2 − chunk_save − 8.4 ≤ 41), the near-lossless
-    // preference before q4 — a shallower quant than the chunk-less walk (which took bare q8 at 39.8).
+    // The bf16 BASE tier carries no tiling saving (its denoise steady-state, not the decode, is the peak)
+    // and no branch-packing correction (a dense base carries a dense branch — nothing was packed), but
+    // the SCALAR chunking rung applies to every tier.
     let bf16_peak = predicted_control_peak_gb(entry, "bf16");
-    assert!((bf16_peak.expect("bf16 control peak") - 67.8).abs() < 1e-6);
+    assert!(
+        (bf16_peak.expect("bf16 control peak") - 67.8).abs() < 1e-6,
+        "the dense tier's row is NOT corrected: its branch really is dense"
+    );
     let bf16_sequential = predicted_control_sequential_peak_gb(entry, "bf16");
     assert!((bf16_sequential.expect("bf16 sequential control peak") - 52.0).abs() < 1e-6);
     assert_eq!(decode_tile_save_gb(entry, "bf16"), None);
@@ -1415,17 +1435,14 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         fit_ladder(
             bf16_peak,
             bf16_sequential,
-            apply_vram_cap(None, Some(42.0)),
+            apply_vram_cap(None, Some(52.0 - chunk_save)),
             decode_tile_save_gb(entry, "bf16"),
             chunk,
-            q8,
-            q4
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: true,
-            branch_quant: Some(Quant::Q8),
         }
     );
 }
@@ -1441,8 +1458,8 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
 #[ignore]
 async fn krea_control_live_ladder_on_a_real_card() {
     use crate::krea_control_fit::{
-        branch_quant_save_gb, chunk_attn_save_gb, decode_tile_save_gb, fit_ladder,
-        predicted_control_peak_gb, predicted_control_sequential_peak_gb, KreaControlFit,
+        chunk_attn_save_gb, decode_tile_save_gb, fit_ladder, predicted_control_peak_gb,
+        predicted_control_sequential_peak_gb, KreaControlFit,
     };
     use crate::vram_gate::apply_vram_cap;
     use gen_core::OffloadPolicy;
@@ -1451,9 +1468,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
     let entry = krea.as_object().expect("krea_2_turbo entry object");
     let tile = decode_tile_save_gb(entry, "q4");
     let chunk = chunk_attn_save_gb(entry);
-    let q8 = branch_quant_save_gb(entry, "q8");
-    let q4 = branch_quant_save_gb(entry, "q4");
-    // The common small-card install: q4 base tier.
+    // The common small-card install: q4 base tier, branch packed to q8 (sc-15799).
     let peak = predicted_control_peak_gb(entry, "q4");
     let sequential = predicted_control_sequential_peak_gb(entry, "q4");
     let tiled_peak = sequential.unwrap() - tile.expect("q4 decodeTileSaveGb shipped");
@@ -1464,27 +1479,17 @@ async fn krea_control_live_ladder_on_a_real_card() {
         .expect("GPU 0 should report a live VRAM budget on a CUDA box");
     eprintln!("live CUDA budget GPU0: {real:?}");
 
-    // Uncapped real 96 GB card → untiled monolithic decode, unchunked, bf16 branch, no rung engages.
+    // Uncapped real 96 GB card → untiled monolithic decode, unchunked, no rung engages.
     assert_eq!(
-        fit_ladder(
-            peak,
-            sequential,
-            apply_vram_cap(Some(real), None),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
+        fit_ladder(peak, sequential, apply_vram_cap(Some(real), None), tile, chunk),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
-            branch_quant: None,
         },
-        "uncapped 96 GB card keeps the untiled bf16 branch"
+        "uncapped 96 GB card engages nothing"
     );
-    // Cap just at the tiled peak (off the REAL reading) → residency and the first speed-cost rung engage:
-    // sequential + tiling, with the bf16 branch kept (no quality penalty).
+    // Cap just at the tiled peak (off the REAL reading) → residency and the first speed-cost rung engage.
     assert_eq!(
         fit_ladder(
             peak,
@@ -1492,40 +1497,31 @@ async fn krea_control_live_ladder_on_a_real_card() {
             apply_vram_cap(Some(real), Some(tiled_peak)),
             tile,
             chunk,
-            q8,
-            q4,
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
-            branch_quant: None,
         },
-        "cap at the tiled peak → VAE tiling keeps the bf16 branch"
+        "cap at the tiled peak → VAE tiling, no quality cost"
     );
-    // Cap below (tiling + chunking + q8) off the REAL reading → all three cheaper rungs on + q4 to fit,
-    // where the old tiling-only ladder rejected-before-OOM.
-    assert_eq!(
-        fit_ladder(
-            peak,
-            sequential,
-            apply_vram_cap(Some(real), Some(chunked_peak - 8.9)),
-            tile,
-            chunk,
-            q8,
-            q4,
-        ),
-        KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
-            chunk_attention: true,
-            branch_quant: Some(gen_core::Quant::Q4),
-        },
-        "cap below tiling+chunking+q8 → tiling + chunking + q4 fits"
-    );
+    // Cap below the chunked peak off the REAL reading → reject-before-OOM: with the branch tier fixed by
+    // the user's tier choice (sc-15799) there is no deeper rung to spend.
+    match fit_ladder(
+        peak,
+        sequential,
+        apply_vram_cap(Some(real), Some(chunked_peak - 0.5)),
+        tile,
+        chunk,
+    ) {
+        KreaControlFit::TooBig { needed_gb, .. } => {
+            assert!((needed_gb - chunked_peak).abs() < 1e-6);
+        }
+        other => panic!("below the chunked peak → reject, got {other:?}"),
+    }
     eprintln!(
-        "krea control fit ladder on a real card: 96→untiled bf16, tiled-peak→tiling, \
-         below-chunk-peak→tiling+chunking, deep→+q4 ✓"
+        "krea control fit ladder on a real card: 96→nothing, tiled-peak→tiling, \
+         below-chunk-peak→reject ✓"
     );
 }
 
@@ -2382,4 +2378,79 @@ async fn utilization_cache_shares_a_fresh_probe_and_refreshes_when_stale() {
     })
     .await;
     assert_eq!(probes.load(Ordering::SeqCst), 2);
+}
+
+/// sc-15799 (tier integrity): the dense-TE carve-out must be DECLARED IN THE SHIPPED CATALOG, because it
+/// is an above-tier residency — on a q4 or q8 tier a `denseTextEncoderTier` entry keeps its text encoder
+/// at a HIGHER precision than the user selected.
+///
+/// That story deleted the hardcoded `DENSE_TE_TIER_MODELS` list from `tier_resolver.rs`: an exception the
+/// shared decision cannot see is exactly the defect it removes, and while the ids lived in Rust the
+/// catalog, the audit table (`config/tier-integrity.jsonc`) and the parity lane had no way to know they
+/// existed. The deletion has a real hazard, though — if the manifest does NOT declare the flag,
+/// `resolve_quant` stops returning `None` and the load-time `.quantize()` re-quantizes a bf16 text encoder
+/// that sc-8711/sc-9362 deliberately kept dense. This test is the guard against that: it reads the SHIPPED
+/// manifest bytes, so a manifest edit dropping the flag fails here rather than silently degrading the
+/// FLUX.2-klein pair's output quality.
+///
+/// Ungated: it reads catalog data only, so it must hold on every build (the MLX and candle lanes both
+/// consult `is_dense_te_tier`).
+#[test]
+fn shipped_dense_te_turnkeys_declare_their_above_tier_text_encoder() {
+    for id in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
+        let entry = builtin_model_entry(id);
+        let declared = entry
+            .get("mlx")
+            .and_then(Value::as_object)
+            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+            .and_then(Value::as_bool);
+        assert_eq!(
+            declared,
+            Some(true),
+            "{id} keeps a DENSE bf16 text encoder on every packed tier (only the transformer is packed, \
+             sc-8711), so it must declare `mlx.denseTextEncoderTier: true`. Without it `resolve_quant` \
+             no longer forces the load quant to None and the dense TE gets re-quantized — the hardcoded \
+             id list that used to cover this is deleted (sc-15799)."
+        );
+    }
+}
+
+/// sc-15799: `mlx.denseTextEncoderTier` may only be declared on an entry that actually SHIPS per-tier
+/// artifacts. The flag's whole meaning is "this tier subdir holds a packed transformer beside a dense
+/// TE"; on an entry with no packed tier it would force the load quant to `None` and silently disable
+/// quantization altogether rather than declaring an above-tier residency. Checked against the shipped
+/// download variants, which is the property that is actually true of a tiered turnkey — deliberately NOT
+/// against `mlx.standardTierLayout`, because the klein pair gets its standard-tier routing from the
+/// `STANDARD_TIER_MODELS` registry and does not set that flag (a separate, still-hardcoded declaration
+/// that is out of this story's scope).
+#[test]
+fn dense_te_declarations_only_appear_on_entries_with_packed_tiers() {
+    for entry in builtin_models_manifest() {
+        let mlx = entry.get("mlx").and_then(Value::as_object);
+        let dense_te = mlx
+            .and_then(|mlx| mlx.get("denseTextEncoderTier"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !dense_te {
+            continue;
+        }
+        let id = entry.get("id").and_then(Value::as_str).unwrap_or("<no id>");
+        let packed_variants: Vec<&str> = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .map(|downloads| {
+                downloads
+                    .iter()
+                    .filter_map(|download| download.get("variant").and_then(Value::as_str))
+                    .filter(|variant| matches!(*variant, "q4" | "q8"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !packed_variants.is_empty(),
+            "{id} declares denseTextEncoderTier but hosts no packed (q4/q8) tier variant. The flag \
+             describes a per-tier turnkey whose transformer is packed beside a dense TE; with no packed \
+             tier it would disable the load quant entirely instead of declaring an above-tier residency"
+        );
+    }
 }
