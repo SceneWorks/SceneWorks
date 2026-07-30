@@ -1342,7 +1342,7 @@ export function rankUncertainties(prod) {
   ];
 }
 
-export async function buildCostModel() {
+export async function buildCostModel({ sourceOverrides = {} } = {}) {
   const sourcePaths = {
     matrix: "docs/generated/memory-matrix.json",
     manifest: "config/manifests/builtin.models.jsonc",
@@ -1359,13 +1359,21 @@ export async function buildCostModel() {
     await Promise.all(
       sourceEntries.map(async ([name, relative]) => [
         name,
-        canonicalSourceText(await readFile(path.join(ROOT, relative), "utf8")),
+        canonicalSourceText(
+          Object.hasOwn(sourceOverrides, name)
+            ? sourceOverrides[name]
+            : await readFile(path.join(ROOT, relative), "utf8"),
+        ),
       ]),
     ),
   );
 
   const matrix = JSON.parse(bodies.matrix);
   const manifest = JSON.parse(stripJsoncComments(bodies.manifest));
+  const revisionBodies = {
+    ...bodies,
+    manifest: JSON.stringify(manifest),
+  };
   const plan = JSON.parse(bodies.calibrationPlan);
   const evidence = JSON.parse(bodies.calibrationEvidence);
 
@@ -1450,11 +1458,16 @@ export async function buildCostModel() {
   const model = {
     schemaVersion: 1,
     generatedFrom: {
-      sceneWorksRevision: `source-tree:${sha256(sourceEntries.map(([name]) => bodies[name]).join(""))}`,
+      sceneWorksRevision: `source-tree:${sha256(
+        sourceEntries.map(([name]) => revisionBodies[name]).join(""),
+      )}`,
       matrixRevision: matrix.generatedFrom.sceneWorksRevision,
       inferenceRevision: matrix.generatedFrom.inferenceRevision,
       sources: Object.fromEntries(
-        sourceEntries.map(([name, relative]) => [name, { path: relative, sha256: sha256(bodies[name]) }]),
+        sourceEntries.map(([name, relative]) => [
+          name,
+          { path: relative, sha256: sha256(revisionBodies[name]) },
+        ]),
       ),
     },
     confidenceTiers: {

@@ -332,6 +332,7 @@ export function derivedCalibrationFingerprint({
   overlay,
   rung,
   parameters,
+  manifestCalibration,
 }) {
   return sha256(
     JSON.stringify({
@@ -347,8 +348,20 @@ export function derivedCalibrationFingerprint({
       overlay,
       rung,
       parameters,
+      manifestCalibration,
     }),
   );
+}
+
+function manifestCalibrationInputs(model, backend, tier) {
+  const scope = model[backend] ?? {};
+  return {
+    minMemoryGb: scope.minMemoryGb ?? null,
+    quantize: scope.quantize ?? null,
+    sequentialPeakGb: scope.sequentialPeakGb?.[tier] ?? null,
+    standardTierLayout: scope.standardTierLayout ?? null,
+    vramGbByTier: scope.vramGbByTier?.[tier] ?? null,
+  };
 }
 
 function runtimeStrategyParameters(parameters) {
@@ -776,6 +789,12 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
+  // JSONC comments and formatting are not part of the manifest contract. Hash the parsed value so
+  // provenance embedded in generated artifacts is stable across semantically inert source edits.
+  const revisionBodies = {
+    ...bodies,
+    manifest: JSON.stringify(manifest),
+  };
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
@@ -786,7 +805,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const sceneWorksRevision = `source-tree:${sha256(
     sourceEntries
       .filter(([name]) => name !== "calibrationEvidence")
-      .map(([name]) => bodies[name])
+      .map(([name]) => revisionBodies[name])
       .join(""),
   )}`;
 
@@ -851,6 +870,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                       overlay,
                       rung,
                       parameters: status.parameters,
+                      manifestCalibration: manifestCalibrationInputs(model, backend, tier),
                     });
               const calibrationRuns = calibrationBundle.records.filter(
                 (record) =>
@@ -1002,9 +1022,9 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
       sceneWorksRevision,
       inferenceRevision: pin,
       sources: Object.fromEntries(
-        sourceEntries.map(([name, source], index) => [
+        sourceEntries.map(([name, source]) => [
           name,
-          { path: source, sha256: sha256(sourceBodies[index]) },
+          { path: source, sha256: sha256(revisionBodies[name]) },
         ]),
       ),
     },

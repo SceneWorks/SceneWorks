@@ -8,6 +8,7 @@ import {
   NA_SELECTION_RULE,
   OVERLAY_LOAD_CONTRACT,
   PRODUCIBILITY_GATES,
+  buildCostModel,
   cellCensus,
   collapseToRuns,
   fitSensitivity,
@@ -17,6 +18,7 @@ import {
   producibility,
   rankUncertainties,
 } from "./calibration-cost-model.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const RUNGS = [
   "resident",
@@ -25,6 +27,35 @@ const RUNGS = [
   "bounded_attention",
   "bounded_transformer_residency",
 ];
+
+test("comment-only manifest edits produce no calibration cost-model change", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = readFileSync(manifestUrl, "utf8");
+  const baseline = await buildCostModel();
+  const commentOnly = await buildCostModel({
+    sourceOverrides: {
+      manifest: `${manifest}\n// SC-16129 regression: semantically inert comment\n`,
+    },
+  });
+  const withoutAnyComments = await buildCostModel({
+    sourceOverrides: {
+      manifest: JSON.stringify(JSON.parse(stripJsoncComments(manifest))),
+    },
+  });
+  assert.deepEqual(commentOnly, baseline);
+  assert.deepEqual(withoutAnyComments, baseline);
+
+  const parsed = JSON.parse(stripJsoncComments(manifest));
+  parsed.models[0].name = `${parsed.models[0].name} semantic mutation`;
+  const semanticChange = await buildCostModel({
+    sourceOverrides: { manifest: JSON.stringify(parsed) },
+  });
+  assert.notEqual(
+    semanticChange.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "the override must be exercised and semantic manifest changes must remain visible",
+  );
+});
 
 /**
  * A small synthetic matrix with the shape that matters:

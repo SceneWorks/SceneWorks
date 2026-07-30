@@ -15,6 +15,7 @@ import {
   mlxRequiredHostBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 test("memory-strategy source hashing is independent of platform line endings", () => {
   const canonical = "alpha\nbeta\ngamma\n";
@@ -23,7 +24,7 @@ test("memory-strategy source hashing is independent of platform line endings", (
   assert.equal(canonicalSourceText("alpha\rbeta\rgamma\r"), canonical);
 });
 
-test("a comment-only manifest edit changes provenance but no calibration fingerprint", async () => {
+test("a comment-only manifest edit produces no generated matrix change", async () => {
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = await readFile(manifestUrl, "utf8");
   const baseline = await buildMatrix();
@@ -32,23 +33,68 @@ test("a comment-only manifest edit changes provenance but no calibration fingerp
       manifest: `${manifest}\n// SC-16129 regression: provenance-only comment\n`,
     },
   });
+  const withoutAnyComments = await buildMatrix({
+    sourceOverrides: {
+      // This also removes every comment block introduced by #1977, proving replacements and
+      // deletions are inert rather than covering only an appended-comment special case.
+      manifest: JSON.stringify(JSON.parse(stripJsoncComments(manifest))),
+    },
+  });
 
-  assert.notEqual(
-    commentOnly.generatedFrom.sceneWorksRevision,
-    baseline.generatedFrom.sceneWorksRevision,
-    "the exact source-tree revision remains provenance and should record the edit",
+  assert.deepEqual(commentOnly, baseline);
+  assert.deepEqual(withoutAnyComments, baseline);
+});
+
+test("a calibration-relevant manifest value rotates affected fallback fingerprints", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = await readFile(manifestUrl, "utf8");
+  const parsed = JSON.parse(stripJsoncComments(manifest));
+  const baseline = await buildMatrix();
+  const model = parsed.models.find((candidate) =>
+    ["mlx", "candle"].some(
+      (backend) =>
+        candidate[backend]?.vramGbByTier &&
+        candidate[backend]?.turboFit?.calibrationFingerprint === undefined,
+    ),
   );
-  assert.deepEqual(
-    commentOnly.cells.map(({ id, calibrationFingerprint }) => ({ id, calibrationFingerprint })),
-    baseline.cells.map(({ id, calibrationFingerprint }) => ({ id, calibrationFingerprint })),
+  assert.ok(model, "fixture needs a derived-fingerprint model with per-tier memory floors");
+  const backend = ["mlx", "candle"].find(
+    (candidate) =>
+      model[candidate]?.vramGbByTier &&
+      model[candidate]?.turboFit?.calibrationFingerprint === undefined,
+  );
+  const tier = Object.keys(model[backend].vramGbByTier)[0];
+  model[backend].vramGbByTier[tier] += 0.01;
+  const changed = await buildMatrix({
+    sourceOverrides: { manifest: JSON.stringify(parsed) },
+  });
+
+  const baselineFingerprints = new Map(
+    baseline.cells.map((cell) => [cell.id, cell.calibrationFingerprint]),
+  );
+  const affected = changed.cells.filter(
+    (cell) =>
+      cell.modelId === model.id &&
+      cell.backend === backend &&
+      cell.tier === tier &&
+      cell.calibrationFingerprint !== null,
+  );
+  assert.ok(affected.length > 0);
+  assert.ok(
+    affected.every(
+      (cell) => cell.calibrationFingerprint !== baselineFingerprints.get(cell.id),
+    ),
   );
   assert.ok(
-    commentOnly.cells.every(
-      (cell, index) =>
-        cell.evidenceRevision.sceneWorks !== baseline.cells[index].evidenceRevision.sceneWorks &&
-        cell.evidenceRevision.inference === baseline.cells[index].evidenceRevision.inference,
-    ),
-    "cell evidenceRevision must retain exact provenance without becoming fingerprint input",
+    changed.cells
+      .filter(
+        (cell) =>
+          cell.modelId !== model.id || cell.backend !== backend || cell.tier !== tier,
+      )
+      .every(
+        (cell) => cell.calibrationFingerprint === baselineFingerprints.get(cell.id),
+      ),
+    "a per-tier floor change must not invalidate unrelated cells",
   );
 });
 
