@@ -16118,11 +16118,15 @@ details[open] > summary.lora-scope-group-heading::before,
    (hue 25) lands on 298, a lavender. An advisory chip with a green border reads as
    success. Measured in the browser; oklch is right for perceptual lightness ramps and
    wrong for pulling a hue toward a near-neutral. */
+/* Chips carry stranger-written strings too — the workflow-replay chips interpolate the envelope's
+   raw `model.slug`, which survives the sanitizer at up to `LABEL_MAX_CHARS`. Without this an
+   unbroken slug is one un-wrappable word in a pill and the row scrolls the dialog sideways. */
 .validation-chip {
   padding: 5px 8px;
   border-radius: var(--r-pill);
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 /* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
@@ -17151,7 +17155,11 @@ button.audio-wave {
   font-size: 12.5px;
   overflow-wrap: anywhere;
 }
+/* Same stranger-string rule as `.workflow-fix-detail` below: this span renders the report's
+   sentences, which embed the envelope's raw `model.slug`. Its own `.workflow-req-head` sibling
+   already wraps; the detail line is the longer of the two. */
 .workflow-req-detail {
+  overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-muted);
@@ -17226,10 +17234,16 @@ button.audio-wave {
   flex: 0 1 220px;
   min-width: 0;
 }
+/* `overflow-wrap: anywhere` for the same reason `.workflow-fix-head` carries it: this text is
+   written by a STRANGER. `report.model.detail` embeds the envelope's raw slug and the sanitizer
+   DROPS an over-length label rather than truncating it, so a 200-char unbroken slug (the
+   `LABEL_MAX_CHARS` ceiling) arrives intact. The panel is a 560px modal with `overflow-y: auto`
+   and no `overflow-x`, so an unbreakable run pushes the whole dialog sideways. */
 .workflow-fix-detail {
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 .workflow-fix-substitute {
   display: flex;

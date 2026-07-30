@@ -956,6 +956,116 @@ async fn the_asset_route_mutates_nothing() {
 }
 
 #[tokio::test]
+async fn the_asset_route_500s_with_its_own_code_when_the_stored_envelope_no_longer_parses() {
+    // The error contract for a record that has gone bad, proven rather than asserted in a comment.
+    //
+    // `import_asset` writes only `serde_json::to_value(&WorkflowShare)` through the same parser
+    // this route reads with, so nothing in the app can PRODUCE this state — which is exactly why
+    // it needed a test rather than a claim. The state is reachable from outside: the envelope
+    // lives in the asset's `.sceneworks.json` sidecar, which is a plain file in the user's project
+    // that a sync tool, a hand edit or a half-written restore can corrupt. `get_asset` reads that
+    // sidecar directly.
+    //
+    // The disposition under test is that this is NOT flattened into `no_workflow`. A 200 saying
+    // "this image carries no workflow" would tell the user their image lost a recipe it is
+    // visibly still carrying, and would hide our own bad record behind a sentence about their
+    // file. It is a 5xx with a code of its own, and the sentence says the image is unaffected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+    let share = image_envelope("krea_2_turbo", "a lighthouse");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Corrupt Record",
+        "shared.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+    )
+    .await;
+
+    // Plant the corruption in the sidecar the route actually reads.
+    let (_, project) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let sidecar = find_asset_sidecar_file(&project_path, &asset_id);
+    let mut record: Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar reads"))
+            .expect("sidecar is JSON");
+    // Still an object, still under the right key, still obviously a workflow — and rejected,
+    // because the marker names a kind this build has no reader for. A record that fails at the
+    // FIRST gate rather than a blob of noise, so the 500 is the parser's verdict and not a JSON
+    // syntax error somewhere upstream of it.
+    record["extra"]["importedWorkflow"] = json!({
+        "sceneworksWorkflow": "video",
+        "schemaVersion": 1,
+        "mode": "text_to_video",
+    });
+    std::fs::write(
+        &sidecar,
+        serde_json::to_vec_pretty(&record).expect("record serializes"),
+    )
+    .expect("sidecar writes");
+
+    let (status, body) = request(
+        app,
+        "GET",
+        &asset_workflow_route(&project_id, &asset_id),
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an unreadable RECORD is our bug, not a file with no recipe: {body}"
+    );
+    assert_eq!(body["code"], json!("asset_workflow_unreadable"));
+    assert_ne!(
+        body["status"],
+        json!("no_workflow"),
+        "flattening this into the ordinary absent answer hides a bad record behind the user's file"
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("image itself is unaffected")),
+        "the sentence must say the picture is fine: {body}"
+    );
+}
+
+/// The `<media>.sceneworks.json` beside an asset's file, found by searching the project for the
+/// record carrying `asset_id` — the layout is the store's business and a test that hardcoded the
+/// path would break on the next relayout rather than on a behaviour change.
+fn find_asset_sidecar_file(project_path: &std::path::Path, asset_id: &str) -> std::path::PathBuf {
+    fn walk(dir: &std::path::Path, asset_id: &str, found: &mut Option<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, asset_id, found);
+            } else if path.to_string_lossy().ends_with(".sceneworks.json") {
+                let parsed: Option<Value> = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                if parsed.is_some_and(|record| record["id"] == json!(asset_id)) {
+                    *found = Some(path);
+                }
+            }
+        }
+    }
+    let mut found = None;
+    walk(project_path, asset_id, &mut found);
+    found.unwrap_or_else(|| panic!("no sidecar found for asset {asset_id} under {project_path:?}"))
+}
+
+#[tokio::test]
 async fn the_asset_route_404s_for_an_asset_that_does_not_exist() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

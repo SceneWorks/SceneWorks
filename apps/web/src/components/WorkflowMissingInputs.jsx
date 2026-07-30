@@ -31,7 +31,12 @@ import {
 // on screen from a faithful replay — which is the failure this whole epic exists to prevent. The
 // CTA is blocked, with the reason named, until the choice is made (`workflowReplayValidation`).
 
-function InstallRow({ row, busy, done, onInstall }) {
+// `failed` is why "Queued" is not a one-way door. A download job that FAILS changes no catalog, so
+// nothing re-resolves and the row would otherwise sit disabled saying "Queued" until the panel is
+// closed and reopened — a dead button, and a user waiting for something that already stopped. When
+// the job is known to have failed the button comes back and the row SAYS so, rather than quietly
+// reverting to "Download" as though the press had never happened.
+function InstallRow({ row, busy, done, failed, onInstall }) {
   return (
     <li className="workflow-fix-row">
       <span className="workflow-fix-head">
@@ -44,10 +49,13 @@ function InstallRow({ row, busy, done, onInstall }) {
           onClick={() => onInstall(row)}
           type="button"
         >
-          {done ? "Queued" : busy ? "Starting…" : "Download"}
+          {done ? "Queued" : busy ? "Starting…" : failed ? "Try again" : "Download"}
         </button>
       </span>
-      <span className="workflow-fix-detail">{row.detail}</span>
+      <span className="workflow-fix-detail">
+        {failed ? "That download failed — the queue has the reason. " : ""}
+        {row.detail}
+      </span>
     </li>
   );
 }
@@ -62,6 +70,9 @@ export function WorkflowMissingInputs({
   assets = [],
   installing = {},
   installed = {},
+  // The rows whose download job failed. Kept apart from `installed` because they are different
+  // answers: "not queued" is a button that was never pressed, "failed" is one that was.
+  installFailed = {},
   onInstall,
   substituteModelId = "",
   onSubstituteModel,
@@ -85,6 +96,7 @@ export function WorkflowMissingInputs({
             <InstallRow
               busy={Boolean(installing[`${row.kind}:${row.id}`])}
               done={Boolean(installed[`${row.kind}:${row.id}`])}
+              failed={Boolean(installFailed[`${row.kind}:${row.id}`])}
               key={`${row.kind}:${row.id}`}
               onInstall={onInstall}
               row={row}

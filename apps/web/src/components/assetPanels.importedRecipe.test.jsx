@@ -154,4 +154,23 @@ describe("FullscreenPreview — the imported-workflow recipe action", () => {
     await render({ asset: asset({ extra: { importedWorkflow: IMPORTED_WORKFLOW } }) });
     expect(recipeButtons()).toHaveLength(0);
   });
+
+  it("offers nothing for a NON-IMAGE asset carrying an envelope", async () => {
+    // Unreachable today — only the image import path writes `extra.importedWorkflow` — and pinned
+    // anyway, because "unreachable" is a fact about the WRITER and this is the reader. Its sibling
+    // `hasRecordedRecipe` already carries a type guard (`["image", "video"]`); without one here
+    // the two diverge silently the moment a video envelope kind lands, and the button would launch
+    // Image Studio for a video. The guard is narrower than the sibling's on purpose: this seam has
+    // an image lane and no video lane.
+    await render({
+      asset: asset({
+        type: "video",
+        file: { path: "assets/videos/clip.mp4", mimeType: "video/mp4" },
+        extra: { importedWorkflow: IMPORTED_WORKFLOW },
+      }),
+      onUseImportedRecipe: vi.fn(),
+      onUseRecipe: vi.fn(),
+    });
+    expect(recipeButtons()).toHaveLength(0);
+  });
 });

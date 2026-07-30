@@ -91,6 +91,10 @@ export function useWorkflowDrop({
   // on a completed `model_download` / `lora_download` — so re-resolution rides the app's existing
   // job stream instead of polling anything.
   catalogRevision = "",
+  // The ids of download jobs that reached a FAILED terminal state, derived by App from the same
+  // job list `useJobEvents` maintains. A failed download changes no catalog, so `catalogRevision`
+  // above cannot carry it — see `queued` below for what this un-latches.
+  failedInstallJobIds = null,
   installModel = null,
   installLora = null,
 } = {}) {
@@ -152,6 +156,29 @@ export function useWorkflowDrop({
     reresolveRef.current?.abort();
     reresolveRef.current = null;
   }, []);
+
+  // A PROJECT SWITCH invalidates the panel, so the panel goes.
+  //
+  // Everything the user answered in it is scoped to the project that was open when they answered:
+  // `inputPicks` holds asset ids from that project's library, and App's own picker list re-filters
+  // on the active project — so after a switch the panel offers the new project's images while
+  // still holding a pick from the old one. Launching then hands `launchImageRecipe` a
+  // `sourceAssetId` the new project does not contain, which is a blank source control at best and
+  // a cross-project read at worst.
+  //
+  // Dismissed rather than partly cleared. Clearing only `inputPicks` would leave the report
+  // standing — and that report was resolved against the OLD project's LoRA catalog (the route is
+  // project-scoped), so it would go on describing requirements for a project nobody is in.
+  const lastProjectRef = useRef(projectId);
+  useEffect(() => {
+    if (lastProjectRef.current === projectId) {
+      return;
+    }
+    lastProjectRef.current = projectId;
+    // Mount does not reach here (the ref starts at the current id), so this only ever fires on a
+    // real change — and `dismiss` on a closed panel is already a no-op state reset.
+    dismiss();
+  }, [projectId, dismiss]);
 
   const handleDroppedFile = useCallback(
     async (file) => {
@@ -349,6 +376,40 @@ export function useWorkflowDrop({
     }));
   }, []);
 
+  // "Queued", minus the installs that have since FAILED.
+  //
+  // `fixes.queued` records that a download job was accepted; it never had a way back, so a
+  // `model_download` that failed left the row reading "Queued" and its button disabled for as long
+  // as the panel stayed open, with nothing on screen saying anything had gone wrong. A failure
+  // produces no catalog change either, so the re-resolution effect below never fires for it and
+  // `catalogRevision` cannot be the signal — the failed JOB is. The only exit was to close the
+  // panel and reopen it, which is a retry the user has to guess at.
+  //
+  // Derived rather than cleared in an effect: this is a pure function of the job list, and an
+  // effect writing back into `fixes` would race the user's next click.
+  const failed = useMemo(() => new Set(failedInstallJobIds ?? []), [failedInstallJobIds]);
+  const queued = useMemo(() => {
+    const rows = {};
+    for (const [key, jobId] of Object.entries(fixes.queued)) {
+      // A job we have no id for (a stubbed installer, an older API) stays latched, because
+      // "unknown" is not "failed" — re-enabling it would offer a retry for a download that may
+      // well be running.
+      rows[key] = Boolean(jobId) && !(typeof jobId === "string" && failed.has(jobId));
+    }
+    return rows;
+  }, [fixes.queued, failed]);
+  // The rows whose download is known to have failed, so the panel can say so rather than silently
+  // re-enabling a button the user already pressed.
+  const installFailed = useMemo(() => {
+    const rows = {};
+    for (const [key, jobId] of Object.entries(fixes.queued)) {
+      if (typeof jobId === "string" && failed.has(jobId)) {
+        rows[key] = true;
+      }
+    }
+    return rows;
+  }, [fixes.queued, failed]);
+
   // Start the install the report published for a catalog-known-but-absent requirement.
   //
   // Routed through App's own `createModelDownloadJob` / `createLoraDownloadJob` rather than POSTing
@@ -359,7 +420,7 @@ export function useWorkflowDrop({
   const installRequirement = useCallback(
     async (row) => {
       const key = `${row?.kind}:${row?.id}`;
-      if (!row?.id || fixes.installing[key] || fixes.queued[key]) {
+      if (!row?.id || fixes.installing[key] || queued[key]) {
         return;
       }
       const start = row.kind === "model" ? installModel : installLora;
@@ -374,10 +435,13 @@ export function useWorkflowDrop({
       setFixes((current) => ({
         ...current,
         installing: { ...current.installing, [key]: false },
-        queued: { ...current.queued, [key]: Boolean(job) },
+        // The JOB ID, not a boolean. "Queued" disables the only button that can retry, so the flag
+        // has to be revocable — and the only thing that can revoke it honestly is the job it
+        // stands for. A boolean has no way back: see `queued` below.
+        queued: { ...current.queued, [key]: job?.id ?? Boolean(job) },
       }));
     },
-    [fixes.installing, fixes.queued, installModel, installLora],
+    [fixes.installing, queued, installModel, installLora],
   );
 
   // "Use this workflow" — build the recipe and hand it to the SAME launch the viewer's
@@ -440,14 +504,23 @@ export function useWorkflowDrop({
     () => ({
       models,
       installing: fixes.installing,
-      installed: fixes.queued,
+      installed: queued,
+      installFailed,
       onInstall: installRequirement,
       substituteModelId: keptSubstituteModelId(fixes.substituteModelId, models),
       onSubstituteModel: chooseSubstituteModel,
       inputPicks: fixes.inputPicks,
       onPickInput: pickInput,
     }),
-    [models, fixes, installRequirement, chooseSubstituteModel, pickInput],
+    [
+      models,
+      fixes,
+      queued,
+      installFailed,
+      installRequirement,
+      chooseSubstituteModel,
+      pickInput,
+    ],
   );
 
   return {

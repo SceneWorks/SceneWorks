@@ -274,25 +274,29 @@ fn a_repo_match_wins_over_a_name_match() {
     assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Repo));
 }
 
+fn two_adapters_off_one_pack() -> Vec<CatalogEntry> {
+    vec![
+        CatalogEntry::new("pack_union")
+            .with_name("Union")
+            .with_repo("acme/pack")
+            .installed(),
+        CatalogEntry::new("pack_hdr")
+            .with_name("HDR")
+            .with_repo("acme/pack")
+            .installed(),
+    ]
+}
+
 #[test]
-fn a_repo_two_local_adapters_share_resolves_to_nothing_and_the_name_may_not_break_the_tie() {
+fn a_repo_two_local_adapters_share_lets_the_name_say_which_of_those_two() {
     // sc-15952. `loras[].source.file` does not travel, so an envelope naming a repo that TWO
-    // locally-installed adapters came out of cannot say which the sender used. `lora_by_repo`
-    // already refused to choose — and `classify_lora` then fell through to the display-name pass,
-    // which happily picked one of the very rows the repo pass had declined to choose between. The
-    // weaker key broke a tie the stronger one could not, and the answer was a plausible WRONG
-    // adapter reported as installed, with one-click replay offered on top of it.
+    // locally-installed adapters came out of cannot say which the sender used FROM THE REPO ALONE.
+    // But both parties installing the same multi-adapter pack is the ordinary way a repo becomes
+    // ambiguous, and it is precisely the case where the two installs' display names agree — so the
+    // name breaks the tie among those two rows, and the recipe the envelope named exactly is
+    // replayed exactly.
     let catalogs = StaticCatalogs {
-        loras: vec![
-            CatalogEntry::new("pack_union")
-                .with_name("Union")
-                .with_repo("acme/pack")
-                .installed(),
-            CatalogEntry::new("pack_hdr")
-                .with_name("HDR")
-                .with_repo("acme/pack")
-                .installed(),
-        ],
+        loras: two_adapters_off_one_pack(),
         ..model_installed()
     };
     let share = envelope(json!({
@@ -300,10 +304,37 @@ fn a_repo_two_local_adapters_share_resolves_to_nothing_and_the_name_may_not_brea
     }));
     let report = build_resolution_report(&share, &catalogs);
     assert_eq!(report.loras.len(), 1, "the entry is listed, never dropped");
+    assert_eq!(report.loras[0].state, RequirementState::Resolved);
+    assert_eq!(report.loras[0].catalog_id.as_deref(), Some("pack_union"));
+    assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Name));
+    assert!(report.runnable);
+}
+
+#[test]
+fn a_repo_two_local_adapters_share_confines_the_name_pass_to_those_two() {
+    // The half that must NOT loosen. The repo narrowed the answer to the pack's own rows; a name
+    // matching none of them may not reach across the catalog for a row from another repo, because
+    // that is the weaker key overruling the stronger one. Unresolved and NAMED, never guessed.
+    let mut loras = two_adapters_off_one_pack();
+    loras.push(
+        CatalogEntry::new("film_grain")
+            .with_name("Film Grain")
+            .with_repo("other/pack")
+            .installed(),
+    );
+    let catalogs = StaticCatalogs {
+        loras,
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Film Grain", "repo": "acme/pack", "weight": 0.8 }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras.len(), 1, "the entry is listed, never dropped");
     assert_eq!(report.loras[0].state, RequirementState::Missing);
     assert!(
         report.loras[0].catalog_id.is_none(),
-        "neither adapter may be presented as the answer: {:?}",
+        "no adapter may be presented as the answer: {:?}",
         report.loras[0]
     );
     assert!(report.loras[0].matched_by.is_none());

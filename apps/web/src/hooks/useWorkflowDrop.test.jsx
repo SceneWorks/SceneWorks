@@ -356,6 +356,116 @@ describe("useWorkflowDrop", () => {
     });
     expect(hook.offer).toBeNull();
   });
+
+  it("drops the whole offer when the active project changes under it", async () => {
+    // The panel's answers are project-scoped and its report is not. `inputPicks` holds asset ids
+    // out of the project that was open when they were picked, and App's own picker list re-filters
+    // on `activeProject.id` — so a pick made before the switch survives into a panel now offering
+    // a different library, and `useWorkflow` would hand `launchImageRecipe` a `sourceAssetId` the
+    // new project does not contain. The report is stale too: the asset route resolves against the
+    // project's LoRA catalog.
+    inspectWorkflowFile.mockResolvedValue(workflowBody());
+    await render({ projectId: "project_1", token: "t" });
+    await act(async () => {
+      await hook.handleDroppedFile(pngFile());
+    });
+    await act(async () => hook.missing.onPickInput("source-0-0", "asset_from_project_1"));
+    expect(hook.offer?.share).toBeTruthy();
+    expect(hook.missing.inputPicks).toEqual({ "source-0-0": "asset_from_project_1" });
+
+    await render({ projectId: "project_2", token: "t" });
+    expect(hook.offer).toBeNull();
+    expect(hook.missing.inputPicks).toEqual({});
+  });
+
+  it("keeps the offer across a re-render that did NOT change the project", async () => {
+    // The other half: the guard fires on a real CHANGE, not on every render. A panel that vanished
+    // whenever App re-rendered would be indistinguishable from one that never opened.
+    inspectWorkflowFile.mockResolvedValue(workflowBody());
+    await render({ projectId: "project_1", token: "t" });
+    await act(async () => {
+      await hook.handleDroppedFile(pngFile());
+    });
+    await render({ projectId: "project_1", token: "t", catalogRevision: "" });
+    expect(hook.offer?.share?.prompt).toBe("a lighthouse in heavy fog");
+  });
+
+  describe("a queued install that fails is not a permanently dead button", () => {
+    const installableBody = () =>
+      workflowBody({
+        resolution: {
+          ...workflowBody().resolution,
+          model: {
+            slug: "fixture_model",
+            state: "installable",
+            catalogId: "fixture_model",
+            name: "Fixture Model",
+            detail: "Fixture Model is in the model catalog but is not downloaded.",
+            install: { method: "POST", path: "/api/v1/models/fixture_model/download" },
+          },
+          runnable: false,
+        },
+      });
+
+    const queueInstall = async (props) => {
+      inspectWorkflowFile.mockResolvedValue(installableBody());
+      await render(props);
+      await act(async () => {
+        await hook.handleDroppedFile(pngFile());
+      });
+      await act(async () => {
+        await hook.missing.onInstall({ kind: "model", id: "fixture_model" });
+      });
+    };
+
+    it("latches Queued while the job is merely running", async () => {
+      await queueInstall({
+        projectId: "project_1",
+        token: "t",
+        installModel: vi.fn(async () => ({ id: "job_1", status: "running" })),
+      });
+      expect(hook.missing.installed["model:fixture_model"]).toBe(true);
+      expect(hook.missing.installFailed["model:fixture_model"]).toBeUndefined();
+    });
+
+    it("un-latches it once that job has failed", async () => {
+      // A failed download changes NO catalog, so `catalogRevision` is byte-identical to what it
+      // was before the button was pressed and the re-resolution effect never fires. Without this
+      // the row read "Queued" with its button disabled until the panel was closed and reopened —
+      // the only retry there was, and one the user has to guess at.
+      const installModel = vi.fn(async () => ({ id: "job_1", status: "queued" }));
+      await queueInstall({ projectId: "project_1", token: "t", installModel });
+      expect(hook.missing.installed["model:fixture_model"]).toBe(true);
+
+      await render({
+        projectId: "project_1",
+        token: "t",
+        installModel,
+        failedInstallJobIds: ["job_1"],
+      });
+      expect(hook.missing.installed["model:fixture_model"]).toBe(false);
+      expect(hook.missing.installFailed["model:fixture_model"]).toBe(true);
+
+      // And the button works again: the guard that refused a second press reads the same map.
+      await act(async () => {
+        await hook.missing.onInstall({ kind: "model", id: "fixture_model" });
+      });
+      expect(installModel).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves a job it has no id for latched, because unknown is not failed", async () => {
+      // A stubbed installer, or an API that answered without an id. Re-enabling here would offer a
+      // retry for a download that may well be running.
+      await queueInstall({
+        projectId: "project_1",
+        token: "t",
+        installModel: vi.fn(async () => ({})),
+        failedInstallJobIds: ["job_1"],
+      });
+      expect(hook.missing.installed["model:fixture_model"]).toBe(true);
+      expect(hook.missing.installFailed["model:fixture_model"]).toBeUndefined();
+    });
+  });
 });
 
 describe("inspectFailureMessage", () => {

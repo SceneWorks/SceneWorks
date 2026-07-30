@@ -301,6 +301,15 @@ pub(crate) async fn get_asset_workflow(
     // envelope that fails it is our record being wrong rather than the user's file, so it is a 5xx
     // with its own code instead of being flattened into "no workflow", which would tell the user
     // their image lost a recipe it is visibly still carrying.
+    //
+    // Nothing in the app can produce this: `import_asset` writes only
+    // `serde_json::to_value(&WorkflowShare)`, a value this same parser accepted a moment earlier.
+    // It is reachable from OUTSIDE — the envelope lives in the asset's `.sceneworks.json` sidecar,
+    // an ordinary file in the user's project that a sync tool, a hand edit or an interrupted
+    // restore can leave malformed — which is why this is a real branch rather than a comment, and
+    // why it is exercised:
+    // `tests::workflows::the_asset_route_500s_with_its_own_code_when_the_stored_envelope_no_longer_parses`
+    // plants a corrupt record on a sidecar and pins the coded 500.
     let share = parse_workflow_share(stored).map_err(|error| {
         tracing::error!(event = "asset_workflow_unreadable", %project_id, error = %error);
         ApiError {

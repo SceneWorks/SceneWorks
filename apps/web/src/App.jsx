@@ -2840,6 +2840,26 @@ export function App() {
       ].join("|"),
     [models, loras],
   );
+  // The downloads that FAILED (sc-15952). `catalogRevision` above deliberately cannot carry these:
+  // a failed download changes no install state, so the string it produces is identical to the one
+  // before the user pressed the button — which is exactly why the panel's "Queued" flag had no way
+  // back and its retry button stayed disabled forever. This is the other half of the same job
+  // stream, one hop away through the list `useJobEvents` already maintains.
+  const failedInstallJobIds = useMemo(
+    () =>
+      jobs
+        .filter(
+          (job) =>
+            (job.type === "model_download" || job.type === "lora_download") &&
+            // "canceled" and "interrupted" are failures for this purpose too: no catalog change,
+            // and the user's next move is the same. Only "completed" leaves the flag latched, and
+            // that one re-resolves through `catalogRevision` instead.
+            terminalStatuses.has(job.status) &&
+            job.status !== "completed",
+        )
+        .map((job) => job.id),
+    [jobs],
+  );
   const workflowDrop = useWorkflowDrop({
     // Inspecting needs a live, authenticated API. Before the gate opens every request 401s, and
     // a drop on the login screen has nothing to prefill anyway.
@@ -2852,6 +2872,7 @@ export function App() {
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
     catalogRevision,
+    failedInstallJobIds,
     installModel: createModelDownloadJob,
     installLora: createLoraDownloadJob,
   });

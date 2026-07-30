@@ -654,8 +654,21 @@ const INPUT_KIND_LABELS = {
 };
 
 // Where an unpickable input is actually supplied, so the row is a direction and not a dead end.
+//
+// Each of these has to name the OUTCOME of proceeding without it, the way every other advisory
+// does — "what you will get instead", not "where the control lives". The two are not the same
+// warning, and the mask is the case where the difference bites: a mask does not weaken the edit,
+// it CHANGES WHICH PIXELS ARE EDITED. `maskAssetId` reaches the worker only from the Image
+// Editor's inpaint brush (`ImageEditor.jsx`); Image Studio has no mask control and its Generate
+// gate does not know one was wanted. So a user who reads "painted in the Image Editor" as a note
+// about where a knob lives, and generates anyway, gets the model rewriting the whole frame and
+// nothing on screen says the replay was not faithful. The sentence says so instead.
 const INPUT_KIND_ELSEWHERE = {
-  mask: "Masks are painted on the image in the Image Editor, not chosen here.",
+  mask:
+    "Masks are painted on the image in the Image Editor, not chosen here — so generating from " +
+    "this panel edits the WHOLE image rather than the masked region, which is a different edit " +
+    "from the one you were sent. To reproduce it, load the recipe and then open the image in the " +
+    "Image Editor and paint the mask there.",
   control:
     "A pre-made control map is attached in Image Studio's own Control panel once the recipe is " +
     "loaded.",

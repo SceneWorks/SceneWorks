@@ -666,6 +666,10 @@ describe("the missing-inputs derivations", () => {
       "Needs a mask.",
     ]);
     expect(slots[3].elsewhere).toContain("Image Editor");
+    // The mask row names the OUTCOME of proceeding without it, not only where the control lives:
+    // Image Studio has no mask control, so the CTA edits the whole frame instead of the region.
+    expect(slots[3].elsewhere).toMatch(/whole image/i);
+    expect(slots[3].elsewhere).toMatch(/different edit from the one you were sent/i);
   });
 
   it("floors an absent count at one slot, the way the report floors its own total", () => {

@@ -921,8 +921,17 @@ function FullscreenPreviewComponent({
       ["image", "video"].includes(asset.type) &&
       (asset.generationSet?.recipe || asset.recipe),
   );
+  // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
+  // Image Studio, and there is no video lane behind it. Unreachable today — only the image import
+  // path writes `extra.importedWorkflow` — but "unreachable" is a fact about the WRITER, and the
+  // day a video envelope kind lands the reader would start offering an image-only prefill for it
+  // with nothing in between to notice. The guard belongs on the side that decides what the button
+  // does.
   const hasImportedWorkflow = Boolean(
-    !hasRecordedRecipe && onUseImportedRecipe && assetImportedWorkflow(asset),
+    !hasRecordedRecipe &&
+      onUseImportedRecipe &&
+      asset.type === "image" &&
+      assetImportedWorkflow(asset),
   );
 
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no

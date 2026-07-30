@@ -170,6 +170,32 @@ describe("workflowReplayValidation", () => {
     expect(summary.surfaced[0].message).toContain("Image Editor");
   });
 
+  it("says what proceeding without the mask actually produces, not just where masks live", () => {
+    // The honesty test every advisory in this set has to pass: "does a user who proceeds get an
+    // image they believe is a faithful replay but is not?" For a mask the answer is yes, and it is
+    // the worst instance of it — `maskAssetId` reaches the worker ONLY from the Image Editor's
+    // inpaint brush, Image Studio has no mask control, and its Generate gate checks the source
+    // asset alone. So the CTA fires, the model rewrites the whole frame, and nothing downstream
+    // notices. A sentence naming the LOCATION of the missing control ("painted in the Image
+    // Editor") reads as a note about UI, not as a warning that a different operation is about to
+    // run. This asserts the CONSEQUENCE is named.
+    const summary = summaryFor({
+      report: report({
+        inputImagesRequired: 1,
+        inputs: [{ kind: "mask", count: 1, state: "userSupplied", detail: "Needs a mask." }],
+      }),
+    });
+    const message = summary.surfaced[0].message;
+    expect(message).toMatch(/whole image/i);
+    expect(message).toMatch(/different edit from the one you were sent/i);
+    // And it still tells them how to actually get the masked version, so the row is a direction
+    // rather than a dead end.
+    expect(message).toMatch(/load the recipe and then open the image in the Image Editor/i);
+    // Naming the consequence must not turn the advisory into a block: the sentence's own
+    // instruction is "load the recipe first", so refusing to load it would be incoherent.
+    expect(summary.ready).toBe(true);
+  });
+
   it("blocks with a reason when this install was never checked against the recipe", () => {
     const summary = summaryFor({ report: null });
     expect(summary.ready).toBe(false);

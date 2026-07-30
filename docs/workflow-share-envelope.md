@@ -168,9 +168,14 @@ in that table is not in the file. Named explicitly because these are the ones pe
 - **Which adapter FILE a LoRA repo means.** `loras[].repo` is the repo id and there is no
   `loras[].file` beside it — a filename is a location, and the path guard exists to keep those out.
   The consequence is on the reading side: a receiving install that has two adapters from one repo
-  cannot tell which the sender used, so the resolution report calls that entry unresolved and names
-  it rather than picking one. A repo of which the receiver registered only one adapter is not
-  ambiguous to it and resolves; nothing in the envelope could distinguish that case.
+  cannot tell from the repo id alone which the sender used. `loras[].name` is then read as a
+  tie-break *among those rows only* — both parties installing the same multi-adapter pack is the
+  usual way this happens, and it is the case where the two installs' display names agree. A name
+  matching none of the tied rows, or two of them, leaves the entry unresolved and named rather than
+  picked. A repo of which the receiver registered only one adapter is not ambiguous to it and
+  resolves on the repo alone; a `name` that disagrees with that row is not consulted, because a
+  display name is whatever the sender's install called the file and the repo id means the same
+  thing on both machines.
 - **Pose library ids.** A pose selection travels as coordinate arrays (`keypoints`, `hands`,
   `face`), because those are what the worker renders. The library ids that named them do not.
 
