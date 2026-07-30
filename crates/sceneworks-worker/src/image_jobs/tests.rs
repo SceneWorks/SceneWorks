@@ -1,4 +1,24 @@
 use super::*;
+
+#[test]
+fn krea_control_geometry_refusal_is_structured_and_never_suggests_an_unverified_size() {
+    let fit = include_str!("../krea_control_fit.rs");
+    let worker = include_str!("krea_control_candle.rs");
+    assert!(fit.contains("pub(crate) struct KreaGeometryRefusal"));
+    assert!(fit.contains("requested_width"));
+    assert!(fit.contains("requested_height"));
+    assert!(fit.contains("verified_alternative"));
+    assert!(worker.contains("\"event\": \"krea_control_geometry_refused\""));
+    assert!(worker.contains("\"refusalReason\": refusal.reason"));
+    assert!(worker.contains("\"requestedGeometry\""));
+    assert!(worker.contains("\"width\": refusal.requested_width"));
+    assert!(worker.contains("\"height\": refusal.requested_height"));
+    assert!(worker.contains("\"verifiedAlternative\": refusal"));
+    assert!(
+        !worker.contains("Lower the output resolution"),
+        "control refusal must not name a geometry or strategy without a current verified record"
+    );
+}
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
     flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,

@@ -112,11 +112,75 @@
 use super::*;
 use gen_core::{OffloadPolicy, Quant};
 use serde_json::Value;
+use std::fmt;
 
 /// Fixed transient/runtime headroom (GB) added on top of the control-lane peak
 /// ([`predicted_control_peak_gb`]), mirroring [`crate::vram_gate`]'s `HEADROOM_GB` — covers allocator
 /// slack + activation spikes not captured by the steady peak.
 const HEADROOM_GB: f64 = 2.0;
+
+/// Typed pre-render refusal for an output geometry. An alternative may be attached only after the
+/// caller has validated a current, exact evidence record; absence is truthful and preferable to
+/// inventing a geometry from a peak estimate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KreaGeometryRefusal {
+    pub(crate) reason: &'static str,
+    pub(crate) requested_width: u32,
+    pub(crate) requested_height: u32,
+    pub(crate) verified_alternative: Option<(u32, u32)>,
+}
+
+impl fmt::Display for KreaGeometryRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Krea 2 pose-ControlNet cannot render the requested {}x{} geometry: {}.",
+            self.requested_width, self.requested_height, self.reason
+        )?;
+        match self.verified_alternative {
+            Some((width, height)) => write!(
+                formatter,
+                " A current measurement verifies {}x{} as an alternative.",
+                width, height
+            ),
+            None => formatter.write_str(
+                " No current verified alternative geometry is available; choose a geometry the UI \
+                 marks verified or use hardware with a verified fit.",
+            ),
+        }
+    }
+}
+
+pub(crate) fn geometry_refusal(
+    requested_width: u32,
+    requested_height: u32,
+    verified_alternative: Option<(u32, u32)>,
+) -> KreaGeometryRefusal {
+    KreaGeometryRefusal {
+        reason: "the current measured feasibility gate rejects it before render",
+        requested_width,
+        requested_height,
+        verified_alternative,
+    }
+}
+
+#[cfg(test)]
+mod geometry_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn refusal_telemetry_preserves_request_and_never_invents_an_alternative() {
+        let refusal = geometry_refusal(1536, 1024, None);
+        assert_eq!(
+            (refusal.requested_width, refusal.requested_height),
+            (1536, 1024)
+        );
+        assert_eq!(refusal.verified_alternative, None);
+        let message = refusal.to_string();
+        assert!(message.contains("1536x1024"));
+        assert!(message.contains("No current verified alternative geometry"));
+    }
+}
 
 /// The outcome of walking the Krea control fit ladder. `Unknown` = no signal (no `candle.control` block,
 /// or a non-NVIDIA host) ⇒ never block — exactly like [`crate::vram_gate::FitDecision::Unknown`].

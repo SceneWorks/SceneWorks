@@ -638,15 +638,31 @@ pub(super) async fn generate_candle_krea_control_stream(
             needed_gb,
             available_gb,
         } => {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Krea 2 pose-ControlNet at the {tier} base tier needs ~{needed} GB of VRAM (with \
-                 headroom, sequential residency + tiled VAE decode + attention chunking) but \
-                 GPU {gpu} has ~{available} GB available. Lower the output resolution or run on a card \
-                 with more VRAM.",
-                needed = needed_gb.round() as i64,
-                available = available_gb.round() as i64,
-                gpu = settings.gpu_id,
-            )));
+            // There is no current exact-geometry alternative record for this control lane (SC-16013
+            // owns remeasurement after the branch repack), so do not turn peak arithmetic into a
+            // claimed alternative. The typed refusal and its structured fields are the worker/API
+            // telemetry surface SC-15613 can consume.
+            let refusal =
+                crate::krea_control_fit::geometry_refusal(request.width, request.height, None);
+            crate::emit_event_value(
+                tracing::Level::WARN,
+                json!({
+                    "event": "krea_control_geometry_refused",
+                    "refusalReason": refusal.reason,
+                    "requestedGeometry": {
+                        "width": refusal.requested_width,
+                        "height": refusal.requested_height,
+                    },
+                    "verifiedAlternative": refusal
+                        .verified_alternative
+                        .map(|(width, height)| json!({ "width": width, "height": height })),
+                    "neededGb": needed_gb,
+                    "availableGb": available_gb,
+                    "gpuId": settings.gpu_id,
+                    "tier": tier,
+                }),
+            );
+            return Err(WorkerError::InvalidPayload(refusal.to_string()));
         }
     };
     // sc-13960: record the admitted control peak so a repeated control render (or a following
