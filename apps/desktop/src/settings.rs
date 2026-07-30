@@ -1049,6 +1049,19 @@ fn sanitized_export_filename(value: &str) -> String {
         .to_owned()
 }
 
+/// Write an export payload to disk EXACTLY as the webview handed it over.
+///
+/// Split out of [`save_image_export`] so the one property that matters about this path is
+/// testable without a native dialog (sc-15954): the desktop shell must not re-encode, re-frame or
+/// otherwise touch the bytes. The Image Editor's untouched-document download hands
+/// `exportEditorFile` the source PNG itself — chunk, colour profile and all — and the browser
+/// half of that function writes it through an object URL, which is verbatim by construction. This
+/// is the desktop half, and "verbatim" has to mean the same thing on both or the two paths
+/// disagree about what a download contains.
+fn write_export_bytes(destination: &std::path::Path, image_bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(destination, image_bytes).map_err(|error| error.to_string())
+}
+
 /// Save a browser-generated image through the native dialog. WebKitGTK and
 /// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
 /// path gives every desktop platform the intended filename and a real save
@@ -1077,7 +1090,7 @@ pub async fn save_image_export(
     let Some(destination) = destination else {
         return Ok(None);
     };
-    std::fs::write(&destination, image_bytes).map_err(|error| error.to_string())?;
+    write_export_bytes(&destination, &image_bytes)?;
     Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
@@ -1400,6 +1413,76 @@ mod tests {
         sanitize_storage_overrides(&mut non_linux, false);
         assert_eq!(non_linux.data_dir.as_deref(), Some("relative/data"));
         assert_eq!(non_linux.hf_home.as_deref(), Some("./huggingface"));
+    }
+
+    /// Frame one PNG chunk: `length | type | data | CRC`.
+    ///
+    /// The CRC is left as zeroes on purpose. This fixture exists to be walked by
+    /// `workflow_chunk_spans`, which is a framing walk over lengths and types and never checks a
+    /// CRC — computing real ones here would add a CRC-32 table to a test that would not be any
+    /// stronger for it.
+    fn framed_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(data.len() + 12);
+        chunk.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("chunk fits u32")
+                .to_be_bytes(),
+        );
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        chunk.extend_from_slice(&[0, 0, 0, 0]);
+        chunk
+    }
+
+    /// A PNG carrying exactly one `sceneworks:workflow` `iTXt` chunk between IHDR and IEND.
+    fn png_with_workflow_chunk() -> Vec<u8> {
+        let mut itxt = sceneworks_core::workflow_png::WORKFLOW_CHUNK_KEYWORD
+            .as_bytes()
+            .to_vec();
+        // keyword NUL | compression flag | compression method | language NUL | translated NUL
+        itxt.extend_from_slice(&[0, 0, 0, 0, 0]);
+        itxt.extend_from_slice(br#"{"sceneworksWorkflow":"image"}"#);
+
+        let mut bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&framed_chunk(b"IHDR", &[0u8; 13]));
+        bytes.extend_from_slice(&framed_chunk(b"iTXt", &itxt));
+        bytes.extend_from_slice(&framed_chunk(b"IEND", &[]));
+        bytes
+    }
+
+    /// sc-15954: the desktop save path writes the webview's bytes VERBATIM.
+    ///
+    /// The Image Editor's untouched-document download hands `exportEditorFile` the source PNG
+    /// itself rather than a `canvas.toBlob` re-encode, so whatever the browser half writes
+    /// through an object URL, this half has to write identically — that is the AC's "desktop path
+    /// and browser object-URL path behave identically". Proven on a payload that actually carries
+    /// a workflow chunk, and checked twice: byte equality (nothing was re-encoded, re-framed or
+    /// truncated) and that the same walker the "Save a copy without the workflow" path uses still
+    /// finds exactly one chunk in the file on disk.
+    #[test]
+    fn the_desktop_export_write_preserves_an_embedded_workflow_chunk() {
+        use sceneworks_core::workflow_png::workflow_chunk_spans;
+
+        let root = scratch_dir("export");
+        let destination = root.join("shot.png");
+        let bytes = png_with_workflow_chunk();
+
+        write_export_bytes(&destination, &bytes).expect("write export bytes");
+
+        let written = std::fs::read(&destination).expect("read back the export");
+        assert_eq!(
+            written, bytes,
+            "the desktop shell must not re-encode an export"
+        );
+        assert_eq!(
+            workflow_chunk_spans(&written)
+                .expect("the written PNG is still walkable")
+                .len(),
+            1,
+            "the embedded workflow chunk must survive the desktop save path"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A unique scratch directory under the system temp dir, so the path-resolution

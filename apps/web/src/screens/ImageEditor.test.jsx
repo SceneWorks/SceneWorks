@@ -63,6 +63,8 @@ import {
   EDITOR_CANVAS_MAX_AREA,
   EDITOR_CANVAS_MAX_SIDE,
   exportEditorFile,
+  editorDownloadPlan,
+  editorDownloadNote,
   paintBoxesOnContext,
   colorName,
   composeColorPrompt,
@@ -610,6 +612,192 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
     expect(document.querySelector("a[download]")).toBeNull();
+  });
+
+  // sc-15954: the two shells must not disagree about what a download contains. The desktop
+  // command takes a byte array from the webview and the browser hands an object URL to an
+  // <a download>; both are handed the SAME File by exportEditorFile, so the proof is that the
+  // bytes the desktop command receives are the bytes the object URL was made from.
+  it("hands the desktop command exactly the bytes the browser path would write", async () => {
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 250]);
+    // jsdom's Blob has no `arrayBuffer()`, so the File stands in for one the same way the desktop
+    // test above does. What is under test is that BOTH branches see this one object.
+    const file = { name: "shot.png", arrayBuffer: async () => bytes.buffer };
+
+    const invoke = vi.fn().mockResolvedValue("/tmp/shot.png");
+    await exportEditorFile(file, { desktop: true, invoke });
+    const [, payload] = invoke.mock.calls[0];
+
+    vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    let downloaded = null;
+    const urlApi = {
+      createObjectURL: vi.fn((blob) => {
+        downloaded = blob;
+        return "blob:test";
+      }),
+      revokeObjectURL: vi.fn(),
+    };
+    await exportEditorFile(file, { desktop: false, documentRef: document, urlApi });
+
+    expect(downloaded).toBe(file);
+    expect(payload.imageBytes).toEqual([...bytes]);
+    expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual(payload.imageBytes);
+    expect(payload.suggestedFilename).toBe(file.name);
+    expect(document.querySelector("a[download]")).toBeNull();
+  });
+});
+
+// ── What Download contains, per document state (sc-15954, epic 15945) ────────
+//
+// The editor is the one egress path that re-encodes, so it is the one that can silently destroy
+// sc-15948's embedded recipe. `editorDownloadPlan` is the single decision both the exported bytes
+// and the header caption are read from, which is what stops the claim and the file drifting.
+describe("editor download plan", () => {
+  const original = { blob: { id: "source-bytes" }, filename: "portrait.png", carriesWorkflow: true };
+
+  function doc(overrides = {}, layerOverrides = {}) {
+    const installedBlob = overrides.installedBlob ?? original.blob;
+    return {
+      width: 1024,
+      height: 1024,
+      source: {
+        kind: "asset",
+        name: "portrait.png",
+        originalExport: { ...original, installedBlob, ...(overrides.originalExport ?? {}) },
+      },
+      layers: [
+        {
+          id: "bg",
+          blob: installedBlob,
+          image: { naturalWidth: 1024, naturalHeight: 1024 },
+          visible: true,
+          opacity: 1,
+          blendMode: "source-over",
+          transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 },
+          ...layerOverrides,
+        },
+      ],
+      ...overrides.doc,
+    };
+  }
+
+  it("hands an untouched PNG straight through, under its own name", () => {
+    expect(editorDownloadPlan(doc())).toEqual({
+      mode: "original",
+      filename: "portrait.png",
+      carriesWorkflow: true,
+      hadWorkflow: true,
+    });
+  });
+
+  // The AC's headline case: open a generated image, change nothing, Download. Before this story
+  // that produced a re-encode with the recipe gone and nothing said about it.
+  it("never re-rasterizes an unmodified generated image", () => {
+    expect(editorDownloadPlan(doc()).mode).toBe("original");
+    expect(editorDownloadNote(editorDownloadPlan(doc())).label).toBe("Recipe included");
+  });
+
+  // Every mutation the editor has replaces or supplements the layer stack, and each one has to
+  // fall out of the passthrough. Deliberately NOT keyed on `dirty` — `runSave` clears that on a
+  // thoroughly edited document — nor on `edits`, which transforms and layer props never append to.
+  it.each([
+    ["a crop / colour grade / AI write-back (new bitmap)", {}, { blob: { id: "other-bytes" } }],
+    ["a moved layer", {}, { transform: { x: 12, y: 0, scaleX: 1, scaleY: 1, rotation: 0 } }],
+    ["a scaled layer", {}, { transform: { x: 0, y: 0, scaleX: 2, scaleY: 1, rotation: 0 } }],
+    ["a rotated layer", {}, { transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 90 } }],
+    ["a faded layer", {}, { opacity: 0.5 }],
+    ["a blend mode", {}, { blendMode: "multiply" }],
+    ["a hidden layer", {}, { visible: false }],
+  ])("re-rasterizes after %s", (_label, overrides, layerOverrides) => {
+    const plan = editorDownloadPlan(doc(overrides, layerOverrides));
+    expect(plan.mode).toBe("raster");
+    expect(plan.carriesWorkflow).toBe(false);
+    expect(plan.filename).toBe("portrait-edited.png");
+  });
+
+  it("re-rasterizes once a second layer exists", () => {
+    const work = doc();
+    work.layers = [...work.layers, { ...work.layers[0], id: "top", blob: { id: "layer-2" } }];
+    expect(editorDownloadPlan(work).mode).toBe("raster");
+  });
+
+  // An outpaint/pad grows the document past the bitmap sitting in it, so the layer alone no
+  // longer describes the file that would be written.
+  it("re-rasterizes when the document is bigger than the bitmap in it", () => {
+    const work = doc();
+    work.width = 1536;
+    expect(editorDownloadPlan(work).mode).toBe("raster");
+  });
+
+  // THE geometry trap this story exists for. `boundedEditorCanvasDimensions` resamples anything
+  // over EDITOR_CANVAS_MAX_SIDE on load, so the canvas is a proxy and the document dimensions are
+  // the proxy's. Re-embedding the envelope into that raster would attach a 8192²-wide recipe to a
+  // 4096² file. The passthrough cannot: it ships the ORIGINAL blob, whose pixels and whose
+  // envelope are the same file's.
+  it("passes the original file through — not the downscaled proxy — for an untouched huge image", () => {
+    const proxy = { id: "downscaled-proxy" };
+    const work = doc({ installedBlob: proxy, doc: { width: 4096, height: 4096 } });
+    work.layers[0].image = { naturalWidth: 4096, naturalHeight: 4096 };
+    work.source.editorDownscaled = { width: 4096, height: 4096, scaled: true, sourceWidth: 8192, sourceHeight: 8192 };
+
+    const plan = editorDownloadPlan(work);
+    expect(plan.mode).toBe("original");
+    // The bytes that go out are the source's, so nothing in the file can claim a resolution the
+    // file does not have.
+    expect(work.source.originalExport.blob).toBe(original.blob);
+    expect(work.source.originalExport.blob).not.toBe(proxy);
+  });
+
+  // The invariant, stated directly: a freshly encoded raster NEVER carries an envelope. It is the
+  // one thing that would let the editor emit a recipe that does not reproduce its file.
+  it("never reports a re-encoded raster as carrying a recipe", () => {
+    for (const work of [
+      doc({}, { blob: { id: "edited" } }),
+      doc({}, { opacity: 0.2 }),
+      { width: 10, height: 10, source: { name: "x.png" }, layers: [] },
+      null,
+    ]) {
+      const plan = editorDownloadPlan(work);
+      if (plan.mode === "raster") expect(plan.carriesWorkflow).toBe(false);
+    }
+  });
+
+  it("falls back to a raster for a source the editor could not vouch for", () => {
+    const work = doc();
+    delete work.source.originalExport;
+    expect(editorDownloadPlan(work)).toEqual({
+      mode: "raster",
+      filename: "portrait-edited.png",
+      carriesWorkflow: false,
+      hadWorkflow: false,
+    });
+  });
+});
+
+describe("editor download note", () => {
+  // Silence is only correct when there was never a recipe to speak about — every image in the
+  // world that did not come out of a SceneWorks generation.
+  it("says nothing about an image that never carried a recipe", () => {
+    expect(editorDownloadNote({ mode: "original", hadWorkflow: false })).toBeNull();
+    expect(editorDownloadNote({ mode: "raster", hadWorkflow: false })).toBeNull();
+    expect(editorDownloadNote(null)).toBeNull();
+  });
+
+  it("announces the loss on an edited document, in visible text", () => {
+    const note = editorDownloadNote({ mode: "raster", hadWorkflow: true, carriesWorkflow: false });
+    expect(note.tone).toBe("dropped");
+    expect(note.label).toBe("Recipe not carried");
+    expect(note.detail).toMatch(/is not in it/);
+  });
+
+  // The other direction is announced too. The passthrough puts an authored prompt into a
+  // downloaded file where the old behaviour destroyed it, and someone deciding whether to send an
+  // image to a client is owed that sentence — which is why it names the control that strips it.
+  it("announces the inclusion too, and names the way to strip it", () => {
+    const note = editorDownloadNote({ mode: "original", hadWorkflow: true, carriesWorkflow: true });
+    expect(note.tone).toBe("included");
+    expect(note.label).toBe("Recipe included");
+    expect(note.detail).toContain("Save a copy without the workflow");
   });
 });
 

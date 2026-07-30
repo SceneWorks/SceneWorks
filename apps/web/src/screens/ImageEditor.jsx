@@ -9,6 +9,7 @@ import { appConfirm } from "../appConfirm.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
+import { describeOpenedImage } from "../pngWorkflowChunk.js";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
@@ -16,6 +17,7 @@ import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { guidanceDefaultFromModel } from "../samplerOptions.js";
 import {
   BLEND_MODES,
+  DEFAULT_BLEND_MODE,
   activeLayerOf,
   addLayer,
   compositeLayersToCanvas,
@@ -665,6 +667,135 @@ export async function exportEditorFile(
   anchor.remove();
   urlApi.revokeObjectURL(url);
   return null;
+}
+
+// ── What Download will actually contain (sc-15954, epic 15945) ───────────────
+//
+// sc-15948 puts the sanitized recipe INSIDE every generated PNG. Every other way a file leaves
+// this app hands those bytes through unchanged, so the chunk survives for free. The editor was
+// the exception: `Download` always went through `canvas.toBlob`, which re-encodes the composite
+// and keeps nothing but pixels — so a user who opened a generated image, changed nothing, and
+// downloaded it got a file with the recipe silently gone.
+//
+// The decision recorded on sc-15954, in one sentence:
+//
+//   An untouched PNG downloads the file you opened, byte for byte. A changed document downloads a
+//   fresh PNG of what you see, with no recipe in it — and the header says which one you will get.
+//
+// # Why no `editedAfterGeneration` flag on the envelope
+//
+// The story's leaning was to re-embed the original envelope marked as provenance. Three reasons
+// not to, in order of weight.
+//
+// 1. The envelope's extension rule is "adding a field does not need a version bump: an older
+//    reader drops what it does not recognize" (docs/workflow-share-envelope.md). That rule holds
+//    for fields whose absence is benign, and inverts for this one: an older build drops the flag
+//    and then presents the envelope as a recipe that reproduces the image — the exact
+//    misstatement this epic exists to stop, shipped by construction. Making it safe needs a
+//    `schemaVersion` bump (which stops every older build reading every shared file, edited or
+//    not) or a new marker kind that older builds refuse as `UnsupportedKind`. Either is a
+//    contract change of the same size as the video lane, for a provenance note.
+// 2. "The recipe this came from" is not well defined here. The document composites N layers from
+//    N sources while `working.source` names one; an AI op replaces the base layer with the output
+//    of a DIFFERENT job with its own model, prompt and seed; a crop changes the content and the
+//    geometry.
+// 3. It would be a new prompt egress, not a preserved one. The prompt is in the file as authored;
+//    attaching it to a hand-edited composite the user believes is a fresh rasterization is a
+//    surprise in the privacy direction too.
+//
+// # Why the geometry in the last AC cannot lie
+//
+// Structurally, not by a check. The only branch that ships an envelope ships the ORIGINAL FILE,
+// so its `width`/`height` and its pixels are the same file's by definition. The branch that can
+// be a different size — `boundedEditorCanvasDimensions` downscaling on load, a crop, an outpaint
+// — is the branch that writes no envelope at all.
+//
+// # Why the untouched test is blob identity and not `dirty`
+//
+// `dirty` is not a statement about the bitmap: `runSave` clears it on a thoroughly edited
+// document, so "not dirty" would let an edited composite take the passthrough branch. `edits` is
+// not one either — layer transforms, opacity and blend changes never append to it. The one thing
+// that IS a statement about the bitmap is reference identity between the single layer's blob and
+// the blob the layer stack was installed from: every mutation the editor has (crop, colour grade,
+// AI write-back, added layer, transform) replaces or supplements that object. Undo restores the
+// same blob by reference (`snapshotLayers` shares it), so undoing back to the opened image
+// correctly re-enables the passthrough.
+
+/// Whether a layer sits 1:1 over the document with nothing done to it.
+function layerIsUntouched(layer, working) {
+  const transform = layer.transform ?? identityTransform();
+  return (
+    layer.visible !== false &&
+    layer.opacity === 1 &&
+    (layer.blendMode || DEFAULT_BLEND_MODE) === DEFAULT_BLEND_MODE &&
+    transform.x === 0 &&
+    transform.y === 0 &&
+    transform.scaleX === 1 &&
+    transform.scaleY === 1 &&
+    transform.rotation === 0 &&
+    working.width === (layer.image?.naturalWidth ?? -1) &&
+    working.height === (layer.image?.naturalHeight ?? -1)
+  );
+}
+
+/// What `Download` will produce for this document. Pure, so the claim the header prints and the
+/// bytes the export writes are decided in ONE place and cannot drift.
+///
+/// * `mode: "original"` — hand the opened file through untouched. `carriesWorkflow` says whether
+///   a recipient gets a recipe out of it.
+/// * `mode: "raster"` — flatten the layer stack to a new PNG. `hadWorkflow` says whether the file
+///   this session started from carried a recipe, which is what makes the loss worth announcing.
+export function editorDownloadPlan(working) {
+  const original = working?.source?.originalExport ?? null;
+  const layers = working?.layers ?? [];
+  const untouched =
+    Boolean(original) &&
+    layers.length === 1 &&
+    layers[0].blob === original.installedBlob &&
+    layerIsUntouched(layers[0], working);
+  if (untouched) {
+    return {
+      mode: "original",
+      filename: original.filename,
+      carriesWorkflow: original.carriesWorkflow === true,
+      hadWorkflow: original.carriesWorkflow === true,
+    };
+  }
+  return {
+    mode: "raster",
+    filename: editedFilename(working?.source),
+    carriesWorkflow: false,
+    hadWorkflow: original?.carriesWorkflow === true,
+  };
+}
+
+/// The line beside the Download button. Null when the source never carried a recipe, which is
+/// every image that did not come out of a SceneWorks generation — there is nothing to say about
+/// those and a permanent notice would be noise.
+///
+/// Both states are announced, not just the loss. Passthrough puts a prompt into a downloaded file
+/// where the old behaviour destroyed it, and a user deciding whether to send an image to a client
+/// is owed that sentence as much as the other one.
+export function editorDownloadNote(plan) {
+  if (!plan?.hadWorkflow) return null;
+  if (plan.mode === "original") {
+    return {
+      tone: "included",
+      label: "Recipe included",
+      detail:
+        "Nothing has been changed, so Download saves the file you opened byte for byte — " +
+        "including the SceneWorks recipe embedded in it. To share it without the recipe, save " +
+        "it to the Library and use “Save a copy without the workflow”.",
+    };
+  }
+  return {
+    tone: "dropped",
+    label: "Recipe not carried",
+    detail:
+      "This image has been edited, so Download writes a new PNG of what you see. The SceneWorks " +
+      "recipe from the image you opened is not in it — it describes a run that did not produce " +
+      "these pixels.",
+  };
 }
 
 // Snap a pixel dimension to a multiple of 16 within [256, 2048] (Ideogram limits).
@@ -1645,9 +1776,18 @@ export function ImageEditor() {
       setStatus({ loading: true, error: "" });
       try {
         const prepared = await blobToEditorImage(blob);
-        const preparedSource = prepared.downscaled
-          ? { ...source, editorDownscaled: prepared.downscaled }
-          : source;
+        // Keep the bytes we opened, plus whether they carry a readable recipe (sc-15954). The
+        // blob is retained by reference — no copy — and `installedBlob` is the identity token
+        // `editorDownloadPlan` compares the layer stack against. Note it is `prepared.blob`, not
+        // `blob`: a source over EDITOR_CANVAS_MAX_SIDE is resampled on load, so the two differ
+        // exactly in the case the story calls the sharp edge, and the passthrough branch must
+        // ship the ORIGINAL rather than the proxy the canvas is showing.
+        const opened = await describeOpenedImage(blob, source?.name);
+        const preparedSource = {
+          ...source,
+          ...(prepared.downscaled ? { editorDownscaled: prepared.downscaled } : null),
+          ...(opened ? { originalExport: { ...opened, installedBlob: prepared.blob } } : null),
+        };
         installWorkingImage(
           prepared.image,
           prepared.objectUrl,
@@ -2573,16 +2713,32 @@ export function ImageEditor() {
     }
   }, [working, saving, workingImageToFile, importAsset, edits]);
 
-  // Export the working image straight to disk as a PNG (no project involvement).
+  // Export straight to disk (no project involvement). An untouched PNG goes out as the file it
+  // came in as — same bytes, same recipe chunk, same colour profile — and anything else is
+  // flattened to a fresh PNG with no recipe in it (sc-15954). `downloadNote` above the button
+  // says which, before the click.
   const runDownload = useCallback(async () => {
     if (!working) return;
     try {
-      const file = await workingImageToFile(editedFilename(working.source));
+      const plan = editorDownloadPlan(working);
+      const file =
+        plan.mode === "original"
+          ? // The File wraps the SAME blob — no re-encode, so this is the one export path in the
+            // editor whose bytes are the source's bytes.
+            new File([working.source.originalExport.blob], plan.filename, { type: "image/png" })
+          : await workingImageToFile(plan.filename);
       await exportEditorFile(file);
     } catch (err) {
       setStatus({ loading: false, error: `Could not export: ${err.message || err}` });
     }
   }, [working, workingImageToFile]);
+
+  // The header's recipe note. Recomputed with the working document, so an edit (or an undo back
+  // to the opened bitmap) flips it immediately.
+  const downloadNote = useMemo(
+    () => (working ? editorDownloadNote(editorDownloadPlan(working)) : null),
+    [working],
+  );
 
   // Confirm before an action that would discard unsaved edits (Open / drag-drop a
   // new image while dirty). Resolves true when it's safe to proceed. Async + desktop-safe
@@ -3166,7 +3322,25 @@ export function ImageEditor() {
                 Saved ✓
               </span>
             ) : null}
-            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
+            {/* Whether the download will carry the embedded recipe (sc-15954). Visible text, not
+                a tooltip: "silent loss is not an acceptable outcome" is the AC, and a title
+                attribute is silence on a touch device. */}
+            {downloadNote ? (
+              <span
+                className="ie-recipe-note"
+                data-tone={downloadNote.tone}
+                role="status"
+                title={downloadNote.detail}
+              >
+                {downloadNote.label}
+              </span>
+            ) : null}
+            <button
+              className="ie-btn sm"
+              onClick={runDownload}
+              title={downloadNote ? `Download a PNG to your computer — ${downloadNote.detail}` : "Download a PNG to your computer"}
+              type="button"
+            >
               Download
             </button>
             <button
