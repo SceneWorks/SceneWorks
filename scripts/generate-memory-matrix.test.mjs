@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +8,7 @@ import {
   assertCellOwnershipIsBackendScoped,
   assertTwinCoverage,
   backendScopes,
+  buildMatrix,
   buildStoryBackendScope,
   canonicalSourceText,
   familyStory,
@@ -19,6 +21,35 @@ test("memory-strategy source hashing is independent of platform line endings", (
   assert.equal(canonicalSourceText(canonical), canonical);
   assert.equal(canonicalSourceText("alpha\r\nbeta\r\ngamma\r\n"), canonical);
   assert.equal(canonicalSourceText("alpha\rbeta\rgamma\r"), canonical);
+});
+
+test("a comment-only manifest edit changes provenance but no calibration fingerprint", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = await readFile(manifestUrl, "utf8");
+  const baseline = await buildMatrix();
+  const commentOnly = await buildMatrix({
+    sourceOverrides: {
+      manifest: `${manifest}\n// SC-16129 regression: provenance-only comment\n`,
+    },
+  });
+
+  assert.notEqual(
+    commentOnly.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "the exact source-tree revision remains provenance and should record the edit",
+  );
+  assert.deepEqual(
+    commentOnly.cells.map(({ id, calibrationFingerprint }) => ({ id, calibrationFingerprint })),
+    baseline.cells.map(({ id, calibrationFingerprint }) => ({ id, calibrationFingerprint })),
+  );
+  assert.ok(
+    commentOnly.cells.every(
+      (cell, index) =>
+        cell.evidenceRevision.sceneWorks !== baseline.cells[index].evidenceRevision.sceneWorks &&
+        cell.evidenceRevision.inference === baseline.cells[index].evidenceRevision.inference,
+    ),
+    "cell evidenceRevision must retain exact provenance without becoming fingerprint input",
+  );
 });
 
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {

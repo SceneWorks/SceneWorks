@@ -69,7 +69,6 @@ pub struct RequestScope<'a> {
     pub mode: &'a str,
     pub overlay: Option<&'a str>,
     pub geometry: MemoryGeometry,
-    pub expected_sceneworks_revision: &'a str,
     pub expected_inference_revision: &'a str,
 }
 
@@ -199,9 +198,7 @@ fn candidate_exclusion(
     {
         return Some(MemoryEvidenceVerdict::OutOfEnvelope);
     }
-    if candidate.evidence.sceneworks_revision != request.expected_sceneworks_revision
-        || candidate.evidence.inference_revision != request.expected_inference_revision
-    {
+    if candidate.evidence.inference_revision != request.expected_inference_revision {
         return Some(MemoryEvidenceVerdict::Stale);
     }
     if contract.validate_selection(&candidate.selection).is_err() {
@@ -480,9 +477,43 @@ mod tests {
                 batch: 1,
                 frames: 1,
             },
-            expected_sceneworks_revision: SW,
             expected_inference_revision: INF,
         }
+    }
+
+    #[test]
+    fn sceneworks_revision_is_provenance_and_does_not_exclude_a_candidate() {
+        let mut source_only_change = evidence(MemoryStrategy::Resident);
+        source_only_change.sceneworks_revision = "provenance-only-source-revision".into();
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &source_only_change,
+        };
+
+        assert!(matches!(
+            select_strategy(
+                request(),
+                &contract(),
+                Some(Budget {
+                    available_gb: 1.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 1.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[candidate],
+            ),
+            Selection::Selected {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -1114,12 +1114,6 @@ fn evaluate_request_with_budget_using_bundle(
             evidence,
         })
         .collect::<Vec<_>>();
-    let expected_scene_works_revision = admission
-        .evidence
-        .first()
-        .map_or(REQUEST_EVIDENCE_REVISION, |candidate| {
-            candidate.evidence.sceneworks_revision.as_str()
-        });
     let expected_inference_revision = admission
         .evidence
         .first()
@@ -1134,7 +1128,6 @@ fn evaluate_request_with_budget_using_bundle(
             mode: mode_key,
             overlay: inputs.overlay.as_deref(),
             geometry,
-            expected_sceneworks_revision: expected_scene_works_revision,
             expected_inference_revision,
         },
         contract,
@@ -2064,7 +2057,6 @@ fn generic_mlx_shared_observation(
             mode: "image_generation",
             overlay: Some("resolved_load_spec"),
             geometry,
-            expected_sceneworks_revision: "sc-15449-contract-v1",
             expected_inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
         },
         &contract,
