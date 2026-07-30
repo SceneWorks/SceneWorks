@@ -742,6 +742,78 @@ pub fn default_image_upscale_engine() -> String {
     "real-esrgan".to_owned()
 }
 
+/// Optional A1111-style Hires.fix pass for text-to-image generation.
+///
+/// The first pass renders at the requested job dimensions. The worker then resizes that image to
+/// `upscale_by` times the original dimensions and uses it as the img2img initialization for a second
+/// pass. `steps == 0` and `cfg_scale == None` mean "inherit the first-pass value".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiresFixRequest {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub steps: u32,
+    #[serde(default = "default_hires_denoising_strength")]
+    pub denoising_strength: f64,
+    #[serde(default = "default_hires_upscale_by")]
+    pub upscale_by: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_scale: Option<f64>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+impl Default for HiresFixRequest {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            steps: 0,
+            denoising_strength: default_hires_denoising_strength(),
+            upscale_by: default_hires_upscale_by(),
+            cfg_scale: None,
+            extra: ExtraFields::default(),
+        }
+    }
+}
+
+impl HiresFixRequest {
+    pub fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
+
+    pub fn effective_steps(&self, first_pass_steps: u32) -> u32 {
+        if self.steps == 0 {
+            first_pass_steps
+        } else {
+            self.steps.clamp(1, 150)
+        }
+    }
+
+    pub fn effective_denoising_strength(&self) -> f32 {
+        self.denoising_strength.clamp(0.0, 1.0) as f32
+    }
+
+    pub fn effective_upscale_by(&self) -> f32 {
+        self.upscale_by.clamp(1.0, 4.0) as f32
+    }
+
+    pub fn effective_cfg_scale(&self, first_pass_cfg: Option<f32>) -> Option<f32> {
+        self.cfg_scale
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 60.0) as f32)
+            .or(first_pass_cfg)
+    }
+}
+
+pub const fn default_hires_denoising_strength() -> f64 {
+    0.7
+}
+
+pub const fn default_hires_upscale_by() -> f64 {
+    2.0
+}
+
 /// Payload for a standalone `video_upscale` job (epic 4811 / sc-4816). Upscales an existing video
 /// asset with the native-MLX SeedVR2 engine. The target size is `factor × source` unless
 /// `target_width`/`target_height` override it; either way the worker snaps both dims to a multiple of
@@ -1831,6 +1903,35 @@ mod tests {
         assert!(request.is_disabled());
         assert_eq!(request.factor, 2);
         assert_eq!(request.engine, "real-esrgan");
+    }
+
+    #[test]
+    fn hires_fix_request_round_trips_and_inherits_unspecified_values() {
+        let value = json!({
+            "enabled": true,
+            "steps": 0,
+            "denoisingStrength": 0.55,
+            "upscaleBy": 1.75,
+            "cfgScale": 6.5
+        });
+        let request: HiresFixRequest =
+            serde_json::from_value(value.clone()).expect("hires fix request parses");
+
+        assert!(request.enabled);
+        assert_eq!(request.effective_steps(28), 28);
+        assert_eq!(request.effective_cfg_scale(Some(4.0)), Some(6.5));
+        assert_eq!(
+            serde_json::to_value(request).expect("hires fix request serializes"),
+            value
+        );
+
+        let defaults: HiresFixRequest =
+            serde_json::from_value(json!({})).expect("empty hires fix request parses");
+        assert!(defaults.is_disabled());
+        assert_eq!(defaults.effective_steps(24), 24);
+        assert_eq!(defaults.effective_denoising_strength(), 0.7);
+        assert_eq!(defaults.effective_upscale_by(), 2.0);
+        assert_eq!(defaults.effective_cfg_scale(Some(7.0)), Some(7.0));
     }
 
     #[test]
