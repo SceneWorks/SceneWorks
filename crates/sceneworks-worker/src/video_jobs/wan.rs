@@ -1359,6 +1359,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
         // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
         offload_policy: input.offload_policy,
+        load_shape: Default::default(),
         // Named model components (epic 13657). Video providers advertise no `required_components`, so the
         // map is empty by default. The one exception is LTX-2.3's OPTIONAL `uncensored_enhancer` (sc-2845
         // / sc-13664): when a `useUncensoredEnhancer` job resolved the amoral 4-bit Gemma snapshot, stage

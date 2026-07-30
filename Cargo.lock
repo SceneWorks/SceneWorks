@@ -6414,6 +6414,7 @@ version = "0.8.1"
 dependencies = [
  "candle-gen",
  "mlx-gen",
+ "mlx-gen-krea",
  "pmetal-mlx-rs",
  "runtime-cuda",
  "runtime-macos",
