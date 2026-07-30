@@ -800,7 +800,7 @@ describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not
     ).toBe(hostGbForPeakGb(10, "mlx"));
   });
 
-  it("does not quote a partial ceiling for the CONVERT-AT-INSTALL tier shape either", () => {
+  it("uses convert-output disk sizes and keeps legacy size-less catalogs conservative", () => {
     // The same class, on a shape memoryFloorCatalogParity.test.js structurally cannot sweep:
     // convert-at-install models (sc-10730) carry their installed set in `mlxTierStates`, a RUNTIME field
     // the manifest does not declare, so the catalog mirror never produces one. `installedTiers` reads
@@ -808,7 +808,7 @@ describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not
     // exist — and a tier present in the install set with no `variants` row is unevidenced AND unestimable.
     //
     // Case 4 has to cover it: with no blanket, the honest answer is silence, not q4's number.
-    const convertAtInstall = (blanket) => ({
+    const convertAtInstall = (blanket, bf16DiskBytes = null) => ({
       id: "synthetic_convert_at_install",
       ...(blanket === null ? {} : { mlx: { minMemoryGb: blanket } }),
       // Not a download matrix: the convert outputs are decoupled from it (sc-10730).
@@ -818,14 +818,23 @@ describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not
       ],
       mlxTierStates: [
         { tier: "q4", installState: "installed" },
-        // A convert output with no `variants` row at all — nothing to measure, nothing to estimate.
-        { tier: "bf16", installState: "installed" },
+        {
+          tier: "bf16",
+          installState: "installed",
+          ...(bf16DiskBytes === null ? {} : { diskSizeBytes: bf16DiskBytes }),
+        },
       ],
     });
+    // An older API did not emit diskSizeBytes. It remains unbounded rather than inventing a number.
     expect(installedFloorHostGb(convertAtInstall(null), { backend: "mlx" })).toBeNull();
-    // ...and with a blanket it is the max, exactly as for the download-matrix shape.
+    // ...and with a blanket it keeps the conservative fallback.
     expect(installedFloorHostGb(convertAtInstall(64), { backend: "mlx" })).toBe(64);
     expect(installedFloorHostGb(convertAtInstall(4), { backend: "mlx" })).toBe(hostGbForPeakGb(10, "mlx"));
+    // A current catalog makes the bf16 convert output estimable. Its 32 GiB of weights plus the shared
+    // transient dominates q4's measured 10 GiB and the 4 GB blanket.
+    expect(installedFloorHostGb(convertAtInstall(4, 32 * GB), { backend: "mlx" })).toBe(
+      hostGbForPeakGb(32 + TRANSIENT_HEADROOM_BYTES / GB, "mlx"),
+    );
   });
 
   it("floors a candle-only tier's q8 DEGRADE at the blanket", () => {

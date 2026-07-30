@@ -3862,13 +3862,73 @@ fn mlx_convert_output_tier_states(
             } else {
                 ("missing", "missing")
             };
+            // Convert-at-install tiers have no downloads[] row of their own, so this runtime catalog
+            // state is the only truthful place to surface their per-tier size. Count the files the
+            // tier can load, including symlinked shared weights: unlike converted_tier_real_bytes
+            // (deletion accounting), this is a residency estimate, not reclaimable disk accounting.
+            let disk_size_bytes = converted_tier_loaded_bytes(&dir);
             json!({
                 "tier": tier,
                 "installState": install_state,
                 "cacheState": cache_state,
+                "diskSizeBytes": disk_size_bytes,
             })
         })
         .collect()
+}
+
+/// Sum the bytes visible to a converted tier load, including symlinked weight files.
+///
+/// This intentionally differs from [`converted_tier_real_bytes`], which excludes symlinks because it
+/// answers "what would deleting this tier reclaim?". The catalog memory floor instead needs "what
+/// bytes can this tier hold resident?", so a shared text encoder or VAE linked into the tier must count.
+/// Directory symlinks are followed because a converter may link a shared component directory rather
+/// than its individual files. Canonical-directory de-duplication prevents cycles and counts a shared
+/// component once even when more than one in-tier path aliases it.
+fn converted_tier_loaded_bytes(tier_dir: &FsPath) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut stack = vec![tier_dir.to_path_buf()];
+    let mut visited_dirs = std::collections::HashSet::new();
+    let mut visited_files = std::collections::HashSet::new();
+    while let Some(dir) = stack.pop() {
+        let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited_dirs.insert(canonical) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_hidden_file(&path) {
+                continue;
+            }
+            let Ok(link_meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if link_meta.file_type().is_symlink() {
+                if let Ok(target_meta) = std::fs::metadata(&path) {
+                    if target_meta.is_file() {
+                        let canonical =
+                            std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                        if visited_files.insert(canonical) {
+                            total = total.saturating_add(target_meta.len());
+                        }
+                    } else if target_meta.is_dir() {
+                        stack.push(path);
+                    }
+                }
+            } else if link_meta.is_dir() {
+                stack.push(path);
+            } else if link_meta.is_file() {
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if visited_files.insert(canonical) {
+                    total = total.saturating_add(link_meta.len());
+                }
+            }
+        }
+    }
+    (total > 0).then_some(total)
 }
 
 /// Whether a converted tier subdir holds loadable weights: a non-hidden `.safetensors` / `.index.json`
@@ -6833,6 +6893,23 @@ mod mlx_tier_probe_tests {
             "a torn DiT-only tier must read incomplete, not installed"
         );
         assert_eq!(a["bf16"], ("missing".into(), "missing".into()));
+        let disk_bytes = |states: &[Value], tier: &str| {
+            states
+                .iter()
+                .find(|state| state["tier"] == tier)
+                .and_then(|state| state["diskSizeBytes"].as_u64())
+        };
+        assert_eq!(
+            disk_bytes(&anima, "q4"),
+            Some(3),
+            "the complete tier reports its DiT, text encoder, and VAE bytes"
+        );
+        assert_eq!(
+            disk_bytes(&anima, "q8"),
+            Some(1),
+            "a torn tier reports the bytes that are actually present"
+        );
+        assert_eq!(disk_bytes(&anima, "bf16"), None);
 
         // A convert family with no bespoke predicate keeps the coarse backbone probe — a DiT-only tier
         // reads installed (byte-identical to the pre-sc-13513 behavior for any non-anima convert family).
@@ -6844,6 +6921,27 @@ mod mlx_tier_probe_tests {
         seed_anima_tier(root, "q8", true);
         let a2 = tier_state_map(&mlx_convert_output_tier_states(root, "anima", "anima_base"));
         assert_eq!(a2["q8"], ("installed".into(), "complete".into()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn convert_output_size_counts_shared_directory_symlinks_once() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tier = tmp.path().join("converted/q4");
+        write_weight(&tier, "diffusion_models", "dit.safetensors");
+        let shared = tmp.path().join("source/text_encoders");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("encoder.safetensors"), b"shared").unwrap();
+        symlink(&shared, tier.join("text_encoders")).unwrap();
+        // A second alias to the same directory must not double-count the same shared component.
+        symlink(&shared, tier.join("text_encoder_alias")).unwrap();
+
+        assert_eq!(
+            converted_tier_loaded_bytes(&tier),
+            Some(1 + b"shared".len() as u64)
+        );
     }
 
     // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from
@@ -6911,6 +7009,16 @@ mod mlx_tier_probe_tests {
         assert_eq!(states["bf16"], ("installed".into(), "complete".into()));
         assert_eq!(states["q4"], ("installed".into(), "complete".into()));
         assert_eq!(states["q8"], ("missing".into(), "incomplete".into()));
+        let state_rows = object["mlxTierStates"].as_array().unwrap();
+        let disk_bytes = |tier: &str| {
+            state_rows
+                .iter()
+                .find(|state| state["tier"] == tier)
+                .and_then(|state| state["diskSizeBytes"].as_u64())
+        };
+        assert_eq!(disk_bytes("bf16"), Some(3));
+        assert_eq!(disk_bytes("q4"), Some(3));
+        assert_eq!(disk_bytes("q8"), Some(1));
         // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
         assert!(object.get("hasVariantMatrix").is_none());
     }

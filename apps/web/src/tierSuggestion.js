@@ -430,7 +430,20 @@ function mlxEstimatedPeakGb(model, tier, options) {
   }
   const variant = (model?.variants ?? []).find((entry) => entry?.variant === tier);
   const footprint = variant ? variantFootprintBytes(variant) : null;
-  return footprint === null ? null : footprint.bytes / BYTES_PER_GB;
+  if (footprint !== null) {
+    return footprint.bytes / BYTES_PER_GB;
+  }
+  // Convert-at-install tiers are runtime outputs, not downloads[], so they have no variants[] row.
+  // The Rust catalog emits their actual load-visible on-disk size on mlxTierStates instead. Apply the
+  // same calibrated disk→resident + transient estimate as variantFootprintBytes so the label and the
+  // download-tier suggestion keep one memory model.
+  const convertState = Array.isArray(model?.mlxTierStates)
+    ? model.mlxTierStates.find((state) => state?.tier === tier)
+    : null;
+  const disk = numberOrNull(convertState?.diskSizeBytes);
+  return disk !== null && disk > 0
+    ? (Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES) / BYTES_PER_GB
+    : null;
 }
 
 // The max peak (GB) over the installed tiers, plus how it was arrived at:
