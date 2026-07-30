@@ -32,6 +32,7 @@ pub mod training;
 pub mod training_store;
 pub mod video_request;
 pub mod voice_store;
+pub mod workflow_png;
 pub mod workflow_share;
 
 pub const API_PREFIX: &str = "/api/v1";

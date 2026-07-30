@@ -63,6 +63,20 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "webp",
 ] }
+# PNG text chunks (sc-15947, epic 15945). `image` 0.25's `PngEncoder` exposes no text-chunk API and
+# `save_with_format` emits IHDR/IDAT/IEND only, so writing the sanitized workflow envelope INTO a
+# generated PNG has to go through `png` directly (`ITXtChunk` + `Writer::write_text_chunk`), and
+# reading it back needs the same crate's bounded `ITXtChunk::decompress_text_with_limit` — the one
+# decompressor in the graph that refuses a zip bomb instead of allocating it.
+#
+# This is version ALIGNMENT, not a new dependency tree: `png` is already in the graph as `image`'s
+# own PNG codec. Declaring it here once is what keeps it that way. A member pinning its own `png`
+# would resolve a SECOND copy, and then the crate that writes the text chunk is not the crate that
+# encodes the pixels — a skew that shows up as neither a compile error nor a feature difference,
+# only as two encoders in one file format. Keep the requirement in lockstep with whatever `image`
+# resolves to; `crates/sceneworks-worker/tests/image_workspace_dep_guard.rs` reads Cargo.lock and
+# fails the build when the two diverge or when a member re-declares it.
+png = "0.18"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -84,4 +98,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "02d8780e286b5aa36bd05cfe691c9026e6e68201" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "ea18475fdf40b7833959a6e92bf97b4e0ae9f051" }
