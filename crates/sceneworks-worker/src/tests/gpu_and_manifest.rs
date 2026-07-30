@@ -1037,9 +1037,15 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     // engine renders one 14B expert at a time (`OffloadPolicy::Sequential`, forced by
     // `video_jobs::candle_wan_offload_policy`), and q4/q8/bf16 are all measured USED_MEM_HIGH peaks at the
     // 1280x720 Lightning default (~22 / ~28 / ~39 GiB). q4 AND q8 both FIT a 32 GB RTX 5090 — the inverse of
-    // the old ~386 GiB OOM-floor that refused everything. q8 was validated to fit 32 GB under a GPU-memory
-    // balloon (the cudarc pool packs to the live peak, not its ~36 GiB high-water); bf16 (measured ~39,
+    // the old ~386 GiB OOM-floor that refused everything. q8's 32 GB fit came from a GPU-memory balloon
+    // (argued as: the cudarc pool packs to the live peak, not its ~36 GiB high-water); bf16 (measured ~39,
     // replacing the old derived 56) admits a 48 GB card but stays refused on 32.
+    //
+    // ⚠️ The q8/bf16 admissions are UNPROVEN (sc-16091 → sc-16118). The balloon argument is circular — it
+    // substitutes the LIVE peak for the pool high-water under test — and its "a spill would inflate wall
+    // time" premise is measured FALSE on that host (sc-15791: a 1.48 GiB overcommit ran at 1.07x, faster in
+    // a sibling run). If the pool does not trim, q8 needs ~34-36 GiB and this gate over-admits a 32 GB card.
+    // The expectations below pin what SHIPS, so drift still goes red; they do not certify the small-card fit.
     let card48 = apply_vram_cap(None, Some(48.0));
     let card32 = apply_vram_cap(None, Some(32.0)); // an RTX 5090 — epic sc-12732's small-card target
     // card16 is already bound above (the 5B section) and reused here.
@@ -1072,7 +1078,8 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
         );
         assert!(
             wan_video_fit_error(id, a14b, "q8", 0, "0", card32).is_none(),
-            "{id} q8 (~{q8} GB live) now fits a 32 GB card — validated under a ≤32 GB balloon"
+            "{id} q8 (~{q8} GB live) is ADMITTED on a 32 GB card — on the unproven pool-trim inference \
+             above, pending sc-16118's enforced-cap re-validation"
         );
         assert!(
             wan_video_fit_error(id, a14b, "q4", 0, "0", card16).is_some(),

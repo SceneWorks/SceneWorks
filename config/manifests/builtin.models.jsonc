@@ -9113,23 +9113,36 @@
       // RTX 5090 — the epic sc-12732 target. (The raw 22 GiB q4 peak physically fits a 24 GB card too, but
       // the conservative headroom targets ~26 GB free, so a 24 GB card is refused — the safe direction.)
       //
-      // q8 (27.95) is now MEASURED to fit a 32 GB card, not just the 96 GB dev box (sc-13174). Its live peak
-      // is 27.95 GiB but its nvidia-smi POOL high-water is 36.9 GB (34.4 GiB) and cudarc never frees the pool,
-      // so it was unproven whether a ≤32 GB card packs down to the live peak (all prior measurement was on the
-      // 96 GB card). Validated by re-running the render under a 64 GiB GPU-memory balloon that left only ~31
-      // GiB free (emulating a 32 GB RTX 5090): it rendered a valid, non-degenerate clip in comparable wall time
-      // (~2388 s vs the unconstrained 2427 s — a WDDM working-set spill would inflate it) with the SAME 27.95
-      // GiB live peak, and balloon(64) + live(28) = 92 GiB stayed under the 96 GiB card so nothing spilled. So
-      // the driver's stream-ordered allocator TRIMS the reserved cache to the live peak under physical pressure
-      // instead of needing the 36.9 GB high-water — q8 is gated at the live peak (admits 32) like q4, not the
-      // conservative pool bound it carried while deferred.
-      //   bf16 (38.56) is now MEASURED too (sc-13174): its dense fp32 `Wan-AI/*-Diffusers` snapshot was staged
-      // (the missing transformer_2 + other fp32 shards downloaded) and run — one dense bf16 expert (~26 GiB,
+      // q8 (27.95) is gated at its LIVE peak, which is what admits a 32 GB card (sc-13174). Its live peak is
+      // 27.95 GiB but its nvidia-smi POOL high-water is 36.9 GB (34.4 GiB) and cudarc never frees the pool, so
+      // whether a ≤32 GB card packs down to the live peak IS the question. sc-13174 argued yes from a 64 GiB
+      // balloon leaving ~31 GiB free: a valid clip, the SAME 27.95 GiB live peak, comparable wall time
+      // (~2388 s vs the unconstrained 2427 s), and balloon(64) + live(28) = 92 < 96 GiB.
+      //
+      // ⚠️ THAT ARGUMENT DOES NOT HOLD, and the tier has NOT been re-measured (sc-16091 → sc-16118). Both
+      // premises fail:
+      //   1. The arithmetic is CIRCULAR. `balloon(64) + live(28) = 92 < 96` uses the LIVE figure, which is the
+      //      correct figure only IF the pool trimmed — the very claim under test. Under the competing
+      //      hypothesis it reads balloon(64) + high-water(34.4) = 98.4 > 95.6, a ~2.8 GiB overcommit.
+      //   2. "A WDDM spill would inflate the wall time" is MEASURED FALSE on this host (sc-15791, 2026-07-30):
+      //      a 3.41 GiB pool-reserved footprint ran with only 1.93 GiB driver-visible free — a 1.48 GiB
+      //      overcommit — completing with a bit-identical peak at 1.07x, and FASTER in a sibling run. The
+      //      driver absorbs the overage silently. Note sc-13174's own ballooned run was faster than
+      //      unconstrained (2388 vs 2427 s), which under the old rule read as proof of no spill.
+      // Both hypotheses predict everything observed, because USED_MEM_HIGH reports LIVE bytes and so reads
+      // 27.95 either way. If the pool does NOT trim, q8's real footprint on a 32 GB card is ~34.4 GiB and this
+      // gate OVER-ADMITS — a user OOMs on a card this manifest says fits. It may well be fine (pool trimming is
+      // documented driver behaviour); it is simply not established. The value is LEFT UNCHANGED deliberately:
+      // correcting it needs the measurement, not a comment edit. sc-16118 settles it under an ENFORCED ceiling
+      // (`CUmemPoolProps.maxSize` + `cuDeviceSetMemPool`, proven in inference #335 to bind candle's allocator)
+      // instead of a balloon, which is not a ceiling on this hardware.
+      //   bf16 (38.56) is MEASURED (sc-13174): its dense fp32 `Wan-AI/*-Diffusers` snapshot was staged (the
+      // missing transformer_2 + other fp32 shards downloaded) and run — one dense bf16 expert (~26 GiB,
       // 14B×2 B) + the shared ~12 GiB activation set. It replaces the old conservative DERIVED 56 bound: the
       // real 38.56 GiB live peak admits a 48 GB card the 56 bound refused, while staying refused on a 32 GB
-      // card (40.56 > 32). Its pool high-water (48.8 GB ≈ 45.4 GiB) sits ABOVE the live peak like q8's did, so
-      // bf16-on-48 rests on the SAME q8-proven behavior (the pool trims to the live peak under pressure); no
-      // separate ≤48 GB balloon was run because 38.56 clears 48 with far more margin than q8's 27.95 cleared 32.
+      // card (40.56 > 32). Its pool high-water (48.8 GB ≈ 45.4 GiB) sits ABOVE the live peak like q8's does,
+      // and no separate ≤48 GB balloon was run — so ⚠️ bf16-on-48 INHERITS the unproven q8 pool-trim inference
+      // above in full, with no independent evidence of its own. Same treatment: value unchanged, sc-16118.
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.13, "q8": 27.95, "bf16": 38.56 },
@@ -9352,11 +9365,15 @@
       // `in_channels` 36 vs 16 — the image concat — not the 40-layer/40-head attention that IS the peak), and
       // the VAE ENCODER is additionally resident here (`WanVae16::new_with_encoder`) to latent-encode the
       // first frame. minMemoryGb 24 gates the DEFAULT (q4) tier + 2 GB headroom → q4 admits a 32 GB card. q8
-      // (28.02 live; nvidia-smi pool high-water 38.2 GB / 35.6 GiB) is validated to fit a 32 GB card the same
-      // way as T2V (a 64 GiB balloon left ~31 GiB free; the render kept the 28.02 live peak in comparable wall
-      // time with no spill), so it now ADMITS 32 rather than being gated at its pool high-water. bf16 (38.62,
-      // measured from the dense fp32 stage; pool high-water 48.9 GB / 45.5 GiB) replaces the old derived 56 —
-      // its 38.62 live peak admits a 48 GB card (refused on 32) on the same q8-proven pool-trim basis as T2V.
+      // (28.02 live; nvidia-smi pool high-water 38.2 GB / 35.6 GiB) admits a 32 GB card the same way as T2V —
+      // a 64 GiB balloon left ~31 GiB free and the render kept the 28.02 live peak in comparable wall time.
+      // ⚠️ It therefore inherits the T2V block's UNPROVEN pool-trim inference in full: that balloon argument is
+      // circular (it substitutes the live figure for the one under test) and its "a spill would inflate wall
+      // time" premise is measured false on this host (sc-15791). If the pool does not trim, q8's real footprint
+      // here is ~35.6 GiB and the 32 GB admission is wrong. bf16 (38.62, measured from the dense fp32 stage;
+      // pool high-water 48.9 GB / 45.5 GiB) replaces the old derived 56 — its 38.62 live peak admits a 48 GB
+      // card (refused on 32) on that same unproven basis. Values LEFT UNCHANGED pending sc-16118, which
+      // re-validates both under an ENFORCED pool cap rather than a balloon. See the T2V block for the detail.
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.20, "q8": 28.02, "bf16": 38.62 },
