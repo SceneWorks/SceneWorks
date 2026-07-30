@@ -1256,6 +1256,154 @@ mod tests {
         }
     }
 
+    /// **SC-16090 — why rung 4's per-backend cost magnitude cannot change a LADDER selection.**
+    ///
+    /// SC-15791 measured rung 4 at ~26× more per denoise step on Candle than on MLX for the same rung,
+    /// same model, same snapshot, and asked whether the ladder's cost order must therefore fork per
+    /// backend. The answer is no, and this is the executable half of the reason: the selector consults
+    /// the *order*, never a magnitude, and it stops at the cheapest **selectable** rung. So rung 4
+    /// never wins over a cheaper rung that fits, and a multiplier on it cannot flip that comparison in
+    /// either direction.
+    ///
+    /// Four arms over one candidate set whose peaks descend with the ladder:
+    ///
+    /// 1. A cheaper rung that fits **wins**, even though rung 4's peak is 5× smaller and would leave
+    ///    far more headroom. A selector that preferred the smallest peak, or that weighed a declared
+    ///    cost, would pick differently here.
+    /// 2. Rung 4 is selected **only** once nothing cheaper fits.
+    /// 3. One notch tighter and the outcome is `Reject` — no render at all.
+    /// 4. And the honest caveat, because arm 3 is not the *only* way rung 4 gets reached: a cheaper
+    ///    rung whose peak WOULD have fit but whose evidence is excluded does not stop the walk, so
+    ///    rung 4 can be selected over a cheaper rung that physically fits (the pre-existing
+    ///    `excluded_cheaper_rung_does_not_block_a_verified_deeper_fit` pins that path directly). It
+    ///    does not rescue the argument's premise and it does not damage it either: the alternative is
+    ///    then `Unverified`, which is still no render. What never happens is rung 4 beating a cheaper
+    ///    rung that is *selectable*.
+    ///
+    /// Which is why the fix belongs in the Candle realization
+    /// (`gen_core::memory_strategy::MemoryWindowMaterialization`, story sc-16096) and not in a forked
+    /// cost order. **Scope warning:** this is a statement about the ladder only. One layer up, the Krea
+    /// capability-downtier collapses "fits resident" and "fits only via rung 4" into the same
+    /// `TierFit::Fits`, and there the magnitude genuinely does decide — sc-16104.
+    #[test]
+    fn the_cheapest_selectable_rung_wins_and_rung_four_never_beats_one_that_fits() {
+        // Peaks in GiB, descending with the ladder: 40 / 30 / 20 / 10 / 2.
+        let peaks = [40.0, 30.0, 20.0, 10.0, 2.0];
+        let evidences = MemoryStrategy::ALL
+            .into_iter()
+            .zip(peaks)
+            .map(|(strategy, gb)| {
+                let mut record = evidence(strategy);
+                record.key.parameters = cumulative_params(strategy);
+                record.predicted_peak_bytes = (gb * BYTES_PER_GIB) as u64;
+                record.observed_peak_bytes = Some(record.predicted_peak_bytes);
+                record
+            })
+            .collect::<Vec<_>>();
+        let candidates = MemoryStrategy::ALL
+            .into_iter()
+            .zip(&evidences)
+            .map(|(strategy, record)| Candidate {
+                selection: MemorySelection {
+                    strategy,
+                    parameters: cumulative_params(strategy),
+                    tier: tier(),
+                },
+                evidence: record,
+            })
+            .collect::<Vec<_>>();
+        let provider = contract();
+        let select = |available_gb: f64| {
+            select_strategy(
+                request(),
+                &provider,
+                Some(Budget {
+                    available_gb,
+                    reclaimable_gb: 0.0,
+                    total_gb: 48.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &candidates,
+            )
+        };
+
+        // 1. Rungs 3 and 4 both fit at 12 GiB. The ORDER decides, not the peak: rung 3 wins even
+        //    though rung 4 would leave 10 GiB more headroom.
+        assert!(
+            matches!(
+                select(12.0),
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedAttention,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "the cheapest fitting rung must win over a deeper one with a smaller peak: {:?}",
+            select(12.0)
+        );
+
+        // 2. Nothing cheaper fits at 3 GiB — now, and only now, rung 4 is selected.
+        assert!(
+            matches!(
+                select(3.0),
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "rung 4 must be reachable once nothing cheaper fits: {:?}",
+            select(3.0)
+        );
+
+        // 3. One notch tighter and there is no render. So rung 4's per-step cost is weighed against
+        //    "cannot render" — never against a cheaper rung that was available.
+        assert!(
+            matches!(select(1.0), Selection::Reject { .. }),
+            "below rung 4's peak the alternative is rejection, not a cheaper rung: {:?}",
+            select(1.0)
+        );
+
+        // 4. The caveat, asserted rather than asserted-away: excluding a cheaper rung's evidence does
+        //    NOT stop the walk, so rung 4 is reachable while rung 3's peak still fits. The alternative
+        //    is `Unverified` — still no render — which is why the conclusion survives. Stale is the
+        //    realistic trigger: every inference pin bump invalidates evidence by `inference_revision`.
+        let mut stale_attention = evidences[3].clone();
+        stale_attention.inference_revision = "0000000000000000000000000000000000000000".into();
+        let mut with_stale = candidates.clone();
+        with_stale[3].evidence = &stale_attention;
+        let selection = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 12.0,
+                reclaimable_gb: 0.0,
+                total_gb: 48.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &with_stale,
+        );
+        assert!(
+            matches!(
+                selection,
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an excluded cheaper rung does not stop the walk, so rung 4 IS reachable at 12 GiB where \
+             rung 3's 10 GiB peak fits — the alternative there is Unverified, not a cheaper render: \
+             {selection:?}"
+        );
+    }
+
     /// SC-15805 — the selector/validator contradiction, pinned closed on the contract shape that
     /// exposes it: rung 1 declared `Missing`.
     ///

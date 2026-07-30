@@ -31,6 +31,143 @@ needs tolerance must include it in the provider estimate and golden evidence.
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.
 
+## The cost order is ordinal, and it stays shared across backends
+
+**One ladder, one order, on every backend — even where the same rung costs an order of magnitude more
+on one of them.** (SC-16090.)
+
+SC-15791 measured rung 4 on Candle/CUDA at ~8.0 s per denoise step against MLX's ~0.309 s for the same
+rung, same model, same snapshot — ~26×, and ~4–5× more again on Candle-q8 than Candle-q4 — and asked
+whether the ladder's cost order must therefore become per-backend and per-tier, or be replaced by a
+selector reading measured per-backend cost. **Neither. Nothing about the order changes.** Three
+independent reasons, each sufficient on its own:
+
+1. **The ladder never trades cost against cost.** `select_strategy` walks the five rungs in order and
+   returns the *first* whose measured peak fits the live budget — the cheapest sufficient rung. Rung 4
+   is therefore reached only when no cheaper rung is **selectable**, so it never wins over a cheaper
+   rung that fits, and a multiplier on it cannot flip that comparison in either direction. Its
+   alternative is no render: usually a `Reject`, or an `Unverified` verdict where a cheaper rung's peak
+   would have fit but its evidence was stale, out-of-envelope or fingerprint-mismatched (that path is
+   real — excluding a cheaper rung does not stop the walk — and it yields a cheaper *non-answer*, not a
+   cheaper render). `Candidate` carries no cost field.
+   `the_cheapest_selectable_rung_wins_and_rung_four_never_beats_one_that_fits` pins all four cases,
+   including that caveat.
+2. **A cost *order* is ordinal; 26× is a magnitude, and no consumer of the order reads one.** The
+   order's whole job is "try the cheaper mechanism first", which it discharges on any backend where
+   rung 4 is still the most expensive rung. Per-backend *magnitudes* are already carried where they
+   belong: per cell, as calibration evidence, keyed by backend. (SC-15791 timed no Candle rung other
+   than 4, so "rung 4 is still last on Candle" remains the epic's premise rather than a measurement —
+   it is not evidence this decision leans on.)
+3. **The 26× is not a backend cost.** It decomposes entirely into per-window work that is not per-window
+   work. Per 97.1 MiB block, medians on a host whose run-to-run spread reaches ±38%: **~204 ms** for the
+   leg the spike labels *host read + repack* (the mapped read is inside that number, and on a cold page
+   cache it dominates, since Candle re-reads the tier every step); **62.5 ms** attributable to a
+   device→host round trip, as a residual rather than an independently timed leg; and the PCIe transfer
+   itself **unresolvable against a ±34.9 ms noise floor**. The conversion is a pure deterministic
+   function of bytes that never change, recomputed once per block per **forward** — 240 times per
+   8-step render, 480 under true CFG — for one answer. Forking the shared order would write a fixable
+   implementation defect into the contract every family story then has to honour.
+
+**What was added instead is the invariant that makes the shared order true.**
+`gen_core::memory_strategy::MemoryWindowMaterialization` is the obligation, asked backend-neutrally and
+answered per realization: a rung-4 window must be a transfer of bytes **already in the form the
+accelerator consumes** — a mapped read plus, where memory is not unified, a host-to-device copy — and
+never a per-window format conversion. MLX satisfies it structurally, because there the mmap *is* the
+residency. A realization that does not may still ship, but only while saying what it converts and naming
+the story that removes it; `conformance_errors` refuses an undeclared one, and refuses an *unstated*
+realization with the fix it can actually perform. `candle-gen-krea` declares `HostFormatConversion` today
+with `owner_story: sc-16096`, which is the story that flips it to `DeviceFormatTransfer`.
+
+It is declared on the backend realization and read through
+`MemoryProviderContract::window_materialization`, mirroring how `engages` layers over
+`MemoryStrategy::engages`. The bare `MemoryStrategy` enum is deliberately untouched: it is contract-owned
+so no provider can opt out of arithmetic, and a rung-4 field there would change the rung for MLX too.
+The field is **required** rather than defaulted — which is why every construction site had to change —
+because a default is an opt-out that reads as a declaration. What the contract cannot do is *verify* the
+answer: a provider that types `DeviceFormatTransfer` over a converting loader has made a false
+declaration and nothing catches it. The compile-forced choice buys a deliberate statement a reviewer can
+check against the loader, not a proof.
+
+Declaring is deliberately **not** vetoing: within the ladder rung 4 at 8.0 s/step still beats the
+rejected render that is its only alternative, so disabling it would trade a slow render for no render.
+What the rule refuses is an **undeclared** realization, never a slow one — cost is not what it reads.
+Note the severity that follows: like every rule in `conformance_errors`, an error is *contract*-level and
+`select_strategy` bails on any non-empty result, so a misdeclaration costs rungs 0–4 rather than rung 4.
+That is right for "this contract cannot be interpreted" and would be wrong for a cost verdict, which is
+a second reason the rule does not attempt one.
+
+### Where the magnitude reaches a tier decision — and why that is allowed
+
+Reason 1 is a statement about the **ladder**, and must not be over-read into "the cost never matters".
+The Krea capability-downtier consumes the ladder's verdict as a boolean: `KreaTurboFit::Resident` and
+`KreaTurboFit::Fits` both collapse to `TierFit::Fits`
+(`crates/sceneworks-worker/src/image_jobs/base.rs`), and `choose_downtier` keeps the highest-fidelity
+tier that fits. So under **Auto** a tier whose *only* fit is rung 4 outranks a lower tier that fits
+resident, and the cost of that rung is what the higher tier is bought with — extrapolating z-image's
+measured q8 figure (~1466 ms/block), tens of seconds per step rather than a q4 resident render's
+low single digits.
+
+**That is intended, and is the same rule the rest of this epic applies.** Fidelity the user asked for is
+not a memory lever: tier integrity refuses to substitute precision, SC-15807 refuses to substitute
+geometry, and refusing to substitute *speed-for-fidelity* is the same refusal. A slow render at the
+selected tier beats a fast render of something the user did not choose. So the downtier's ordering
+stands as written, on both the explicit and the Auto path.
+
+Two things this does **not** license:
+
+- **An explicit pick never reaches the downtier at all** and never had to — `explicit_pick`
+  (`mlxQuantizeExplicit`) skips it outright, as does an NVFP4 selection, which is unrankable on purpose.
+  The rule above is about Auto only.
+- **Accepting the cost is not the same as hiding it.** Nothing today tells a caller that its render is
+  slow *because* it is streaming blocks to hold the tier, and a render 1-2 orders of magnitude slower
+  than the same job at a lower tier is operationally indistinguishable from a hang. Disclosure is
+  SC-16104's remaining scope; the policy question it was filed to settle is settled here.
+
+One consequence to carry forward: this **declines** SC-15791's recommendation *"do not enable rung 4 on
+q8 until the repack is hoisted"*. Deliberately — gating q8 would be exactly the fidelity substitution the
+rule forbids. It does mean the per-window conversion is paid on the tier where it is worst, which raises
+the value of SC-16096 rather than lowering it.
+
+### A rung declares no non-VRAM resource cost
+
+SC-15791 also asked how a rung declares a **host RAM** cost, because its recommended Candle fix — cache
+the repacked bytes host-side — holds ~3.16 GiB of host memory for the whole request, on exactly the
+low-RAM hosts rung 4 exists for, while MLX pays nothing host-side. (That 3.16 GiB is derived arithmetic
+for a *proposed* fix, not a measurement; nothing in the spike watched host RSS.) A rung whose resource
+cost changes *kind* between backends cannot be expressed as one cost order or one saving figure.
+
+**No such axis is added, because the cost belongs to that one candidate fix rather than to the rung.** A
+realization that materializes windows from device-format bytes on disk holds its host copy as the mapped
+file — reclaimable page cache, the same *kind* of resource MLX's mmap is — and makes no anonymous
+per-request allocation at all. Adding a resource-kind axis for an implementation nobody has to write is
+the same mistake as (3) above, one layer down.
+
+**What that leaves undeclared, stated rather than glossed.** The `HostFormatConversion` realization that
+ships today *does* have a host cost, and this decision does not surface its size. Its per-window
+conversion allocates anonymous host memory per projection and frees it again: the block's unpacked codes
+for q4, and for q8 a **full dense f32 grid** (`repack::dequant_mlx_q8_gs`), which for a 3840 × 15360
+projection is a few hundred MiB. Those are transients rather than request-held, and they are **not
+measured** — SC-15791 says plainly that q8 host memory is unverified. So on a low-RAM host a rung-4
+Candle selection today carries an unquantified host transient no gate sees. It is recorded here so it is
+not mistaken for zero; SC-16096 both removes the conversion and owes the measurement.
+
+**Revisit trigger — deliberately broad enough to catch that case.** The axis is owed if a realization is
+measured to need host memory proportional to the model that a fit gate would have to account for: held
+for the request or transient, reclaimable or not, device-format alternative or none. SC-16096 must raise
+it rather than absorb it. What is *not* owed is an axis built ahead of that measurement, on a figure
+derived for a fix nobody has written.
+
+### What this decision does not settle
+
+The *prerequisite* axis was checked and needs nothing: SC-15791 confirmed rung 4's single edge (requires
+rung 1 engaged in the same request) holds on Candle for the same arithmetic reason, so
+`MemoryProviderContract::requires` stays unbuilt. Two things the spike left genuinely open are **not**
+answered here and are not preconditions for this decision: whether the ~26× survives the fix (SC-16096
+measures it), and whether the small-card behaviour rung 4 exists for can be validated at all on the dev
+box — SC-15791 over-committed 3.41 GiB into 1.93 GiB of driver-visible free and completed at 1.07× wall
+time, so the ceiling is not enforced there and neither completion nor wall time detects a spill
+(SC-16091).
+
 ## Tier integrity
 
 **No component is resident above the user's selected quant tier unless a declared, measured exception
