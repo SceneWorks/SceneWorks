@@ -665,7 +665,7 @@
               },
               "denseTextEncoderTier": {
                 "type": "boolean",
-                "description": "When true (with standardTierLayout), every tier keeps a DENSE bf16 text encoder — only the transformer is packed (e.g. FLUX.2-klein). The worker forces the load quant to None for these so the dense TE is never re-quantized. Mirrors the DENSE_TE_TIER_MODELS set."
+                "description": "When true (with standardTierLayout), every tier keeps a DENSE bf16 text encoder — only the transformer is packed (e.g. FLUX.2-klein). The worker forces the load quant to None for these so the dense TE is never re-quantized. THIS IS A DECLARED ABOVE-TIER RESIDENCY EXCEPTION (sc-15799): on a q4 or q8 tier the text encoder is resident at a HIGHER precision than the user selected, which the tier-integrity invariant permits only when the exception is declared and measured. Since sc-15799 this flag is the ONLY way to obtain the carve-out — the hardcoded DENSE_TE_TIER_MODELS worker registry it used to mirror is deleted, because an exception the shared decision cannot see is exactly what that story removes. Setting it REQUIRES a matching exception row in config/tier-integrity.jsonc; scripts/check-tier-integrity.mjs fails the parity lane otherwise."
               },
               "convertSourceRepo": {
                 "type": "string",
@@ -712,36 +712,40 @@
               "control": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the ~6.6 GB bf16 control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained.",
+                "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained. sc-15799 (tier integrity) removed the branch-quant rung: the branch's tier is a function of the BASE tier (branchTierByBaseTier), so there is nothing left for the ladder to trade. Every peak here is read VERBATIM as an upper bound and is NOT corrected for the branch's tier — the sc-15799 review retracted the branchPackSaveGb correction, whose q8 8.4 / q4 10.2 GB exceeded the entire 6.6 GB control branch and under-predicted the true host by ~5 GB toward an OOM. While `measured` is false the worker also refuses to turn these rows into a hard reject (krea_control_fit::control_evidence_is_current); sc-16013 owns the re-measure.",
                 "properties": {
-                  "peakGbByTier": {
+                  "branchTierByBaseTier": {
                     "type": "object",
-                    "description": "Overall control-lane render peak VRAM (GB) at 1024²/8-step, keyed by BASE quant tier, with a bf16 control branch and NO fit-ladder rungs engaged. The peak is the end-of-render VAE-decode spike (sc-11744). The fit-gate compares this + headroom against free VRAM.",
+                    "description": "TIER INTEGRITY (sc-15799): the tier the pose control branch is packed to, keyed by BASE quant tier. Declarative mirror of gen_core::tier_integrity::control_branch_tier, which is the executable rule — this records what ships so the audit table and the parity lane can see it. q8 → q8 (follows the tier exactly); q4 → q8 (the ONE declared, measured exception: a q4 control residual measures 'pose-locked; non-pose details drift', so it floors one tier above the selection); bf16 → bf16 (already at tier). NOT budget-dependent and NOT a memory lever. Every tier the entry HOSTS must appear as a key: the checker iterates declared keys, so an undeclared hosted tier variant (for example int8-convrot) would go unchecked, and scripts/check-tier-integrity.mjs therefore requires full coverage. Note what this map gives up on the q8 tier — the deleted rung could pack a q8 base's branch to q4, one tier BELOW the selection, which tier integrity permits; that band (~28.97-30.77 GB free on the shipped rows) is a real capability traded for never substituting unrequested precision.",
+                    "additionalProperties": { "type": "string", "enum": ["q4", "q8", "bf16"] }
+                  },
+                  "bf16BranchPeakGbByTier": {
+                    "type": "object",
+                    "description": "Overall control-lane render peak VRAM (GB) at 1024²/8-step, keyed by BASE quant tier, captured with a **bf16** control branch and NO fit-ladder rungs engaged. The peak is the end-of-render VAE-decode spike (sc-11744). SUPERSEDED BY sc-15799 for every packed tier: the branch now packs to the base tier, so these rows describe a configuration that no longer ships and `measured` is false until sc-16013 re-measures. Named for the branch tier they were captured at so they cannot be mistaken for current evidence. The worker reads the row VERBATIM as an UPPER BOUND and applies NO correction: a lighter branch can only lower a peak, so the row bounds the shipping configuration, and over-predicting adapts a card early while under-predicting admits an OOM. The branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8, ~1.7 GB at q4, so the true weight-side deltas are 3.3 / 4.9 GB; the retracted branchPackSaveGb claimed 8.4 / 10.2, which exceed the whole branch and are therefore not weight-side quantities at all.",
                     "additionalProperties": { "type": "number" }
                   },
-                  "sequentialPeakGbByTier": {
+                  "bf16BranchSequentialPeakGbByTier": {
                     "type": "object",
-                    "description": "Measured pose-control peak after the bespoke provider encodes and drops Qwen3-VL before loading the DiT + control branch + VAE (sc-12176), keyed by BASE quant tier. This is the cheapest fit-ladder rung and the second-stage reject ceiling; deeper tiling/chunking/branch-quant savings compose from this staged baseline.",
+                    "description": "Pose-control peak after the bespoke provider encodes and drops Qwen3-VL before loading the DiT + control branch + VAE (sc-12176), keyed by BASE quant tier, captured with a **bf16** control branch. This is the cheapest fit-ladder rung and the second-stage reject ceiling; the deeper tiling/chunking savings compose from this staged baseline. Superseded, and read verbatim as an upper bound exactly like bf16BranchPeakGbByTier (sc-15799).",
                     "additionalProperties": { "type": "number" }
                   },
                   "decodeTileSaveGb": {
                     "type": "object",
-                    "description": "Measured peak reduction (GB) from the CHEAPEST rung — forcing the seam-free tiled VAE decode (sc-11744, candle-gen #492; Krea2ControlRequest.tile_vae_decode), keyed by BASE quant tier. A SPEED cost, no quality cost. The fit-gate subtracts this from peakGbByTier and engages it BEFORE branch-quant. Measured only for the tier(s) where the end-of-render decode spike IS the render peak (q4); omitted where the denoise steady-state dominates and tiling recovers little.",
+                    "description": "Measured peak reduction (GB) from the CHEAPEST deeper rung — forcing the seam-free tiled VAE decode (sc-11744, candle-gen #492; Krea2ControlRequest.tile_vae_decode), keyed by BASE quant tier. A SPEED cost, no quality cost. Measured only for the tier(s) where the end-of-render decode spike IS the render peak (q4); omitted where the denoise steady-state dominates and tiling recovers little. Carried across the sc-15799 repack: it is a delta between two arms of the same load, so the resident branch is present in both and cancels.",
                     "additionalProperties": { "type": "number" }
                   },
                   "chunkAttnSaveGb": {
                     "type": "number",
-                    "description": "Measured peak reduction (GB) from the MIDDLE rung — engaging sc-6217-style query-row attention chunking on the composable base stack + control branch (sc-11745, candle-gen #496; Krea2ControlPaths.chunk_attention). A SPEED cost, no quality cost (the chunked forward is byte-identical). Bounds the DENOISE-phase activation peak, so the fit-gate engages it between decodeTileSaveGb (decode-phase) and the last-resort branch quant. A SCALAR (not tier-keyed): the activation peak is bf16 regardless of the base weight tier.",
+                    "description": "Measured peak reduction (GB) from the DEEPEST rung — engaging sc-6217-style query-row attention chunking on the composable base stack + control branch (sc-11745, candle-gen #496; Krea2ControlPaths.chunk_attention). A SPEED cost, no quality cost (the chunked forward is byte-identical). Bounds the DENOISE-phase activation peak. A SCALAR (not tier-keyed): the activation peak is bf16 regardless of the base weight tier, which is also why the sc-15799 branch repack does not move it.",
                     "minimum": 0
-                  },
-                  "branchQuantSaveGb": {
-                    "type": "object",
-                    "description": "Measured peak reduction (GB) from the last-resort rung — quantizing the control branch bf16 → q8/q4 (candle-gen #483, sc-11743), keyed by target quant (q8 / q4). The fit-gate subtracts this (composed with the cheaper decodeTileSaveGb + chunkAttnSaveGb rungs) from peakGbByTier to decide whether the branch-quant rung makes the lane fit, preferring q8 (near-lossless) before q4 (pose-locked; non-pose drift).",
-                    "additionalProperties": { "type": "number" }
                   },
                   "measured": {
                     "type": "boolean",
-                    "description": "true when peakGbByTier / sequentialPeakGbByTier / decodeTileSaveGb / chunkAttnSaveGb / branchQuantSaveGb were MEASURED on a real GPU; false when partially ESTIMATED pending measurement."
+                    "description": "true when the peak rows / decodeTileSaveGb / chunkAttnSaveGb were MEASURED on a real GPU for the configuration that SHIPS; false when superseded or partially estimated pending measurement. sc-15799 set this false: the peaks were captured with a bf16 branch that no longer ships (see supersededBy). It is READ, not decorative — krea_control_fit::control_evidence_is_current gates two behaviours on it: while false the fit ladder returns a best-effort admit instead of a hard reject (a reject computed from a stale UPPER BOUND can refuse a job that would run), and incurred_peak_gb records no reclaimable high-water (the uncorrected row over-states what the packed load holds, and an over-stated pool lets a later gate over-admit)."
+                  },
+                  "supersededBy": {
+                    "type": "string",
+                    "description": "Shortcut story id whose change invalidated the measurements in this block, present only while `measured` is false. Set by sc-15799 (the control-branch repack); cleared when sc-16013 lands the re-measure. Its presence is the machine-readable form of 'do not read these rows as current calibrated evidence'."
                   }
                 }
               },

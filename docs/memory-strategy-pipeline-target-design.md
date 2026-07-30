@@ -505,12 +505,15 @@ in the manifest: *"every component is packed at the chosen tier."*
 `mempolicy`'s own doc describes it as *"pack the control branch **to the base quant tier** at load
 time."* That is the invariant, implemented as an escalation step. Reading it against the numbers:
 
-- q8 is measured **near-lossless** and saves **8.4 GiB**. There is no quality argument for defaulting
-  to bf16 when the user asked for q8.
+- q8 is measured **near-lossless** and saves **~3.3 GB** on the weight side (the branch's projections
+  are 3.30 B params ≈ 6.6 GB bf16 against ~3.3 GB packed at q8). There is no quality argument for
+  defaulting to bf16 when the user asked for q8. (This bullet first said 8.4 GiB, from the
+  `branchPackSaveGb` figure the SC-15799 review retracted — 8.4 exceeds the entire branch, so it was
+  never a weight-side quantity. See the retraction note further down.)
 - It is load-time-only — *"it cannot be re-packed mid-render"* — which is what an install-time
   artifact choice looks like, not a runtime lever.
 - It sits **last** in the escalation order, so a constrained machine engages residency and decode
-  tiling first to claw back single-digit GiB while 8.4 GiB of unrequested precision sits in the
+  tiling first to claw back single-digit GiB while ~3.3 GB of unrequested precision sits in the
   branch the entire time.
 
 Qwen already publishes its ControlNet per tier (q4 0.99 GB / q8 1.87 GB / bf16 3.51 GB), so the
@@ -527,6 +530,48 @@ hole in the rule; it is the rule working.
 - `Lever::BranchQuant` — deleted.
 - `should_quantize_control_branch` — deleted. The branch's tier is decided by the installed artifact.
 - The q4→q8 floor — declared in the manifest with its quality evidence attached.
+
+### As shipped (SC-15799, inference PR #329 / SceneWorks PR #1963)
+
+All three, plus more than the section anticipated.
+
+- `gen_core::tier_integrity` is the shared executable rule (`control_branch_tier`,
+  `is_above_selected_tier`, `fidelity_rank`), consumed by mlx-gen-krea, candle-gen-krea's provider
+  contract, and the worker's control fit gate — one decision, three consumers.
+- `Lever::BranchQuant` and `should_quantize_control_branch` are gone; `mempolicy`'s ladder is now
+  residency → decode tiling → resolution, and `MemoryPlan` has no `quantize_branch`. The worker's
+  control fit ladder lost its fifth rung and rejects below attention chunking rather than spending
+  quality the user did not ask for.
+- The q4→q8 floor is declared at `candle.control.branchTierByBaseTier` with its measured evidence, and
+  cross-checked against the shared rule by a test that reads the shipped manifest.
+- **The audit changed the picture.** The section assumed a handful of exceptions. The real count is 79,
+  across most of the catalog — on a packed tier the great majority of entries keep a VAE, a text
+  encoder, or both at bf16/f32, decided inside providers where the shared decision could not see it.
+  `config/tier-integrity.jsonc` declares all of them; `scripts/check-tier-integrity.mjs` enforces
+  well-formedness, evidence, and a ratchet — keyed per `(model, component)`, with its size committed —
+  that forbids *any* entry from adding an unmeasured row for a component it does not already declare.
+  24 are measured from in-tree numbers; 55 are declared-but-unmeasured and owned by SC-16015.
+  (The first revision declared 61/19/42 and called the ledger complete. Review found three omissions
+  with costs already in the tree — the mage `norm_out.linear` head floor on five more entries,
+  `krea_2_raw`'s dense f32 VAE, and all twelve SenseNova-U1 dense-head rows — so the ledger now states
+  its declaration THRESHOLD instead of claiming completeness in the abstract.)
+- Two consequences the section did not name: `mlx.denseTextEncoderTier` is now the only route to a
+  dense text encoder (the hardcoded `DENSE_TE_TIER_MODELS` worker registry is deleted), and the
+  control-lane peaks are renamed `bf16Branch*` with `measured: false`, because they were captured
+  against a branch tier that no longer ships. SC-16013 owns the re-measure; SC-16014 owns the
+  lens-turbo mxfp4 upcast, which is a backend capability gap and cannot be fixed by repacking.
+- A third the section did not anticipate: **renaming a superseded row is not enough — the reader has to
+  honour it.** The first revision corrected the `bf16Branch*` rows by subtracting
+  `candle.control.branchPackSaveGb` (q8 8.4 / q4 10.2 GB) to "convert" them into the shipping
+  configuration. Both figures exceed the ENTIRE 6.6 GB control branch, so neither was ever a weight-side
+  quantity, and the correction under-predicted the q4/q8 host by ~5 GB one-directionally toward an OOM on
+  a live CUDA admission path. The key is retracted; the rows are read verbatim as upper bounds; and
+  `measured: false` now gates two behaviours in code (no hard reject, no reclaim credit) rather than
+  sitting beside a reader that ignored it. See "Repacking invalidates measurements" in the contract.
+- The cost of the rule is now stated where the rule is: a q8 base could previously pack its branch to q4,
+  one tier BELOW the selection, which tier integrity permits — that band (~28.97-30.77 GB free on the
+  shipped rows) is a real capability given up, and it is disclosed in the contract, the manifest and the
+  fit-ladder module docs rather than left for a reader to derive.
 
 ---
 

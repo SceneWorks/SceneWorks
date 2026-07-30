@@ -2355,6 +2355,13 @@ mod tests {
         assert_eq!(predicted_peak_gb(0), None);
     }
 
+    /// NOTE (sc-15799): `45.67` and `28.43` below are the THIRD copy of the lens-turbo measurement —
+    /// the other two are the `HEADROOM_GB` doc table above and the `lens_turbo` row in
+    /// `config/tier-integrity.jsonc`, which declares the 17.24 GiB mxfp4 → bf16 upcast as a
+    /// backend-capability exception. `scripts/check-tier-integrity.mjs` asserts all three numbers still
+    /// appear in THIS file, so a re-measure (sc-16014) that moves one copy and not the others fails the
+    /// `parity` lane with a message that names the reason, instead of turning this lane red for something
+    /// unrelated.
     #[test]
     fn lens_dense_calibration_covers_the_measured_full_peak_without_blanket_inflation() {
         let gib = BYTES_PER_GIB;
