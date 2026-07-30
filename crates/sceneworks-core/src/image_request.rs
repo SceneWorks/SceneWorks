@@ -33,7 +33,15 @@ use crate::payload_util::{
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
 const DEFAULT_MODE: &str = "text_to_image";
-const DEFAULT_STYLE_PRESET: &str = "cinematic";
+/// Default `stylePreset` when the payload omits one (matches the Python worker, and the
+/// rust-api DTO's `default_style_preset`).
+///
+/// Public because it is the value that means "no preset ran": the API overwrites this field with a
+/// recipe-preset id when one does, so anything still holding this literal names nothing.
+/// [`crate::workflow_resolution::INERT_STYLE_PRESETS`] reads it from here rather than repeating the
+/// literal, because every generated envelope carries it — misreading it as an unresolved preset
+/// would mark every shared image unreplayable.
+pub const DEFAULT_STYLE_PRESET: &str = "cinematic";
 /// Default fit mode (epic 2551): never distort, cover the frame. Shared with the
 /// video request (sc-6139) so image- and video-conditioned sources normalize identically.
 pub(crate) const DEFAULT_FIT_MODE: &str = "crop";

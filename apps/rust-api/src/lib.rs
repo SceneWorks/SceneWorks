@@ -122,6 +122,8 @@ use assets::{
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
+mod workflows;
+use workflows::{inspect_workflow, max_inspect_multipart_body_bytes};
 // Test-only crate-root imports: the `tests` module reaches these helpers via
 // `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
 // Gating them keeps the non-test build warning-free — they have no non-test
@@ -331,6 +333,33 @@ const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
+// sc-15950: `POST /api/v1/workflows/inspect` deliberately does NOT get `MAX_UPLOAD_BYTES`.
+//
+// The asset upload route pays 2 GiB because the bytes BECOME the asset — the write is the point.
+// Inspect streams the body to `cache/uploads` before any PNG check, throws it away, and returns a
+// small JSON report, so a 2 GiB body buys 2 GiB of transient disk and one blocking thread for a
+// result measured in kilobytes. There is no rate limit, concurrency limit or timeout layer in this
+// app (tower-http is compression + cors only) and the desktop sets `SCENEWORKS_TRUST_LOOPBACK`, so
+// any local process can drive N of those concurrently without a token.
+//
+// 512 MiB is sized against what users actually drop, not against a round number. The largest PNG
+// SceneWorks itself can write is a 4096² generation (`image_request::MAX_DIMENSION`) through a 4×
+// upscale = 16384², 8-bit RGB (`workflow_png::write_workflow_chunk` takes an `RgbImage`) = 805 MB
+// raw, which PNG's filtered deflate puts well under 512 MiB on rendered content; an ordinary 4096²
+// share is ~50 MB, and a phone photo is single-digit MB. So the cap rejects nothing a user would
+// plausibly drop while cutting the transient-disk exposure 4×.
+const MAX_WORKFLOW_INSPECT_BYTES: usize = 512 * 1024 * 1024;
+// The route limit must sit ABOVE the per-field cap, not equal to it: a body exactly at the cap
+// plus multipart framing (boundaries, headers, the trailing CRLF) exceeds an equal router limit,
+// so axum's own limit trips first and `field.chunk()` surfaces it as a plain 400 — the typed 413
+// would then be unreachable at the only boundary that matters. Same headroom, for the same reason,
+// as `MAX_LORA_MULTIPART_BODY_BYTES`. The route reads it through
+// `workflows::max_inspect_multipart_body_bytes`, which derives it from the live per-field cap so
+// the two cannot drift back into equality and so a test can exercise the real boundary at a
+// sendable size.
+const MULTIPART_FRAMING_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WORKFLOW_INSPECT_MULTIPART_BODY_BYTES: usize =
+    MAX_WORKFLOW_INSPECT_BYTES + MULTIPART_FRAMING_HEADROOM_BYTES;
 // sc-8885 (F-083): the shared max age for every `cache/*-uploads` staging area (asset,
 // lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
 // in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
@@ -350,6 +379,10 @@ const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 thread_local! {
     static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // sc-15950: same override, same reasoning, for `POST /api/v1/workflows/inspect`. The real cap
+    // is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the oversized-body branch is only
+    // reachable through a lowered cap.
+    static TEST_MAX_WORKFLOW_INSPECT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
 static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
@@ -1395,6 +1428,17 @@ fn create_app_with_state_mode(
                 // limit; re-attach it per-route since the router default is now the
                 // small JSON cap. GET has no body, so this is harmless for listing.
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // sc-15950: read a shared image's embedded workflow WITHOUT creating an asset. Registered
+        // beside the asset routes because it shares their multipart shape and staging area, but it
+        // is deliberately not project-scoped — it mutates nothing, so there is nothing to scope.
+        // Same auth posture as the upload route above; a larger-than-JSON per-route limit is
+        // re-attached for the same reason (the router default is the small JSON cap), but it is
+        // this route's OWN cap plus framing headroom rather than the 2 GiB asset ceiling — see
+        // `MAX_WORKFLOW_INSPECT_BYTES` for why both numbers are what they are.
+        .route(
+            "/api/v1/workflows/inspect",
+            post(inspect_workflow).layer(DefaultBodyLimit::max(max_inspect_multipart_body_bytes())),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
