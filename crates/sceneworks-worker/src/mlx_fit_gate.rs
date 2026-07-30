@@ -408,8 +408,9 @@ fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) ->
 pub(crate) struct MlxRequestInputs {
     pub width: u32,
     pub height: u32,
-    /// Original job count. The provider currently renders one image per invocation, but admitting
-    /// only a single item would hide the aggregate request from Mage's measured estimator.
+    /// Original job image count. This is a SCHEDULING quantity, not a memory one — see
+    /// [`request_batch`] for why it must never reach a geometry's `batch`. Kept here so the
+    /// over-budget message can quote the request the operator actually submitted.
     pub count: u32,
     pub mode: String,
     pub overlay: Option<String>,
@@ -438,6 +439,39 @@ fn decimal_gb_to_bytes(gb: f64) -> u64 {
 
 pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u64) -> u64 {
     baseline.saturating_add(after.saturating_sub(before))
+}
+
+/// The batch dimension of ONE provider forward pass, which on this lane is always 1 — NOT the job's
+/// image count.
+///
+/// A multi-image job is a SEQUENTIAL loop, not a batched pass: `image_jobs::base` expands the job
+/// count into one seed per image and hands the vector to `image_jobs::stream::drive_gen_items`, which
+/// calls the provider once per seed with a `GenerationRequest { count: 1, .. }` and releases MLX's
+/// retained-buffer cache between items (`RequestCacheRelease`, a `Drop` guard, so cancel and error
+/// exits release too — sc-5567). Peak unified memory is therefore a MAX over items, not a sum: the
+/// resident weights plus ONE image's transient working set, whatever the count.
+///
+/// This function exists because charging `count` as a batch dimension is not a small over-estimate,
+/// it is unbounded. Both consumers of `geometry.batch` multiply by it — the generic estimator's
+/// `request_scale` and Mage's `generation_peak_gb` — so a 4-image 1152x2048 krea_2_turbo request was
+/// quoted 33.22 GiB of weights + 16 GiB x 2.25 MP x 4 = 177.22 GiB against a 126.00 GiB budget. The
+/// activation term ALONE (144 GiB) exceeded the whole budget, so that cell rejected every model at
+/// every tier on a 128 GiB Mac before a single weight byte was counted.
+///
+/// If a provider ever renders a genuine batched pass, the fix is to thread THAT pass's batch size
+/// here — not to reinstate the job count, which cannot describe serialized work.
+fn request_batch(_inputs: &MlxRequestInputs) -> u32 {
+    1
+}
+
+/// The provider-facing geometry of one forward pass. See [`request_batch`] for the `batch` rule.
+fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
+    MemoryGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: request_batch(inputs),
+        frames: 1,
+    }
 }
 
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
@@ -742,10 +776,13 @@ fn evidence_admission_route(
             process_limit_bytes: None,
         });
     }
-    let request_geometry = CalibrationGeometry {
+    // A measured cell is recorded per forward pass (`batch: 1`), so keying the lookup on the job's
+    // image count made every count > 1 request miss its own calibration and fall to the generic
+    // estimator's Legacy/OutOfEnvelope path. See `request_batch`.
+    let request_cell_geometry = CalibrationGeometry {
         width: inputs.width,
         height: inputs.height,
-        batch: inputs.count.max(1),
+        batch: request_batch(inputs),
         frames: 1,
     };
     let overlay = inputs.overlay.as_deref().unwrap_or("none");
@@ -754,7 +791,7 @@ fn evidence_admission_route(
         .filter(|binding| {
             binding.mode == mode_key
                 && binding.overlay == overlay
-                && binding.geometry == request_geometry
+                && binding.geometry == request_cell_geometry
         })
         .collect::<Vec<_>>();
     if matching.is_empty() {
@@ -776,7 +813,7 @@ fn evidence_admission_route(
             tier: binding.tier.clone(),
             mode: mode_key.to_owned(),
             overlay: overlay.to_owned(),
-            geometry: request_geometry,
+            geometry: request_cell_geometry,
             rung: binding.rung,
             parameters: binding.parameters.clone(),
             calibration: binding.query.clone(),
@@ -796,12 +833,7 @@ fn evidence_admission_route(
                         tier: plan.tier,
                         mode: mode_key.to_owned(),
                         overlay: inputs.overlay.clone(),
-                        geometry: MemoryGeometry {
-                            width: inputs.width,
-                            height: inputs.height,
-                            batch: inputs.count.max(1),
-                            frames: 1,
-                        },
+                        geometry: request_geometry(inputs),
                         strategy: evidence_strategy(binding.rung),
                         parameters: binding.selection_parameters,
                     },
@@ -916,12 +948,7 @@ fn evaluate_request_with_budget_using_bundle(
 ) -> WorkerResult<MlxRequestEvaluation> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
-    let geometry = MemoryGeometry {
-        width: inputs.width,
-        height: inputs.height,
-        batch: inputs.count.max(1),
-        frames: 1,
-    };
+    let geometry = request_geometry(inputs);
     let (mode, mode_key) = request_mode(&inputs.mode);
     if plan.engine_id.starts_with("mage_flow") && inputs.adapter_count > 0 {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1312,12 +1339,7 @@ pub(crate) fn evaluate_request(
     load_policy: OffloadPolicy,
     external_committed_bytes: u64,
 ) -> WorkerResult<MlxRequestEvaluation> {
-    let geometry = MemoryGeometry {
-        width: inputs.width,
-        height: inputs.height,
-        batch: inputs.count.max(1),
-        frames: 1,
-    };
+    let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
     let total_peak_bytes = request_total_peak_bytes(plan, geometry);
     evaluate_request_with_budget(
@@ -3764,7 +3786,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(first_a.context.geometry.batch, 3);
+        // A 3-image job is three sequential forward passes, so the modeled batch stays 1 even though
+        // `request_inputs` carried count 3 (see `request_batch`).
+        assert_eq!(first_a.context.geometry.batch, 1);
         assert_eq!(first_a.context.mode, MemoryMode::Edit);
         assert_eq!(
             first_a.context.overlay.as_deref(),
@@ -3777,6 +3801,57 @@ mod tests {
         assert_eq!(
             first_a.context.predicted_peak_bytes, second_a.context.predicted_peak_bytes,
             "the intervening geometry cannot poison a warm follow-up"
+        );
+    }
+
+    /// A multi-image job is a sequential loop with an MLX cache release between items (sc-5567), so
+    /// its peak is one image's working set — the estimator must be INVARIANT in the job count.
+    ///
+    /// The numbers are the real reported rejection: krea_2_turbo bf16 (33.22 GiB of safetensors) at
+    /// 1152x2048 count 4 on a 128 GiB Mac (126.00 GiB after the 2 GiB legacy unified reserve). The
+    /// count multiplier quoted 33.22 + 16 x 2.25 x 4 = 177.22 GiB — the activation term alone
+    /// exceeded the whole budget, so this cell rejected every model at every tier.
+    #[test]
+    fn generic_request_peak_is_invariant_in_the_job_image_count() {
+        let plan = MlxRequestPlan {
+            engine_id: "krea_2_turbo",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+            },
+            asset_bytes: 35_666_644_396,
+            activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        // Go through `request_geometry` rather than hand-building a `batch: 1` geometry, so this
+        // exercises the production count -> batch seam instead of asserting a value it supplies.
+        let peak = |count: u32| {
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(1152, 2048, count)))
+        };
+
+        let single = peak(1);
+        for count in [2, 4, 8] {
+            assert_eq!(
+                peak(count),
+                single,
+                "count {count} is {count} sequential passes, not a batched one"
+            );
+        }
+
+        let budget = gib_to_bytes(126.0);
+        assert!(
+            peak(4) <= budget,
+            "the reported cell must admit: needed {:.2} GiB vs {:.2} GiB available",
+            peak(4) as f64 / BYTES_PER_GIB,
+            budget as f64 / BYTES_PER_GIB
+        );
+
+        // Non-constant control: resolution is still a real axis, so an estimator that stopped
+        // scaling entirely would not pass by accident.
+        assert!(
+            peak(1) > plan.generic_total_peak_bytes(request_geometry(&request_inputs(512, 512, 1))),
+            "the estimator must still grow with output resolution"
         );
     }
 
