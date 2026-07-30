@@ -308,6 +308,26 @@ describe("useWorkflowDrop — the imported-asset offer", () => {
     expect(hook.missing.inputPicks).toEqual({});
   });
 
+  it("aborts an in-flight re-resolution when the panel is dismissed", async () => {
+    // A re-resolution belongs to the offer being dismissed, and for a dropped file it is a second
+    // POST of that file — up to 512 MiB, still uploading. The effect's own cleanup does not cover
+    // it: its deps are the catalog and the credentials, and a dismiss changes neither.
+    fetchAssetWorkflow.mockResolvedValueOnce(workflowBody());
+    await render({ catalogRevision: "before" });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+    let signal = null;
+    fetchAssetWorkflow.mockImplementation(
+      (_project, _asset, options) =>
+        new Promise(() => {
+          signal = options.signal;
+        }),
+    );
+    await render({ catalogRevision: "after" });
+    expect(signal?.aborted).toBe(false);
+    await act(async () => hook.dismiss());
+    expect(signal.aborted).toBe(true);
+  });
+
   it("does nothing without a project to read the asset from", async () => {
     await render({ projectId: null });
     await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));

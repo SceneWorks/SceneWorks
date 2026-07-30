@@ -120,11 +120,19 @@ export function useWorkflowDrop({
   const offerRef = useRef(null);
   offerRef.current = offer;
 
-  // Abandon whatever inspect is running and take the next ticket. Every supersede goes through
-  // here so there is one place that can forget to abort.
+  // Abandon whatever is running and take the next ticket. Every supersede goes through here so
+  // there is one place that can forget to abort.
+  //
+  // BOTH requests are abandoned. A re-resolution belongs to the offer that is being replaced or
+  // dismissed, and for a dropped file it is a second POST of that file — up to 512 MiB, still
+  // uploading — so leaving it to finish and have its answer ignored is the leak this ref exists to
+  // stop. (The effect's own cleanup does not cover this: its deps are the catalog and the
+  // credentials, none of which a dismiss changes.)
   const supersede = useCallback(() => {
     inFlightRef.current?.abort();
     inFlightRef.current = null;
+    reresolveRef.current?.abort();
+    reresolveRef.current = null;
     ticketRef.current += 1;
     return ticketRef.current;
   }, []);

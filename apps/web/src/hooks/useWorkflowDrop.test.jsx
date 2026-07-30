@@ -79,7 +79,15 @@ describe("useWorkflowDrop", () => {
   const startDrop = async (file) => {
     await act(async () => {
       hook.handleDroppedFile(file);
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Wait until the inspect has actually STARTED, rather than for a fixed tick. The prescreen
+      // in front of it is an async range read off the file, and jsdom's `Blob` has no
+      // `arrayBuffer`, so it goes through `FileReader` — a macrotask whose completion one
+      // `setTimeout(0)` does not reliably outlast. That made both abort tests below intermittently
+      // read `signal` as null. Bounded, so a drop that never reaches the endpoint still fails its
+      // assertion instead of hanging the suite.
+      for (let tick = 0; tick < 50 && inspectWorkflowFile.mock.calls.length === 0; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     });
   };
 
