@@ -221,6 +221,7 @@ pub(crate) async fn run_image_generate_job(
             "Missing payload.projectId".to_owned(),
         ));
     }
+    validate_hires_fix_request(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -1092,6 +1093,12 @@ pub(crate) async fn run_image_generate_job(
     }
 
     if !handled {
+        if request.hires_fix.enabled {
+            return Err(WorkerError::InvalidPayload(
+                "Hires.fix requires a native image engine with img2img support; this job resolved only to the procedural stub."
+                    .to_owned(),
+            ));
+        }
         generate_stub_stream(
             api,
             settings,
@@ -1923,6 +1930,108 @@ fn resolve_family(request: &ImageRequest) -> String {
         }
     }
     String::new()
+}
+
+fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
+    (dimension as f64 * upscale_by as f64).round() as u32
+}
+
+/// Reject unsupported Hires.fix request shapes before any model load. Hires.fix is a plain
+/// text-to-image second pass: existing edit/control inputs, PiD, multi-phase sampling, and the
+/// separate post-generation upscaler are intentionally mutually exclusive rather than being
+/// silently dropped by a provider.
+fn validate_hires_fix_request(request: &ImageRequest) -> WorkerResult<()> {
+    if request.hires_fix.is_disabled() {
+        return Ok(());
+    }
+    if request.mode != "text_to_image" {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix is only available for text-to-image generation.".to_owned(),
+        ));
+    }
+    if request.upscale.enabled {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
+        ));
+    }
+    let family = resolve_family(request);
+    let advertises_img2img = request
+        .model_manifest_entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if family != "sdxl" && !advertises_img2img {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Hires.fix requires an img2img-capable model; '{}' does not advertise that capability.",
+            request.model
+        )));
+    }
+    let has_edit_or_control_input = request.source_asset_id.is_some()
+        || request.reference_asset_id.is_some()
+        || !request.reference_asset_ids.is_empty()
+        || request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || request
+            .advanced
+            .get("poses")
+            .and_then(Value::as_array)
+            .is_some_and(|poses| !poses.is_empty())
+        || request
+            .advanced
+            .get("controlImage")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+    if has_edit_or_control_input {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
+                .to_owned(),
+        ));
+    }
+    if request
+        .advanced
+        .get("usePid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix and PiD super-resolution are mutually exclusive.".to_owned(),
+        ));
+    }
+    if request
+        .advanced
+        .get("phases")
+        .and_then(Value::as_array)
+        .is_some_and(|phases| !phases.is_empty())
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix cannot be combined with multi-phase sampling.".to_owned(),
+        ));
+    }
+    let acceleration_sampler = request
+        .advanced
+        .get("sampler")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
+    if request.model == "realvisxl_lightning" || acceleration_sampler {
+        return Err(WorkerError::InvalidPayload(
+            "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
+                .to_owned(),
+        ));
+    }
+    let upscale_by = request.hires_fix.effective_upscale_by();
+    let target_width = hires_fix_target_dimension(request.width, upscale_by);
+    let target_height = hires_fix_target_dimension(request.height, upscale_by);
+    if target_width > 4096 || target_height > 4096 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Hires.fix target {}x{} exceeds the 4096px image limit; lower the base resolution or Upscale by value.",
+            target_width, target_height
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:

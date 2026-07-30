@@ -89,6 +89,11 @@ export function buildImageJobRequest(state) {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    hiresFixEnabled,
+    hiresFixSteps,
+    hiresFixDenoisingStrength,
+    hiresFixUpscaleBy,
+    hiresFixCfgScale,
     // Advanced knobs (delegated to buildImageJobAdvanced).
     sampler,
     scheduler,
@@ -229,6 +234,20 @@ export function buildImageJobRequest(state) {
             engine: upscaleEngine,
             // SeedVR2-only detail/softness knob (sc-4815); omitted for engines that ignore it.
             ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
+          },
+        }
+      : {}),
+    ...(hiresFixEnabled
+      ? {
+          hiresFix: {
+            enabled: true,
+            steps:
+              hiresFixSteps === "" || hiresFixSteps == null ? 0 : Number(hiresFixSteps),
+            denoisingStrength: Number(hiresFixDenoisingStrength),
+            upscaleBy: Number(hiresFixUpscaleBy),
+            ...(hiresFixCfgScale === "" || hiresFixCfgScale == null
+              ? {}
+              : { cfgScale: Number(hiresFixCfgScale) }),
           },
         }
       : {}),

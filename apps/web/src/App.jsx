@@ -2812,6 +2812,54 @@ export function App() {
   // `launchRecipe` is `launchImageRecipe`, the same seam the viewer's "Use this recipe" uses.
   // `importAsset` is the ordinary upload path, which is what records `extra.importedWorkflow`
   // on the asset (sc-15949).
+  // The images the panel's input pickers may offer (sc-15952). The same filter Image Studio's own
+  // source/reference pickers use (`editImageAssets`), because a pick made here has to be selectable
+  // there — offering a trashed asset would seed a control whose list does not contain it.
+  const workflowInputAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          (asset.type === "image" || asset.type === "frame") &&
+          asset.projectId === activeProject?.id &&
+          !asset.status?.trashed &&
+          !asset.status?.rejected,
+      ),
+    [assets, activeProject?.id],
+  );
+  // What this install has ON DISK, as one string (sc-15952).
+  //
+  // The signal behind "install a missing model, and the open panel re-resolves without a reload".
+  // A completed `model_download` / `lora_download` makes `useJobEvents` refetch both catalogs, and
+  // this changes only when an install STATE does — so a routine catalog refetch that changed
+  // nothing does not send the panel back to the API, while a finished download always does.
+  const catalogRevision = useMemo(
+    () =>
+      [
+        ...models.map((model) => `m:${model.id}:${model.installState}`),
+        ...loras.map((lora) => `l:${lora.id}:${lora.scope ?? ""}:${lora.installState}`),
+      ].join("|"),
+    [models, loras],
+  );
+  // The downloads that FAILED (sc-15952). `catalogRevision` above deliberately cannot carry these:
+  // a failed download changes no install state, so the string it produces is identical to the one
+  // before the user pressed the button — which is exactly why the panel's "Queued" flag had no way
+  // back and its retry button stayed disabled forever. This is the other half of the same job
+  // stream, one hop away through the list `useJobEvents` already maintains.
+  const failedInstallJobIds = useMemo(
+    () =>
+      jobs
+        .filter(
+          (job) =>
+            (job.type === "model_download" || job.type === "lora_download") &&
+            // "canceled" and "interrupted" are failures for this purpose too: no catalog change,
+            // and the user's next move is the same. Only "completed" leaves the flag latched, and
+            // that one re-resolves through `catalogRevision` instead.
+            terminalStatuses.has(job.status) &&
+            job.status !== "completed",
+        )
+        .map((job) => job.id),
+    [jobs],
+  );
   const workflowDrop = useWorkflowDrop({
     // Inspecting needs a live, authenticated API. Before the gate opens every request 401s, and
     // a drop on the login screen has nothing to prefill anyway.
@@ -2820,14 +2868,36 @@ export function App() {
     token,
     importAsset,
     launchRecipe: launchImageRecipe,
+    // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
+    // a row the picker would drop on the next render (sc-15952).
+    models: imageModels,
+    catalogRevision,
+    failedInstallJobIds,
+    installModel: createModelDownloadJob,
+    installLora: createLoraDownloadJob,
   });
+  // The viewer's "Use this recipe" for an IMPORTED asset. The preview closes first, the way the
+  // recorded-recipe path does — the offer is a modal of its own, and stacking it over the viewer
+  // would trap focus between two dialogs.
+  const offerAssetWorkflow = workflowDrop.offerAssetWorkflow;
+  const useImportedAssetRecipe = useCallback(
+    (asset) => {
+      closePreview();
+      offerAssetWorkflow(asset);
+    },
+    // Depends on the CALLBACK, not the hook's return object, which is a fresh literal every render
+    // — an unstable prop here would defeat `FullscreenPreview`'s `React.memo` on every App render.
+    [closePreview, offerAssetWorkflow],
+  );
   useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
   // Rendered from a single place even though the app has two shells: `Modal` portals to
   // <body>, so this element does not have to sit inside whichever shell is on screen.
   const workflowDropPanel = (
     <WorkflowDropPanel
+      assets={workflowInputAssets}
       canImport={Boolean(activeProject)}
       importState={workflowDrop.importState}
+      missing={workflowDrop.missing}
       offer={workflowDrop.offer}
       onDismiss={workflowDrop.dismiss}
       onImport={workflowDrop.importImage}
@@ -3534,6 +3604,7 @@ export function App() {
           onEditImage={sendAssetToImageEditor}
           onEditInStudio={sendAssetToImageEdit}
           onPreviewAsset={previewAssetInDirection}
+          onUseImportedRecipe={useImportedAssetRecipe}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
           sourceAsset={previewSourceAsset}

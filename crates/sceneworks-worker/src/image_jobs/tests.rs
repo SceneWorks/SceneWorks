@@ -18,6 +18,194 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[test]
+fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
+    let valid = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "width": 1024,
+        "height": 1024,
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "ui": { "img2img": true }
+        },
+        "hiresFix": {
+            "enabled": true,
+            "steps": 12,
+            "denoisingStrength": 0.7,
+            "upscaleBy": 2.0
+        }
+    }));
+    validate_hires_fix_request(&valid).expect("img2img model supports hires fix");
+
+    let with_upscale = request(json!({
+        "projectId": "p",
+        "model": "sdxl",
+        "modelManifestEntry": { "family": "sdxl" },
+        "upscale": { "enabled": true },
+        "hiresFix": { "enabled": true }
+    }));
+    assert!(validate_hires_fix_request(&with_upscale)
+        .unwrap_err()
+        .to_string()
+        .contains("mutually exclusive"));
+
+    let too_large = request(json!({
+        "projectId": "p",
+        "model": "sdxl",
+        "width": 3072,
+        "height": 2048,
+        "modelManifestEntry": { "family": "sdxl" },
+        "hiresFix": { "enabled": true, "upscaleBy": 2.0 }
+    }));
+    assert!(validate_hires_fix_request(&too_large)
+        .unwrap_err()
+        .to_string()
+        .contains("6144x4096"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct HiresProbeGenerator {
+    descriptor: gen_core::ModelDescriptor,
+    requests: std::sync::Mutex<Vec<GenerationRequest>>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl HiresProbeGenerator {
+    fn new() -> Self {
+        Self {
+            descriptor: gen_core::ModelDescriptor {
+                id: "hires_probe",
+                family: "test",
+                backend: "test",
+                modality: gen_core::Modality::Image,
+                capabilities: Default::default(),
+                required_components: &[],
+            },
+            requests: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for HiresProbeGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        &self.descriptor
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        let pass = self.requests.lock().unwrap().len() as u8 + 1;
+        self.requests.lock().unwrap().push(req.clone());
+        for current in 1..=req.steps.unwrap_or(1) {
+            on_progress(Progress::Step {
+                current,
+                total: req.steps.unwrap_or(1),
+            });
+        }
+        on_progress(Progress::Decoding);
+        Ok(GenerationOutput::Images(vec![Image {
+            width: req.width,
+            height: req.height,
+            pixels: vec![pass; (req.width * req.height * 3) as usize],
+        }]))
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_progress() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let mut progress = Vec::new();
+    let output = generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        Some(7.0),
+        Some("bad".to_owned()),
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance::default(),
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: Some(5.5),
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        &cancel,
+        &mut |event| progress.push(event),
+    )
+    .expect("two-pass generation");
+
+    assert_eq!((output.0, output.1), (8, 8));
+    assert!(output.2.iter().all(|pixel| *pixel == 2));
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!((requests[0].width, requests[0].height), (4, 4));
+    assert_eq!(requests[0].steps, Some(2));
+    assert_eq!((requests[1].width, requests[1].height), (8, 8));
+    assert_eq!(requests[1].steps, Some(3));
+    assert_eq!(requests[1].guidance, Some(5.5));
+    match requests[1].conditioning.as_slice() {
+        [Conditioning::Reference { image, strength }] => {
+            assert_eq!((image.width, image.height), (8, 8));
+            assert!(image.pixels.iter().all(|pixel| *pixel == 1));
+            assert_eq!(*strength, Some(0.3));
+        }
+        other => panic!("expected one high-resolution reference, got {other:?}"),
+    }
+    let steps: Vec<(u32, u32)> = progress
+        .iter()
+        .filter_map(|event| match event {
+            Progress::Step { current, total } => Some((*current, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, vec![(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|event| matches!(event, Progress::Decoding))
+            .count(),
+        1
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {

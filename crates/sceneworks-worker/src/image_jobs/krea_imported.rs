@@ -342,6 +342,12 @@ fn krea_imported_raw_settings(
         "kreaImportedBase".to_owned(),
         Value::String(format!("{KREA_IMPORTED_BASE_REPO}#{KREA_IMPORTED_BASE_TIER}")),
     );
+    if request.hires_fix.enabled {
+        raw.insert(
+            "hiresFix".to_owned(),
+            serde_json::to_value(&request.hires_fix).expect("HiresFixRequest is serializable"),
+        );
+    }
     raw
 }
 
@@ -460,6 +466,8 @@ async fn generate_krea_imported_stream(
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
+    let enhance = PromptEnhance::default();
     let raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
 
     // Per-image work items: (seed, prompt) — `request.count` renders, each its own seed.
@@ -514,6 +522,35 @@ async fn generate_krea_imported_stream(
             drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
+                }
+                if let Some(hires_fix) = hires_fix {
+                    let (out_width, out_height, pixels) = generate_one_with_hires(
+                        model.as_ref(),
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        None,
+                        None,
+                        None,
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        &enhance,
+                        Some(hires_fix),
+                        &cancel,
+                        on_progress,
+                    )?;
+                    return Ok(Some((seed, out_width, out_height, pixels)));
                 }
                 let request = GenerationRequest {
                     prompt,

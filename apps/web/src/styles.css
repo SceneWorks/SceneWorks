@@ -16118,11 +16118,15 @@ details[open] > summary.lora-scope-group-heading::before,
    (hue 25) lands on 298, a lavender. An advisory chip with a green border reads as
    success. Measured in the browser; oklch is right for perceptual lightness ramps and
    wrong for pulling a hue toward a near-neutral. */
+/* Chips carry stranger-written strings too — the workflow-replay chips interpolate the envelope's
+   raw `model.slug`, which survives the sanitizer at up to `LABEL_MAX_CHARS`. Without this an
+   unbroken slug is one un-wrappable word in a pill and the row scrolls the dialog sideways. */
 .validation-chip {
   padding: 5px 8px;
   border-radius: var(--r-pill);
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 /* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
@@ -17151,7 +17155,11 @@ button.audio-wave {
   font-size: 12.5px;
   overflow-wrap: anywhere;
 }
+/* Same stranger-string rule as `.workflow-fix-detail` below: this span renders the report's
+   sentences, which embed the envelope's raw `model.slug`. Its own `.workflow-req-head` sibling
+   already wraps; the detail line is the longer of the two. */
 .workflow-req-detail {
+  overflow-wrap: anywhere;
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-muted);
@@ -17176,4 +17184,84 @@ button.audio-wave {
 .workflow-req-bad {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* The missing-inputs surface (sc-15952). Sits under the report and is rendered ONLY when there is
+   something to do about the recipe — a fully-resolvable one shows none of this, so none of these
+   rules has an empty-state variant to style. */
+.workflow-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+}
+.workflow-fix-title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.workflow-fix-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-fix-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.workflow-fix-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.workflow-fix-head strong {
+  flex: 1 1 auto;
+}
+.workflow-fix-head select {
+  flex: 0 1 220px;
+  min-width: 0;
+}
+/* `overflow-wrap: anywhere` for the same reason `.workflow-fix-head` carries it: this text is
+   written by a STRANGER. `report.model.detail` embeds the envelope's raw slug and the sanitizer
+   DROPS an over-length label rather than truncating it, so a 200-char unbroken slug (the
+   `LABEL_MAX_CHARS` ceiling) arrives intact. The panel is a 560px modal with `overflow-y: auto`
+   and no `overflow-x`, so an unbreakable run pushes the whole dialog sideways. */
+.workflow-fix-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.workflow-fix-substitute {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.workflow-fix-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.workflow-fix-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workflow-fix-inputs > .workflow-fix-detail {
+  margin: 0;
 }

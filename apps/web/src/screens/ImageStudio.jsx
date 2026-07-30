@@ -573,6 +573,13 @@ export function ImageStudio() {
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only used by the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(saved.upscaleSoftness ?? 0);
+  const [hiresFixEnabled, setHiresFixEnabled] = useState(saved.hiresFixEnabled ?? false);
+  const [hiresFixSteps, setHiresFixSteps] = useState(saved.hiresFixSteps ?? 0);
+  const [hiresFixDenoisingStrength, setHiresFixDenoisingStrength] = useState(
+    saved.hiresFixDenoisingStrength ?? 0.7,
+  );
+  const [hiresFixUpscaleBy, setHiresFixUpscaleBy] = useState(saved.hiresFixUpscaleBy ?? 2);
+  const [hiresFixCfgScale, setHiresFixCfgScale] = useState(saved.hiresFixCfgScale ?? "");
   const [submitting, setSubmitting] = useState(false);
   // Auto-expand state (sc-6501): when a structured model is in plain-text mode, Generate first
   // expands the idea into a JSON caption via magic-prompt. `expanding` drives the button label;
@@ -638,14 +645,16 @@ export function ImageStudio() {
     setUpscaleFactor,
   });
 
-  // PiD decode and Upscale both super-resolve, so they're mutually exclusive in the UI (each
-  // disables the other while active). If a saved/preset state carries both on, drop PiD (keep
-  // Upscale) so neither checkbox is left permanently disabled.
+  // PiD, post-generation Upscale, and Hires.fix are mutually exclusive super-resolution paths.
+  // If restored state carries PiD plus either option, keep the explicit upscale process and drop PiD.
   useEffect(() => {
-    if (usePid && upscaleEnabled) {
+    if (usePid && (upscaleEnabled || hiresFixEnabled)) {
       setUsePid(false);
     }
-  }, [usePid, upscaleEnabled, setUsePid]);
+    if (upscaleEnabled && hiresFixEnabled) {
+      setUpscaleEnabled(false);
+    }
+  }, [usePid, upscaleEnabled, hiresFixEnabled, setUsePid]);
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
@@ -1227,6 +1236,49 @@ export function ImageStudio() {
   // these two for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  const hiresFixModelCapable = Boolean(
+    supportsImg2img || selectedModel?.family === "sdxl",
+  );
+  const hiresFixAccelerationBlocked =
+    model === "realvisxl_lightning" || ["lightning", "lcm", "hyper"].includes(sampler);
+  const hiresFixInputBlocked =
+    Boolean(img2imgReferenceAssetId) ||
+    posePayload.length > 0 ||
+    Boolean(controlPreprocessSourceId) ||
+    Boolean(controlPassthroughId) ||
+    (multiPhaseEnabled && modelSupportsMultiPhase(selectedModel));
+  const hiresFixAvailable =
+    mode === "text_to_image" && hiresFixModelCapable && !hiresFixAccelerationBlocked;
+  const hiresFixDisabled =
+    !hiresFixAvailable || usePid || hiresFixInputBlocked;
+  const hiresFixDisabledReason = !hiresFixModelCapable
+    ? "The selected model does not support the img2img second pass required by Hires.fix."
+    : mode !== "text_to_image"
+      ? "Hires.fix is only available for text-to-image generation."
+      : hiresFixAccelerationBlocked
+        ? "Lightning, LCM, and Hyper samplers do not accept the required img2img second pass."
+        : usePid
+          ? "Disable PiD before enabling Hires.fix."
+          : hiresFixInputBlocked
+            ? "Remove the starting image, strict control, or multi-phase denoise before enabling Hires.fix."
+            : undefined;
+  useEffect(() => {
+    // Keep restored state while the model catalog is still loading. Once the selected model is
+    // resolved, incompatible modes/samplers/inputs turn the option off instead of submitting a
+    // payload the worker must reject.
+    if (
+      hiresFixEnabled &&
+      selectedModel &&
+      (!hiresFixAvailable || hiresFixInputBlocked)
+    ) {
+      setHiresFixEnabled(false);
+    }
+  }, [
+    hiresFixEnabled,
+    selectedModel,
+    hiresFixAvailable,
+    hiresFixInputBlocked,
+  ]);
   const advancedDefaultsModel = useRef(model);
   const skipAdvancedDefaultsReset = useRef(false);
   useEffect(() => {
@@ -1576,6 +1628,13 @@ export function ImageStudio() {
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952: the reference images the user supplied in the shared-workflow panel. Guarded on
+    // presence rather than assigned unconditionally — a recorded recipe carries no
+    // `referenceAssetIds`, and clearing the multi-reference picker on every "Use this recipe"
+    // would drop a selection the user had already made.
+    if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
+      setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+    }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
     setTrueCfgScale(rawSettings.trueCfgScale ?? settings.trueCfgScale ?? trueCfgScale);
@@ -1640,6 +1699,12 @@ export function ImageStudio() {
     if (typeof upscale?.softness === "number") {
       setUpscaleSoftness(upscale.softness);
     }
+    const hiresFix = launchRequest.hiresFix ?? rawSettings.hiresFix ?? settings.hiresFix;
+    setHiresFixEnabled(Boolean(hiresFix?.enabled));
+    setHiresFixSteps(hiresFix?.steps ?? 0);
+    setHiresFixDenoisingStrength(hiresFix?.denoisingStrength ?? 0.7);
+    setHiresFixUpscaleBy(hiresFix?.upscaleBy ?? 2);
+    setHiresFixCfgScale(hiresFix?.cfgScale ?? "");
   // The launch id owns this one-shot hydration. Including the local values this
   // effect sets would replay a launch while applying that launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1662,6 +1727,13 @@ export function ImageStudio() {
   const { width, height, invalid: dimensionsInvalid } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
+  const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
+  const hiresFixTargetInvalid =
+    hiresFixEnabled && (hiresFixTargetWidth > 4096 || hiresFixTargetHeight > 4096);
+  const hiresFixTargetMessage = hiresFixTargetInvalid
+    ? `Hires.fix target ${hiresFixTargetWidth}×${hiresFixTargetHeight} exceeds the 4096px image limit.`
+    : "";
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -1812,6 +1884,11 @@ export function ImageStudio() {
       ["upscaleFactor", setUpscaleFactor],
       ["upscaleEngine", setUpscaleEngine],
       ["upscaleSoftness", setUpscaleSoftness],
+      ["hiresFixEnabled", setHiresFixEnabled],
+      ["hiresFixSteps", setHiresFixSteps],
+      ["hiresFixDenoisingStrength", setHiresFixDenoisingStrength],
+      ["hiresFixUpscaleBy", setHiresFixUpscaleBy],
+      ["hiresFixCfgScale", setHiresFixCfgScale],
     ],
     // Restore the saved sub-mode ("type"). Edit presets only surface in edit mode, so
     // this only ever flips between text/character within one workflow.
@@ -1853,6 +1930,11 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      hiresFixEnabled,
+      hiresFixSteps,
+      hiresFixDenoisingStrength,
+      hiresFixUpscaleBy,
+      hiresFixCfgScale,
       // Reference/identity knobs only matter for the character flow; keep them
       // out of plain text/edit presets so they don't carry irrelevant state.
       ...(mode === "character_image"
@@ -1886,6 +1968,11 @@ export function ImageStudio() {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    hiresFixEnabled,
+    hiresFixSteps,
+    hiresFixDenoisingStrength,
+    hiresFixUpscaleBy,
+    hiresFixCfgScale,
     selectedLoraIds,
     loraWeights,
     // Krea 2 multi-phase denoise (sc-13885): persist the editor toggle, phase list, and disclosure
@@ -1954,8 +2041,12 @@ export function ImageStudio() {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
       return;
     }
-    if (dimensionsInvalid) {
-      setSubmitError(dimensionError ?? "Width and height must each be between 256 and 4096.");
+    if (dimensionsInvalid || hiresFixTargetInvalid) {
+      setSubmitError(
+        hiresFixTargetMessage ||
+          dimensionError ||
+          "Width and height must each be between 256 and 4096.",
+      );
       return;
     }
     setSubmitting(true);
@@ -2129,6 +2220,11 @@ export function ImageStudio() {
       upscaleFactor,
       upscaleEngine,
       upscaleSoftness,
+      hiresFixEnabled,
+      hiresFixSteps,
+      hiresFixDenoisingStrength,
+      hiresFixUpscaleBy,
+      hiresFixCfgScale: supportsGuidance ? hiresFixCfgScale : "",
       sampler,
       scheduler,
       schedulerShift,
@@ -2231,8 +2327,12 @@ export function ImageStudio() {
       setBatchConfirmPending(false);
       return;
     }
-    if (dimensionsInvalid) {
-      setBatchError(dimensionError ?? "Width and height must each be between 256 and 4096.");
+    if (dimensionsInvalid || hiresFixTargetInvalid) {
+      setBatchError(
+        hiresFixTargetMessage ||
+          dimensionError ||
+          "Width and height must each be between 256 and 4096.",
+      );
       return;
     }
     setBatchError("");
@@ -3512,7 +3612,7 @@ export function ImageStudio() {
                   >
                     <input
                       checked={usePid}
-                      disabled={upscaleEnabled}
+                      disabled={upscaleEnabled || hiresFixEnabled}
                       onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
@@ -3547,7 +3647,13 @@ export function ImageStudio() {
                 <input
                   checked={upscaleEnabled}
                   disabled={usePid}
-                  onChange={(event) => setUpscaleEnabled(event.target.checked)}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setUpscaleEnabled(enabled);
+                    if (enabled) {
+                      setHiresFixEnabled(false);
+                    }
+                  }}
                   type="checkbox"
                 />
                 Upscale
@@ -3587,6 +3693,96 @@ export function ImageStudio() {
                   />
                   <span>{upscaleSoftness.toFixed(2)}</span>
                 </label>
+              ) : null}
+              <label
+                className="checkline hires-fix-toggle"
+                title={hiresFixDisabledReason}
+              >
+                <input
+                  checked={hiresFixEnabled}
+                  disabled={hiresFixDisabled}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setHiresFixEnabled(enabled);
+                    if (enabled) {
+                      setUpscaleEnabled(false);
+                    }
+                  }}
+                  type="checkbox"
+                />
+                Hires.fix
+              </label>
+              {hiresFixEnabled ? (
+                <>
+                  <label title="0 inherits the first-pass step count.">
+                    Hires Steps
+                    <input
+                      aria-label="Hires Steps"
+                      max="150"
+                      min="0"
+                      onChange={(event) => setHiresFixSteps(Number(event.target.value))}
+                      step="1"
+                      type="number"
+                      value={hiresFixSteps}
+                    />
+                  </label>
+                  <label title="How strongly the high-resolution pass may redraw the upscaled first pass.">
+                    Denoising Strength
+                    <input
+                      aria-label="Hires Denoising Strength"
+                      max="1"
+                      min="0"
+                      onChange={(event) =>
+                        setHiresFixDenoisingStrength(Number(event.target.value))
+                      }
+                      step="0.05"
+                      type="range"
+                      value={hiresFixDenoisingStrength}
+                    />
+                    <span>{hiresFixDenoisingStrength.toFixed(2)}</span>
+                  </label>
+                  <label>
+                    Upscale by
+                    <select
+                      aria-label="Hires Upscale by"
+                      onChange={(event) => setHiresFixUpscaleBy(Number(event.target.value))}
+                      value={hiresFixUpscaleBy}
+                    >
+                      {[1.25, 1.5, 1.75, 2, 2.5, 3, 4].map((factor) => (
+                        <option key={factor} value={factor}>
+                          {factor}x
+                        </option>
+                      ))}
+                    </select>
+                    <span
+                      className="field-hint"
+                      role={hiresFixTargetInvalid ? "alert" : undefined}
+                    >
+                      Output {hiresFixTargetWidth}×{hiresFixTargetHeight}
+                      {hiresFixTargetInvalid ? " · exceeds 4096px limit" : ""}
+                    </span>
+                  </label>
+                  <label
+                    title={
+                      supportsGuidance
+                        ? "Blank inherits the first-pass CFG scale."
+                        : "This model does not use CFG."
+                    }
+                  >
+                    Hires CFG Scale
+                    <input
+                      aria-label="Hires CFG Scale"
+                      disabled={!supportsGuidance}
+                      max="60"
+                      min="0"
+                      onChange={(event) => setHiresFixCfgScale(event.target.value)}
+                      placeholder="Inherit"
+                      step="0.1"
+                      type="number"
+                      value={supportsGuidance ? hiresFixCfgScale : ""}
+                    />
+                  </label>
+                </>
               ) : null}
               {supportsNegativePrompt ? (
                 <label className="prompt-field">
