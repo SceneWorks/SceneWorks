@@ -11,11 +11,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const actionMocks = vi.hoisted(() => ({
   saveAssetAs: vi.fn(),
   revealAsset: vi.fn(),
+  // sc-15953: the menu asks whether the asset's format can carry a workflow before offering the
+  // "save a copy without it" row. Mocked to the real predicate's answer for a PNG.
+  assetCanCarryWorkflow: vi.fn(() => true),
 }));
 
 vi.mock("../assetActions.js", () => ({
   saveAssetAs: actionMocks.saveAssetAs,
   revealAsset: actionMocks.revealAsset,
+  assetCanCarryWorkflow: actionMocks.assetCanCarryWorkflow,
 }));
 
 // Mutable runtime state driven per-suite. The component reads `isDesktop` at module

@@ -559,9 +559,7 @@ fn the_save_as_seam_strips_without_touching_the_source() {
         before,
         "the source asset must be byte-for-byte what it was"
     );
-    assert!(read_workflow_chunk_file(&source)
-        .expect("reads")
-        .is_some());
+    assert!(read_workflow_chunk_file(&source).expect("reads").is_some());
 }
 
 // ---------------------------------------------------------------------------

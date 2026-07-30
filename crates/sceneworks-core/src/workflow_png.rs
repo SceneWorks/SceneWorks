@@ -1253,7 +1253,10 @@ mod tests {
             .expect("strips")
             .expect("had something to strip");
         assert_eq!(read_workflow_chunk(&stripped), Ok(None));
-        assert!(stripped == png_with(&[]), "the tail chunk was excised whole");
+        assert!(
+            stripped == png_with(&[]),
+            "the tail chunk was excised whole"
+        );
 
         // Both at once — the duplicate case that reads as an error rather than a workflow. A file
         // the reader refuses is still a file with our prompt in it, so it must strip clean.
@@ -1262,9 +1265,11 @@ mod tests {
             &framed(&workflow_chunk(envelope.clone())),
         );
         assert_eq!(
-            read_workflow_chunk(&strip_workflow_chunk(&both)
-                .expect("strips")
-                .expect("had something to strip")),
+            read_workflow_chunk(
+                &strip_workflow_chunk(&both)
+                    .expect("strips")
+                    .expect("had something to strip")
+            ),
             Ok(None)
         );
 
@@ -1274,11 +1279,15 @@ mod tests {
             let mut data = WORKFLOW_CHUNK_KEYWORD.as_bytes().to_vec();
             data.push(0);
             data.extend_from_slice(b"whatever a foreign writer put here");
-            let spliced =
-                splice_after_ihdr(&png_with(&[]), &framed_chunk(kind, &data, None));
+            let spliced = splice_after_ihdr(&png_with(&[]), &framed_chunk(kind, &data, None));
             let stripped = strip_workflow_chunk(&spliced)
                 .expect("strips")
-                .unwrap_or_else(|| panic!("{} under our keyword must be taken out", String::from_utf8_lossy(kind)));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} under our keyword must be taken out",
+                        String::from_utf8_lossy(kind)
+                    )
+                });
             assert!(stripped == png_with(&[]));
         }
     }
@@ -1292,9 +1301,7 @@ mod tests {
             parse_workflow_share_json(&minimal_envelope_json("a lighthouse")).expect("parses");
 
         write_workflow_chunk(&rgb_fixture(), &source, Some(&envelope)).expect("writes");
-        assert!(read_workflow_chunk_file(&source)
-            .expect("reads")
-            .is_some());
+        assert!(read_workflow_chunk_file(&source).expect("reads").is_some());
         assert_eq!(
             copy_without_workflow_chunk(&source, &destination),
             Ok(true),
@@ -1304,9 +1311,7 @@ mod tests {
 
         // The source is untouched: turning the switch off, or saving one copy without the
         // workflow, changes nothing about files already written.
-        assert!(read_workflow_chunk_file(&source)
-            .expect("reads")
-            .is_some());
+        assert!(read_workflow_chunk_file(&source).expect("reads").is_some());
 
         // A source with nothing to strip goes through `std::fs::copy`, so the plain and the
         // without-workflow save produce the same file.

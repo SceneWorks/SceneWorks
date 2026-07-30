@@ -13,11 +13,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const actionMocks = vi.hoisted(() => ({
   saveAssetAs: vi.fn(),
   revealAsset: vi.fn(),
+  // sc-15953: the menu asks whether the asset's format can carry a workflow before offering the
+  // "save a copy without it" row. Mocked to the real predicate's answer for a PNG.
+  assetCanCarryWorkflow: vi.fn(() => true),
 }));
 
 vi.mock("../assetActions.js", () => ({
   saveAssetAs: actionMocks.saveAssetAs,
   revealAsset: actionMocks.revealAsset,
+  assetCanCarryWorkflow: actionMocks.assetCanCarryWorkflow,
 }));
 
 // Mutable desktop flag driven per-suite. The component reads `isDesktop` at module
@@ -191,6 +195,31 @@ describe("FullscreenPreview context menu (desktop)", () => {
         .click();
     });
     expect(actionMocks.revealAsset).toHaveBeenCalledWith(imageAsset);
+  });
+
+  it("offers a without-the-workflow copy for a format that can carry one (sc-15953)", async () => {
+    await renderPreview(baseProps({ asset: imageAsset }));
+    await rightClickStage();
+    const label = "Save a copy without the workflow…";
+    expect(menuItemLabels()).toContain(label);
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".preview-context-menu-item")]
+        .find((button) => button.textContent.trim() === label)
+        .click();
+    });
+    expect(actionMocks.saveAssetAs).toHaveBeenCalledWith(imageAsset, { withoutWorkflow: true });
+    // The plain Save As stays exactly what it was — this is an extra copy, not a replacement.
+    expect(actionMocks.saveAssetAs).not.toHaveBeenCalledWith(imageAsset);
+  });
+
+  it("omits it for a format the envelope cannot ride in (sc-15953)", async () => {
+    // Offering a no-op control would imply the file might be carrying a workflow.
+    actionMocks.assetCanCarryWorkflow.mockReturnValueOnce(false);
+    await renderPreview(baseProps({ asset: videoAsset }));
+    await rightClickStage();
+    expect(menuItemLabels()).not.toContain("Save a copy without the workflow…");
+    expect(menuItemLabels()).toContain("Save As…");
   });
 
   it("Zoom In / Zoom Out / Fit menu items drive the view transform", async () => {

@@ -791,7 +791,9 @@ fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
         let Some(open) = line.trim().strip_prefix("[\"") else {
             continue;
         };
-        let Some(close) = open.find('"') else { continue };
+        let Some(close) = open.find('"') else {
+            continue;
+        };
         listed.insert(open[..close].to_owned());
     }
     let documented = pinned_set(&doc(), "prose-fields", 0);

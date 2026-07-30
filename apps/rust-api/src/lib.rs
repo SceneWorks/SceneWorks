@@ -2207,8 +2207,12 @@ async fn stripped_project_file_response(
         // Nothing of ours can be in it. Fall back to the ordinary streaming response so a video or
         // a JPEG is served exactly as it always was, under its own ETag.
         let etag = project_file_etag(&metadata);
-        let headers =
-            project_file_response_headers(&project_file.content_type, metadata.len(), &etag, last_modified)?;
+        let headers = project_file_response_headers(
+            &project_file.content_type,
+            metadata.len(),
+            &etag,
+            last_modified,
+        )?;
         if project_file_is_not_modified(request_headers, &etag, last_modified) {
             return Ok(not_modified_response(headers));
         }
