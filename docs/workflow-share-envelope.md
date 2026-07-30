@@ -584,6 +584,37 @@ fields, what is in the file, and what is not — are rendered in the UI from dec
 [How this document is kept honest](#how-this-document-is-kept-honest) pins against the tables above,
 in both directions.
 
+### The Image Editor is the one export that re-encodes
+
+Every other way a file leaves this app copies bytes, so the chunk rides along without anyone
+arranging it. The editor cannot: `Download` there flattens a layer stack onto a canvas, and a
+canvas holds pixels and nothing else — no text chunks, no colour profile, no EXIF. Before sc-15954
+that quietly cost the recipe on a round trip in which the user changed nothing.
+
+So the editor's `Download` has two behaviours, and its header says which one the next click gets:
+
+- **Nothing has been changed** → the file you opened is written out **byte for byte**, under its
+  own name. Not a re-encode with the recipe put back — the same bytes, so the chunk, the colour
+  profile and the pixels are all the original's. The header reads *Recipe included*.
+- **Anything has been changed** → a fresh PNG of what you see, with **no** recipe in it. The header
+  reads *Recipe not carried*. An edited image is not the output of that recipe, and there is no
+  flagged "provenance, not reproduction" variant of the envelope: the additive-field rule above
+  means an older reader would drop such a flag and go on presenting the recipe as one that
+  reproduces the image, which is the failure this whole contract exists to prevent. sc-15954
+  records the decision in full.
+
+"Changed" is measured against the bitmap, not against the unsaved-edits pill — a crop, a colour
+grade, an AI op, a second layer, a moved or faded or blended layer all fall out of the first case,
+and undoing back to the opened image falls back into it. Note the consequence for a source over
+the editor's canvas ceiling: it is resampled on load, so the canvas is a proxy, and the untouched
+download hands back the **original** file rather than the smaller one on screen. That is what stops
+a recipe claiming a resolution the file it travels in does not have.
+
+The first case is a genuine egress the editor did not use to have — an authored prompt now leaves
+in a file that previously lost it — which is why the header names it rather than only naming the
+loss. To send that image without the recipe, save it to the Library and use **Save a copy without
+the workflow**.
+
 The strip itself refuses rather than guesses. A PNG whose chunk framing cannot be walked to an IEND,
 or whose unwalkable trailing bytes carry `sceneworks:workflow`, is an error and not a copy: "here is
 your file without the workflow" answered with the original, or with a truncated file that does not

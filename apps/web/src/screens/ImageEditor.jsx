@@ -2715,8 +2715,8 @@ export function ImageEditor() {
 
   // Export straight to disk (no project involvement). An untouched PNG goes out as the file it
   // came in as — same bytes, same recipe chunk, same colour profile — and anything else is
-  // flattened to a fresh PNG with no recipe in it (sc-15954). `downloadNote` above the button
-  // says which, before the click.
+  // flattened to a fresh PNG with no recipe in it (sc-15954). `downloadNote`, rendered beside the
+  // button, says which of the two the click will produce.
   const runDownload = useCallback(async () => {
     if (!working) return;
     try {
