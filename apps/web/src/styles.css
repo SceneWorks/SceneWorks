@@ -14564,6 +14564,21 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 3px;
 }
 
+/* The "also in the file" / "not in the file" bullets (sc-15953). A LIST rather than one long
+   comma-joined sentence: several of these phrases carry their own commas and dashes, so joined
+   into a paragraph a reader cannot tell where one claim ends and the next begins — on the surface
+   whose entire job is to be read before a file is sent to someone else. `-3px` pulls the list up
+   under its "Also in the file:" lead-in so the two read as one block. */
+.settings-note-list {
+  margin: -3px 0 0;
+  padding-left: 17px;
+  list-style: disc;
+}
+
+.settings-note-list > li {
+  margin: 2px 0;
+}
+
 /*
  * WorkerProgressCard (sc-2083) — unified worker/job progress component.
  * See docs/design/worker-progress-card.md. Replaces .local-job-card, .job-row,

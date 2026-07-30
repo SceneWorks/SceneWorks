@@ -91,14 +91,14 @@ function joinLabels(labels) {
 // covers several keys ("its size" is `width` and `height`). Repeats collapse when the sentence is
 // built, so the reader sees the phrase once and the pin still sees every key.
 
-const L_MARKER = "a marker saying this is a SceneWorks recipe, and which version of the format";
-const L_PRODUCER = "the SceneWorks name, project URL and released version of the build that wrote it";
+const L_MARKER = "a marker saying this is a SceneWorks recipe, and which version of the format it is";
+const L_PRODUCER = "the SceneWorks name, project URL and released version of the build that wrote the file";
 const L_MODE = "the generation mode";
 const L_NAMES = "the model and style names";
-const L_PROSE = "the prompt fields named above";
+const L_PROSE = "the prompt fields named above, verbatim";
 const L_SEED = "the seed for this image";
-const L_SIZE = "its size";
-const L_FIT = "how it was fitted";
+const L_SIZE = "the image size the run asked for";
+const L_FIT = "how a source image was fitted";
 const L_COUNT = "how many images the run asked for";
 const L_UPSCALE = "any upscale settings";
 const L_LORAS = "LoRA names, weights and Hugging Face repo ids";
@@ -111,7 +111,7 @@ const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
 const L_INPUTS = "which kinds of input image the recipe needs and how many of each";
-const L_OMITTED = "a note of any list that was too long to record";
+const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
 // are the allow-listed advanced settings; the rest are top-level envelope fields.
@@ -214,18 +214,22 @@ export const WORKFLOW_FIELDS_NOT_IN_FILE = Object.freeze([
 // beside the keyed list so the sentence reads as one thought.
 const UNKEYED_ABSENCES = Object.freeze([N_IDENTITY, N_TIME, N_IMAGES]);
 
-// "the generation mode, the model and style names, …" — the rendered "Also in the file" list.
-export function inFileSentence() {
-  return joinLabels(WORKFLOW_FIELDS_IN_FILE.map(([, label]) => label));
+// The bullets of the "Also in the file" list: every declared label, in order, repeats collapsed.
+//
+// A LIST rather than one comma-joined sentence, and not for taste. Several of these phrases carry
+// their own commas and dashes ("the pose, hand and face coordinates … facial landmarks included"),
+// so joining fifteen of them produces a paragraph in which a reader cannot tell where one claim ends
+// and the next begins — on the surface whose whole job is to be read before sharing a file.
+export function inFileItems() {
+  return [...new Set(WORKFLOW_FIELDS_IN_FILE.map(([, label]) => label))];
 }
 
-// The rendered "Not in the file" list. The unkeyed absences lead, because they are what a user
-// scans for first.
-export function notInFileSentence() {
-  return joinLabels([
-    ...UNKEYED_ABSENCES,
-    ...WORKFLOW_FIELDS_NOT_IN_FILE.map(([, label]) => label),
-  ]);
+// The bullets of "Not in the file". The unkeyed absences lead, because they are what a user scans
+// for first.
+export function notInFileItems() {
+  return [
+    ...new Set([...UNKEYED_ABSENCES, ...WORKFLOW_FIELDS_NOT_IN_FILE.map(([, label]) => label)]),
+  ];
 }
 
 function readFlag(key, fallback) {

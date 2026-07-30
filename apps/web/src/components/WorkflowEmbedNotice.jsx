@@ -3,8 +3,8 @@ import { Icon } from "./Icons.jsx";
 import {
   SAVE_WITHOUT_WORKFLOW_LABEL,
   WORKFLOW_SHARE_DOC_URL,
-  inFileSentence,
-  notInFileSentence,
+  inFileItems,
+  notInFileItems,
   proseFieldSentence,
 } from "../workflowEmbed.js";
 
@@ -41,11 +41,21 @@ export function WorkflowEmbedDetails() {
         Face repo id and is not treated as a location.
       </p>
       <p className="settings-note">
-        <strong>Also in the file:</strong> {inFileSentence()}.
+        <strong>Also in the file:</strong>
       </p>
+      <ul className="settings-note settings-note-list">
+        {inFileItems().map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
       <p className="settings-note">
-        <strong>Not in the file:</strong> {notInFileSentence()}.
+        <strong>Not in the file:</strong>
       </p>
+      <ul className="settings-note settings-note-list">
+        {notInFileItems().map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
       <p className="settings-note">
         Turning this off applies from the next generation. Images already on disk keep the block
         they were written with — to share one of those without it, use{" "}

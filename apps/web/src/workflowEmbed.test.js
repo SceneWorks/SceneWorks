@@ -10,8 +10,8 @@ const {
   WORKFLOW_FIELDS_IN_FILE,
   WORKFLOW_FIELDS_NOT_IN_FILE,
   WORKFLOW_SHARE_DOC_URL,
-  inFileSentence,
-  notInFileSentence,
+  inFileItems,
+  notInFileItems,
   persistWorkflowEmbedPreference,
   proseFieldSentence,
   readEmbedWorkflowInImages,
@@ -110,7 +110,7 @@ describe("the two lists a user acts on (sc-15953)", () => {
     // The finding: `advanced.poses` reduces to the `keypoints` / `hands` / `face` arrays —
     // coordinates derived from a reference photo, facial landmarks included — and the copy named
     // none of it, folding them under "the shared generation settings … and the like".
-    const sentence = inFileSentence();
+    const sentence = inFileItems().join(" | ");
     for (const word of ["pose", "hand", "face"]) {
       expect(sentence).toContain(word);
     }
@@ -122,21 +122,22 @@ describe("the two lists a user acts on (sc-15953)", () => {
   it("does not let 'not in the file' imply nothing derived from a reference travels", () => {
     // "The input images themselves" sitting in a list of absences invites exactly that reading,
     // which is the forbidden direction: claiming more privacy than the allow-list delivers.
-    const sentence = notInFileSentence();
+    const sentence = notInFileItems().join(" | ");
     expect(sentence).toContain("the input images themselves");
     expect(sentence).toContain("what a pose selection traced from one does travel");
   });
 
   it("renders every declared label into its sentence, with repeats collapsed", () => {
-    const rendered = inFileSentence();
+    const rendered = inFileItems().join(" | ");
     for (const [, label] of WORKFLOW_FIELDS_IN_FILE) {
       expect(rendered).toContain(label);
     }
     for (const [, label] of WORKFLOW_FIELDS_NOT_IN_FILE) {
-      expect(notInFileSentence()).toContain(label);
+      expect(notInFileItems()).toContain(label);
     }
-    // `width` and `height` share one phrase; the reader must see it once.
-    expect(rendered.split("its size")).toHaveLength(2);
+    // `width` and `height` share one phrase; the reader must see one bullet, not two.
+    expect(inFileItems().length).toBeLessThan(WORKFLOW_FIELDS_IN_FILE.length);
+    expect(new Set(inFileItems()).size).toBe(inFileItems().length);
   });
 
   it("keys both lists by envelope path, so the Rust pin has something to match", () => {
