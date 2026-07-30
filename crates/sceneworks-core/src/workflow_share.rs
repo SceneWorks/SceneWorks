@@ -1012,11 +1012,15 @@ pub fn advanced_key_rule(key: &str) -> Option<&'static AdvancedKeyRule> {
 ///   [`relative_tree_segments`]);
 /// * `file://`, including percent-encoded (`file%3A%2F%2FD%3A%2Fx`).
 ///
-/// Deliberately NOT applied to the authored prose fields (`prompt`, `negativePrompt`,
-/// `stylePrompt`, the structured prompt's `intent` / `runtimePrompt`): those are what the user
-/// typed, and silently mangling a prompt because it mentions a directory would be worse than
-/// the leak it prevents — the user authored it and can see it. That exemption is pinned by
-/// `authored_prose_travels_verbatim_even_when_it_names_a_path` in the integration tests.
+/// Deliberately NOT applied to the six authored prose fields (`prompt`, `negativePrompt`,
+/// `stylePrompt`, `systemMessage`, and the structured prompt's `intent` / `runtimePrompt` — the
+/// four that live under an `advanced` key are the `PROSE_KEYS` constant below): those are what the
+/// user typed, and silently mangling a prompt because it mentions a directory would be worse than
+/// the leak it prevents — the user authored it and can see it. `systemMessage` is in that set, so
+/// an interleave system prompt naming a directory travels like any other authored text. That
+/// exemption is pinned by `authored_prose_travels_verbatim_even_when_it_names_a_path` in the
+/// integration tests, and against the document by
+/// `the_doc_lists_exactly_the_path_exempt_prose_fields`.
 #[must_use]
 pub fn is_path_shaped(value: &str) -> bool {
     let trimmed = value.trim();
@@ -2071,7 +2075,11 @@ fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
 /// the image — exactly as `keypoints` does. Dropping them would cost reproduction fidelity for
 /// zero privacy gain. What does NOT travel is the pose-library `id` that named the entry, and
 /// anything else the picker attached to it.
-const POSE_FIELDS: &[&str] = &["keypoints", "hands", "face"];
+///
+/// Public so `docs/workflow-share-envelope.md` can be pinned to it: the document names these three
+/// in prose twice, and `workflow_share_doc.rs` asserts both mentions against this slice in both
+/// directions.
+pub const POSE_FIELDS: &[&str] = &["keypoints", "hands", "face"];
 
 fn sanitize_poses(value: &Value) -> Option<Value> {
     let poses = value.as_array()?;
