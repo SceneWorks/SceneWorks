@@ -32,11 +32,19 @@
 //! # Allow-list, never a deny-list
 //!
 //! `advanced` (cloned verbatim into an asset's `rawAdapterSettings`) is untyped and grows
-//! whenever someone adds a knob to `apps/web/src/imageJobAdvanced.js`. A deny-list leaks every
-//! future field by default, so [`ADVANCED_KEY_RULES`] classifies every key the builder can emit
-//! and anything unclassified is dropped. `crates/sceneworks-core/tests/workflow_share.rs`
-//! parses that JS file and fails the build when a key is neither allow-listed nor explicitly
-//! denied — a new knob can neither silently leak nor silently vanish.
+//! whenever someone adds a knob to one of the studio's job builders. A deny-list leaks every
+//! future field by default, so [`ADVANCED_KEY_RULES`] classifies every key those builders can
+//! emit and anything unclassified is dropped. `crates/sceneworks-core/tests/workflow_share.rs`
+//! parses each builder named in [`ADVANCED_BUILDERS`] and fails the build when a key is neither
+//! allow-listed nor explicitly denied — a new knob can neither silently leak nor silently vanish.
+//!
+//! sc-15946 shipped that lint against ONE builder on the premise that it was the only one. It was
+//! not: sc-15948 found a second (`buildDetailJobBody`, whose `cnScale` was being dropped) and then
+//! two more (the character lane's `angleSet`, the interleave lane's `systemMessage` /
+//! `imageGuidanceScale`). A lint that is bolted on per discovery closes no class, so
+//! [`ADVANCED_BUILDERS`] is a registry the lint ENUMERATES, and the same test walks
+//! `apps/web/src` for anything that builds an `advanced` map and refuses to pass while one is in
+//! neither the registry nor [`DEFERRED_ADVANCED_BUILDERS`].
 //!
 //! The line between in and out is *what to make* vs *what this machine can afford*:
 //! sampler / steps / guidance / PiD describe the intended output and travel; quant tier,
@@ -289,18 +297,311 @@ pub enum AdvancedDisposition {
     Deny,
 }
 
-/// Where a key comes from, so the coverage lint knows which rules it can hold the JS builder
-/// accountable for.
+/// Which builder a rule is held accountable to, so the coverage lint knows what JS to read.
+///
+/// Every variant except [`Self::Server`] names exactly one entry in [`ADVANCED_BUILDERS`], and
+/// the lint asserts that correspondence in both directions — a variant with no registry entry, or
+/// a registry entry with no variant, fails. That is what makes adding a builder a decision rather
+/// than an omission.
+///
+/// A key MORE THAN ONE builder emits is tagged with its primary builder (the largest,
+/// fastest-moving surface that emits it). The "is every emitted key classified?" half of the lint
+/// runs for every registered builder regardless of tags; only the "is every rule still emitted?"
+/// half is per-tag, and a key needs just one builder holding it honest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvancedKeySource {
-    /// Emitted by `buildImageJobAdvanced` in `apps/web/src/imageJobAdvanced.js`. The coverage
-    /// lint asserts these match the JS source exactly, in both directions.
+    /// `buildImageJobAdvanced` — the Image Studio's ~30-knob builder.
     StudioBuilder,
+    /// `buildEditJobBody` — the Image Editor's prompt-edit body (sc-15948 follow-up: it emits
+    /// `advanced.guidanceScale` and feeds an embedding lane, so it is registered even though
+    /// every key it emits was already classified).
+    EditBuilder,
+    /// `buildDetailJobBody` — the standalone `image_detail` pass's own two-knob builder
+    /// (sc-15948). Before it was registered, `cnScale` was unclassified and silently dropped.
+    DetailBuilder,
+    /// `buildAdvanced` in `CharacterAdvancedOptions.jsx` — the character lane's shared tuning
+    /// block, which merges one of the `advancedExtras` maps below into its own knobs.
+    CharacterBuilder,
+    /// `useAngleController`'s `advancedExtras` — the Angle Set form (sc-15948 follow-up).
+    /// `angleSet` is what makes the worker emit one image per view angle, so dropping it made a
+    /// shared angle-set image replay as a single image.
+    CharacterAngleExtras,
+    /// `usePoseController`'s `advancedExtras` — the Pose Library form.
+    CharacterPoseExtras,
+    /// `DocumentStudio.submit` — the interleaved-document lane, which sc-15948 turned INTO an
+    /// embedding lane (`sensenova_jobs.rs` threads `workflow_source` into `ImagePlan`).
+    InterleaveBuilder,
+    /// `buildUpscaleJobBody` — the standalone `image_upscale` job. It emits NO `advanced` map, and
+    /// is registered precisely so that stays true: it feeds an embedding lane (sc-15948 ISSUE 1),
+    /// so the day it grows a knob the lint demands a classification. No rule is tagged with it.
+    UpscaleBuilder,
     /// Stamped onto `advanced` by the API after the request arrives (recipe-preset resolution
     /// in `apps/rust-api/src/generation.rs`). Classified here for the record; the lint does
-    /// not expect to find them in the JS.
+    /// not expect to find them in the JS, and no [`ADVANCED_BUILDERS`] entry claims it.
     Server,
 }
+
+impl AdvancedKeySource {
+    /// Every variant, so the lint can assert the registry covers them all. A new variant that
+    /// nobody registered fails [`ADVANCED_BUILDERS`]'s round-trip test.
+    pub const ALL: &'static [Self] = &[
+        Self::StudioBuilder,
+        Self::EditBuilder,
+        Self::DetailBuilder,
+        Self::CharacterBuilder,
+        Self::CharacterAngleExtras,
+        Self::CharacterPoseExtras,
+        Self::InterleaveBuilder,
+        Self::UpscaleBuilder,
+        Self::Server,
+    ];
+}
+
+/// The JS shape a registered builder writes its `advanced` map in, and therefore which extractor
+/// in `crates/sceneworks-core/tests/workflow_share.rs` can read it.
+///
+/// Named in the registry rather than sniffed, because a wrong guess is the failure mode this whole
+/// lint exists to prevent: an extractor that quietly understands nothing returns an empty key set
+/// and passes. Each extractor panics with instructions when the file stops matching its shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvancedBuilderShape {
+    /// `return { key, ...(cond ? { key } : {}) }` — the conditional-spread object literal
+    /// `buildImageJobAdvanced` is built from. Needs the brace-aware scanner.
+    ReturnedObject,
+    /// `advanced: { a, b }` — a flat object literal in a returned payload, no spreads, no
+    /// nesting (`buildDetailJobBody`).
+    FlatAdvancedLiteral,
+    /// `const advanced = { … }` followed by `advanced.key = …` assignments. Both halves are
+    /// emits, and a spread in the initializer must be declared in
+    /// [`AdvancedBuilder::spread_of`].
+    AssignedObject,
+    /// `advancedExtras: { … }` — a controller's contribution, merged into a
+    /// [`Self::AssignedObject`] builder's initializer by spread.
+    ExtrasLiteral,
+    /// The builder posts NO `advanced` map at all (`buildUpscaleJobBody`). Registered anyway,
+    /// because it feeds an embedding lane: the lint asserts the function stays empty of
+    /// `advanced`, so the day someone adds a knob there it has to be classified.
+    NoAdvancedMap,
+}
+
+/// One JS builder whose `advanced` keys reach an embedding lane.
+///
+/// The registry the coverage lint enumerates. `path` + `function` are read out of the repo, so a
+/// rename fails loudly rather than silently pointing the lint at nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct AdvancedBuilder {
+    /// The tag rules use to name this builder. Unique across the registry.
+    pub source: AdvancedKeySource,
+    /// Repo-relative path of the file that defines it.
+    pub path: &'static str,
+    /// The JS function whose body the extractor reads.
+    pub function: &'static str,
+    pub shape: AdvancedBuilderShape,
+    /// The embedding lane this builder's payload ends up written by, so a reader can see why the
+    /// keys matter. Prose, asserted only to be non-trivial.
+    pub lane: &'static str,
+    /// Keys the extractor MUST still find. A floor against an extractor that has quietly stopped
+    /// understanding the file — the failure mode that makes a green lint worthless.
+    pub anchors: &'static [&'static str],
+    /// The smallest number of keys the extractor may report before the lint calls itself broken.
+    /// Set well under the real count; it is a floor, not a census.
+    pub minimum_keys: usize,
+    /// Identifiers spread into an [`AdvancedBuilderShape::AssignedObject`] initializer, whose keys
+    /// are accounted for by another registry entry. Declared so a NEW spread of something nobody
+    /// classified fails the lint instead of vanishing into it.
+    pub spread_of: &'static [&'static str],
+}
+
+/// Every builder whose `advanced` keys travel inside a shared image (sc-15948).
+///
+/// The lanes, as of sc-15948: `POST /api/v1/image/jobs` (`text_to_image` / `edit_image` /
+/// `character_image`), `POST /api/v1/image/detail/jobs`, `POST /api/v1/image/interleave/jobs`, and
+/// the standalone `image_upscale` job. All four write their PNG through a seam that embeds.
+///
+/// **Adding a builder here is what turns the lint on for it.** Adding a builder to the WEB and not
+/// to this table fails `every_advanced_builder_in_the_web_app_is_accounted_for`, which walks
+/// `apps/web/src` and refuses any `advanced`-map producer that is in neither this registry nor
+/// [`DEFERRED_ADVANCED_BUILDERS`].
+pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
+    AdvancedBuilder {
+        source: AdvancedKeySource::StudioBuilder,
+        path: "apps/web/src/imageJobAdvanced.js",
+        function: "buildImageJobAdvanced",
+        shape: AdvancedBuilderShape::ReturnedObject,
+        lane:
+            "POST /api/v1/image/jobs — text_to_image, edit_image and character_image, written by \
+               `write_image_asset`",
+        anchors: &["resolution", "sampler", "steps", "styleId", "poses"],
+        minimum_keys: 25,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::EditBuilder,
+        path: "apps/web/src/imageJobs.js",
+        function: "buildEditJobBody",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/image/jobs — edit_image from the Image Editor, written by \
+               `write_image_asset`",
+        anchors: &["guidanceScale"],
+        minimum_keys: 1,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::DetailBuilder,
+        path: "apps/web/src/imageJobs.js",
+        function: "buildDetailJobBody",
+        shape: AdvancedBuilderShape::FlatAdvancedLiteral,
+        lane: "POST /api/v1/image/detail/jobs, written by `image_jobs/detail.rs`",
+        anchors: &["strength", "cnScale"],
+        minimum_keys: 2,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::CharacterBuilder,
+        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
+        function: "buildAdvanced",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/image/jobs — character_image, written by `write_image_asset`",
+        anchors: &["ipAdapterScale", "steps", "usePid"],
+        // The angle-set / pose-library controllers' `advancedExtras`, each registered below.
+        minimum_keys: 9,
+        spread_of: &["base"],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::CharacterAngleExtras,
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "useAngleController",
+        shape: AdvancedBuilderShape::ExtrasLiteral,
+        lane: "POST /api/v1/image/jobs — character_image (angle set), written by \
+               `write_image_asset`",
+        anchors: &["angleSet"],
+        minimum_keys: 2,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::CharacterPoseExtras,
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "usePoseController",
+        shape: AdvancedBuilderShape::ExtrasLiteral,
+        lane: "POST /api/v1/image/jobs — character_image (pose library), written by \
+               `write_image_asset`",
+        anchors: &["poses", "faceRestore"],
+        minimum_keys: 3,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::InterleaveBuilder,
+        path: "apps/web/src/screens/DocumentStudio.jsx",
+        function: "submit",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/image/interleave/jobs, written by `sensenova_jobs.rs` through \
+               `write_image_asset`",
+        anchors: &["systemMessage", "imageGuidanceScale"],
+        minimum_keys: 2,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::UpscaleBuilder,
+        path: "apps/web/src/imageJobs.js",
+        function: "buildUpscaleJobBody",
+        shape: AdvancedBuilderShape::NoAdvancedMap,
+        lane: "POST /api/v1/jobs type=image_upscale, written by `single_child_asset.rs`",
+        anchors: &[],
+        minimum_keys: 0,
+        spread_of: &[],
+    },
+];
+
+/// A builder that produces an `advanced` map the lint has SEEN and deliberately does not
+/// classify, because its lane does not embed yet.
+///
+/// This list exists so "unaccounted for" and "accounted for as out of scope" are different
+/// states. Making one of these lanes embed means moving its entry into [`ADVANCED_BUILDERS`] —
+/// at which point every key it emits must be classified, which is the point.
+#[derive(Debug, Clone, Copy)]
+pub struct DeferredAdvancedBuilder {
+    pub path: &'static str,
+    pub function: &'static str,
+    /// Why it is not classified. Two categories, and the lint accepts nothing else, so a deferral
+    /// cannot be a shrug:
+    ///
+    /// * **Awaiting classification** — names the `sc-` story that owns turning its lane on.
+    /// * **Permanently exempt** — starts with [`PERMANENT_EXEMPTION`] and says why no story will
+    ///   ever own it, plus what would have to change for that to stop being true.
+    pub reason: &'static str,
+}
+
+/// The prefix that marks a [`DeferredAdvancedBuilder::reason`] as a PERMANENT exemption rather
+/// than a story-owned deferral.
+///
+/// A deferral normally names the story that will classify its keys. Some `advanced` maps are not
+/// waiting on anybody: they are a different namespace on a lane that embeds nothing, so there is no
+/// story to name and inventing a fake id would be worse than saying so. The lint requires a reason
+/// with this prefix to state what would have to change (an embedding write seam) and to name
+/// [`ADVANCED_BUILDERS`] as where the entry moves if it ever does.
+pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
+
+/// The VIDEO builders (sc-15956 owns the video envelope and these keys), plus one permanent
+/// exemption for an `advanced` map that is not an image payload at all.
+///
+/// `VideoStudio.jsx` alone emits ~15 keys nothing here classifies. That is fine only for as long
+/// as no video write seam embeds: the moment sc-15956 threads a workflow into a video write, its
+/// builder moves up into [`ADVANCED_BUILDERS`] and every one of those keys needs an
+/// `allow`/`deny` decision. Nothing about a video lane can start embedding while its keys sit in
+/// this list — that is what this list is for.
+pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/screens/VideoStudio.jsx",
+        function: "submit",
+        reason: "The Video Studio's own ~15-knob advanced map. No video write seam embeds a \
+                 workflow yet; sc-15956 owns the video envelope and must classify these keys \
+                 before it does.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/components/editor/useEditorGeneration.js",
+        function: "buildBasePayload",
+        reason: "The timeline editor's shared video payload (queueTimelineVideoJob). Video lane — \
+                 sc-15956 classifies it when video images start embedding.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "extendSelectedClip",
+        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
+                 timelineContext. Video lane — sc-15956.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "replaceSelectedItem",
+        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
+                 timelineContext. Video lane — sc-15956.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "bridgeGap",
+        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
+                 timelineContext. Video lane — sc-15956.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/simple/simpleJobs.js",
+        function: "buildSimpleVideoRequest",
+        reason: "The Simple shell's VIDEO request. Its image sibling \
+                 (`buildSimpleImageRequest`) delegates to `buildImageJobRequest` and so is \
+                 covered by the studio builder; this one is a video lane — sc-15956.",
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/training/trainingConfig.js",
+        function: "trainingConfigSnapshot",
+        reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
+                 from the image payload's — trainer hyperparameters (networkType, lrScheduler, \
+                 sampleSteps, decomposeFactor) on a training job, not generation intent for an \
+                 image. No training write seam EMBEDS a workflow, nothing sanitizes these keys \
+                 through `ADVANCED_KEY_RULES`, and no story is waiting to classify them: this is \
+                 not a deferral with an owner, it is deliberately outside the allow-list. What \
+                 would have to change is a training write seam that embeds. Then, and only then, \
+                 this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
+                 allow/deny decision.",
+    },
+];
 
 /// How an allowed value is reduced. Anything that does not match its shape is dropped rather
 /// than passed through — that is what stops an object (and any path inside it) from being
@@ -352,6 +653,37 @@ const fn deny(key: &'static str, reason: &'static str) -> AdvancedKeyRule {
     }
 }
 
+/// `allow`, tagged to a builder other than the studio's.
+const fn allow_from(
+    key: &'static str,
+    shape: AdvancedShape,
+    source: AdvancedKeySource,
+    reason: &'static str,
+) -> AdvancedKeyRule {
+    AdvancedKeyRule {
+        key,
+        disposition: AdvancedDisposition::Allow,
+        shape,
+        source,
+        reason,
+    }
+}
+
+/// `deny`, tagged to a builder other than the studio's.
+const fn deny_from(
+    key: &'static str,
+    source: AdvancedKeySource,
+    reason: &'static str,
+) -> AdvancedKeyRule {
+    AdvancedKeyRule {
+        key,
+        disposition: AdvancedDisposition::Deny,
+        shape: AdvancedShape::Scalar,
+        source,
+        reason,
+    }
+}
+
 const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule {
     AdvancedKeyRule {
         key,
@@ -364,9 +696,9 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 
 /// Every `advanced` key, classified.
 ///
-/// The load-bearing table. `crates/sceneworks-core/tests/workflow_share.rs` parses
-/// `apps/web/src/imageJobAdvanced.js` and fails when a key the builder can emit is missing
-/// here — so a new knob is a compile-time decision, not a silent leak and not a silent loss.
+/// The load-bearing table. `crates/sceneworks-core/tests/workflow_share.rs` parses every builder
+/// in [`ADVANCED_BUILDERS`] and fails when a key one of them can emit is missing here — so a new
+/// knob is a build-time decision, not a silent leak and not a silent loss.
 ///
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
@@ -483,6 +815,45 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "stylePrompt",
         AdvancedShape::Scalar,
         "The raw pre-style prompt, so a reader sees what was actually typed.",
+    ),
+    allow_from(
+        "cnScale",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::DetailBuilder,
+        "Authored tile-ControlNet strength for the Detail pass — one of the two knobs that \
+         builder exposes, and the sibling of the allow-listed `strength`. Without it a shared \
+         detail-refined image describes half of what produced it (sc-15948).",
+    ),
+    allow_from(
+        "angleSet",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::CharacterAngleExtras,
+        "Authored turnaround request: it makes the worker emit one image per view angle \
+         regardless of `count`, so it decides WHAT IS MADE. Dropping it made a shared angle-set \
+         image replay as a single image (sc-15948).",
+    ),
+    allow_from(
+        "systemMessage",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::InterleaveBuilder,
+        "The interleave system prompt the user typed, and the exact text the model saw — the same \
+         class as `prompt` and `stylePrompt`, so it is PROSE (see `PROSE_KEYS`): bounded and \
+         control-stripped, but never dropped for naming a directory. It is only sent when edited \
+         away from the worker's own default, so it is authored content by construction.",
+    ),
+    allow_from(
+        "imageGuidanceScale",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::InterleaveBuilder,
+        "Authored reference-guidance strength for an interleaved document (engine \
+         `img_cfg_scale`) — the same authored-strength class as `ipAdapterScale` and \
+         `controlScale`, and only emitted when the run actually grounds on reference frames.",
+    ),
+    deny_from(
+        "keypointCollectionId",
+        AdvancedKeySource::CharacterAngleExtras,
+        "A local Key Point Library collection id. It resolves to nothing on another install — the \
+         same class as `recipePresetId` and `controlImage` (sc-15948).",
     ),
     allow(
         "phases",
@@ -797,6 +1168,45 @@ fn hf_repo_id(value: &str) -> Option<String> {
 // Build
 // ---------------------------------------------------------------------------
 
+/// What the envelope takes from the produced IMAGE rather than from the job payload.
+///
+/// Exists because sc-15948 embeds at the worker's write seam, where no [`Asset`] has been built
+/// yet — the worker writes the PNG and reports flat facts, and the API turns those into the
+/// sidecar afterwards. Rather than have the worker fabricate an `Asset` (whose `mode` and
+/// `adapter` are closed enums it would have to guess at), both callers name the same handful of
+/// per-image values and go through the same builder.
+///
+/// Every field here is a FALLBACK for the payload except `seed`, which always wins: the payload
+/// carries the batch's base `seed` and its whole `seeds` list, and only the writer of one file
+/// knows which of those rendered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowAssetFacts {
+    pub mode: String,
+    pub model: String,
+    pub prompt: String,
+    pub negative_prompt: String,
+    /// The seed of THIS image, never the batch base.
+    pub seed: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl WorkflowAssetFacts {
+    /// The facts an already-built sidecar carries.
+    #[must_use]
+    pub fn from_asset(asset: &Asset) -> Self {
+        Self {
+            mode: asset.recipe.mode.as_str().to_owned(),
+            model: asset.recipe.model.clone(),
+            prompt: asset.recipe.prompt.clone(),
+            negative_prompt: asset.recipe.negative_prompt.clone(),
+            seed: asset.recipe.seed,
+            width: asset.file.width,
+            height: asset.file.height,
+        }
+    }
+}
+
 /// Build the sanitized envelope for one generated asset.
 ///
 /// `job_payload` is the job row's `payload_json` — the exact `ImageJobRequest` the API stored,
@@ -809,6 +1219,21 @@ fn hf_repo_id(value: &str) -> Option<String> {
 /// produced the file being shared.
 #[must_use]
 pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> WorkflowShare {
+    build_workflow_share_from(&WorkflowAssetFacts::from_asset(asset), job_payload)
+}
+
+/// [`build_workflow_share`] against [`WorkflowAssetFacts`] instead of a built sidecar — the entry
+/// point the worker's write seam uses (sc-15948).
+///
+/// The one implementation both forms share, so the sanitizer, the payload-over-facts precedence
+/// and the allow-list cannot differ between "embedded when the image was written" and "rebuilt
+/// from a sidecar". `build_workflow_share_is_the_facts_builder` in
+/// `crates/sceneworks-core/tests/workflow_share.rs` pins the delegation.
+#[must_use]
+pub fn build_workflow_share_from(
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> WorkflowShare {
     let string_field = |key: &str| {
         job_payload
             .get(key)
@@ -822,17 +1247,16 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
             .and_then(|value| u32::try_from(value).ok())
     };
 
-    let mode = string_field("mode").unwrap_or_else(|| asset.recipe.mode.as_str().to_owned());
-    let model = string_field("model").unwrap_or_else(|| asset.recipe.model.clone());
-    let prompt = string_field("prompt").unwrap_or_else(|| asset.recipe.prompt.clone());
+    let mode = string_field("mode").unwrap_or_else(|| facts.mode.clone());
+    let model = string_field("model").unwrap_or_else(|| facts.model.clone());
+    let prompt = string_field("prompt").unwrap_or_else(|| facts.prompt.clone());
     let negative_prompt =
-        string_field("negativePrompt").unwrap_or_else(|| asset.recipe.negative_prompt.clone());
+        string_field("negativePrompt").unwrap_or_else(|| facts.negative_prompt.clone());
 
-    // The sidecar's seed — not the payload's. `payload.seed` is the batch BASE and
-    // `payload.seeds` is the whole batch; only the sidecar knows which one rendered the file
-    // being shared. The batch list never travels: the other images are not this share's
-    // business. (`Recipe::seed` is a required field, so there is nothing to fall back to.)
-    let seed = Some(asset.recipe.seed);
+    // The produced image's seed — not the payload's. `payload.seed` is the batch BASE and
+    // `payload.seeds` is the whole batch; only whoever wrote one file knows which one rendered
+    // it. The batch list never travels: the other images are not this share's business.
+    let seed = Some(facts.seed);
 
     // Raw on purpose: `reduce_workflow_share` runs `sanitize_advanced`, and sanitizing here as
     // well would be the same pass twice — harmless only for as long as every rule stays
@@ -855,8 +1279,8 @@ pub fn build_workflow_share(asset: &Asset, job_payload: &JsonObject) -> Workflow
         prompt,
         negative_prompt,
         seed,
-        width: u32_field("width").or(asset.file.width),
-        height: u32_field("height").or(asset.file.height),
+        width: u32_field("width").or(facts.width),
+        height: u32_field("height").or(facts.height),
         count: u32_field("count"),
         style_preset: string_field("stylePreset"),
         style_id: string_field("styleId"),
@@ -1159,7 +1583,16 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
 ///
 /// Exempt from the PATH check only. They are still bounded and control-stripped by
 /// [`shareable_prose`], because on the parse side they are a stranger's strings.
-const PROSE_KEYS: &[&str] = &["stylePrompt", "intent", "runtimePrompt"];
+const PROSE_KEYS: &[&str] = &[
+    "stylePrompt",
+    "intent",
+    "runtimePrompt",
+    // The interleave system prompt (sc-15948). Prose rather than a label because the user typed
+    // it into a textarea and it is the literal instruction the model received; bounding it as a
+    // slug would silently drop a system message that happened to mention a directory, which is
+    // the exact silent-loss failure this epic's lint exists to prevent.
+    "systemMessage",
+];
 
 fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
     match value {
@@ -1795,6 +2228,8 @@ mod tests {
                 "intent": "/home/michael/clients/acme/nda.md",
                 "runtimePrompt": "see ..\\..\\briefs\\acme.json"
             },
+            // The interleave system prompt joined this class in sc-15948 — same reason.
+            "systemMessage": "Ground every panel on ..\\..\\briefs\\acme.json",
             "sampler": "C:\\Users\\Michael\\samplers\\euler.json"
         })
         .as_object()
@@ -1811,9 +2246,16 @@ mod tests {
             recipe["runtimePrompt"],
             json!("see ..\\..\\briefs\\acme.json")
         );
+        assert_eq!(
+            sanitized["systemMessage"],
+            json!("Ground every panel on ..\\..\\briefs\\acme.json")
+        );
         // A NON-prose key next to them is still guarded — the exemption is per key, not global.
         assert!(!sanitized.contains_key("sampler"));
-        assert_eq!(PROSE_KEYS, ["stylePrompt", "intent", "runtimePrompt"]);
+        assert_eq!(
+            PROSE_KEYS,
+            ["stylePrompt", "intent", "runtimePrompt", "systemMessage"]
+        );
     }
 
     /// The prose exemption is from the PATH check and from nothing else. A prompt is

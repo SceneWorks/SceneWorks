@@ -1107,6 +1107,22 @@ pub(crate) async fn run_image_upscale_job(
         // upscale result reveals whether the hardware EP ran or it fell back to CPU (sc-8923).
         upscale_settings["device"] = json!(device);
     }
+    // The sanitized workflow this PNG carries (epic 15945, sc-15948). This is a DISTINCT job with
+    // its own payload, so — per the story's rule for a derived pass — the envelope describes THIS
+    // pass and inherits nothing from whatever generated the source image. `engine_id` and `factor`
+    // are the APPLIED values (canonicalized and validated above), not the requested ones, and
+    // `softness` only travels for the engine that has the knob.
+    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).map(|payload| {
+        crate::image_jobs::standalone_upscale_workflow_share(
+            &payload,
+            engine_id,
+            factor,
+            (engine_id == "seedvr2").then_some(softness),
+            seed as i64,
+            src_w,
+            src_h,
+        )
+    });
     let result = write_single_child_asset(
         &project_path,
         image::DynamicImage::ImageRgb8(upscaled),
@@ -1116,6 +1132,7 @@ pub(crate) async fn run_image_upscale_job(
             model: engine_id,
             adapter: engine_id,
             encode_label: "upscale encode task",
+            workflow,
         },
         |write| {
             json!({

@@ -580,12 +580,25 @@ pub(crate) async fn run_image_detail_job(
     let (out_w, out_h) = (refined.width(), refined.height());
     let media_path = project_path.join(&media_rel);
     let temp_path = media_path.with_extension("tmp.png");
+    // This pass is its own job with its own payload, so the embedded workflow describes the REFINE
+    // (its own prompt, backbone, seed, strength and cnScale) and inherits nothing from the
+    // generation that produced the source image — see `detail_workflow_share` (sc-15948).
+    let share = workflow_source(settings, &job.payload).map(|payload| {
+        detail_workflow_share(
+            &payload,
+            &model,
+            &params.prompt,
+            &params.negative,
+            params.seed,
+            out_w,
+            out_h,
+        )
+    });
     // Encode + atomically promote the refined PNG off the async runtime thread (sc-8909 / F-107).
     let encode_tmp = temp_path.clone();
     let encode_final = media_path.clone();
     tokio::task::spawn_blocking(move || {
-        refined
-            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+        write_workflow_chunk(&refined, &encode_tmp, share.as_ref())
             .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
         std::fs::rename(&encode_tmp, &encode_final).inspect_err(|_| {
             let _ = std::fs::remove_file(&encode_tmp);

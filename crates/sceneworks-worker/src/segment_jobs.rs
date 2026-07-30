@@ -337,6 +337,13 @@ pub(crate) async fn run_image_segment_job(
             model: "sam3",
             adapter: "sam3",
             encode_label: "smart-select mask encode task",
+            // Deliberately NO workflow (epic 15945, sc-15948). This asset is not a generated image:
+            // it is a binary selection mask derived from a box prompt plus a concept string, and it
+            // has no generation recipe to replay — sc-15952 would prefill the Image Studio with a
+            // "recipe" that produces nothing. It is also grayscale (`ImageLuma8`), and the chunk
+            // writer encodes RGB8, so embedding would triple a mask's size and change its colour
+            // type, which `writes_one_png_and_builds_the_shared_result_envelope` pins.
+            workflow: None,
         },
         |write| {
             json!({

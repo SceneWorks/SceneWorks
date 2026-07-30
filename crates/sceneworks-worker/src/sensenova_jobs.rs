@@ -626,10 +626,12 @@ pub(crate) async fn run_interleave_job(
     // no loop worth interrupting, and aborting a half-written document asset mid-rename is worse
     // than letting the seconds-long write finish.
     let job_owned = job.clone();
+    let workflow_source = crate::image_jobs::workflow_source(settings, &job.payload);
     let write_task = tokio::task::spawn_blocking(move || {
         write_interleaved_document(
             request,
             job_owned,
+            workflow_source,
             project_path,
             prompt,
             model_id,
@@ -848,6 +850,9 @@ pub(crate) async fn run_interleave_job(
 fn write_interleaved_document(
     request: ImageRequest,
     job: JobSnapshot,
+    // Resolved by the async caller (sc-15948): the embed toggle lives in the config dir, and this
+    // runs on the blocking pool with no `Settings` in hand.
+    workflow_source: Option<std::sync::Arc<JsonObject>>,
     project_path: PathBuf,
     prompt: String,
     model_id: String,
@@ -880,7 +885,7 @@ fn write_interleaved_document(
 
     // Generated images persist as ordinary image assets — the worker saves the PNG + reports facts,
     // and the Rust API builds + indexes their sidecars. The document references them in order.
-    let plan = ImagePlan::with_count(&request, images.len() as u32);
+    let plan = ImagePlan::with_count(&request, images.len() as u32, workflow_source);
     let mut image_raw_settings = raw_settings.clone();
     image_raw_settings.insert("interleaved".to_owned(), Value::Bool(true));
     let mut image_writes: Vec<Value> = Vec::with_capacity(images.len());

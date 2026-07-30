@@ -239,6 +239,491 @@ fn write_image_asset_confines_malicious_model_id() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Embedded workflow (epic 15945, sc-15948)
+// ---------------------------------------------------------------------------
+
+/// Worker settings pointed at a scratch config dir, so the embed toggle can be written and read
+/// without touching the real install's `ui-preferences.json`.
+fn settings_with_config_dir(config_dir: &Path) -> Settings {
+    let mut settings = Settings::from_env();
+    settings.config_dir = config_dir.to_path_buf();
+    settings
+}
+
+fn write_embed_preference(config_dir: &Path, enabled: bool) {
+    std::fs::create_dir_all(config_dir).unwrap();
+    std::fs::write(
+        sceneworks_core::app_paths::ui_preferences_file(config_dir),
+        format!(r#"{{"theme":"dark","embedWorkflowInImages":{enabled}}}"#),
+    )
+    .unwrap();
+}
+
+/// A representative Image Studio payload: an edit with a reference and a mask, LoRAs, a style, an
+/// upscale pass, and `advanced` carrying both allow-listed knobs and denied ones.
+fn embed_payload() -> JsonObject {
+    json!({
+        "projectId": "p",
+        "mode": "edit_image",
+        "model": "krea_2_turbo",
+        "prompt": "Mist over hills",
+        "negativePrompt": "text, watermark",
+        "count": 2,
+        "width": 320,
+        "height": 256,
+        "seed": 100,
+        "seeds": [100, 101],
+        "stylePreset": "cinematic",
+        "styleId": "style_noir",
+        "fitMode": "pad",
+        "sourceAssetId": "asset_source_1",
+        "referenceAssetIds": ["asset_ref_1", "asset_ref_2"],
+        "maskAssetId": "asset_mask_1",
+        "upscale": { "enabled": true, "engine": "real-esrgan", "factor": 2 },
+        "loras": [{
+            "name": "Film Grain",
+            "weight": 0.6,
+            "source": { "provider": "huggingface", "repo": "acme/film-grain", "file": "grain.safetensors" }
+        }],
+        "modelManifestEntry": { "family": "krea" },
+        "advanced": {
+            "steps": 8,
+            "sampler": "euler",
+            "guidanceScale": 3.5,
+            "mlxQuantize": 4,
+            "flashAttn": true,
+            "controlImage": "asset_control_1"
+        }
+    })
+    .as_object()
+    .cloned()
+    .unwrap()
+}
+
+fn write_one(plan: &ImagePlan, req: &ImageRequest, seed: i64, project_path: &Path) -> JsonObject {
+    let pixels = stub_rgb8(req.width, req.height, seed);
+    write_image_asset(
+        plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(req),
+        project_path,
+    )
+    .unwrap()
+}
+
+/// The main funnel embeds the sanitized envelope, and the envelope describes THIS image.
+///
+/// `write_image_asset` is the one place every generated image is written, which is why sc-15948
+/// embeds here rather than at the four egress paths (`std::fs::copy`, the API's `ReaderStream`, the
+/// browser's `<a download>`, the MCP base64) — all of which are byte-exact and therefore carry
+/// whatever this wrote, including a PNG dragged straight out of Explorer.
+#[test]
+fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let payload = embed_payload();
+    let req = ImageRequest::from_payload(&payload);
+    // No preference file at all — embedding is ON by default, which is the shape a fresh install has.
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    // Image index 0 of a two-image batch whose base seed is 100 — so the seed that lands in the
+    // envelope has to be this image's, not the batch's `seeds` list.
+    let fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("it carries a workflow");
+
+    assert_eq!(share.mode, "edit_image");
+    assert_eq!(share.model, "krea_2_turbo");
+    assert_eq!(share.prompt, "Mist over hills");
+    assert_eq!(share.negative_prompt, "text, watermark");
+    assert_eq!(share.seed, Some(100));
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+    assert_eq!(share.style_preset.as_deref(), Some("cinematic"));
+    assert_eq!(share.fit_mode.as_deref(), Some("pad"));
+    // The payload asked for an inline upscale, but THIS file is the base render — see
+    // `the_base_image_of_an_inline_upscale_describes_no_upscale_pass`.
+    assert_eq!(share.upscale, None);
+    assert_eq!(
+        share.loras.first().and_then(|lora| lora.repo.as_deref()),
+        Some("acme/film-grain")
+    );
+
+    // Input images by SHAPE, never by id: source + two references + mask + the control map.
+    let mut kinds: Vec<(&str, u32)> = share
+        .inputs
+        .iter()
+        .map(|input| (input.kind.as_str(), input.count))
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        vec![("control", 1), ("mask", 1), ("reference", 2), ("source", 1)]
+    );
+
+    // The allow-list ran on the way out, in the file that actually leaves the machine.
+    let advanced = &share.advanced;
+    assert_eq!(advanced.get("steps"), Some(&json!(8)));
+    assert_eq!(advanced.get("sampler"), Some(&json!("euler")));
+    for denied in ["mlxQuantize", "flashAttn", "controlImage"] {
+        assert!(
+            !advanced.contains_key(denied),
+            "`{denied}` must not travel inside a shared image"
+        );
+    }
+    let text = serde_json::to_string(&share).unwrap();
+    for local_id in [
+        "asset_source_1",
+        "asset_ref_1",
+        "asset_mask_1",
+        "asset_control_1",
+        "\"projectId\"",
+    ] {
+        assert!(!text.contains(local_id), "{local_id} leaked: {text}");
+    }
+
+    // And it is still an ordinary PNG: the chunk is ancillary, so every decoder must ignore it.
+    let decoded = image::open(&media).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (320, 256));
+}
+
+/// Turning the setting off writes the file SceneWorks writes today, to the byte.
+///
+/// Proven by comparison against a real `save_with_format` write of the same pixel buffer rather
+/// than by reading the implementation — the `None` arm of `write_workflow_chunk` guarantees this
+/// (`the_none_path_is_byte_identical_to_save_with_format`, sc-15947) and this is the seam actually
+/// taking it.
+#[test]
+fn embedding_off_writes_the_bytes_sceneworks_writes_today() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    write_embed_preference(&config_dir, false);
+    let settings = settings_with_config_dir(&config_dir);
+
+    let payload = embed_payload();
+    let req = ImageRequest::from_payload(&payload);
+    let source = workflow_source(&settings, &payload);
+    assert!(
+        source.is_none(),
+        "a stored `embedWorkflowInImages: false` must leave nothing to embed"
+    );
+
+    let seed = resolve_seed(&req, 0);
+    let plan = ImagePlan::with_count(&req, req.count, source);
+    let fact = write_one(&plan, &req, seed, &project_path);
+    let written = std::fs::read(project_path.join(fact["mediaPath"].as_str().unwrap())).unwrap();
+
+    // The same pixels through the encoder this seam used before sc-15948.
+    let reference_path = dir.path().join("reference.png");
+    image::RgbImage::from_raw(
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, seed),
+    )
+    .unwrap()
+    .save_with_format(&reference_path, image::ImageFormat::Png)
+    .unwrap();
+    let reference = std::fs::read(&reference_path).unwrap();
+
+    assert_eq!(
+        written.len(),
+        reference.len(),
+        "opting out changed the encoded size by {} bytes",
+        written.len().abs_diff(reference.len())
+    );
+    assert!(
+        written == reference,
+        "opting out did not produce the bytes `save_with_format` produces"
+    );
+
+    // Stated the other way round too, so this cannot pass because the reader is broken.
+    let embedded_plan = ImagePlan::with_count(&req, req.count, Some(Arc::new(payload)));
+    let embedded = write_one(&embedded_plan, &req, seed, &project_path);
+    let embedded_bytes =
+        std::fs::read(project_path.join(embedded["mediaPath"].as_str().unwrap())).unwrap();
+    assert!(embedded_bytes.len() > reference.len());
+}
+
+/// A write with no job payload behind it must produce a plain PNG, not an error and not an envelope
+/// of bare fallbacks. The stub and dry-run paths go through this funnel too.
+#[test]
+fn a_write_with_no_payload_embeds_nothing_and_still_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    assert!(
+        workflow_source(&settings, &JsonObject::new()).is_none(),
+        "an empty payload has nothing to describe, so it must embed nothing"
+    );
+
+    let req =
+        request(json!({ "projectId": "p", "model": "z_image_turbo", "width": 256, "height": 256 }));
+    let plan = ImagePlan::new(&req);
+    let fact = write_one(&plan, &req, 1, &project_path);
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    assert_eq!(
+        sceneworks_core::workflow_png::read_workflow_chunk_file(&media).unwrap(),
+        None,
+        "an absent payload is an absence, never an error"
+    );
+    assert!(image::open(&media).is_ok());
+}
+
+/// The toggle is read live off the config dir, so a user who flips it does not have to restart the
+/// worker — the same live-handoff shape as the GPU-memory-limit file (epic 7819).
+#[test]
+fn the_embed_toggle_is_read_from_the_config_dir_each_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().to_path_buf();
+    let settings = settings_with_config_dir(&config_dir);
+    let payload = embed_payload();
+
+    assert!(
+        workflow_source(&settings, &payload).is_some(),
+        "no preference file means ON"
+    );
+    write_embed_preference(&config_dir, false);
+    assert!(workflow_source(&settings, &payload).is_none());
+    write_embed_preference(&config_dir, true);
+    assert!(workflow_source(&settings, &payload).is_some());
+}
+
+/// The inline-upscaled variant carries the pass that produced IT, and specifically the pass that
+/// RAN rather than the one that was requested (sc-15948).
+///
+/// The request here asks for `aura-sr` at 3x — an engine that no longer exists and a factor the
+/// worker does not offer. `apply_inline_upscale` normalizes both before upscaling, so a shared
+/// upscaled image that echoed the request would describe a pass nobody can reproduce.
+#[test]
+fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
+    let mut payload = embed_payload();
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let base_fact = json!({
+        "assetId": "asset_base", "seed": 101, "width": 320, "height": 256, "index": 0
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let applied = json!({ "enabled": true, "engine": "seedvr2", "factor": 2, "softness": 0.25 });
+
+    let share = upscaled_workflow_share(&req, &base_fact, &payload, &applied);
+    let upscale = share.upscale.as_ref().expect("the pass is recorded");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
+    assert_eq!(upscale.factor, Some(2));
+    assert_eq!(upscale.softness, Some(0.25));
+
+    // The base generation still travels — the upscaled file is base + pass, not pass alone — and the
+    // seed is the BASE image's, because that is the render this variant came out of.
+    assert_eq!(share.prompt, "Mist over hills");
+    assert_eq!(share.model, "krea_2_turbo");
+    assert_eq!(share.seed, Some(101));
+    // Generation geometry, not the upscaled file's: the envelope is a recipe, and "render 320x256
+    // then upscale 2x" is what reproduces this image.
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+
+    // A payload that omitted geometry falls back to the BASE fact's, never to the upscaled file's.
+    let mut geometry_less = payload.clone();
+    geometry_less.remove("width");
+    geometry_less.remove("height");
+    let share = upscaled_workflow_share(&req, &base_fact, &geometry_less, &applied);
+    assert_eq!((share.width, share.height), (Some(320), Some(256)));
+}
+
+/// The BASE image of an inline-upscale generation must not describe a pass it never received
+/// (sc-15948).
+///
+/// `apply_inline_upscale` keeps the base render as its own retained asset and appends the upscaled
+/// variant beside it, so an inline-upscale generation ships TWO files. `write_image_asset` embeds the
+/// raw request payload, which means the base file used to claim `upscale.enabled: true` — and claim
+/// it in the REQUESTED terms, which the pass then clamps (`factor` to 2 or 4) and normalizes (the
+/// dropped `aura-sr` to `real-esrgan`). The hostile request below asks for `aura-sr` at 3x: neither
+/// exists, and the base image was never upscaled at all, so a base envelope echoing them named a
+/// dropped engine at an unoffered factor on a file that received no pass. sc-15952 prefills the
+/// studio from this.
+///
+/// The two halves are asserted together on one generation, because "drop it from the base" is only
+/// right if the variant still carries it — otherwise the pass would go unrecorded everywhere.
+#[test]
+fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut payload = embed_payload();
+    payload.insert(
+        "upscale".to_owned(),
+        json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let base_fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
+
+    let media = project_path.join(base_fact["mediaPath"].as_str().unwrap());
+    let base = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("the base image still carries its own workflow");
+    assert_eq!(
+        base.upscale, None,
+        "the base render received no upscale pass, so its envelope must not describe one"
+    );
+    // Not merely absent from the typed field — absent from the FILE. A serialized `"upscale"` key
+    // would still reach sc-15952's prefill.
+    let text = serde_json::to_string(&base).unwrap();
+    for fragment in ["upscale", "aura-sr"] {
+        assert!(
+            !text.contains(fragment),
+            "{fragment:?} must not appear in the base image's envelope: {text}"
+        );
+    }
+    // Everything else about the base render is untouched.
+    assert_eq!(base.prompt, "Mist over hills");
+    assert_eq!(base.seed, Some(100));
+    assert_eq!((base.width, base.height), (Some(320), Some(256)));
+
+    // The derived variant is where the pass lives, in APPLIED terms: `apply_inline_upscale` clamps
+    // 3 to 2 and normalizes `aura-sr` to `real-esrgan` before upscaling.
+    let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
+    let variant = upscaled_workflow_share(&req, &base_fact, &payload, &applied);
+    let upscale = variant
+        .upscale
+        .as_ref()
+        .expect("the variant records the pass");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.engine.as_deref(), Some("real-esrgan"));
+    assert_eq!(upscale.factor, Some(2));
+}
+
+/// The detail pass has its OWN job payload, so its envelope describes the refine — not the
+/// generation that produced the image it refined (sc-15948).
+#[test]
+fn the_detail_pass_describes_itself_and_not_the_source_generation() {
+    // The payload `buildDetailJobBody` sends: a source asset, a backbone, and two knobs.
+    let payload = json!({
+        "projectId": "p",
+        "sourceAssetId": "asset_source_1",
+        "model": "realvisxl",
+        "displayName": "Mist over hills",
+        "advanced": { "strength": 0.55, "cnScale": 0.7 }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+
+    let share = detail_workflow_share(
+        &payload,
+        "realvisxl",
+        "ultra detailed, sharp focus, fine texture, high quality",
+        "blurry, soft, lowres, smooth, plastic",
+        7,
+        1536,
+        1024,
+    );
+
+    assert_eq!(share.mode, "image_detail");
+    assert_eq!(share.model, "realvisxl");
+    assert_eq!(
+        share.prompt, "ultra detailed, sharp focus, fine texture, high quality",
+        "the prompt the model saw lives in `advanced`, not at the payload's top level"
+    );
+    assert_eq!(
+        share.negative_prompt,
+        "blurry, soft, lowres, smooth, plastic"
+    );
+    assert_eq!(share.seed, Some(7));
+    assert_eq!((share.width, share.height), (Some(1536), Some(1024)));
+
+    // Both knobs the Detail UI exposes travel. `cnScale` was unclassified — and therefore silently
+    // dropped — until sc-15948 added it to `ADVANCED_KEY_RULES`.
+    assert_eq!(share.advanced.get("strength"), Some(&json!(0.55)));
+    assert_eq!(share.advanced.get("cnScale"), Some(&json!(0.7)));
+
+    // The source image is a SHAPE, never the local id.
+    assert_eq!(share.inputs.len(), 1);
+    assert_eq!(share.inputs[0].kind, "source");
+    let text = serde_json::to_string(&share).unwrap();
+    assert!(!text.contains("asset_source_1"), "{text}");
+}
+
+/// The measured per-image cost, recorded on sc-15948.
+///
+/// A batch at the sizes the Image Studio actually renders, so "the chunk and nothing else" is a
+/// number rather than a claim. The bound is deliberately loose in one direction only: what would be
+/// a regression is the *encoder* drifting (a compression-level or row-filter change would move the
+/// delta by kilobytes on the pixels, not by tens of bytes on the text), which is what the sc-15947
+/// invariant test pins and what this would notice second.
+#[test]
+fn the_embedded_chunk_costs_only_the_chunk_on_a_representative_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut deltas = Vec::new();
+    for (width, height) in [(512, 512), (768, 512), (1024, 1024), (1280, 720)] {
+        let mut payload = embed_payload();
+        payload.insert("width".to_owned(), json!(width));
+        payload.insert("height".to_owned(), json!(height));
+        let req = ImageRequest::from_payload(&payload);
+        let seed = resolve_seed(&req, 0);
+
+        let embedded = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+        let plain = ImagePlan::with_count(&req, 1, None);
+        let with = write_one(&embedded, &req, seed, &project_path);
+        let without = write_one(&plain, &req, seed, &project_path);
+
+        let with_bytes = std::fs::metadata(project_path.join(with["mediaPath"].as_str().unwrap()))
+            .unwrap()
+            .len();
+        let without_bytes =
+            std::fs::metadata(project_path.join(without["mediaPath"].as_str().unwrap()))
+                .unwrap()
+                .len();
+        let delta = with_bytes as i64 - without_bytes as i64;
+        println!("{width}x{height}: {without_bytes} -> {with_bytes} (+{delta} bytes)");
+        deltas.push(delta);
+    }
+
+    // Effectively one number regardless of the pixels: the only thing that moves is the deflated
+    // length of the envelope's own `width`/`height` digits, which is single-digit bytes. Measured on
+    // this batch: 446 / 449 / 448 / 446 bytes.
+    let (low, high) = (
+        *deltas.iter().min().expect("a batch"),
+        *deltas.iter().max().expect("a batch"),
+    );
+    assert!(
+        high - low <= 32,
+        "the per-image cost must be flat across image sizes, measured {deltas:?}"
+    );
+    assert!(
+        (200..2048).contains(&low) && (200..2048).contains(&high),
+        "a representative envelope should cost a few hundred bytes, measured {deltas:?}"
+    );
+}
+
 #[test]
 fn resolve_seed_matches_python_precedence() {
     // base seed wins (seed + index), even over an explicit seeds list.
