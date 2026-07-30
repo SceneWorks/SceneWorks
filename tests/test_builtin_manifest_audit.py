@@ -1570,11 +1570,25 @@ def test_wan_a14b_candle_all_tiers_measured_q8_admits_32gb():
     completes them:
       * q8's live peak is ~28 GiB, but its nvidia-smi pool high-water (~34-36, which cudarc never frees)
         left it unproven whether a <=32 GB card packs down to the live peak. A GPU-memory-balloon
-        emulation (64 GiB balloon -> ~31 GiB free) reproduced the SAME ~28 live peak at full GPU util with
-        no spill, so q8 is gated at its live peak and now ADMITS a 32 GB RTX 5090 -- the epic goal.
+        emulation (64 GiB balloon -> ~31 GiB free) reproduced the SAME ~28 live peak with no apparent
+        spill, so q8 is gated at its live peak and ADMITS a 32 GB RTX 5090 -- the epic goal.
       * bf16 was staged (dense fp32 diffusers, after downloading the missing transformer_2 shards) and
         measured at ~39 GiB (one bf16 expert + activations), REPLACING the old conservative derived 56
         bound: the real number admits a 48 GB card but stays refused on 32.
+
+    WARNING -- the q8/bf16 <=32/<=48 admissions are UNPROVEN (sc-16091 -> sc-16118). The balloon argument
+    behind them is circular: `balloon(64) + live(28) = 92 < 96` substitutes the LIVE figure for the pool
+    high-water, which is only valid if the pool trimmed -- the very claim under test. Under the competing
+    hypothesis it reads 64 + 34.4 = 98.4 > 95.6, a ~2.8 GiB overcommit. And "a spill would inflate wall
+    time" is measured FALSE on that host (sc-15791): a 1.48 GiB overcommit completed at 1.07x, faster in a
+    sibling run. Both hypotheses predict what was observed, since USED_MEM_HIGH reports LIVE bytes either
+    way. bf16 has no independent evidence at all -- it was granted 48 on the same q8 inference.
+
+    The values below are therefore pinned as SHIPPED, not as VERIFIED. This test guards against silent
+    drift; it does not certify the small-card fit. sc-16118 re-validates both under an ENFORCED pool cap
+    (`CUmemPoolProps.maxSize` + `cuDeviceSetMemPool`) instead of a balloon, which is not a ceiling on that
+    hardware. If a tier fails there, these numbers change and this docstring's premise goes with them.
+
     Pinning the exact values (not just measured:true) mutation-checks the flip -- ripping a tier out or
     regressing q8 back to its pool bound goes RED here. This is the inverse of the sc-12631
     `..._q4_measured_admits_32gb_q8_bf16_deferred` tripwire it replaces.
