@@ -347,7 +347,8 @@ mod tests {
         MemoryConformanceState, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryFormulaKind,
         MemoryLifecycleCapabilities, MemoryMode, MemoryParameterRanges, MemoryParityContract,
         MemoryParityResult, MemoryPhase, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
-        MemoryStrategyCapability, MemoryStrategyParameters, Precision, Quant,
+        MemoryStrategyCapability, MemoryStrategyParameters, MemoryWindowMaterialization, Precision,
+        Quant,
     };
     use std::sync::{Arc, Mutex};
 
@@ -369,6 +370,12 @@ mod tests {
                 device_residency: true,
                 host_backed_weights: true,
                 host_to_device_block_materialization: true,
+                // SC-16090 made this field required, deliberately: a default would be an opt-out that
+                // reads as a declaration. This is a synthetic fixture (`provider_id: "test"`) with no
+                // loader behind it, so the value is a choice about coverage rather than a claim — the
+                // conforming one keeps the rest of this module reading as the steady state, and
+                // `a_declared_host_conversion_is_still_selectable` covers the other arm.
+                block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
             },
         );
         contract.strategies = MemoryStrategy::ALL
@@ -1401,6 +1408,93 @@ mod tests {
             "an excluded cheaper rung does not stop the walk, so rung 4 IS reachable at 12 GiB where \
              rung 3's 10 GiB peak fits — the alternative there is Unverified, not a cheaper render: \
              {selection:?}"
+        );
+    }
+
+    /// **SC-16090 — declaring a non-conforming window realization must not veto it.**
+    ///
+    /// The contract lets a provider ship a rung-4 realization that converts formats per window, so
+    /// long as it says what it converts and names the story removing it. That is the shape
+    /// `candle-gen-krea` ships today (`HostFormatConversion { owner_story: "sc-16096" }`), and it is a
+    /// deliberate decision rather than an oversight: within this ladder rung 4 is reached only when
+    /// nothing cheaper fits, so refusing it would trade a slow render for no render.
+    ///
+    /// gen-core pins that such a contract is conformance-CLEAN. Nothing pinned that it is still
+    /// SELECTED, and that half is this repo's: `select_strategy` bails to
+    /// `Unverified { Invalid }` on any non-empty `conformance_errors`, so a later "tightening" of that
+    /// rule into a veto would not fail a gen-core test — it would silently drop Krea's entire ladder to
+    /// resident-only gating, on every candle job. This is the assertion that turns that red.
+    ///
+    /// The undeclared arm is asserted alongside it, so the test cannot pass by the rule being absent.
+    #[test]
+    fn a_declared_host_conversion_is_still_selectable() {
+        let converting = |owner_story: &str| MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: true,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::HostFormatConversion {
+                converts: "MLX affine packed triple -> GGML Q4_1 per projection, per window"
+                    .to_owned(),
+                owner_story: owner_story.to_owned(),
+            },
+        };
+        let mut record = evidence(MemoryStrategy::BoundedTransformerResidency);
+        record.key.parameters = cumulative_params(MemoryStrategy::BoundedTransformerResidency);
+        record.predicted_peak_bytes = (2.0 * BYTES_PER_GIB) as u64;
+        record.observed_peak_bytes = Some(record.predicted_peak_bytes);
+        let candidates = [Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::BoundedTransformerResidency,
+                parameters: cumulative_params(MemoryStrategy::BoundedTransformerResidency),
+                tier: tier(),
+            },
+            evidence: &record,
+        }];
+        let select = |provider: &MemoryProviderContract| {
+            select_strategy(
+                request(),
+                provider,
+                Some(Budget {
+                    available_gb: 8.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 8.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &candidates,
+            )
+        };
+
+        let mut declared = contract();
+        declared.backend = converting("sc-16096");
+        assert!(
+            matches!(
+                select(&declared),
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "a declared per-window conversion must stay SELECTABLE — the rule refuses an undeclared \
+             realization, never a slow one: {:?}",
+            select(&declared)
+        );
+
+        // The other arm: undeclared is a contract-level error, and the severity is wider than rung 4
+        // by design — the whole contract becomes uninterpretable, so the selector refuses everything.
+        let mut undeclared = contract();
+        undeclared.backend = converting("");
+        assert!(
+            matches!(
+                select(&undeclared),
+                Selection::Unverified {
+                    reason: MemoryEvidenceVerdict::Invalid
+                }
+            ),
+            "an UNDECLARED conversion must fail closed rather than select: {:?}",
+            select(&undeclared)
         );
     }
 
