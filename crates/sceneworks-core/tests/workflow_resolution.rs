@@ -274,6 +274,98 @@ fn a_repo_match_wins_over_a_name_match() {
     assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Repo));
 }
 
+fn two_adapters_off_one_pack() -> Vec<CatalogEntry> {
+    vec![
+        CatalogEntry::new("pack_union")
+            .with_name("Union")
+            .with_repo("acme/pack")
+            .installed(),
+        CatalogEntry::new("pack_hdr")
+            .with_name("HDR")
+            .with_repo("acme/pack")
+            .installed(),
+    ]
+}
+
+#[test]
+fn a_repo_two_local_adapters_share_lets_the_name_say_which_of_those_two() {
+    // sc-15952. `loras[].source.file` does not travel, so an envelope naming a repo that TWO
+    // locally-installed adapters came out of cannot say which the sender used FROM THE REPO ALONE.
+    // But both parties installing the same multi-adapter pack is the ordinary way a repo becomes
+    // ambiguous, and it is precisely the case where the two installs' display names agree — so the
+    // name breaks the tie among those two rows, and the recipe the envelope named exactly is
+    // replayed exactly.
+    let catalogs = StaticCatalogs {
+        loras: two_adapters_off_one_pack(),
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Union", "repo": "acme/pack", "weight": 0.8 }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras.len(), 1, "the entry is listed, never dropped");
+    assert_eq!(report.loras[0].state, RequirementState::Resolved);
+    assert_eq!(report.loras[0].catalog_id.as_deref(), Some("pack_union"));
+    assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Name));
+    assert!(report.runnable);
+}
+
+#[test]
+fn a_repo_two_local_adapters_share_confines_the_name_pass_to_those_two() {
+    // The half that must NOT loosen. The repo narrowed the answer to the pack's own rows; a name
+    // matching none of them may not reach across the catalog for a row from another repo, because
+    // that is the weaker key overruling the stronger one. Unresolved and NAMED, never guessed.
+    let mut loras = two_adapters_off_one_pack();
+    loras.push(
+        CatalogEntry::new("film_grain")
+            .with_name("Film Grain")
+            .with_repo("other/pack")
+            .installed(),
+    );
+    let catalogs = StaticCatalogs {
+        loras,
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Film Grain", "repo": "acme/pack", "weight": 0.8 }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras.len(), 1, "the entry is listed, never dropped");
+    assert_eq!(report.loras[0].state, RequirementState::Missing);
+    assert!(
+        report.loras[0].catalog_id.is_none(),
+        "no adapter may be presented as the answer: {:?}",
+        report.loras[0]
+    );
+    assert!(report.loras[0].matched_by.is_none());
+    assert!(
+        report.loras[0].detail.contains("acme/pack"),
+        "the sentence must name the repo: {}",
+        report.loras[0].detail
+    );
+    assert!(!report.runnable);
+}
+
+#[test]
+fn a_repo_nothing_here_carries_still_falls_through_to_the_name_pass() {
+    // The guard above is scoped to AMBIGUITY. A repo this install simply does not know must still
+    // let a display-name match resolve — that is how a locally-imported copy of a shared LoRA is
+    // found at all, and narrowing it would report half the resolvable LoRAs as user-trained.
+    let catalogs = StaticCatalogs {
+        loras: vec![CatalogEntry::new("film_grain")
+            .with_name("Film Grain")
+            .installed()],
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{ "name": "Film Grain", "repo": "acme/never-heard-of-it" }],
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras[0].state, RequirementState::Resolved);
+    assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Name));
+    assert_eq!(report.loras[0].catalog_id.as_deref(), Some("film_grain"));
+}
+
 #[test]
 fn an_unresolvable_lora_is_listed_rather_than_dropped() {
     // A user-trained LoRA is the EXPECTED unresolvable case. Dropping the entry would make the

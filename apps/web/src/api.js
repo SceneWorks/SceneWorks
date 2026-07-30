@@ -194,3 +194,19 @@ export async function inspectWorkflowFile(file, { projectId, token, signal } = {
   }
   return apiFetch("/api/v1/workflows/inspect", token, { method: "POST", body, signal });
 }
+
+// The recipe an ALREADY-IMPORTED asset is carrying, and what this install can do about it right
+// now (sc-15952). Same `{ status, workflow, resolution }` body as `inspectWorkflowFile`, so a
+// reader branches on `status` either way.
+//
+// The envelope itself needs no request — it rides on the asset at `extra.importedWorkflow`
+// (sc-15949). The RESOLUTION is what this fetches: it is computed against catalogs that live
+// behind the API, and it stops being true the moment a download finishes, which is why this is a
+// plain re-GET rather than something cached beside the envelope.
+export async function fetchAssetWorkflow(projectId, assetId, { token, signal } = {}) {
+  return apiFetch(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/workflow`,
+    token,
+    { signal },
+  );
+}

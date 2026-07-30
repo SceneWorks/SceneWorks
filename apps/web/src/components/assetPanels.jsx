@@ -26,6 +26,7 @@ import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { Modal } from "./Modal.jsx";
+import { assetImportedWorkflow } from "../workflowShare.js";
 
 // Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
 // Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
@@ -878,6 +879,7 @@ function FullscreenPreviewComponent({
   onEditInStudio,
   onPreviewAsset,
   onUseRecipe,
+  onUseImportedRecipe,
   previousAsset,
   purgeAsset,
   sourceAsset,
@@ -904,6 +906,33 @@ function FullscreenPreviewComponent({
   React.useEffect(() => {
     setKeepSeed(false);
   }, [asset.id]);
+
+  // The two "Use this recipe" affordances, and why they are mutually exclusive.
+  //
+  // A GENERATED asset has a recipe recorded beside it by this install, complete with the seed of
+  // this exact image — the long-standing path. An IMPORTED one has an envelope read out of the
+  // file's own bytes (sc-15949), which is a different recipe from a different machine and reaches
+  // the studio through a different seam. Rendering both would put two identical buttons side by
+  // side pointing at two different recipes, so the recorded one wins where both somehow exist and
+  // the imported one appears where it is the only recipe there is. `hasImportedWorkflow` is also
+  // the "and nowhere else" half: no envelope, no button.
+  const hasRecordedRecipe = Boolean(
+    onUseRecipe &&
+      ["image", "video"].includes(asset.type) &&
+      (asset.generationSet?.recipe || asset.recipe),
+  );
+  // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
+  // Image Studio, and there is no video lane behind it. Unreachable today — only the image import
+  // path writes `extra.importedWorkflow` — but "unreachable" is a fact about the WRITER, and the
+  // day a video envelope kind lands the reader would start offering an image-only prefill for it
+  // with nothing in between to notice. The guard belongs on the side that decides what the button
+  // does.
+  const hasImportedWorkflow = Boolean(
+    !hasRecordedRecipe &&
+      onUseImportedRecipe &&
+      asset.type === "image" &&
+      assetImportedWorkflow(asset),
+  );
 
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
@@ -1293,7 +1322,7 @@ function FullscreenPreviewComponent({
             </button>
             {/* Videos re-run from their recipe exactly as images do, seed and all (sc-12324) —
                 the affordance follows the recipe, not the media type. */}
-            {onUseRecipe && ["image", "video"].includes(asset.type) && (asset.generationSet?.recipe || asset.recipe) ? (
+            {hasRecordedRecipe ? (
               <>
                 {hasSeed ? (
                   <label className="checkline preview-keep-seed" title="Reuse the exact seed for a byte-for-byte rerun">
@@ -1305,6 +1334,21 @@ function FullscreenPreviewComponent({
                   Use this recipe
                 </button>
               </>
+            ) : null}
+            {/* An image someone else made, imported here, carrying the recipe that made it in its
+                own bytes (sc-15949 → sc-15952). It has no recorded recipe of its own — nothing on
+                this install generated it — so the button above is absent and this one takes its
+                place. Deliberately EXCLUSIVE of it: an asset with both would offer "Use this
+                recipe" twice, pointing at two different recipes, and nothing on screen would say
+                which was which. */}
+            {hasImportedWorkflow ? (
+              <button
+                onClick={() => onUseImportedRecipe(asset)}
+                title="This image carries the recipe that made it"
+                type="button"
+              >
+                Use this recipe
+              </button>
             ) : null}
             {onEditImage && asset.type === "image" ? (
               <button onClick={() => onEditImage(asset)} type="button">

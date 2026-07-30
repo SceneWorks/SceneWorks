@@ -34,6 +34,29 @@
 //! normalization ([`normalized_label`]), the mapping from (known, installed, fetchable) to a
 //! state, and the sentences.
 //!
+//! # What a LoRA's `name` is allowed to decide
+//!
+//! `loras[].repo` and `loras[].name` are not two tries at the same question. The repo id names one
+//! Hugging Face repo on every install; the display name is whatever the SENDER's install called
+//! the adapter, and two installs of the same file routinely disagree about it. So the name is
+//! never allowed to overrule the repo — only to say which row, among the ones the repo already
+//! selected, was meant:
+//!
+//! - **The repo matches exactly one local row.** It resolves, and the name is not consulted at
+//!   all. A `name` that CONTRADICTS that row is therefore ignored rather than acted on. That is a
+//!   deliberate asymmetry, not an oversight: acting on the contradiction would mean either
+//!   reporting a row the repo id positively identifies as unresolved, or letting a label the
+//!   sender's install chose overturn the one key that means the same thing everywhere. The
+//!   envelope does carry a signal here; this reader declines to treat it as one.
+//! - **Several local rows claim the repo.** The repo has narrowed the answer to those rows but
+//!   cannot pick one — `loras[].source.file` does not travel. The name then breaks the tie WITHIN
+//!   that set ([`WorkflowCatalogs::lora_by_name_in_repo`]), because both parties installing the
+//!   same multi-adapter pack is the ordinary way a repo becomes ambiguous and is exactly the case
+//!   where the names agree. A name matching none of the tied rows, or two of them, resolves to
+//!   nothing and is named.
+//! - **No local row claims the repo** (or the envelope carries no repo). Nothing has been narrowed,
+//!   so the name is the only key there is and it runs over the whole catalog.
+//!
 //! # "In the catalog" and "on disk" are different answers
 //!
 //! A cache-only resolver never auto-downloads, so a model the catalog knows perfectly well can
@@ -188,9 +211,44 @@ pub trait WorkflowCatalogs {
     /// identifies one adapter and a display name does not.
     fn lora_by_repo(&self, repo: &str) -> Option<CatalogEntry>;
 
+    /// Whether MORE THAN ONE row claims `repo` — the question [`Self::lora_by_repo`] cannot
+    /// answer, because "nothing matched" and "several matched" reduce to the same `None`.
+    ///
+    /// It is asked because [`classify_lora`] falls back to the display-name pass when the repo
+    /// matched nothing, and an ambiguous repo has to send that fallback somewhere NARROWER than a
+    /// plain miss does. It does not switch the fallback off: see
+    /// [`Self::lora_by_name_in_repo`] for where it goes instead, and why.
+    ///
+    /// The ambiguity is structural rather than unlucky: `loras[].source.file` does **not** travel
+    /// (see `docs/workflow-share-envelope.md`), so an envelope naming a repo two locally-installed
+    /// adapters came out of cannot say which of them the sender used *by repo alone*. Guessing
+    /// produces a plausible wrong image, which is worse than reporting the entry unresolvable.
+    ///
+    /// The converse limit is honest and unclosable from here: a repo holding several adapters of
+    /// which this install registered only ONE is not ambiguous to the catalog, so it resolves —
+    /// and it resolves even when the envelope's `name` names something else entirely, because the
+    /// repo pass wins outright and the name is never consulted. That asymmetry is deliberate, not
+    /// an oversight: see the module docs.
+    fn lora_repo_ambiguous(&self, repo: &str) -> bool;
+
     /// The LoRA catalog row whose display name (or catalog id) matches `name`. Compare with
     /// [`normalized_label`] so both sides fold case and separators identically.
     fn lora_by_name(&self, name: &str) -> Option<CatalogEntry>;
+
+    /// The same display-name lookup as [`Self::lora_by_name`], but over ONLY the rows claiming
+    /// `repo` — the tie-break [`classify_lora`] runs when [`Self::lora_repo_ambiguous`] said yes.
+    ///
+    /// Why a restricted pass rather than either extreme. Refusing the name outright makes the
+    /// ordinary case unresolvable: **both parties installing the same multi-adapter pack is the
+    /// usual way a repo becomes ambiguous**, and it is exactly the case where the two installs'
+    /// display names agree and the name is right. Running the UNRESTRICTED pass is the other
+    /// error: it lets the weaker key pick a row from some other repo, contradicting the stronger
+    /// key that had already narrowed the answer to this repo's rows.
+    ///
+    /// So the repo keeps its authority — the answer is one of the rows claiming it, or nothing —
+    /// and the name is used only to say WHICH of those rows. A unique hit inside the tied set
+    /// resolves; zero hits, or a name two of the tied rows share, stays unresolved and is named.
+    fn lora_by_name_in_repo(&self, name: &str, repo: &str) -> Option<CatalogEntry>;
 
     /// The Style catalog row for a `styleId` — a group id or a sub-style id, one flat id-space.
     fn style(&self, id: &str) -> Option<CatalogEntry>;
@@ -275,30 +333,33 @@ fn find_by_id(entries: &[CatalogEntry], id: &str) -> Option<CatalogEntry> {
         .cloned()
 }
 
-impl WorkflowCatalogs for StaticCatalogs {
-    fn model(&self, slug: &str) -> Option<CatalogEntry> {
-        find_by_id(&self.models, slug)
-    }
-
-    fn lora_by_repo(&self, repo: &str) -> Option<CatalogEntry> {
+impl StaticCatalogs {
+    /// The one repo pass, so [`WorkflowCatalogs::lora_by_repo`] and
+    /// [`WorkflowCatalogs::lora_repo_ambiguous`] read the same three-way answer instead of two
+    /// predicates that can drift into disagreeing about what "ambiguous" means.
+    fn match_lora_repo(&self, repo: &str) -> Match<'_> {
         let wanted = repo.trim().to_ascii_lowercase();
         if wanted.is_empty() {
-            return None;
+            return Match::None;
         }
-        match unique_match(&self.loras, |entry| {
+        unique_match(&self.loras, |entry| {
             entry
                 .repo
                 .as_deref()
                 .is_some_and(|candidate| candidate.trim().to_ascii_lowercase() == wanted)
-        }) {
-            Match::One(entry) => Some(entry.clone()),
-            // Two rows off one repo (two adapter FILES from the same Hugging Face repo) are two
-            // different adapters. The repo id no longer identifies one, so it identifies none.
-            Match::None | Match::Ambiguous => None,
-        }
+        })
     }
 
-    fn lora_by_name(&self, name: &str) -> Option<CatalogEntry> {
+    /// The two-pass name lookup, over the rows `restrict` admits.
+    ///
+    /// One body for both name methods so the whole-catalog pass and the tied-rows pass cannot
+    /// drift into folding labels differently or ordering their two passes differently — the
+    /// restriction is the ONLY difference between them.
+    fn match_lora_name(
+        &self,
+        name: &str,
+        restrict: &dyn Fn(&CatalogEntry) -> bool,
+    ) -> Option<CatalogEntry> {
         let wanted = normalized_label(name);
         if wanted.is_empty() {
             return None;
@@ -307,10 +368,11 @@ impl WorkflowCatalogs for StaticCatalogs {
         // predicate over `name || id` let a row whose id happened to equal the sender's name win
         // over the row actually CALLED that, purely because it came first in the catalog.
         match unique_match(&self.loras, |entry| {
-            entry
-                .name
-                .as_deref()
-                .is_some_and(|candidate| normalized_label(candidate) == wanted)
+            restrict(entry)
+                && entry
+                    .name
+                    .as_deref()
+                    .is_some_and(|candidate| normalized_label(candidate) == wanted)
         }) {
             Match::One(entry) => return Some(entry.clone()),
             // An ambiguous name pass stops here rather than falling through: an id match is the
@@ -320,10 +382,51 @@ impl WorkflowCatalogs for StaticCatalogs {
         }
         // Pass 2: the catalog id, so a name slugged on one install (`film_grain`) still matches a
         // row that carries no display name. Only reached when NOTHING is called `wanted`.
-        match unique_match(&self.loras, |entry| normalized_label(&entry.id) == wanted) {
+        match unique_match(&self.loras, |entry| {
+            restrict(entry) && normalized_label(&entry.id) == wanted
+        }) {
             Match::One(entry) => Some(entry.clone()),
             Match::None | Match::Ambiguous => None,
         }
+    }
+}
+
+impl WorkflowCatalogs for StaticCatalogs {
+    fn model(&self, slug: &str) -> Option<CatalogEntry> {
+        find_by_id(&self.models, slug)
+    }
+
+    fn lora_by_repo(&self, repo: &str) -> Option<CatalogEntry> {
+        match self.match_lora_repo(repo) {
+            Match::One(entry) => Some(entry.clone()),
+            // Two rows off one repo (two adapter FILES from the same Hugging Face repo) are two
+            // different adapters. The repo id no longer identifies one, so it identifies none.
+            Match::None | Match::Ambiguous => None,
+        }
+    }
+
+    fn lora_repo_ambiguous(&self, repo: &str) -> bool {
+        matches!(self.match_lora_repo(repo), Match::Ambiguous)
+    }
+
+    fn lora_by_name(&self, name: &str) -> Option<CatalogEntry> {
+        self.match_lora_name(name, &|_| true)
+    }
+
+    fn lora_by_name_in_repo(&self, name: &str, repo: &str) -> Option<CatalogEntry> {
+        let wanted_repo = repo.trim().to_ascii_lowercase();
+        if wanted_repo.is_empty() {
+            return None;
+        }
+        // The SAME repo comparison `match_lora_repo` uses, so the set the name is asked to
+        // choose within is exactly the set the repo pass called tied. Two spellings of "claims
+        // this repo" would let a row be tied for one purpose and absent for the other.
+        self.match_lora_name(name, &|entry| {
+            entry
+                .repo
+                .as_deref()
+                .is_some_and(|candidate| candidate.trim().to_ascii_lowercase() == wanted_repo)
+        })
     }
 
     fn style(&self, id: &str) -> Option<CatalogEntry> {
@@ -718,20 +821,36 @@ fn classify_model(slug: &str, catalogs: &dyn WorkflowCatalogs) -> ModelRequireme
 fn classify_lora(lora: &WorkflowLora, catalogs: &dyn WorkflowCatalogs) -> LoraRequirement {
     // Repo before name: `owner/name` identifies one adapter, a display name is whatever the
     // sender's install called it.
-    let matched = lora
+    let repo = lora
         .repo
         .as_deref()
         .map(str::trim)
-        .filter(|repo| !repo.is_empty())
+        .filter(|repo| !repo.is_empty());
+    // A repo SEVERAL local rows claim is not a miss, and the difference decides WHERE the name
+    // pass may look — not whether it runs at all. `source.file` does not travel, so two adapters
+    // off one repo are two answers the repo id alone cannot choose between; the display name may
+    // break that tie, but only among the tied rows. Letting it reach OUTSIDE the repo would be the
+    // weaker key overruling the stronger one, which had already narrowed the answer to this repo.
+    //
+    // Both halves matter. Both parties installing the same multi-adapter pack is the ordinary way
+    // a repo becomes ambiguous, and it is precisely the case where the names agree — refusing the
+    // name there reports "applying one would be a guess" about a recipe the envelope named exactly.
+    let repo_ambiguous = repo.is_some_and(|repo| catalogs.lora_repo_ambiguous(repo));
+    let name = lora
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let matched = repo
         .and_then(|repo| catalogs.lora_by_repo(repo))
         .map(|entry| (LoraMatchedBy::Repo, entry))
         .or_else(|| {
-            lora.name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .and_then(|name| catalogs.lora_by_name(name))
-                .map(|entry| (LoraMatchedBy::Name, entry))
+            let name = name?;
+            match repo.filter(|_| repo_ambiguous) {
+                Some(repo) => catalogs.lora_by_name_in_repo(name, repo),
+                None => catalogs.lora_by_name(name),
+            }
+            .map(|entry| (LoraMatchedBy::Name, entry))
         });
     let entry = matched.as_ref().map(|(_, entry)| entry);
     let state = state_for(entry);
@@ -752,6 +871,15 @@ fn classify_lora(lora: &WorkflowLora, catalogs: &dyn WorkflowCatalogs) -> LoraRe
         RequirementState::Missing if entry.is_some() => {
             format!("{label} is in the LoRA catalog but this install has no way to fetch it.")
         }
+        // Named separately from a plain miss because the user's next move is different: they have
+        // the weights, and no amount of downloading will tell this install WHICH of them the file
+        // meant.
+        RequirementState::Missing | RequirementState::UserSupplied if repo_ambiguous => format!(
+            "More than one LoRA installed here comes from Hugging Face repo `{}`, and a shared \
+             recipe does not record which adapter file was used — so applying one would be a \
+             guess.",
+            repo.unwrap_or_default()
+        ),
         RequirementState::Missing | RequirementState::UserSupplied => format!(
             "No LoRA on this install matches {identity}; it was most likely trained by whoever \
              shared the image."
@@ -1036,21 +1164,194 @@ mod tests {
         assert!(catalogs.lora_by_name("film grain").is_none());
     }
 
-    #[test]
-    fn two_rows_off_one_repo_resolve_to_nothing() {
-        let catalogs = StaticCatalogs {
+    fn multi_adapter_repo() -> StaticCatalogs {
+        StaticCatalogs {
             loras: vec![
                 CatalogEntry::new("union")
                     .with_repo("acme/pack")
+                    .with_name("Union")
                     .installed(),
-                CatalogEntry::new("hdr").with_repo("Acme/Pack").installed(),
+                CatalogEntry::new("hdr")
+                    .with_repo("Acme/Pack")
+                    .with_name("HDR")
+                    .installed(),
             ],
             ..StaticCatalogs::default()
-        };
+        }
+    }
+
+    #[test]
+    fn two_rows_off_one_repo_resolve_to_nothing() {
+        let catalogs = multi_adapter_repo();
         assert!(
             catalogs.lora_by_repo("acme/pack").is_none(),
             "two adapter files from one repo are two adapters"
         );
+        assert!(
+            catalogs.lora_repo_ambiguous("acme/pack"),
+            "and the caller must be able to tell that from a plain miss"
+        );
+        assert!(
+            !catalogs.lora_repo_ambiguous("acme/nothing"),
+            "a repo nobody claims is a miss, not an ambiguity"
+        );
+        assert!(!catalogs.lora_repo_ambiguous("   "));
+    }
+
+    #[test]
+    fn an_ambiguous_repo_lets_the_name_break_the_tie_among_the_tied_rows() {
+        // Both installs have the same multi-adapter pack — the ORDINARY way a repo becomes
+        // ambiguous, and the one case where the two installs' display names agree. The repo
+        // narrowed the answer to `union` and `hdr`; the name says which. Refusing here reported
+        // "applying one would be a guess" about a recipe the envelope had named exactly.
+        let catalogs = multi_adapter_repo();
+        let requirement = classify_lora(
+            &WorkflowLora {
+                name: Some("Union".to_owned()),
+                repo: Some("acme/pack".to_owned()),
+                weight: Some(0.8),
+            },
+            &catalogs,
+        );
+        assert_eq!(requirement.state, RequirementState::Resolved);
+        assert_eq!(requirement.catalog_id.as_deref(), Some("union"));
+        assert_eq!(requirement.matched_by, Some(LoraMatchedBy::Name));
+    }
+
+    #[test]
+    fn an_ambiguous_repo_confines_the_name_pass_to_the_rows_claiming_it() {
+        // The leak sc-15952 closed, stated the way it is actually true. The tie-break is scoped to
+        // the repo's own rows: a name matching NONE of them resolves to nothing rather than
+        // reaching across the catalog for a row from some other repo — that would be the weaker
+        // key overruling the stronger one, which had already said the answer is in `acme/pack`.
+        let mut catalogs = multi_adapter_repo();
+        catalogs.loras.push(
+            CatalogEntry::new("film_grain")
+                .with_repo("other/pack")
+                .with_name("Film Grain")
+                .installed(),
+        );
+        let requirement = classify_lora(
+            &WorkflowLora {
+                name: Some("Film Grain".to_owned()),
+                repo: Some("acme/pack".to_owned()),
+                weight: Some(0.8),
+            },
+            &catalogs,
+        );
+        assert_eq!(requirement.state, RequirementState::Missing);
+        assert!(requirement.catalog_id.is_none());
+        assert!(requirement.matched_by.is_none());
+        assert!(
+            requirement.detail.contains("acme/pack") && requirement.detail.contains("guess"),
+            "the sentence must name the repo and why nothing was chosen: {}",
+            requirement.detail
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_repo_whose_tied_rows_share_a_name_resolves_to_nothing() {
+        // The tie-break is a UNIQUE hit inside the tied set, not a first-match. Two rows off one
+        // repo that are also CALLED the same thing leave nothing to choose with, and catalog order
+        // must not become the answer.
+        let catalogs = StaticCatalogs {
+            loras: vec![
+                CatalogEntry::new("union_a")
+                    .with_repo("acme/pack")
+                    .with_name("Union")
+                    .installed(),
+                CatalogEntry::new("union_b")
+                    .with_repo("acme/pack")
+                    .with_name("union")
+                    .installed(),
+            ],
+            ..StaticCatalogs::default()
+        };
+        let requirement = classify_lora(
+            &WorkflowLora {
+                name: Some("Union".to_owned()),
+                repo: Some("acme/pack".to_owned()),
+                weight: None,
+            },
+            &catalogs,
+        );
+        assert_eq!(requirement.state, RequirementState::Missing);
+        assert!(requirement.matched_by.is_none());
+    }
+
+    #[test]
+    fn an_ambiguous_repo_with_no_name_at_all_resolves_to_nothing() {
+        // Nothing to break the tie with. The repo pass declined and there is no second key.
+        let catalogs = multi_adapter_repo();
+        let requirement = classify_lora(
+            &WorkflowLora {
+                name: None,
+                repo: Some("acme/pack".to_owned()),
+                weight: None,
+            },
+            &catalogs,
+        );
+        assert_eq!(requirement.state, RequirementState::Missing);
+        assert!(requirement.matched_by.is_none());
+    }
+
+    #[test]
+    fn the_restricted_name_pass_folds_labels_the_way_the_open_one_does() {
+        // Both name methods run one body, so the tied-rows pass must normalize identically — and
+        // must reach the ID pass for a tied row that carries no display name.
+        let catalogs = multi_adapter_repo();
+        assert_eq!(
+            catalogs
+                .lora_by_name_in_repo("  union  ", "ACME/Pack")
+                .map(|entry| entry.id),
+            Some("union".to_owned()),
+            "case and surrounding space fold on both the name and the repo"
+        );
+        assert!(catalogs.lora_by_name_in_repo("Union", "   ").is_none());
+        assert!(catalogs.lora_by_name_in_repo("   ", "acme/pack").is_none());
+        let id_only = StaticCatalogs {
+            loras: vec![
+                CatalogEntry::new("film_grain")
+                    .with_repo("acme/pack")
+                    .installed(),
+                CatalogEntry::new("other")
+                    .with_repo("acme/pack")
+                    .with_name("Other")
+                    .installed(),
+            ],
+            ..StaticCatalogs::default()
+        };
+        assert_eq!(
+            id_only
+                .lora_by_name_in_repo("Film Grain", "acme/pack")
+                .map(|entry| entry.id),
+            Some("film_grain".to_owned()),
+            "the id pass runs inside the restriction too, for a row with no display name"
+        );
+    }
+
+    #[test]
+    fn an_unambiguous_repo_still_falls_through_to_the_name_pass() {
+        // The guard is scoped to the ambiguous case: a repo NOTHING here carries must still let a
+        // display-name match resolve, which is how a locally-imported copy of a shared LoRA is
+        // found at all.
+        let catalogs = StaticCatalogs {
+            loras: vec![CatalogEntry::new("film_grain")
+                .with_name("Film Grain")
+                .installed()],
+            ..StaticCatalogs::default()
+        };
+        let requirement = classify_lora(
+            &WorkflowLora {
+                name: Some("Film Grain".to_owned()),
+                repo: Some("acme/unknown-pack".to_owned()),
+                weight: None,
+            },
+            &catalogs,
+        );
+        assert_eq!(requirement.state, RequirementState::Resolved);
+        assert_eq!(requirement.matched_by, Some(LoraMatchedBy::Name));
+        assert_eq!(requirement.catalog_id.as_deref(), Some("film_grain"));
     }
 
     #[test]
@@ -1074,7 +1375,13 @@ mod tests {
             fn lora_by_repo(&self, _: &str) -> Option<CatalogEntry> {
                 None
             }
+            fn lora_repo_ambiguous(&self, _: &str) -> bool {
+                false
+            }
             fn lora_by_name(&self, _: &str) -> Option<CatalogEntry> {
+                None
+            }
+            fn lora_by_name_in_repo(&self, _: &str, _: &str) -> Option<CatalogEntry> {
                 None
             }
             fn style(&self, _: &str) -> Option<CatalogEntry> {

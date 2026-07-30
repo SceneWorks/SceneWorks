@@ -123,7 +123,7 @@ use assets::{
     update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
 mod workflows;
-use workflows::{inspect_workflow, max_inspect_multipart_body_bytes};
+use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body_bytes};
 // Test-only crate-root imports: the `tests` module reaches these helpers via
 // `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
 // Gating them keeps the non-test build warning-free — they have no non-test
@@ -1443,6 +1443,14 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id",
             get(get_asset).delete(delete_asset),
+        )
+        // sc-15952: the resolution report for the envelope an IMPORTED asset is already carrying
+        // at `extra.importedWorkflow`. The envelope needs no route — it rides on the asset — but
+        // the report is computed against catalogs that live behind this API, and it goes stale the
+        // moment a download finishes, so re-resolving after an install is a plain refetch of this.
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/workflow",
+            get(get_asset_workflow),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/poster/:poster_sha256",

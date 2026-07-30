@@ -4,9 +4,11 @@ A PNG that SceneWorks generates carries a small block of JSON describing the rec
 so the recipe travels with the image. The local sidecar (`<media>.sceneworks.json`) does not survive
 a copy-paste into a chat window; this does, because it is inside the file.
 
-Two things read it back today: importing such an image records the envelope on the asset, and
-`POST /api/v1/workflows/inspect` reads one out of an uploaded file without importing anything. The
-studio surfaces that offer it as "use this recipe" are still being built (sc-15951 / sc-15952).
+Three things read it back today: importing such an image records the envelope on the asset,
+`POST /api/v1/workflows/inspect` reads one out of an uploaded file without importing anything, and
+`GET /api/v1/projects/:project_id/assets/:asset_id/workflow` re-reads the recorded one and resolves
+it against this install's catalogs. Both studio surfaces — dropping a shared image anywhere, and
+"Use this recipe" on an imported one — go through the same offer panel.
 
 This document is the contract. It exists for two people:
 
@@ -163,6 +165,17 @@ in that table is not in the file. Named explicitly because these are the ones pe
   decision written down against its name. Either way the receiving install picks its own.
 - **Local ids that resolve to nothing elsewhere.** Recipe preset ids, control-image asset ids,
   trained-overlay ids and their resolved weights paths, Key Point Library collection ids.
+- **Which adapter FILE a LoRA repo means.** `loras[].repo` is the repo id and there is no
+  `loras[].file` beside it — a filename is a location, and the path guard exists to keep those out.
+  The consequence is on the reading side: a receiving install that has two adapters from one repo
+  cannot tell from the repo id alone which the sender used. `loras[].name` is then read as a
+  tie-break *among those rows only* — both parties installing the same multi-adapter pack is the
+  usual way this happens, and it is the case where the two installs' display names agree. A name
+  matching none of the tied rows, or two of them, leaves the entry unresolved and named rather than
+  picked. A repo of which the receiver registered only one adapter is not ambiguous to it and
+  resolves on the repo alone; a `name` that disagrees with that row is not consulted, because a
+  display name is whatever the sender's install called the file and the repo id means the same
+  thing on both machines.
 - **Pose library ids.** A pose selection travels as coordinate arrays (`keypoints`, `hands`,
   `face`), because those are what the worker renders. The library ids that named them do not.
 
@@ -452,6 +465,16 @@ That guardrail exists because the first cut of the panel displayed ten knobs —
 `usePid`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
 `poses`, `phases` — as ordinary settings rows while none of them reached a control. Being told a
 recipe replayed faithfully when it did not is the failure this whole contract exists to prevent.
+
+An `allow` whose *shape* is reduced past the point of replay belongs in the same category, and
+`structuredPrompt` is the standing example. It travels, as its scalar fields; the studio's
+structured builder rehydrates from the `caption` object, which does not. So a shared
+structured-caption recipe reaches no builder control at all and replays as the composed prose in the
+plain prompt box — which reproduces the image faithfully, because the top-level `prompt` is the
+exact string the model received, and is still not the builder being restored. Its `ADVANCED_PREFILL`
+row therefore marks it not restored and says why. Rehydrating the builder instead would mean giving
+the caption a classified sub-schema of its own, which is a change to this contract and not to the
+panel.
 
 If the value is authored text the user typed rather than a slug, say so in the reason and add it to
 `PROSE_KEYS` — which makes it path-exempt, so you are also adding a field to the privacy callout at

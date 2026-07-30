@@ -35,11 +35,12 @@
 
 use super::*;
 
+use sceneworks_core::project_store::IMPORTED_WORKFLOW_KEY;
 use sceneworks_core::workflow_png::{read_workflow_chunk_file, WorkflowChunkError};
 use sceneworks_core::workflow_resolution::{
     build_resolution_report, CatalogEntry, InstallAction, ResolutionReport, StaticCatalogs,
 };
-use sceneworks_core::workflow_share::WorkflowShare;
+use sceneworks_core::workflow_share::{parse_workflow_share, WorkflowShare};
 
 /// `status` when the file carried a readable envelope.
 pub(crate) const INSPECT_STATUS_WORKFLOW: &str = "workflow";
@@ -234,6 +235,101 @@ pub(crate) async fn inspect_workflow(
         })),
         Err(error) => Err(inspect_error(&error)),
     }
+}
+
+/// `code` on the 5xx for an `extra.importedWorkflow` this build cannot read back.
+///
+/// Reachable only through a record OUR OWN import wrote, so it is a server-side fault and never a
+/// statement about a file the caller sent. Its own code because the caller's next move is a bug
+/// report, not a different image.
+pub(crate) const ASSET_WORKFLOW_CODE_UNREADABLE: &str = "asset_workflow_unreadable";
+
+/// `GET /api/v1/projects/:project_id/assets/:asset_id/workflow` — the recipe an IMPORTED asset is
+/// carrying, plus what this install can do about it right now (sc-15952).
+///
+/// # Why a route at all, when the envelope is already on the asset
+///
+/// It is not the envelope that is missing. `list_assets` already hands the web
+/// `extra.importedWorkflow` (sc-15949), so the recipe is in the browser before this route is
+/// called. What is missing is the **report**: the envelope is a fact about the file and the report
+/// is a fact about this machine at this moment, and the catalogs it is computed against
+/// (`model_catalog`'s install-state sweep, the four-scope LoRA merge, the Style catalog, the preset
+/// merge) live behind the API and are not in the client's hands at all.
+///
+/// # Why a GET keyed by asset, and not a POST of the envelope
+///
+/// Both were available. Posting `extra.importedWorkflow` back up and asking for a report would have
+/// avoided a route, and it would have made the report a function of client-supplied JSON — an
+/// envelope the server re-parses out of a request body is one a caller can edit, and the whole
+/// point of sc-15949's "ours or absent" rule on that key is that the stored envelope is the one
+/// THIS reader sanitized. Reading it server-side keeps it that way.
+///
+/// The second reason is the one the AC names: a report goes stale the moment a download finishes,
+/// so re-resolution after an install has to be cheap and repeatable. A GET keyed by
+/// `(project, asset)` is exactly a refetch — no upload, no multipart, no file the client has to
+/// still be holding. (`POST /api/v1/workflows/inspect` could technically serve this by re-uploading
+/// the asset's PNG, which is a multi-megabyte round trip to re-read bytes the server already has.)
+///
+/// Read-only: `get_asset` reads the project's index and nothing is written on any path.
+pub(crate) async fn get_asset_workflow(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+) -> Result<Json<WorkflowInspectResponse>, ApiError> {
+    let lookup_project = project_id.clone();
+    let asset = project_call(state.clone(), move |store| {
+        store.get_asset(&lookup_project, &asset_id)
+    })
+    .await?;
+    // Absent is the ordinary answer, not a failure: most assets are generated or were imported
+    // from an image with no chunk in it. Same 200 + `no_workflow` shape the inspect route uses for
+    // every foreign PNG, so the web has ONE branch.
+    let Some(stored) = asset
+        .get("extra")
+        .and_then(|extra| extra.get(IMPORTED_WORKFLOW_KEY))
+    else {
+        return Ok(Json(WorkflowInspectResponse {
+            status: INSPECT_STATUS_NO_WORKFLOW,
+            workflow: None,
+            resolution: None,
+            detail: Some(
+                "This image carries no SceneWorks workflow, so there is no recipe to read from it."
+                    .to_owned(),
+            ),
+        }));
+    };
+    // The SAME parser the import wrote through — the contract's "one parse path" rule. A stored
+    // envelope that fails it is our record being wrong rather than the user's file, so it is a 5xx
+    // with its own code instead of being flattened into "no workflow", which would tell the user
+    // their image lost a recipe it is visibly still carrying.
+    //
+    // Nothing in the app can produce this: `import_asset` writes only
+    // `serde_json::to_value(&WorkflowShare)`, a value this same parser accepted a moment earlier.
+    // It is reachable from OUTSIDE — the envelope lives in the asset's `.sceneworks.json` sidecar,
+    // an ordinary file in the user's project that a sync tool, a hand edit or an interrupted
+    // restore can leave malformed — which is why this is a real branch rather than a comment, and
+    // why it is exercised:
+    // `tests::workflows::the_asset_route_500s_with_its_own_code_when_the_stored_envelope_no_longer_parses`
+    // plants a corrupt record on a sidecar and pins the coded 500.
+    let share = parse_workflow_share(stored).map_err(|error| {
+        tracing::error!(event = "asset_workflow_unreadable", %project_id, error = %error);
+        ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
+                     The image itself is unaffected."
+                .to_owned(),
+            code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
+        }
+    })?;
+    let catalogs = inspect_catalogs(&state, Some(&project_id))
+        .await
+        .map_err(|error| coded(error, INSPECT_CODE_CATALOG_FAILED))?;
+    let resolution = build_resolution_report(&share, &catalogs);
+    Ok(Json(WorkflowInspectResponse {
+        status: INSPECT_STATUS_WORKFLOW,
+        workflow: Some(share),
+        resolution: Some(resolution),
+        detail: None,
+    }))
 }
 
 /// The per-field upload cap. [`MAX_WORKFLOW_INSPECT_BYTES`] in production; overridable in tests,
