@@ -340,12 +340,13 @@ pub fn select_strategy(
 mod tests {
     use super::*;
     use gen_core::{
-        MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity,
-        MemoryConformanceState, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryFormulaKind,
-        MemoryLifecycleCapabilities, MemoryMode, MemoryParameterRanges, MemoryParityContract,
-        MemoryParityResult, MemoryPhase, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
-        MemoryStrategyCapability, MemoryStrategyParameters, MemoryWindowMaterialization, Precision,
-        Quant,
+        LoadShape, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
+        MemoryCalibrationIdentity, MemoryConformanceState, MemoryEvidenceDimensions,
+        MemoryEvidenceKey, MemoryFormulaKind, MemoryLifecycleCapabilities, MemoryMode,
+        MemoryParameterRanges, MemoryParityContract, MemoryParityResult, MemoryPhase,
+        MemoryPrerequisiteScope, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
+        MemoryStrategyCapability, MemoryStrategyParameters, MemoryStrategyPrerequisite,
+        MemoryWindowMaterialization, Precision, Quant,
     };
     use std::sync::{Arc, Mutex};
 
@@ -409,6 +410,11 @@ mod tests {
             attention_chunking: true,
             transformer_window_materialization: true,
         };
+        // Rung 4's shared prerequisite is the independent load-time materialization shape, not
+        // staged residency. This all-rungs fixture must therefore model a generator loaded through
+        // the deferred path; provider-specific rung dependencies belong in
+        // `additional_prerequisites`.
+        contract.load_shape = LoadShape::DeferredMaterialization;
         contract.formula = MemoryFormulaKind::AssetBytesPlusHeadroom;
         contract.calibration = Some(MemoryCalibrationIdentity::new(FP));
         contract
@@ -1543,6 +1549,16 @@ mod tests {
     #[test]
     fn selector_and_validator_agree_rung_by_rung_when_rung_one_is_missing() {
         let mut provider = contract();
+        // Candle Krea retains this realization-specific dependency even though rung 1 is no longer
+        // the shared rung-4 prerequisite. Keep the selector/validator regression pinned to that
+        // additive graph edge instead of recreating the obsolete global rule.
+        provider.additional_prerequisites.push((
+            MemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
         provider
             .strategies
             .iter_mut()
@@ -1611,7 +1627,8 @@ mod tests {
                 MemoryStrategy::Resident
                 | MemoryStrategy::BoundedDecode
                 | MemoryStrategy::BoundedAttention => true,
-                // Rung 1 is Missing; rung 4 declares an engagement prerequisite on it.
+                // Rung 1 is Missing; this provider declares an additive rung-4 engagement
+                // prerequisite on it.
                 MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency => {
                     false
                 }

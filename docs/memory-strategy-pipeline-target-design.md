@@ -81,9 +81,13 @@ Each rung declares exactly four things, each in exactly one place, each derived 
 
 The unit is the **request** peak, not a phase peak. A strategy that halves one phase while a
 different phase still binds the request has saved the user nothing, and a calibration row claiming
-otherwise is a false green. SC-15794 is the worked example: rung 4's text-encoder scope cuts the
-z-image conditioning phase 2.718 → 1.455 GiB (−46.5%) and moves the request peak by **0.0%**, because
-decode binds every tier at ~4.365 GiB. The capability is real and published; the default is not it.
+otherwise is a false green. SC-15998 corrected the earlier Z-Image worked example twice. The
+independent `Resident + DeferredMaterialization` load shape moved the q4 512²/1-step request peak
+from 9.550 to 4.847 GiB, but the like-for-like deferred baseline was already 4.847 GiB. Adding a
+TextEncoder, DiT, or Both rung-4 window changed the targeted phase peak but moved the **request**
+peak 0.0% because decode still bound it. The old TextEncoder conclusion therefore survives for this
+envelope, for a better-controlled reason; none of these rows may be recorded as a rung-4 request
+saving.
 
 Availability is the mechanism that enforces this. A typed `Error::Unsupported` at the provider is a
 **backstop for a selector bug**, not a control-flow path — if it fires in production, the selector
@@ -117,7 +121,7 @@ expert residency (§14).
 rung 1  →  (none)
 rung 2  →  (none)
 rung 3  →  (none)
-rung 4  →  requires rung 1 ENGAGED in the same request
+rung 4  →  requires `LoadShape::DeferredMaterialization`
 ```
 
 That is the entire graph. Two things follow:
@@ -126,9 +130,11 @@ That is the entire graph. Two things follow:
 or not the text encoder was shed. Today's numeric-order walk asserts otherwise, and that is the
 latent trap described in §5.
 
-**Rung 4's single edge is a correctness constraint, not a cost ordering.** A block window bounds
-nothing if the trunk is already materialized — it *adds* a copy on top. This is the fact currently
-encoded three separate times (§9).
+**Rung 4's single edge is a load-shape constraint, not a cost ordering or a rung dependency.** A
+block window bounds nothing if the trunk is already materialized — it *adds* a copy on top. A
+deferred-materialization generator can remain warm across requests while reopening only the current
+block window; staged residency is an independent phase-level choice. The original rung-4 → rung-1
+edge survives only in the explicitly superseded historical analysis in §5.
 
 ### Cost-order defaults are a different thing, and must stay separate
 
@@ -304,13 +310,16 @@ disappears:
 let streamable = matches!(spec.weights, WeightsSource::Dir(_))
     && matches!(spec.offload_policy, OffloadPolicy::Sequential);
 
-// target
-let streamable = matches!(spec.weights, WeightsSource::Dir(_));
+// target (SC-15998)
+let streamable = matches!(spec.weights, WeightsSource::Dir(_))
+    && matches!(spec.load_shape, LoadShape::DeferredMaterialization);
 ```
 
-The `Sequential` clause becomes the declared prerequisite edge `rung 4 → rung 1`. The provider stops
-hand-maintaining it, and `resolve_block_window`'s check reverts to the pure backstop it is already
-documented as being.
+The original claim that the `Sequential` clause should become `rung 4 → rung 1` was wrong. Phase
+release and block materialization are independent load facts. The declared shared prerequisite is
+`LoadShape::DeferredMaterialization`; `resolve_block_window` remains the typed backstop for an eager
+load. A backend whose current realization still couples the mechanisms appends its own prerequisite
+through `MemoryProviderContract::additional_prerequisites` instead of changing the shared graph.
 
 **One capability change removes the load-time coupling from both residency-bounding rungs.**
 
@@ -357,7 +366,51 @@ Any honest declaration at the bottom of the ladder trips it.
 
 Replace the order-derived walk with the declared graph from §3.
 
-### As shipped (SC-15805, inference PR #325 / SceneWorks PR #1956)
+### Correction (SC-15998): the original rung-4 premise was wrong
+
+The SC-15805 historical record below correctly replaced order-derived dependencies, but its single
+edge was wrong: it treated Z-Image's then-coupled loader (`Sequential` implied streamable blocks) as
+universal arithmetic. SC-15998 measured the axes separately on Apple Silicon with real q4 Z-Image
+weights at 512²/1 step:
+
+| composition | request peak | warm retained | cold / warm | phase reloads |
+|---|---:|---:|---:|---:|
+| Resident + Eager baseline | 9.550 GiB | 5.380 GiB | 0.799 / 0.953 s | 0 + 0 |
+| rung 1 only (Sequential + Eager) | 4.580 GiB | 0.000 GiB | 0.924 / 0.989 s | 1 + 1 |
+| deferred load only (Resident, no rung 4) | 4.847 GiB | 0.677 GiB | 0.917 / 0.941 s | 0 + 0 |
+| rung 4 DiT (Resident + Deferred) | 4.847 GiB | 0.677 GiB | 1.031 / 1.031 s | 0 + 0 |
+| rung 4 TextEncoder (Resident + Deferred) | 4.847 GiB | 0.677 GiB | 1.005 / 1.058 s | 0 + 0 |
+| rung 4 Both (Resident + Deferred) | 4.847 GiB | 0.677 GiB | 1.150 / 1.142 s | 0 + 0 |
+| rungs 1+4 Both (Sequential + Deferred) | 3.946 GiB | 0.000 GiB | 1.180 / 1.206 s | 1 + 1 |
+| warm mixed scope: TextEncoder → Both (Resident + Deferred) | 4.847 GiB | 0.677 GiB | — / 1.146 s | 0 + 0 |
+
+The result separates two conclusions. First, it disproves the old **prerequisite** premise directly:
+the deferred load shape preserves a warm generator and performs no phase reload, so rung 1 is not
+required. Second, no rung-4 scope adds a request-peak saving over that like-for-like deferred
+baseline at this envelope (all are 4.847 GiB); only the targeted phase peaks move. The mixed-scope
+row runs both requests on the same generator and proves that excluding the DiT from the first
+request does not bulk-materialize and retain it for the later bounded pass. The current contract
+therefore:
+
+- gives `LoadSpec` two independent axes: `offload_policy` and `load_shape`;
+- declares rung 4's shared prerequisite as `LoadShape::DeferredMaterialization`, not rung 1;
+- keeps rung 1 out of rung 4's shared engagement while preserving the cost-order default for rungs
+  2 and 3;
+- validates the load shape explicitly, and makes Z-Image availability depend on both a re-openable
+  directory source and the deferred-materialization request;
+- preserves that load shape across warm mixed-scope requests: an unselected transformer uses one
+  all-covering streamed window, which is the explicit deferred-load behavior and is **not** recorded
+  as a bounded-rung saving; the selected component alone gets the smaller rung-4 window;
+- permits only additive provider prerequisites. Candle Krea currently appends a rung-1 engagement
+  edge because its three-stage realization remains coupled; it cannot remove the shared load-shape
+  prerequisite.
+
+The calibration fingerprints moved because both the executed composition and its baseline identity
+changed. Eager and Deferred contracts have distinct fingerprints: their measured baselines differ
+by nearly 2× here, so evidence from either shape must not validate the other, and evidence captured
+against the old staged+windowed generation must not validate resident+deferred runs.
+
+### Historical record — superseded (SC-15805, inference PR #325 / SceneWorks PR #1956)
 
 - `MemoryStrategy::requires() -> &'static [MemoryStrategyPrerequisite]` publishes the graph, and
   `MemoryStrategyCapability::requires()` exposes it per rung — empty for rungs 1, 2, 3;

@@ -4,8 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, Generator, LoadSpec, MemoryCacheState, MoeExpert, OffloadPolicy,
-    Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, Generator, LoadShape, LoadSpec, MemoryCacheState, MoeExpert,
+    OffloadPolicy, Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -63,6 +63,11 @@ pub(crate) struct GeneratorCacheKey {
     extra_controls: Vec<CacheWeightsSource>,
     ip_adapter: Option<CacheWeightsSource>,
     adapters: Vec<CacheAdapterSpec>,
+    // Phase release and block materialization are independent load-time identities (SC-15998).
+    // Reusing a generator across either boundary would execute a different physical load shape than
+    // the caller requested.
+    offload_policy: OffloadPolicy,
+    load_shape: LoadShape,
     // Per-generation PiD decoder aux-weights (epic 7840, sc-7849): `(checkpoint, gemma)` when the
     // generator was loaded with `LoadSpec::with_pid`, else `None`. Keyed so a PiD-equipped load is a
     // distinct cache entry from the plain VAE load — toggling `usePid` reloads rather than reusing a
@@ -101,6 +106,8 @@ impl GeneratorCacheKey {
                 .collect(),
             ip_adapter: spec.ip_adapter.as_ref().map(CacheWeightsSource::from),
             adapters: spec.adapters.iter().map(CacheAdapterSpec::from).collect(),
+            offload_policy: spec.offload_policy,
+            load_shape: spec.load_shape,
             pid: spec.pid.as_ref().map(|pid| {
                 (
                     CacheWeightsSource::from(&pid.checkpoint),
@@ -866,6 +873,29 @@ mod tests {
             GeneratorCacheKey::from_load_spec("z_image_turbo", &with_adapter),
             GeneratorCacheKey::from_load_spec("z_image_turbo", &different_scale)
         );
+    }
+
+    #[test]
+    fn cache_key_separates_phase_residency_from_materialization_shape() {
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/z-image/q4")));
+        let staged = base.clone().with_offload_policy(OffloadPolicy::Sequential);
+        let deferred = base
+            .clone()
+            .with_load_shape(LoadShape::DeferredMaterialization);
+        let staged_deferred = staged
+            .clone()
+            .with_load_shape(LoadShape::DeferredMaterialization);
+
+        let keys = [&base, &staged, &deferred, &staged_deferred]
+            .map(|spec| GeneratorCacheKey::from_load_spec("z_image_turbo", spec));
+        for left in 0..keys.len() {
+            for right in (left + 1)..keys.len() {
+                assert_ne!(
+                    keys[left], keys[right],
+                    "all four residency/materialization combinations need distinct cache entries"
+                );
+            }
+        }
     }
 
     // sc-8841 (F-039): the fingerprint helper is the core of the fix — it must report a DIFFERENT
