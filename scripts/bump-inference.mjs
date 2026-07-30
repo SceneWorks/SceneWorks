@@ -193,6 +193,47 @@ function distinctResolutions(crate) {
   );
 }
 
+// `config/inference-third-party-source.json` is ALSO keyed to the pin: check-license-coverage.mjs
+// fails closed when its `inferenceRevision` / `provenanceScan.revision` / `crateCoverage.revision` do
+// not equal the pinned rev. Unlike the memory matrix this cannot be regenerated blindly — a bump that
+// brings a NEW crate or a new embedded third-party source needs a human classification decision, and
+// the rescan needs a local inference clone (`--repo`) that this script does not otherwise require. So
+// run the guard and let its own remediation text (which names the exact scanner invocations) speak; the
+// point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
+// Fail-closed on purpose: the manifests and lockfile are already written by now, so the bump is
+// genuinely incomplete until the audit is refreshed and this passes.
+function verifyLicenseAudit() {
+  console.log("$ node scripts/check-license-coverage.mjs");
+  try {
+    execFileSync("node", ["scripts/check-license-coverage.mjs"], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
+  } catch {
+    throw new Error(
+      "the inference source/license audit is stale for the new pin (see the check output above). " +
+        "Re-run the scanner against a local inference clone, refresh " +
+        "config/inference-third-party-source.json (inferenceRevision, provenanceScan, crateCoverage, " +
+        "auditDigest), then re-run this bump to verify. The pin itself is already written.",
+    );
+  }
+}
+
+// `docs/generated/memory-matrix.{json,md}` is DERIVED from the inference pin: the generator stamps
+// `inferenceRevision` on the document and on every cell's `evidenceRevision`, and each cell's
+// `calibrationFingerprint` is a sha256 over `{sceneWorksRevision, inferencePin, model, route, …}`. So a
+// pin bump makes the checked-in artifact stale by construction, and `tests/test_memory_matrix.py`
+// (parity CI) fails with "generated memory matrix is stale". Regenerating here keeps everything derived
+// from the pin moving in ONE commit, the same reason the lockfile regen lives in this script rather than
+// in the caller's hands.
+function regenerateMemoryMatrix() {
+  console.log("$ node scripts/generate-memory-matrix.mjs");
+  execFileSync("node", ["scripts/generate-memory-matrix.mjs"], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+}
+
 function verifyNoSkew() {
   // gen-core: reuse the repo's own CI-wired guard verbatim.
   console.log("$ bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle");
@@ -408,6 +449,8 @@ function main() {
   }
   cargoUpdate(sha);
   verifyNoSkew();
+  regenerateMemoryMatrix();
+  verifyLicenseAudit();
   console.log("bump-inference: done");
 }
 
