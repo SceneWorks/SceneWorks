@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e9bab27daeedbb6d46a5d43e8acfd6013f65fcfea21583e4fbff4010fe3d6345",
-    "matrixRevision": "source-tree:6e96a961b6f0e8343fb4d98e2edb570c00bb1ac656c71c4e6708273c213973d9",
+    "sceneWorksRevision": "source-tree:2e6d30e2348c44419499fc82bb3be6703af388aa60eafce04123940eaf520964",
+    "matrixRevision": "source-tree:1598807ea7fe2513b636d415f10b67c3666d7781fb12b489e208413417db6301",
     "inferenceRevision": "7ab75ec7887871d6971a46b1bb700ad80acfbc72",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "d8e349039009ae02e80a835f6bf887d572e87819b776dc5a78f800312d6d68c6"
+        "sha256": "10a347cdf9ac833cdf153fe42fbd676eca9871d9ff23d3dee949fdef25baf891"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "b6fb8c3043c5bc5788fce2f2746d2b6dbbacb2c3eb45273799f0e12938a25c33"
+        "sha256": "271f6e22bc703bbaf234cc9fce6c5cbba6300d1832cd7cb82e0e340bc76b4867"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "176a3d8e8887743e9b846ba21cf11a7a12503e1d92221d626ab311ee53e6c036"
+        "sha256": "87c2cf706e01090a4037161150b378a561c0eddb4886779884087b5cd8628525"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "75d55d242e6da7d2cc3c25bb93a7c15bc6c2a73add8dee177f8501c58d03e0f0"
+        "sha256": "0c04832e9bbaab35a0abef97c340af3bc94d65d81a29ee8f86a4d58df1a8a022"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -27,7 +27,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "94611db68050f4ec4a9011725c0dc5de03eeda95dd4eadaa6b9562740c9c6c73"
+        "sha256": "1c8c2a538be15f47c2373955ffd2420cbfb1397a9c4bf85ee81f215928552154"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",

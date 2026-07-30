@@ -9,17 +9,122 @@ import {
   assertCellOwnershipIsBackendScoped,
   assertTwinCoverage,
   backendScopes,
+  buildMatrix,
   buildStoryBackendScope,
   canonicalSourceText,
   familyStory,
+  mlxRequiredHostBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 test("memory-strategy source hashing is independent of platform line endings", () => {
   const canonical = "alpha\nbeta\ngamma\n";
   assert.equal(canonicalSourceText(canonical), canonical);
   assert.equal(canonicalSourceText("alpha\r\nbeta\r\ngamma\r\n"), canonical);
   assert.equal(canonicalSourceText("alpha\rbeta\rgamma\r"), canonical);
+});
+
+test("a comment-only manifest edit produces no generated matrix change", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = await readFile(manifestUrl, "utf8");
+  const baseline = await buildMatrix();
+  const commentOnly = await buildMatrix({
+    sourceOverrides: {
+      manifest: `${manifest}\n// SC-16129 regression: provenance-only comment\n`,
+    },
+  });
+  const withoutAnyComments = await buildMatrix({
+    sourceOverrides: {
+      // This also removes every comment block introduced by #1977, proving replacements and
+      // deletions are inert rather than covering only an appended-comment special case.
+      manifest: JSON.stringify(JSON.parse(stripJsoncComments(manifest))),
+    },
+  });
+
+  assert.deepEqual(commentOnly, baseline);
+  assert.deepEqual(withoutAnyComments, baseline);
+});
+
+test("a calibration-relevant manifest value rotates affected fallback fingerprints", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = await readFile(manifestUrl, "utf8");
+  const parsed = JSON.parse(stripJsoncComments(manifest));
+  const baseline = await buildMatrix();
+  const model = parsed.models.find((candidate) =>
+    ["mlx", "candle"].some(
+      (backend) =>
+        candidate[backend]?.vramGbByTier &&
+        candidate[backend]?.turboFit?.calibrationFingerprint === undefined,
+    ),
+  );
+  assert.ok(model, "fixture needs a derived-fingerprint model with per-tier memory floors");
+  const backend = ["mlx", "candle"].find(
+    (candidate) =>
+      model[candidate]?.vramGbByTier &&
+      model[candidate]?.turboFit?.calibrationFingerprint === undefined,
+  );
+  const tier = Object.keys(model[backend].vramGbByTier)[0];
+  model[backend].vramGbByTier[tier] += 0.01;
+  const changed = await buildMatrix({
+    sourceOverrides: { manifest: JSON.stringify(parsed) },
+  });
+
+  const baselineFingerprints = new Map(
+    baseline.cells.map((cell) => [cell.id, cell.calibrationFingerprint]),
+  );
+  const affected = changed.cells.filter(
+    (cell) =>
+      cell.modelId === model.id &&
+      cell.backend === backend &&
+      cell.tier === tier &&
+      cell.calibrationFingerprint !== null,
+  );
+  assert.ok(affected.length > 0);
+  assert.ok(
+    affected.every(
+      (cell) => cell.calibrationFingerprint !== baselineFingerprints.get(cell.id),
+    ),
+  );
+  assert.ok(
+    changed.cells
+      .filter(
+        (cell) =>
+          cell.modelId !== model.id || cell.backend !== backend || cell.tier !== tier,
+      )
+      .every(
+        (cell) => cell.calibrationFingerprint === baselineFingerprints.get(cell.id),
+      ),
+    "a per-tier floor change must not invalidate unrelated cells",
+  );
+});
+
+test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
+  const record = {
+    backend: "mlx",
+    hardware: {
+      memoryBytes: 8 * 1024 ** 3,
+      mlxMemoryLimitBytes: 6 * 1024 ** 3,
+      wiredLimitBytes: 7 * 1024 ** 3,
+    },
+    predictedPeakBytes: { overall: 5 * 1024 ** 3 },
+    observedMemory: {
+      overall: {
+        wiredBytes: 4 * 1024 ** 3,
+        reclaimableBytes: 1 * 1024 ** 3,
+      },
+    },
+  };
+  assert.equal(mlxRequiredHostBytes(record), 7 * 1024 ** 3);
+  assert.equal(mlxRequiredHostBytes({ ...record, backend: "candle" }), null);
+  assert.equal(
+    mlxRequiredHostBytes({
+      ...record,
+      observedMemory: { overall: { wiredBytes: 9 * 1024 ** 3, reclaimableBytes: 0 } },
+    }),
+    11 * 1024 ** 3,
+    "observed non-reclaimable wired peak wins when it exceeds prediction",
+  );
 });
 
 // SC-15510: `z_image_edit` is a catalog id, not a provider. Both backends serve it from the

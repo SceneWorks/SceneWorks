@@ -16,8 +16,8 @@ pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v3";
 /// ABI paired by the manifest/query side of the reader.
 ///
 /// The evidence schema deliberately stays at v2: callers must supply the manifest's ABI together
-/// with its fingerprint and exact source revisions. That makes an ABI mutation stale without
-/// rewriting the already-promoted producer contract.
+/// with its fingerprint. Exact source revisions remain captured provenance; the ABI/fingerprint
+/// pair owns SceneWorks invalidation without rewriting the already-promoted producer contract.
 pub const MEMORY_CALIBRATION_ABI: u32 = 1;
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
@@ -482,8 +482,6 @@ pub struct EvidenceQuery {
 pub enum StaleEvidenceReason {
     CalibrationAbi,
     CalibrationFingerprint,
-    SceneWorksRevision,
-    MatrixSourceRevision,
     InferenceRevision,
     ArtifactRepository,
     ArtifactResolvedRevision,
@@ -533,18 +531,6 @@ impl EvidenceBundle {
         for record in candidates {
             let mismatch = if record.calibration_fingerprint != query.calibration.fingerprint {
                 Some(StaleEvidenceReason::CalibrationFingerprint)
-            } else if record.repositories.scene_works.revision
-                != query.calibration.scene_works_revision
-            {
-                Some(StaleEvidenceReason::SceneWorksRevision)
-            } else if record
-                .repositories
-                .scene_works
-                .matrix_source_revision
-                .as_deref()
-                != Some(query.calibration.matrix_source_revision.as_str())
-            {
-                Some(StaleEvidenceReason::MatrixSourceRevision)
             } else if record.repositories.inference.revision != query.calibration.inference_revision
             {
                 Some(StaleEvidenceReason::InferenceRevision)
@@ -588,6 +574,67 @@ impl EvidenceBundle {
         } else {
             EvidenceVerdict::Unknown
         }
+    }
+}
+
+/// Memory quantities used by admission after a verified MLX cell has been selected.
+///
+/// `peak_bytes` is the larger of the producer's predicted whole-request peak and the measured,
+/// non-reclaimable wired high-water mark. `foreign_reserve_bytes` is the part of unified memory the
+/// captured MLX limits deliberately left outside the process. Keeping these terms separate prevents
+/// the dedicated-VRAM allocator slack used by Candle from being mistaken for macOS/foreign demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MlxAdmissionEnvelope {
+    pub peak_bytes: u64,
+    pub observed_non_reclaimable_wired_bytes: u64,
+    pub foreign_reserve_bytes: u64,
+}
+
+impl MlxAdmissionEnvelope {
+    /// Smallest physical unified-memory size that can satisfy this exact cell.
+    ///
+    /// This is the shared runtime/UI bridge: the worker compares exact evidence against the same
+    /// additive requirement that a later web consumer may display. Saturation fails conservative
+    /// for corrupt or impossible producer values.
+    pub fn required_host_bytes(self) -> u64 {
+        self.peak_bytes.saturating_add(self.foreign_reserve_bytes)
+    }
+
+    pub fn fits_host_bytes(self, host_bytes: u64) -> bool {
+        self.required_host_bytes() <= host_bytes
+    }
+}
+
+impl EvidenceRecord {
+    /// Derive the verified MLX admission envelope from counters carried by the evidence contract.
+    ///
+    /// No constant is introduced here. The usable process ceiling is the smaller of the captured
+    /// MLX memory and wired limits; the remainder of physical unified memory is foreign resident
+    /// demand. Reclaimable allocator bytes are not charged as wired residency.
+    pub fn mlx_admission_envelope(&self) -> Option<MlxAdmissionEnvelope> {
+        let Hardware::Mlx(hardware) = &self.hardware else {
+            return None;
+        };
+        let RequiredNullable::Value(predicted) = &self.predicted_peak_bytes else {
+            return None;
+        };
+        let RequiredNullable::Value(observed) = &self.observed_memory else {
+            return None;
+        };
+        let process_ceiling = hardware
+            .mlx_memory_limit_bytes
+            .min(hardware.wired_limit_bytes)
+            .min(hardware.memory_bytes);
+        let foreign_reserve_bytes = hardware.memory_bytes.saturating_sub(process_ceiling);
+        let non_reclaimable_wired = observed
+            .overall
+            .wired_bytes
+            .saturating_sub(observed.overall.reclaimable_bytes);
+        Some(MlxAdmissionEnvelope {
+            peak_bytes: predicted.overall.max(non_reclaimable_wired),
+            observed_non_reclaimable_wired_bytes: non_reclaimable_wired,
+            foreign_reserve_bytes,
+        })
     }
 }
 
@@ -1394,6 +1441,62 @@ mod tests {
         }
     }
 
+    fn mlx_record(total: u64, memory_limit: u64, wired_limit: u64) -> Value {
+        let mut record = complete_record();
+        record["backend"] = json!("mlx");
+        record["hardware"] = json!({
+            "probe": "mlx-rs",
+            "memoryBytes": total,
+            "model": "Fixture Mac",
+            "chip": "Fixture Silicon",
+            "osVersion": "26.0",
+            "metalDevice": "Fixture GPU",
+            "mlxMemoryLimitBytes": memory_limit,
+            "wiredLimitBytes": wired_limit
+        });
+        record
+    }
+
+    #[test]
+    fn mlx_admission_envelope_derives_foreign_demand_and_keeps_observed_distinct() {
+        let gib = 1024_u64.pow(3);
+        let small = match load_bundle(&bundle(mlx_record(8 * gib, 6 * gib, 7 * gib)))
+            .expect("valid small-host evidence")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
+        };
+        let small = small.records[0]
+            .mlx_admission_envelope()
+            .expect("MLX complete record");
+        assert_eq!(small.foreign_reserve_bytes, 2 * gib);
+        assert_eq!(small.observed_non_reclaimable_wired_bytes, 230);
+        assert_eq!(small.peak_bytes, 230);
+        let required = 2 * gib + 230;
+        assert_eq!(small.required_host_bytes(), required);
+        assert!(small.fits_host_bytes(required), "exact equality fits");
+        assert!(
+            !small.fits_host_bytes(required - 1),
+            "one byte below the exact host requirement must fail"
+        );
+
+        let mid = match load_bundle(&bundle(mlx_record(32 * gib, 24 * gib, 20 * gib)))
+            .expect("valid mid-host evidence")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
+        };
+        let mid = mid.records[0]
+            .mlx_admission_envelope()
+            .expect("MLX complete record");
+        assert_eq!(mid.foreign_reserve_bytes, 12 * gib);
+        assert_ne!(small.foreign_reserve_bytes, mid.foreign_reserve_bytes);
+        assert_eq!(
+            mid.observed_non_reclaimable_wired_bytes, 230,
+            "observed telemetry is not overwritten by a predicted/envelope maximum"
+        );
+    }
+
     fn exact_query() -> EvidenceQuery {
         EvidenceQuery {
             backend: Backend::Candle,
@@ -1587,7 +1690,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_revision_and_abi_mutations_are_independently_stale() {
+    fn fingerprint_inference_and_abi_mutations_are_stale_but_source_revisions_are_provenance() {
         let bundle = loaded_bundle();
 
         let mut fingerprint = exact_query();
@@ -1599,10 +1702,10 @@ mod tests {
 
         let mut scene_works = exact_query();
         scene_works.calibration.scene_works_revision = "c".repeat(40);
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&scene_works),
-            EvidenceVerdict::Stale(StaleEvidenceReason::SceneWorksRevision)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut inference = exact_query();
         inference.calibration.inference_revision = "d".repeat(40);
@@ -1613,10 +1716,10 @@ mod tests {
 
         let mut matrix = exact_query();
         matrix.calibration.matrix_source_revision = "source-tree:2222222".to_owned();
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&matrix),
-            EvidenceVerdict::Stale(StaleEvidenceReason::MatrixSourceRevision)
-        );
+            EvidenceVerdict::Verified(_)
+        ));
 
         let mut artifact_repository = exact_query();
         artifact_repository.calibration.artifact_repository = "other/repo".to_owned();

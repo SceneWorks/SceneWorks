@@ -17,6 +17,12 @@ const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
 const EXPECTED_MLX_STAGED_COUNT = 39;
+// Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
+// execution/layout/quantization change that makes measurements unsafe must add or bump its key;
+// ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
+const CALIBRATION_ABI_VERSIONS = Object.freeze({
+  default: 1,
+});
 const RUNGS = [
   "resident",
   "staged_residency",
@@ -312,10 +318,62 @@ function sortedUnique(values) {
   return [...new Set(values)].sort();
 }
 
+function calibrationAbiVersion(provider) {
+  return CALIBRATION_ABI_VERSIONS[provider] ?? CALIBRATION_ABI_VERSIONS.default;
+}
+
+export function derivedCalibrationFingerprint({
+  inferencePin,
+  model,
+  provider,
+  backend,
+  tier,
+  mode,
+  overlay,
+  rung,
+  parameters,
+  manifestCalibration,
+}) {
+  return sha256(
+    JSON.stringify({
+      calibrationAbi: {
+        provider,
+        version: calibrationAbiVersion(provider),
+      },
+      inferencePin,
+      model,
+      backend,
+      tier,
+      mode,
+      overlay,
+      rung,
+      parameters,
+      manifestCalibration,
+    }),
+  );
+}
+
+function manifestCalibrationInputs(model, backend, tier) {
+  const scope = model[backend] ?? {};
+  return {
+    minMemoryGb: scope.minMemoryGb ?? null,
+    quantize: scope.quantize ?? null,
+    sequentialPeakGb: scope.sequentialPeakGb?.[tier] ?? null,
+    standardTierLayout: scope.standardTierLayout ?? null,
+    vramGbByTier: scope.vramGbByTier?.[tier] ?? null,
+  };
+}
+
 function runtimeStrategyParameters(parameters) {
   return Object.fromEntries(
     Object.entries(parameters).filter(([key]) =>
-      ["decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key),
+      [
+        "decodeTileEdge",
+        "decodeOverlap",
+        "attentionChunkSize",
+        "transformerWindowSize",
+        "transformerWindowComponent",
+      ].includes(key),
     ),
   );
 }
@@ -347,6 +405,26 @@ export function calibrationBinding(record, cell) {
     !record.loadability.resolvedPathFingerprint
   ) reasons.push("loadability-not-passed");
   return { eligible: reasons.length === 0, reasons };
+}
+
+// Derive the exact additive host requirement used by the Rust MLX admission envelope.
+// This is a generated-data bridge only. It does not suggest a tier or add model-specific policy.
+export function mlxRequiredHostBytes(record) {
+  if (record?.backend !== "mlx") return null;
+  const memoryBytes = record.hardware?.memoryBytes;
+  const mlxLimit = record.hardware?.mlxMemoryLimitBytes;
+  const wiredLimit = record.hardware?.wiredLimitBytes;
+  const predicted = record.predictedPeakBytes?.overall;
+  const wired = record.observedMemory?.overall?.wiredBytes;
+  const reclaimable = record.observedMemory?.overall?.reclaimableBytes;
+  const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
+  if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
+
+  const processCeiling = Math.min(memoryBytes, mlxLimit, wiredLimit);
+  const foreignReserve = memoryBytes - processCeiling;
+  const nonReclaimableWired = Math.max(0, wired - reclaimable);
+  const required = Math.max(predicted, nonReclaimableWired) + foreignReserve;
+  return Number.isSafeInteger(required) ? required : null;
 }
 
 function parseExpectedImageIds(source) {
@@ -737,7 +815,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
   }
 }
 
-export async function buildMatrix() {
+export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const sourcePaths = {
     manifest: "config/manifests/builtin.models.jsonc",
     engines: "crates/sceneworks-worker/src/engines.rs",
@@ -750,8 +828,12 @@ export async function buildMatrix() {
   };
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
-    Object.values(sourcePaths).map(async (relative) =>
-      canonicalSourceText(await readFile(path.join(ROOT, relative), "utf8")),
+    sourceEntries.map(async ([name, relative]) =>
+      canonicalSourceText(
+        Object.hasOwn(sourceOverrides, name)
+          ? sourceOverrides[name]
+          : await readFile(path.join(ROOT, relative), "utf8"),
+      ),
     ),
   );
   const bodies = Object.fromEntries(
@@ -763,6 +845,12 @@ export async function buildMatrix() {
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
+  // JSONC comments and formatting are not part of the manifest contract. Hash the parsed value so
+  // provenance embedded in generated artifacts is stable across semantically inert source edits.
+  const revisionBodies = {
+    ...bodies,
+    manifest: JSON.stringify(manifest),
+  };
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
@@ -773,7 +861,7 @@ export async function buildMatrix() {
   const sceneWorksRevision = `source-tree:${sha256(
     sourceEntries
       .filter(([name]) => name !== "calibrationEvidence")
-      .map(([name]) => bodies[name])
+      .map(([name]) => revisionBodies[name])
       .join(""),
   )}`;
 
@@ -832,20 +920,18 @@ export async function buildMatrix() {
                 status.state === "Missing"
                   ? null
                   : status.calibrationFingerprint ??
-                    sha256(
-                      JSON.stringify({
-                        sceneWorksRevision,
-                        inferencePin: pin,
-                        model: model.id,
-                        route: route.engine,
-                        backend,
-                        tier,
-                        mode,
-                        overlay,
-                        rung,
-                        parameters: status.parameters,
-                      }),
-                    );
+                    derivedCalibrationFingerprint({
+                      inferencePin: pin,
+                      model: model.id,
+                      provider: route.engine,
+                      backend,
+                      tier,
+                      mode,
+                      overlay,
+                      rung,
+                      parameters: status.parameters,
+                      manifestCalibration: manifestCalibrationInputs(model, backend, tier),
+                    });
               const calibrationRuns = calibrationBundle.records.filter(
                 (record) =>
                   record.target.modelId === model.id &&
@@ -858,6 +944,7 @@ export async function buildMatrix() {
               );
               const runSummary = (record) => {
                 const overall = record.observedMemory?.overall?.deviceBytes;
+                const requiredHostBytes = mlxRequiredHostBytes(record);
                 return {
                   source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
                   hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
@@ -866,6 +953,7 @@ export async function buildMatrix() {
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
                   ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
+                  ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
                   parity: {
                     contract: record.quality.contract,
                     result: record.quality.result === "not_run" ? "not_run" : record.quality.result,
@@ -994,9 +1082,9 @@ export async function buildMatrix() {
       sceneWorksRevision,
       inferenceRevision: pin,
       sources: Object.fromEntries(
-        sourceEntries.map(([name, source], index) => [
+        sourceEntries.map(([name, source]) => [
           name,
-          { path: source, sha256: sha256(sourceBodies[index]) },
+          { path: source, sha256: sha256(revisionBodies[name]) },
         ]),
       ),
     },

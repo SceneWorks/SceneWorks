@@ -123,6 +123,12 @@ pub(crate) async fn write_model_install_marker(
 /// Write the versioned HF-cache install receipt. Unlike the legacy marker this records the exact
 /// resolved snapshot files, so a later manifest change can distinguish a still-usable install from
 /// a torn download.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DownloadArtifactReceipt<'a> {
+    pub(crate) resolved_tier: Option<&'a str>,
+    pub(crate) tree_stamp: Option<&'a str>,
+}
+
 pub(crate) async fn write_model_download_receipt(
     target_dir: &Path,
     payload: &JsonObject,
@@ -130,17 +136,24 @@ pub(crate) async fn write_model_download_receipt(
     job_id: &str,
     resolved_files: &[String],
     snapshot_revision: Option<&str>,
+    artifact: DownloadArtifactReceipt<'_>,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
+    let variant = payload
+        .get("variant")
+        .cloned()
+        .unwrap_or_else(|| Value::String("default".to_owned()));
     let receipt = json!({
         "schemaVersion": 2,
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
         "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
-        "variant": payload.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
+        "variant": variant,
+        "resolvedTier": artifact.resolved_tier,
         "manifestFiles": payload.get("files").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         "resolvedFiles": resolved_files,
         "snapshotRevision": snapshot_revision,
+        "artifactTreeStamp": artifact.tree_stamp,
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });

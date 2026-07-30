@@ -36,11 +36,17 @@ use gen_core::{
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
     MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
     MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, WeightsSource,
+    OffloadPolicy, TransformerComponent, WeightsSource,
 };
+use sceneworks_core::memory_calibration::{
+    Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
+    EvidenceVerdict, Geometry as CalibrationGeometry, StaleEvidenceReason, StrategyRung,
+};
+use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
+use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
@@ -52,24 +58,71 @@ const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
 #[derive(Clone, Debug)]
 pub(crate) struct MlxRequestPlan {
     engine_id: &'static str,
+    model_id: String,
     tier: MemoryNumericTier,
     asset_bytes: u64,
     activation_headroom_bytes: u64,
+    calibration: MlxCalibrationConfig,
 }
 
 impl MlxRequestPlan {
-    pub(crate) fn for_spec(engine_id: &'static str, spec: &LoadSpec) -> Self {
+    pub(crate) fn for_spec_and_manifest(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+    ) -> Self {
         let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
+        let spec_tier = MemoryNumericTier {
+            precision: spec.precision,
+            quant: spec.quantize,
+        };
+        let (tier, calibration) = match manifest {
+            Some(manifest) => match MlxCalibrationBinding::from_manifest(manifest) {
+                Ok(Some(bindings)) => match resolved_artifact {
+                    Some(resolved) => match resolved.fixed_artifact_tier.as_deref() {
+                        Some(fixed_tier) => {
+                            match numeric_tier_for_resolved(fixed_tier, spec_tier) {
+                                Ok(tier) => (
+                                    tier,
+                                    MlxCalibrationConfig::Valid(MlxCalibrationSet {
+                                        bindings,
+                                        resolved,
+                                    }),
+                                ),
+                                Err(reason) => (spec_tier, MlxCalibrationConfig::Invalid(reason)),
+                            }
+                        }
+                        None => (
+                            spec_tier,
+                            MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
+                        ),
+                    },
+                    None => (
+                        spec_tier,
+                        MlxCalibrationConfig::Invalid(
+                            "the resolver supplied no immutable artifact provenance".to_owned(),
+                        ),
+                    ),
+                },
+                Ok(None) => (spec_tier, MlxCalibrationConfig::Absent),
+                Err(reason) => (spec_tier, MlxCalibrationConfig::Invalid(reason)),
+            },
+            None => (spec_tier, MlxCalibrationConfig::Absent),
+        };
         Self {
             engine_id,
-            tier: MemoryNumericTier {
-                precision: spec.precision,
-                quant: spec.quantize,
-            },
+            model_id: model_id.to_owned(),
+            tier,
             asset_bytes,
-            // The historical generic headroom includes the 2 GiB OS reserve. Request budgeting
-            // carries that reserve separately, so leave only the activation allowance here.
-            activation_headroom_bytes: gib_to_bytes((headroom_gb - OS_RESERVE_GB).max(0.0)),
+            // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
+            // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
+            // the activation allowance here. Exact evidence supplies its own measured envelope.
+            activation_headroom_bytes: gib_to_bytes(
+                (headroom_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+            ),
+            calibration,
         }
     }
 
@@ -83,6 +136,271 @@ impl MlxRequestPlan {
                 .clamp(0.0, u64::MAX as f64) as u64,
         )
     }
+}
+
+#[derive(Clone, Debug)]
+struct MlxCalibrationBinding {
+    query: CalibrationBinding,
+    provider: String,
+    tier: String,
+    mode: String,
+    overlay: String,
+    geometry: CalibrationGeometry,
+    rung: StrategyRung,
+    parameters: JsonObject<String, Value>,
+    selection_parameters: gen_core::MemoryStrategyParameters,
+}
+
+#[derive(Clone, Debug)]
+struct MlxCalibrationSet {
+    bindings: Vec<MlxCalibrationBinding>,
+    resolved: ResolvedArtifactProvenance,
+}
+
+#[derive(Clone, Debug)]
+enum MlxCalibrationConfig {
+    Absent,
+    Valid(MlxCalibrationSet),
+    Invalid(String),
+}
+
+impl MlxCalibrationBinding {
+    /// Read the optional closed collection of exact-cell MLX bindings. A model may carry many tiers
+    /// and many request cells per tier; request-time routing selects exactly one by resolved source
+    /// plus mode/overlay/geometry. Duplicate selectors are rejected here as ambiguous opt-in.
+    fn from_manifest(manifest: &JsonObject<String, Value>) -> Result<Option<Vec<Self>>, String> {
+        let Some(calibrations) = manifest.get("mlx").and_then(|mlx| mlx.get("calibrations")) else {
+            return Ok(None);
+        };
+        let calibrations = calibrations
+            .as_array()
+            .filter(|items| !items.is_empty())
+            .ok_or_else(|| "mlx.calibrations must be a non-empty array".to_owned())?;
+        let mut bindings = Vec::with_capacity(calibrations.len());
+        for (index, calibration) in calibrations.iter().enumerate() {
+            bindings.push(Self::parse(calibration, index)?);
+        }
+        for left in 0..bindings.len() {
+            for right in (left + 1)..bindings.len() {
+                if bindings[left].same_selector(&bindings[right]) {
+                    return Err(format!(
+                        "mlx.calibrations[{left}] and mlx.calibrations[{right}] are ambiguous duplicates"
+                    ));
+                }
+            }
+        }
+        Ok(Some(bindings))
+    }
+
+    fn parse(calibration: &Value, index: usize) -> Result<Self, String> {
+        const CALIBRATION_FIELDS: [&str; 16] = [
+            "abi",
+            "fingerprint",
+            "sceneWorksRevision",
+            "matrixSourceRevision",
+            "inferenceRevision",
+            "provider",
+            "tier",
+            "mode",
+            "overlay",
+            "geometry",
+            "artifactRepository",
+            "artifactResolvedRevision",
+            "artifactVariant",
+            "resolvedPathFingerprint",
+            "rung",
+            "parameters",
+        ];
+        let calibration = calibration
+            .as_object()
+            .ok_or_else(|| format!("mlx.calibrations[{index}] must be an object"))?;
+        if let Some(field) = calibration
+            .keys()
+            .find(|field| !CALIBRATION_FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!(
+                "mlx.calibrations[{index}] contains unknown field {field:?}"
+            ));
+        }
+        let text = |name| {
+            calibration
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("mlx.calibrations[{index}].{name} must be a non-empty string")
+                })
+        };
+        let rung = match text("rung")?.as_str() {
+            "resident" => StrategyRung::Resident,
+            "staged_residency" => StrategyRung::StagedResidency,
+            "bounded_decode" => StrategyRung::BoundedDecode,
+            "bounded_attention" => StrategyRung::BoundedAttention,
+            "bounded_transformer_residency" => StrategyRung::BoundedTransformerResidency,
+            other => {
+                return Err(format!(
+                    "unsupported mlx.calibrations[{index}].rung {other:?}"
+                ))
+            }
+        };
+        let parameters = calibration
+            .get("parameters")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| format!("mlx.calibrations[{index}].parameters must be an object"))?;
+        let selection_parameters = parse_evidence_parameters(rung, &parameters)?;
+        let geometry = calibration
+            .get("geometry")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("mlx.calibrations[{index}].geometry must be an object"))?;
+        const GEOMETRY_FIELDS: [&str; 4] = ["width", "height", "batch", "frames"];
+        if let Some(field) = geometry
+            .keys()
+            .find(|field| !GEOMETRY_FIELDS.contains(&field.as_str()))
+        {
+            return Err(format!(
+                "mlx.calibrations[{index}].geometry contains unknown field {field:?}"
+            ));
+        }
+        let geometry_value = |name| {
+            geometry
+                .get(name)
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    format!("mlx.calibrations[{index}].geometry.{name} must be a positive u32")
+                })
+        };
+        Ok(Self {
+            query: CalibrationBinding {
+                abi: calibration
+                    .get("abi")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| format!("mlx.calibrations[{index}].abi must be a u32"))?,
+                fingerprint: text("fingerprint")?,
+                scene_works_revision: text("sceneWorksRevision")?,
+                matrix_source_revision: text("matrixSourceRevision")?,
+                inference_revision: text("inferenceRevision")?,
+                artifact_repository: text("artifactRepository")?,
+                artifact_resolved_revision: text("artifactResolvedRevision")?,
+                artifact_variant: text("artifactVariant")?,
+                resolved_path_fingerprint: text("resolvedPathFingerprint")?,
+            },
+            provider: text("provider")?,
+            tier: text("tier")?,
+            mode: text("mode")?,
+            overlay: text("overlay")?,
+            geometry: CalibrationGeometry {
+                width: geometry_value("width")?,
+                height: geometry_value("height")?,
+                batch: geometry_value("batch")?,
+                frames: geometry_value("frames")?,
+            },
+            rung,
+            parameters,
+            selection_parameters,
+        })
+    }
+
+    fn same_selector(&self, other: &Self) -> bool {
+        self.query == other.query
+            && self.provider == other.provider
+            && self.tier == other.tier
+            && self.mode == other.mode
+            && self.overlay == other.overlay
+            && self.geometry == other.geometry
+            && self.rung == other.rung
+            && self.parameters == other.parameters
+    }
+}
+
+fn numeric_tier_for_resolved(
+    tier: &str,
+    fallback: MemoryNumericTier,
+) -> Result<MemoryNumericTier, String> {
+    let resolved = match tier {
+        "q4" => MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q4),
+        },
+        "q8" => MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q8),
+        },
+        "nvfp4" => MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Nvfp4),
+        },
+        "bf16" => MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+        },
+        "fp32" => MemoryNumericTier {
+            precision: gen_core::Precision::Fp32,
+            quant: None,
+        },
+        other => return Err(format!("unsupported resolver-supplied MLX tier {other:?}")),
+    };
+    if fallback.quant.is_some() && fallback != resolved {
+        return Err(format!(
+            "resolver tier {tier:?} conflicts with the LoadSpec numeric tier"
+        ));
+    }
+    Ok(resolved)
+}
+
+fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
+    match tier.quant {
+        Some(gen_core::Quant::Q4) => "q4",
+        Some(gen_core::Quant::Q8) => "q8",
+        Some(gen_core::Quant::Nvfp4) => "nvfp4",
+        None if tier.precision == gen_core::Precision::Fp32 => "fp32",
+        None => "bf16",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmissionPath {
+    Evidence,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyAdmissionReason {
+    PackagedEmpty,
+    NoBinding,
+    NoRecord,
+    OutOfEnvelope,
+    StaleFingerprint,
+    StaleIdentity,
+    StaleBundle,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedAdmissionCandidate {
+    evidence: MemoryEvidence,
+    foreign_reserve_bytes: u64,
+    required_host_bytes: u64,
+    record_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct AdmissionRoute {
+    path: AdmissionPath,
+    fallback_reason: Option<LegacyAdmissionReason>,
+    evidence: Vec<VerifiedAdmissionCandidate>,
+    evidence_revision: Option<String>,
+    process_limit_bytes: Option<u64>,
+}
+
+fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) -> MemoryBudget {
+    if let Some(process_limit_bytes) = admission.process_limit_bytes {
+        budget.reserved_headroom_bytes = budget.total_bytes.saturating_sub(process_limit_bytes);
+    }
+    budget
 }
 
 /// Exact request axes that must be reconsidered for both cold and warm cache runs.
@@ -105,6 +423,9 @@ pub(crate) struct MlxRequestInputs {
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
     pub context: MemoryRunContext,
+    /// Request-scoped soft MLX ceiling derived from an exact verified cell. Legacy cells keep the
+    /// process-global #1947 fallback. Applying this never changes the wired limit.
+    pub process_limit_bytes: Option<u64>,
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -197,6 +518,361 @@ fn resident_evidence(
     (selection, evidence)
 }
 
+fn stale_fallback_reason(reason: StaleEvidenceReason) -> LegacyAdmissionReason {
+    if reason == StaleEvidenceReason::CalibrationFingerprint {
+        LegacyAdmissionReason::StaleFingerprint
+    } else {
+        LegacyAdmissionReason::StaleIdentity
+    }
+}
+
+fn stronger_fallback_reason(
+    current: LegacyAdmissionReason,
+    candidate: LegacyAdmissionReason,
+) -> LegacyAdmissionReason {
+    let priority = |reason| match reason {
+        LegacyAdmissionReason::NoRecord => 0,
+        LegacyAdmissionReason::OutOfEnvelope => 1,
+        LegacyAdmissionReason::StaleFingerprint => 2,
+        LegacyAdmissionReason::StaleIdentity => 3,
+        LegacyAdmissionReason::PackagedEmpty
+        | LegacyAdmissionReason::NoBinding
+        | LegacyAdmissionReason::StaleBundle => 4,
+    };
+    if priority(candidate) > priority(current) {
+        candidate
+    } else {
+        current
+    }
+}
+
+fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
+    match rung {
+        StrategyRung::Resident => MemoryStrategy::Resident,
+        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
+        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
+        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
+        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
+    }
+}
+
+fn parse_evidence_parameters(
+    rung: StrategyRung,
+    parameters: &JsonObject<String, Value>,
+) -> Result<gen_core::MemoryStrategyParameters, String> {
+    const KEYS: [&str; 5] = [
+        "decodeTileEdge",
+        "decodeOverlap",
+        "attentionChunkSize",
+        "transformerWindowSize",
+        "transformerWindowComponent",
+    ];
+    if let Some(key) = parameters.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return Err(format!("unknown MLX strategy parameter {key:?}"));
+    }
+    let integer = |key: &str, minimum: u32| -> Result<u32, String> {
+        parameters
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value >= minimum)
+            .ok_or_else(|| format!("{key} must be an integer >= {minimum}"))
+    };
+    let expected_numeric: &[(&str, u32)] = match rung {
+        StrategyRung::Resident | StrategyRung::StagedResidency => &[],
+        StrategyRung::BoundedDecode => &[("decodeTileEdge", 1), ("decodeOverlap", 0)],
+        StrategyRung::BoundedAttention => &[
+            ("decodeTileEdge", 1),
+            ("decodeOverlap", 0),
+            ("attentionChunkSize", 1),
+        ],
+        StrategyRung::BoundedTransformerResidency => &[
+            ("decodeTileEdge", 1),
+            ("decodeOverlap", 0),
+            ("attentionChunkSize", 1),
+            ("transformerWindowSize", 1),
+        ],
+    };
+    for (key, _) in expected_numeric {
+        if !parameters.contains_key(*key) {
+            return Err(format!("{rung:?} requires {key}"));
+        }
+    }
+    for key in KEYS[..4].iter().filter(|key| {
+        !expected_numeric
+            .iter()
+            .any(|(expected, _)| expected == *key)
+    }) {
+        if parameters.contains_key(*key) {
+            return Err(format!("{rung:?} forbids {key}"));
+        }
+    }
+    let transformer_window_component = match parameters.get("transformerWindowComponent") {
+        None => None,
+        Some(Value::String(value)) if rung == StrategyRung::BoundedTransformerResidency => {
+            Some(match value.as_str() {
+                "dit" => TransformerComponent::Dit,
+                "text_encoder" => TransformerComponent::TextEncoder,
+                "both" => TransformerComponent::Both,
+                other => return Err(format!("unsupported transformerWindowComponent {other:?}")),
+            })
+        }
+        Some(_) if rung != StrategyRung::BoundedTransformerResidency => {
+            return Err(format!("{rung:?} forbids transformerWindowComponent"))
+        }
+        Some(_) => {
+            return Err("transformerWindowComponent must be dit, text_encoder, or both".to_owned())
+        }
+    };
+    Ok(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "decodeTileEdge")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        decode_overlap: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "decodeOverlap")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        attention_chunk_size: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "attentionChunkSize")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        transformer_window_size: expected_numeric
+            .iter()
+            .find(|(key, _)| *key == "transformerWindowSize")
+            .map(|(key, minimum)| integer(key, *minimum))
+            .transpose()?,
+        transformer_window_component,
+    })
+}
+
+/// Apply Decision 2 at the request seam: exact verified cells fail closed; every non-covering state
+/// returns to the established legacy selector. The route is returned so tests and telemetry can
+/// distinguish a normal empty-bundle transition from drift or an out-of-envelope request.
+fn packaged_admission_route(
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> WorkerResult<AdmissionRoute> {
+    if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} has an invalid MLX calibration opt-in: {reason}",
+            plan.model_id
+        )));
+    }
+    let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "packaged memory-calibration evidence is invalid: {error}"
+        ))
+    })?;
+    let bundle = match loaded {
+        BundleLoad::Ready(bundle) => bundle,
+        BundleLoad::Stale(_) => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::StaleBundle),
+                evidence: Vec::new(),
+                evidence_revision: None,
+                process_limit_bytes: None,
+            });
+        }
+    };
+    evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
+}
+
+fn evidence_admission_route(
+    bundle: &EvidenceBundle,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> WorkerResult<AdmissionRoute> {
+    if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} has an invalid MLX calibration opt-in: {reason}",
+            plan.model_id
+        )));
+    }
+    if bundle.records.is_empty() {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::PackagedEmpty),
+            evidence: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    }
+    let calibration = match &plan.calibration {
+        MlxCalibrationConfig::Absent => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::NoBinding),
+                evidence: Vec::new(),
+                evidence_revision: None,
+                process_limit_bytes: None,
+            })
+        }
+        MlxCalibrationConfig::Valid(calibration) => calibration,
+        MlxCalibrationConfig::Invalid(_) => unreachable!("invalid opt-in rejected above"),
+    };
+    let identity_matches = calibration
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.provider == plan.engine_id
+                && binding.tier == plan_tier_key(plan.tier)
+                && binding.query.artifact_repository == calibration.resolved.identity.repository
+                && binding.query.artifact_resolved_revision
+                    == calibration.resolved.identity.revision
+                && binding.query.artifact_variant == calibration.resolved.identity.variant
+                && binding.query.resolved_path_fingerprint
+                    == calibration.resolved.identity.fingerprint
+        })
+        .collect::<Vec<_>>();
+    if identity_matches.is_empty() {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+            evidence: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    }
+    let request_geometry = CalibrationGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: inputs.count.max(1),
+        frames: 1,
+    };
+    let overlay = inputs.overlay.as_deref().unwrap_or("none");
+    let matching = identity_matches
+        .into_iter()
+        .filter(|binding| {
+            binding.mode == mode_key
+                && binding.overlay == overlay
+                && binding.geometry == request_geometry
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::OutOfEnvelope),
+            evidence: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    }
+    let mut evidence = Vec::new();
+    let mut fallback_reason = LegacyAdmissionReason::NoRecord;
+    for binding in matching {
+        let query = EvidenceQuery {
+            backend: CalibrationBackend::Mlx,
+            model_id: plan.model_id.clone(),
+            provider: binding.provider.clone(),
+            tier: binding.tier.clone(),
+            mode: mode_key.to_owned(),
+            overlay: overlay.to_owned(),
+            geometry: request_geometry,
+            rung: binding.rung,
+            parameters: binding.parameters.clone(),
+            calibration: binding.query.clone(),
+        };
+        match bundle.evidence_for(&query) {
+            EvidenceVerdict::Verified(record) => {
+                let envelope = record.mlx_admission_envelope().ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                    "{} has a verified MLX evidence cell without a complete MLX admission envelope",
+                    plan.model_id
+                ))
+                })?;
+                let memory_evidence = MemoryEvidence {
+                    key: MemoryEvidenceKey {
+                        resolved_route: plan.engine_id.to_owned(),
+                        backend: "mlx".to_owned(),
+                        tier: plan.tier,
+                        mode: mode_key.to_owned(),
+                        overlay: inputs.overlay.clone(),
+                        geometry: MemoryGeometry {
+                            width: inputs.width,
+                            height: inputs.height,
+                            batch: inputs.count.max(1),
+                            frames: 1,
+                        },
+                        strategy: evidence_strategy(binding.rung),
+                        parameters: binding.selection_parameters,
+                    },
+                    conformance: MemoryConformanceState::Verified,
+                    dimensions: MemoryEvidenceDimensions::VERIFIED,
+                    calibration_abi: binding.query.abi,
+                    calibration_fingerprint: binding.query.fingerprint.clone(),
+                    sceneworks_revision: binding.query.scene_works_revision.clone(),
+                    inference_revision: binding.query.inference_revision.clone(),
+                    harness_version: record.harness_version.clone(),
+                    predicted_peak_bytes: envelope.peak_bytes,
+                    observed_peak_bytes: Some(envelope.observed_non_reclaimable_wired_bytes),
+                    parity: MemoryParityContract::Exact,
+                    parity_result: MemoryParityResult::Passed,
+                };
+                evidence.push(VerifiedAdmissionCandidate {
+                    evidence: memory_evidence,
+                    foreign_reserve_bytes: envelope.foreign_reserve_bytes,
+                    required_host_bytes: envelope.required_host_bytes(),
+                    record_id: record.id.clone(),
+                });
+            }
+            EvidenceVerdict::Unknown => {}
+            EvidenceVerdict::OutOfEnvelope => {
+                fallback_reason =
+                    stronger_fallback_reason(fallback_reason, LegacyAdmissionReason::OutOfEnvelope);
+            }
+            EvidenceVerdict::Stale(reason) => {
+                fallback_reason =
+                    stronger_fallback_reason(fallback_reason, stale_fallback_reason(reason));
+            }
+        }
+    }
+    if evidence.is_empty() {
+        return Ok(AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(fallback_reason),
+            evidence,
+            evidence_revision: None,
+            process_limit_bytes: None,
+        });
+    }
+    if evidence
+        .iter()
+        .all(|candidate| candidate.required_host_bytes > budget.total_bytes)
+    {
+        let minimum = evidence
+            .iter()
+            .map(|candidate| candidate.required_host_bytes)
+            .min()
+            .unwrap_or(0);
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} request {}x{} count {} needs at least {:.2} GiB from verified MLX evidence, but \
+             {:.2} GiB of unified memory is available",
+            plan.model_id,
+            inputs.width,
+            inputs.height,
+            inputs.count.max(1),
+            minimum as f64 / BYTES_PER_GIB,
+            budget.total_bytes as f64 / BYTES_PER_GIB,
+        )));
+    }
+    Ok(AdmissionRoute {
+        path: AdmissionPath::Evidence,
+        fallback_reason: None,
+        evidence,
+        evidence_revision: None,
+        process_limit_bytes: None,
+    })
+}
+
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
 /// accepted explicitly; absent exact verified cells, only the resident baseline can be admitted.
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +886,33 @@ fn evaluate_request_with_budget(
     total_peak_bytes: u64,
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
+) -> WorkerResult<MlxRequestEvaluation> {
+    evaluate_request_with_budget_using_bundle(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        additional_evidence,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_request_with_budget_using_bundle(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    budget: MemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[MemoryEvidence],
+    evidence_bundle: Option<&EvidenceBundle>,
 ) -> WorkerResult<MlxRequestEvaluation> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
@@ -251,6 +954,43 @@ fn evaluate_request_with_budget(
         .calibration
         .as_ref()
         .map_or(0, |identity| identity.abi);
+    let mut admission = match evidence_bundle {
+        Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
+        None => packaged_admission_route(plan, inputs, mode_key, budget)?,
+    };
+    if admission.path == AdmissionPath::Evidence
+        && !contract.calibration.as_ref().is_some_and(|identity| {
+            admission.evidence.iter().all(|candidate| {
+                identity.abi == candidate.evidence.calibration_abi
+                    && identity.fingerprint == candidate.evidence.calibration_fingerprint
+            })
+        })
+    {
+        admission = AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+            evidence: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+        };
+    }
+    // The selector and provider request context must use the same evidence-derived foreign demand
+    // as the fail-closed precheck and the request-scoped MLX ceiling. Otherwise a covered request
+    // with existing committed memory could be admitted against the legacy 2 GiB reserve even though
+    // its record captured a larger non-process share.
+    let mut budget = budget_for_admission(budget, &admission);
+    tracing::info!(
+        event = "mlx_memory_admission_path",
+        route = plan.engine_id,
+        model = plan.model_id,
+        path = ?admission.path,
+        fallback_reason = ?admission.fallback_reason,
+        evidence_revision = admission.evidence_revision.as_deref().unwrap_or("none"),
+        width = inputs.width,
+        height = inputs.height,
+        count = inputs.count.max(1),
+        "selected MLX memory-admission path"
+    );
     if plan.engine_id.starts_with("mage_flow")
         && !matches!(
             contract.calibration.as_ref(),
@@ -275,14 +1015,30 @@ fn evaluate_request_with_budget(
         .committed_bytes
         .saturating_sub(external_committed_bytes)
         .min(contract.asset_facts.base_bytes);
-    if attributable_resident_bytes > total_peak_bytes {
+    let evidence_peak_bytes = admission
+        .evidence
+        .iter()
+        .map(|candidate| candidate.evidence.predicted_peak_bytes)
+        .max();
+    let modeled_peak_bytes = evidence_peak_bytes.unwrap_or(total_peak_bytes);
+    if attributable_resident_bytes > modeled_peak_bytes {
         return Err(WorkerError::InvalidPayload(format!(
             "{} live resident attribution {} exceeds modeled total peak {}; refusing an \
              inconsistent MLX budget",
-            plan.engine_id, attributable_resident_bytes, total_peak_bytes
+            plan.engine_id, attributable_resident_bytes, modeled_peak_bytes
         )));
     }
-    let predicted_peak_bytes = total_peak_bytes - attributable_resident_bytes;
+    let predicted_peak_bytes = if admission.path == AdmissionPath::Evidence {
+        // Exact evidence describes the whole request peak. On a warm cache, remove only this
+        // provider's already-resident assets from committed bytes so the full peak is charged once;
+        // unrelated allocations remain committed. Do not rewrite the evidence record's peak.
+        budget.committed_bytes = budget
+            .committed_bytes
+            .saturating_sub(attributable_resident_bytes);
+        modeled_peak_bytes
+    } else {
+        total_peak_bytes - attributable_resident_bytes
+    };
     let (resident_selection, resident) = resident_evidence(
         plan.engine_id,
         plan.tier,
@@ -292,16 +1048,64 @@ fn evaluate_request_with_budget(
         predicted_peak_bytes,
         calibration_fingerprint,
     );
-    let mut selections = Vec::with_capacity(1 + additional_evidence.len());
-    selections.push(resident_selection);
-    selections.extend(additional_evidence.iter().map(|evidence| MemorySelection {
-        strategy: evidence.key.strategy,
-        parameters: evidence.key.parameters,
-        tier: evidence.key.tier,
-    }));
-    let mut evidence = Vec::with_capacity(1 + additional_evidence.len());
-    evidence.push(&resident);
-    evidence.extend(additional_evidence);
+    let mut selections = Vec::new();
+    let mut evidence = Vec::new();
+    if admission.path == AdmissionPath::Evidence {
+        // A covered cell is authorized only by its exact verified ladder. Letting the generic
+        // resident estimate or caller-supplied evidence run first would turn Evidence telemetry
+        // into a legacy bypass.
+        for candidate in &admission.evidence {
+            let exact = &candidate.evidence;
+            if attributable_resident_bytes > exact.predicted_peak_bytes {
+                continue;
+            }
+            let candidate_budget = Budget {
+                available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
+                    / BYTES_PER_GIB,
+                reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
+                total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
+                reserved_headroom_gb: candidate.foreign_reserve_bytes as f64 / BYTES_PER_GIB,
+            };
+            if candidate_budget.effective_gb().is_some_and(|available| {
+                exact.predicted_peak_bytes as f64 / BYTES_PER_GIB <= available
+            }) {
+                selections.push(MemorySelection {
+                    strategy: exact.key.strategy,
+                    parameters: exact.key.parameters,
+                    tier: exact.key.tier,
+                });
+                evidence.push(exact);
+            }
+        }
+        if evidence.is_empty() {
+            let minimum_required_host = admission
+                .evidence
+                .iter()
+                .map(|candidate| candidate.required_host_bytes)
+                .min()
+                .unwrap_or(0);
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} request {}x{} count {} needs at least {:.2} GiB at its smallest verified \
+                 MLX host boundary, but no exact candidate fits the live unified-memory budget",
+                plan.model_id,
+                inputs.width,
+                inputs.height,
+                inputs.count.max(1),
+                minimum_required_host as f64 / BYTES_PER_GIB,
+            )));
+        }
+    } else {
+        selections.reserve(1 + additional_evidence.len());
+        evidence.reserve(1 + additional_evidence.len());
+        selections.push(resident_selection);
+        evidence.push(&resident);
+        selections.extend(additional_evidence.iter().map(|item| MemorySelection {
+            strategy: item.key.strategy,
+            parameters: item.key.parameters,
+            tier: item.key.tier,
+        }));
+        evidence.extend(additional_evidence);
+    }
     let candidates = selections
         .iter()
         .zip(evidence)
@@ -310,6 +1114,12 @@ fn evaluate_request_with_budget(
             evidence,
         })
         .collect::<Vec<_>>();
+    let expected_inference_revision = admission
+        .evidence
+        .first()
+        .map_or(INFERENCE_CONTRACT_REVISION, |candidate| {
+            candidate.evidence.inference_revision.as_str()
+        });
     let selection = crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: plan.engine_id,
@@ -318,8 +1128,7 @@ fn evaluate_request_with_budget(
             mode: mode_key,
             overlay: inputs.overlay.as_deref(),
             geometry,
-            expected_sceneworks_revision: REQUEST_EVIDENCE_REVISION,
-            expected_inference_revision: INFERENCE_CONTRACT_REVISION,
+            expected_inference_revision,
         },
         contract,
         Some(Budget {
@@ -327,11 +1136,15 @@ fn evaluate_request_with_budget(
                 / BYTES_PER_GIB,
             reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
             total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
-            reserved_headroom_gb: budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB,
+            reserved_headroom_gb: if admission.path == AdmissionPath::Evidence {
+                0.0
+            } else {
+                budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
+            },
         }),
         &candidates,
     );
-    let (selection, needed_gb, available_gb) = match selection {
+    let (selection, mut needed_gb, mut available_gb) = match selection {
         Selection::Selected {
             selection,
             needed_gb,
@@ -363,6 +1176,43 @@ fn evaluate_request_with_budget(
             return Err(WorkerError::InvalidPayload(message));
         }
     };
+    let mut selected_record_id = None;
+    let mut process_limit_bytes = admission.process_limit_bytes;
+    let predicted_peak_bytes = if admission.path == AdmissionPath::Evidence {
+        let index = admission
+            .evidence
+            .iter()
+            .position(|candidate| {
+                let evidence = &candidate.evidence;
+                evidence.key.strategy == selection.strategy
+                    && evidence.key.parameters == selection.parameters
+                    && evidence.key.tier == selection.tier
+            })
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{} selected a strategy without matching verified MLX evidence",
+                    plan.engine_id
+                ))
+            })?;
+        let candidate = &admission.evidence[index];
+        let evidence = &candidate.evidence;
+        let reserve = candidate.foreign_reserve_bytes;
+        let selected_budget = Budget {
+            available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
+                / BYTES_PER_GIB,
+            reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
+            total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
+            reserved_headroom_gb: reserve as f64 / BYTES_PER_GIB,
+        };
+        needed_gb = evidence.predicted_peak_bytes.saturating_add(reserve) as f64 / BYTES_PER_GIB;
+        available_gb = selected_budget.effective_gb().unwrap_or(0.0);
+        budget.reserved_headroom_bytes = reserve;
+        process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
+        selected_record_id = Some(candidate.record_id.clone());
+        evidence.predicted_peak_bytes
+    } else {
+        predicted_peak_bytes
+    };
     tracing::info!(
         event = "memory_strategy_request_selected",
         route = plan.engine_id,
@@ -377,6 +1227,7 @@ fn evaluate_request_with_budget(
         load_policy = ?load_policy,
         strategy = ?selection.strategy,
         parameters = ?selection.parameters,
+        evidence_record_id = selected_record_id.as_deref().unwrap_or("none"),
         predicted_peak_bytes,
         effective_budget_bytes = budget.effective_bytes(),
         needed_gb,
@@ -385,6 +1236,7 @@ fn evaluate_request_with_budget(
     );
     Ok(MlxRequestEvaluation {
         memory: memory_for_selection(contract, selection),
+        process_limit_bytes,
         context: MemoryRunContext {
             selection,
             calibration_abi,
@@ -398,7 +1250,9 @@ fn evaluate_request_with_budget(
             budget,
             predicted_peak_bytes,
             cache_state,
-            evidence_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+            evidence_revision: selected_record_id
+                .or(admission.evidence_revision)
+                .unwrap_or_else(|| REQUEST_EVIDENCE_REVISION.to_owned()),
         },
     })
 }
@@ -423,7 +1277,8 @@ fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
                 )
             })?
             .total_gb;
-        (gib_to_bytes(total_gib), gib_to_bytes(OS_RESERVE_GB))
+        let reserve = crate::fit_gate::legacy_unified_reserve(total_gib);
+        (gib_to_bytes(total_gib), gib_to_bytes(reserve.gb))
     };
     Ok(MemoryBudget {
         total_bytes,
@@ -569,24 +1424,6 @@ const HEADROOM_GB: f64 = 18.0;
 /// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
 /// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
 const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
-
-/// Reserve (GiB) kept free for macOS + the SceneWorks app + other apps when the WEIGHTS-FIT FLOOR
-/// (sc-12179, GitHub #1544) admits a model whose predicted PEAK exceeds the budget. Deliberately
-/// small: it guards the OS from outright starvation (which would destabilize the whole machine), NOT
-/// the pageable activation transient (which degrades to swap, not a wired SIGKILL). A FLAT constant
-/// (not a fraction of RAM) on purpose — the OS floor is roughly absolute, so it must not scale up to
-/// tens of GiB on a large machine and lock a big Mac out of its own memory.
-///
-/// 2 GiB is anchored on the 0.7.3 baseline: z-image-turbo q4 (5.49 GiB on disk, largest single
-/// component 3.38 GiB) ran on an 8 GB Mac with roughly this much left for the OS + paged transient.
-/// It leaves ~6 GiB of weight budget on an 8 GB Mac — comfortably admitting that baseline and the
-/// other small tiers — while still rejecting a model whose weights alone can't be held resident.
-/// See [`weights_fit_floor`] and the `z_image_turbo_q4_admits_on_an_8gb_mac` baseline test.
-///
-/// Shared with [`crate::generator_cache::resolve_gpu_memory_limit`], which reserves the same floor
-/// when it derives the default MLX process memory limit — the admission floor and the runtime
-/// ceiling must agree, or the gate admits a tier the runtime then refuses to hold.
-pub(crate) const OS_RESERVE_GB: f64 = 2.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
@@ -847,7 +1684,7 @@ fn sysctl_total_unified_memory_bytes() -> Option<u64> {
 //     materializes the whole clip — sc-12291), so the peak grows LINEARLY IN CLIP LENGTH. A 7-frame
 //     and a 151-frame request differ by ~55 GiB on the same model. A constant cannot express that.
 //
-//  2. Mochi's `supports_sequential_offload: false` ⇒ `weights_fit_floor` admits on WEIGHTS ALONE
+//  2. Mochi's `supports_sequential_offload: false` ⇒ the legacy admission override admits on WEIGHTS ALONE
 //     (18.73 GiB fits almost any Mac), so the generic gate would happily admit a 151-frame job that
 //     then needs ~79 GiB. The floor is correct for its own purpose (sc-12179: never wall-reject a
 //     machine that used to work) but it is precisely what makes the generic gate unable to protect
@@ -867,21 +1704,27 @@ fn sysctl_total_unified_memory_bytes() -> Option<u64> {
 // All three points above hold verbatim for the candle lane, which grew the same gate in sc-12306 —
 // except (3), where a CUDA OOM is catchable rather than a SIGKILL, so the pre-flight buys an
 // actionable message and minutes of un-wasted denoise rather than process survival. What remains here
-// is MLX-SPECIFIC: the unified-memory budget probe, the `OS_RESERVE_GB` reserve, and the Mac-worded
+// is MLX-SPECIFIC: the unified-memory budget probe, the typed legacy/evidence reserve, and the Mac-worded
 // message. The shared ARITHMETIC lives in `crate::fit_gate` (`mochi_decode_peak_gb` /
 // `mochi_needed_gb`); the candle half is `vram_gate::mochi_fit_error`. The on-disk scan
 // (`mochi_resident_bytes`) is shared too — the hosted tier layout is one repo serving both lanes.
 
 /// Predicted whole-generation peak (GiB) for an MLX Mochi request, in UNIFIED memory: the shared
-/// backend-neutral arithmetic ([`crate::fit_gate::mochi_needed_gb`]) reserving [`OS_RESERVE_GB`],
+/// backend-neutral arithmetic ([`crate::fit_gate::mochi_needed_gb`]) with the caller's unified reserve,
 /// because on unified memory the OS draws from the same pool the model does.
 ///
 /// The formula itself moved to [`crate::fit_gate`] when the candle video lane needed the identical
 /// arithmetic (sc-12306) — every term in it is a fact about the MODEL (tensor shapes × the f32 dtype
 /// both decoders pin), so duplicating it per lane would let the two gates disagree about one model.
 /// The RESERVE is what stays lane-specific; see that function's note.
-fn mochi_needed_gb(weight_bytes: u64, frames: u32, width: u32, height: u32) -> Option<f64> {
-    crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, OS_RESERVE_GB)
+fn mochi_needed_gb(
+    weight_bytes: u64,
+    frames: u32,
+    width: u32,
+    height: u32,
+    reserve_gb: f64,
+) -> Option<f64> {
+    crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, reserve_gb)
 }
 
 /// The pure Mochi admission decision: `Some(error)` when the predicted peak overflows the budget,
@@ -895,10 +1738,9 @@ pub(crate) fn mochi_fit_error(
     height: u32,
     budget: Option<MlxMemoryBudget>,
 ) -> Option<WorkerError> {
-    let (needed_gb, budget) = (
-        mochi_needed_gb(weight_bytes, frames, width, height)?,
-        budget?,
-    );
+    let budget = budget?;
+    let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
+    let needed_gb = mochi_needed_gb(weight_bytes, frames, width, height, reserve.gb)?;
     (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
         mochi_too_big_error(
             model_label,
@@ -1046,21 +1888,19 @@ fn decide_residency_with_headroom(
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
-    let base = decide_residency_by_peak_with_headroom(
+    let peak = decide_residency_by_peak_with_headroom(
         total_bytes,
         te_bytes,
         budget,
         sequential_capable,
         headroom_gb,
     );
-    // Weights-fit floor (sc-12179): a would-be reject is downgraded to a (best-effort) load when the
-    // resident weights actually fit — the peak predictor's pageable transient must not categorically
-    // exclude a small Mac. Any non-reject outcome stands as-is.
-    match base {
+    match peak {
         ResidencyOutcome::Reject { .. } => {
-            weights_fit_floor(total_bytes, te_bytes, budget, sequential_capable).unwrap_or(base)
+            legacy_admission_override(total_bytes, te_bytes, budget, sequential_capable)
+                .unwrap_or(peak)
         }
-        resident_or_sequential => resident_or_sequential,
+        admitted => admitted,
     }
 }
 
@@ -1069,7 +1909,7 @@ fn decide_residency_with_headroom(
 /// — against the budget. This is the right signal for SELECTING Resident vs Sequential and for the
 /// rejection message's `needed`/`staged` numbers, but it rejects too aggressively on small Macs
 /// because the flat headroom bundles a pageable 1024² activation transient (sc-12179); the caller
-/// folds in [`weights_fit_floor`] before honoring a reject.
+/// folds in the Decision 2 legacy override before honoring a reject.
 #[cfg(test)]
 fn decide_residency_by_peak(
     total_bytes: u64,
@@ -1217,7 +2057,6 @@ fn generic_mlx_shared_observation(
             mode: "image_generation",
             overlay: Some("resolved_load_spec"),
             geometry,
-            expected_sceneworks_revision: "sc-15449-contract-v1",
             expected_inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
         },
         &contract,
@@ -1234,40 +2073,6 @@ fn generic_mlx_shared_observation(
     )
 }
 
-/// Weights-fit floor (sc-12179, GitHub #1544): a machine that can hold the model's RESIDENT WEIGHTS
-/// can still run it — paging the activation transient if needed — exactly as it did before this
-/// fit-gate existed. [`predicted_peak_gb`] adds a flat [`HEADROOM_GB`] that bundles a worst-case
-/// 1024² activation transient (~14 GiB); that transient is PAGEABLE (degrades to swap, not a wired
-/// SIGKILL) and resolution-bound, so on small Macs `Σweights + 18` exceeds total RAM for EVERY model
-/// and [`decide_residency_by_peak`] categorically rejects — even a tiny model that generated fine on
-/// 0.7.3. This floor converts that reject into a load whenever the wired weights fit
-/// `budget − OS_RESERVE_GB`: [`ResidencyOutcome::Sequential`] (wired bounded to the largest single
-/// component) when the provider stages, else [`ResidencyOutcome::Resident`] (best-effort). Returns
-/// `None` when the weights themselves won't fit — a genuine reject-before-SIGKILL that stands, and
-/// when there is no budget signal (the gate never blocks without one).
-///
-/// TRADE-OFF (see sc-12179 / sc-11924): this makes the gate strictly more permissive, so a
-/// transient-heavy bf16 tier on a mid-size Mac can now reach a Metal-OOM/SIGKILL where it previously
-/// pre-rejected. That is the pre-fit-gate behavior and the correct default — a machine that ran a
-/// model must not be newly wall-rejected. The honest fix for those tiers is in-memory (materialized)
-/// component sizing (sc-11924), not a blanket over-reservation that excludes every 8/16 GB Mac.
-fn weights_fit_floor(
-    total_bytes: u64,
-    te_bytes: u64,
-    budget: Option<MlxMemoryBudget>,
-    sequential_capable: bool,
-) -> Option<ResidencyOutcome> {
-    let ceiling_gb = budget?.total_gb - OS_RESERVE_GB;
-    if sequential_capable {
-        // Staged: peak wired residency is the largest single component (text encoders dropped first).
-        (staged_weights_gb(total_bytes, te_bytes) <= ceiling_gb)
-            .then_some(ResidencyOutcome::Sequential)
-    } else {
-        // Can't stage: the whole model is held resident; admit if the weights fit best-effort.
-        (total_bytes as f64 / BYTES_PER_GIB <= ceiling_gb).then_some(ResidencyOutcome::Resident)
-    }
-}
-
 /// The largest single component's on-disk weight bytes (GiB) — the wired residency the `Sequential`
 /// schedule holds at peak (text encoder(s) dropped before the DiT loads). WEIGHTS ONLY, no activation
 /// headroom — contrast [`predicted_sequential_peak_gb`], which adds [`HEADROOM_GB`] for the peak
@@ -1275,6 +2080,29 @@ fn weights_fit_floor(
 fn staged_weights_gb(total_bytes: u64, te_bytes: u64) -> f64 {
     let rest_bytes = total_bytes.saturating_sub(te_bytes);
     te_bytes.max(rest_bytes) as f64 / BYTES_PER_GIB
+}
+
+/// Decision 1 / Decision 2 transition override.
+///
+/// This deliberately replaces the old `weights_fit_floor` symbol while preserving its outcome for
+/// requests which have no exact verified evidence. The settled transition rule requires those cells
+/// to remain byte-for-byte legacy, including the 8 GiB q4 guard, until that cell's calibration story
+/// opts it into evidence. Verified cells never call this function and genuinely fail closed above.
+fn legacy_admission_override(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MlxMemoryBudget>,
+    sequential_capable: bool,
+) -> Option<ResidencyOutcome> {
+    let budget = budget?;
+    let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
+    let ceiling_gb = budget.total_gb - reserve.gb;
+    if sequential_capable {
+        (staged_weights_gb(total_bytes, te_bytes) <= ceiling_gb)
+            .then_some(ResidencyOutcome::Sequential)
+    } else {
+        (total_bytes as f64 / BYTES_PER_GIB <= ceiling_gb).then_some(ResidencyOutcome::Resident)
+    }
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
@@ -1355,7 +2183,7 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
     // hosted once in a shared mirror — so an unstaged sum scored a q4 edit install at 2.17 GiB
     // against a real 6.52 GiB, which both under-quoted the over-budget message and let the
-    // `weights_fit_floor` admit tiers that do not fit. A component resolved to a path INSIDE the
+    // the legacy override admit tiers that do not fit. A component resolved to a path INSIDE the
     // weights dir is skipped, because the scan already counted it.
     for source in spec.components.values() {
         let inside = match source {
@@ -1465,7 +2293,7 @@ fn too_big_error(
 // This gate is the training analogue of the generation `apply_residency_policy` admission check, and
 // it REUSES this module's machinery per sc-14056: `sum_safetensors_bytes` for the dense DiT bytes,
 // `resolve_budget` + the `sysctl hw.memsize` probe (+ `SCENEWORKS_MLX_MEMORY_CAP_ENV` emulation) for
-// the platform-aware unified-memory budget, and `OS_RESERVE_GB` for the OS floor. It is a pre-flight
+// the platform-aware unified-memory budget, and the typed legacy unified reserve. It is a pre-flight
 // admission check (an MLX overcommit SIGKILLs the process — it cannot be caught after the fact, the
 // same reason the generation gate and the Mochi gate are pre-flight), so a full-tune this machine
 // cannot hold is refused up front with an actionable message rather than an uncatchable mid-run kill.
@@ -1551,7 +2379,7 @@ fn full_finetune_peak_gb(
     let state = dit_gb * state_multiplier;
     let attention = tokens * tokens * FULL_FINETUNE_ATTN_BYTES_PER_TOKEN_PAIR / BYTES_PER_GIB;
     let feature = tokens * FULL_FINETUNE_FEATURE_BYTES_PER_TOKEN / BYTES_PER_GIB;
-    Some(state + attention + feature + OS_RESERVE_GB)
+    Some(state + attention + feature + crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
 }
 
 /// The pure full-fine-tune admission decision: `Some(message)` when the predicted peak overflows the
@@ -1694,12 +2522,14 @@ mod tests {
     fn request_plan() -> MlxRequestPlan {
         MlxRequestPlan {
             engine_id: "mage_flow",
+            model_id: "mage_flow".to_owned(),
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Absent,
         }
     }
 
@@ -1732,6 +2562,1075 @@ mod tests {
             use_pid: false,
             has_phases: false,
         }
+    }
+
+    fn fixture_bundle() -> EvidenceBundle {
+        match sceneworks_core::memory_calibration::load_bundle(include_str!(
+            "../tests/fixtures/mlx-memory-calibration.json"
+        ))
+        .expect("valid MLX calibration fixture")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
+        }
+    }
+
+    fn fixture_binding(tier: &str, variant: &str) -> MlxCalibrationBinding {
+        let parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+        ]);
+        fixture_binding_for(tier, variant, StrategyRung::BoundedDecode, parameters)
+    }
+
+    fn fixture_binding_for(
+        tier: &str,
+        variant: &str,
+        rung: StrategyRung,
+        parameters: JsonObject<String, Value>,
+    ) -> MlxCalibrationBinding {
+        MlxCalibrationBinding {
+            query: CalibrationBinding {
+                abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                fingerprint: "fixture-formula-v2".to_owned(),
+                scene_works_revision: "a".repeat(40),
+                matrix_source_revision: "source-tree:1111111".to_owned(),
+                inference_revision: "b".repeat(40),
+                artifact_repository: "SceneWorks/fixture".to_owned(),
+                artifact_resolved_revision: "c".repeat(40),
+                artifact_variant: variant.to_owned(),
+                resolved_path_fingerprint: format!(
+                    "SceneWorks/fixture@{}:{variant}",
+                    "c".repeat(40)
+                ),
+            },
+            provider: "fixture_provider".to_owned(),
+            tier: tier.to_owned(),
+            mode: "text_to_image".to_owned(),
+            overlay: "none".to_owned(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            rung,
+            selection_parameters: parse_evidence_parameters(rung, &parameters)
+                .expect("fixture parameters"),
+            parameters,
+        }
+    }
+
+    fn fixture_calibration_json(tier: &str, variant: &str) -> Value {
+        serde_json::json!({
+            "abi": sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+            "fingerprint": "fixture-formula-v2",
+            "sceneWorksRevision": "a".repeat(40),
+            "matrixSourceRevision": "source-tree:1111111",
+            "inferenceRevision": "b".repeat(40),
+            "provider": "fixture_provider",
+            "tier": tier,
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+                "width": 1024,
+                "height": 1024,
+                "batch": 1,
+                "frames": 1
+            },
+            "artifactRepository": "SceneWorks/fixture",
+            "artifactResolvedRevision": "c".repeat(40),
+            "artifactVariant": variant,
+            "resolvedPathFingerprint": format!(
+                "SceneWorks/fixture@{}:{variant}",
+                "c".repeat(40)
+            ),
+            "rung": "bounded_decode",
+            "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128
+            }
+        })
+    }
+
+    fn fixture_manifest(calibrations: Vec<Value>) -> JsonObject<String, Value> {
+        serde_json::json!({ "mlx": { "calibrations": calibrations } })
+            .as_object()
+            .expect("manifest object")
+            .clone()
+    }
+
+    fn fixture_spec(tier: gen_core::Quant, variant: &str) -> LoadSpec {
+        LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(format!(
+            "/cache/models--SceneWorks--fixture/snapshots/{}/{variant}/weights",
+            "c".repeat(40)
+        ))))
+        .with_quant(tier)
+    }
+
+    fn fixture_provenance(tier: &str, variant: &str) -> ResolvedArtifactProvenance {
+        ResolvedArtifactProvenance {
+            identity: crate::model_jobs::ResolvedArtifactIdentity {
+                repository: "SceneWorks/fixture".to_owned(),
+                revision: "c".repeat(40),
+                variant: variant.to_owned(),
+                fingerprint: format!("SceneWorks/fixture@{}:{variant}", "c".repeat(40)),
+            },
+            fixed_artifact_tier: Some(tier.to_owned()),
+        }
+    }
+
+    fn fixture_plan() -> MlxRequestPlan {
+        let variant = "packed-q4";
+        MlxRequestPlan {
+            engine_id: "fixture_provider",
+            model_id: "fixture_model".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            asset_bytes: gib_to_bytes(3.0),
+            activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet {
+                bindings: vec![fixture_binding("q4", variant)],
+                resolved: fixture_provenance("q4", variant),
+            }),
+        }
+    }
+
+    fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
+        MlxRequestInputs {
+            width,
+            height,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+        }
+    }
+
+    fn fixture_generator() -> RequestGenerator {
+        use gen_core::{
+            MemoryCalibrationIdentity, MemoryLifecycleCapabilities, MemoryParameterRanges,
+            MemoryPhase, MemoryStrategyCapability, MemoryStrategySupport,
+        };
+
+        let mut contract = MemoryProviderContract::compatibility_default(
+            "fixture_provider",
+            MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.calibration = Some(MemoryCalibrationIdentity::new("fixture-formula-v2"));
+        contract.asset_facts.base_bytes = gib_to_bytes(3.0);
+        contract.lifecycle = MemoryLifecycleCapabilities {
+            phases: vec![
+                MemoryPhase::Conditioning,
+                MemoryPhase::Denoise,
+                MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: true,
+            transformer_window_materialization: false,
+        };
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| MemoryStrategyCapability {
+                strategy,
+                support: if matches!(
+                    strategy,
+                    MemoryStrategy::Resident
+                        | MemoryStrategy::StagedResidency
+                        | MemoryStrategy::BoundedDecode
+                        | MemoryStrategy::BoundedAttention
+                ) {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                },
+                parameters: match strategy {
+                    MemoryStrategy::BoundedDecode => MemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![128],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedAttention => MemoryParameterRanges {
+                        attention_chunk_sizes: vec![256],
+                        ..Default::default()
+                    },
+                    _ => MemoryParameterRanges::default(),
+                },
+            })
+            .collect();
+        RequestGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "fixture_provider",
+                family: "test",
+                backend: "mlx",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                required_components: &[],
+            },
+            contract: Some(contract),
+        }
+    }
+
+    fn fixture_budget(total_gib: f64) -> MemoryBudget {
+        MemoryBudget {
+            total_bytes: gib_to_bytes(total_gib),
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        }
+    }
+
+    fn fixture_ladder() -> (EvidenceBundle, MlxRequestPlan) {
+        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+
+        let mut bundle = fixture_bundle();
+        let base = bundle.records.remove(0);
+        let rung = |rung, parameters: JsonObject<String, Value>, peak_gib: f64| {
+            let mut record = base.clone();
+            record.strategy.rung = rung;
+            record.strategy.parameters = parameters.clone();
+            record.sweep.cases[0].parameters = parameters;
+            if let RequiredNullable::Value(predicted) = &mut record.predicted_peak_bytes {
+                *predicted = PredictedPeakBytes {
+                    conditioning: predicted.conditioning.min(gib_to_bytes(peak_gib)),
+                    denoise: gib_to_bytes(peak_gib),
+                    decode: predicted.decode.min(gib_to_bytes(peak_gib)),
+                    overall: gib_to_bytes(peak_gib),
+                };
+            }
+            record
+        };
+        let resident_parameters = JsonObject::new();
+        let decode_parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+        ]);
+        let attention_parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+            ("attentionChunkSize".to_owned(), serde_json::json!(256)),
+        ]);
+        bundle.records = vec![
+            rung(StrategyRung::Resident, resident_parameters.clone(), 7.0),
+            rung(StrategyRung::BoundedDecode, decode_parameters.clone(), 5.0),
+            rung(
+                StrategyRung::BoundedAttention,
+                attention_parameters.clone(),
+                4.0,
+            ),
+        ];
+        let mut plan = fixture_plan();
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings = vec![
+            fixture_binding_for(
+                "q4",
+                "packed-q4",
+                StrategyRung::Resident,
+                resident_parameters,
+            ),
+            fixture_binding_for(
+                "q4",
+                "packed-q4",
+                StrategyRung::BoundedDecode,
+                decode_parameters,
+            ),
+            fixture_binding_for(
+                "q4",
+                "packed-q4",
+                StrategyRung::BoundedAttention,
+                attention_parameters,
+            ),
+        ];
+        (bundle, plan)
+    }
+
+    #[test]
+    fn manifest_reader_distinguishes_absent_valid_and_malformed_opt_in() {
+        let spec = fixture_spec(gen_core::Quant::Q4, "packed-q4");
+        let absent = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &spec,
+            Some(&JsonObject::new()),
+            None,
+        );
+        assert!(matches!(absent.calibration, MlxCalibrationConfig::Absent));
+
+        let valid_manifest = fixture_manifest(vec![fixture_calibration_json("q4", "packed-q4")]);
+        let valid = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &spec,
+            Some(&valid_manifest),
+            Some(fixture_provenance("q4", "packed-q4")),
+        );
+        let MlxCalibrationConfig::Valid(calibration) = valid.calibration else {
+            panic!("well-formed opt-in must be valid");
+        };
+        assert_eq!(calibration.bindings.len(), 1);
+        assert_eq!(calibration.resolved.identity.variant, "packed-q4");
+        assert_eq!(valid.tier.quant, Some(gen_core::Quant::Q4));
+
+        let unavailable = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &spec,
+            Some(&valid_manifest),
+            None,
+        );
+        assert!(matches!(
+            unavailable.calibration,
+            MlxCalibrationConfig::Invalid(_)
+        ));
+        assert!(packaged_admission_route(
+            &unavailable,
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0)
+        )
+        .expect_err("present opt-in without trusted resolver provenance must fail closed")
+        .to_string()
+        .contains("resolver supplied no immutable"));
+
+        let mut malformed = fixture_calibration_json("q4", "packed-q4");
+        malformed
+            .as_object_mut()
+            .expect("calibration object")
+            .remove("fingerprint");
+        let malformed_manifest = fixture_manifest(vec![malformed]);
+        let malformed = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &spec,
+            Some(&malformed_manifest),
+            Some(fixture_provenance("q4", "packed-q4")),
+        );
+        assert!(matches!(
+            malformed.calibration,
+            MlxCalibrationConfig::Invalid(_)
+        ));
+        assert!(packaged_admission_route(
+            &malformed,
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0)
+        )
+        .expect_err("a malformed present opt-in must not collapse to packaged-empty legacy")
+        .to_string()
+        .contains("invalid MLX calibration opt-in"));
+    }
+
+    #[test]
+    fn parameter_reader_is_closed_and_preserves_transformer_component() {
+        let parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+            ("attentionChunkSize".to_owned(), serde_json::json!(256)),
+            ("transformerWindowSize".to_owned(), serde_json::json!(4)),
+            (
+                "transformerWindowComponent".to_owned(),
+                serde_json::json!("both"),
+            ),
+        ]);
+        let parsed =
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &parameters)
+                .expect("the complete exact parameter set is valid");
+        assert_eq!(parsed.decode_tile_edge, Some(512));
+        assert_eq!(parsed.decode_overlap, Some(128));
+        assert_eq!(parsed.attention_chunk_size, Some(256));
+        assert_eq!(parsed.transformer_window_size, Some(4));
+        assert_eq!(
+            parsed.transformer_window_component,
+            Some(TransformerComponent::Both)
+        );
+
+        let mut unknown = parameters.clone();
+        unknown.insert("unrecognized".to_owned(), serde_json::json!(1));
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unknown)
+                .expect_err("unknown parameters fail closed")
+                .contains("unknown")
+        );
+
+        let mut malformed = parameters.clone();
+        malformed.insert(
+            "transformerWindowComponent".to_owned(),
+            serde_json::json!(12),
+        );
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &malformed)
+                .expect_err("a non-string transformer component fails closed")
+                .contains("transformerWindowComponent")
+        );
+
+        let mut unsupported = parameters;
+        unsupported.insert(
+            "transformerWindowComponent".to_owned(),
+            serde_json::json!("vae"),
+        );
+        assert!(
+            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unsupported)
+                .expect_err("an unknown transformer component fails closed")
+                .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn fallback_reason_priority_is_independent_of_binding_order() {
+        let fold = |reasons: &[LegacyAdmissionReason]| {
+            reasons
+                .iter()
+                .copied()
+                .fold(LegacyAdmissionReason::NoRecord, stronger_fallback_reason)
+        };
+        let forward = [
+            LegacyAdmissionReason::OutOfEnvelope,
+            LegacyAdmissionReason::StaleFingerprint,
+            LegacyAdmissionReason::StaleIdentity,
+        ];
+        let mut reversed = forward;
+        reversed.reverse();
+        assert_eq!(
+            fold(&forward),
+            LegacyAdmissionReason::StaleIdentity,
+            "the strongest drift reason wins"
+        );
+        assert_eq!(
+            fold(&forward),
+            fold(&reversed),
+            "reversing calibration binding order must not change the fallback reason"
+        );
+    }
+
+    #[test]
+    fn calibration_collection_supports_tiers_and_cells_but_rejects_duplicate_selectors() {
+        let mut second_cell = fixture_calibration_json("q4", "packed-q4");
+        second_cell["geometry"]["width"] = serde_json::json!(512);
+        second_cell["geometry"]["height"] = serde_json::json!(512);
+        let manifest = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            second_cell,
+            fixture_calibration_json("q8", "packed-q8"),
+        ]);
+        let bindings = MlxCalibrationBinding::from_manifest(&manifest)
+            .expect("valid collection")
+            .expect("present collection");
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.tier == "q4")
+                .count(),
+            2,
+            "one tier may contain multiple exact request cells"
+        );
+        assert!(bindings.iter().any(|binding| binding.tier == "q8"));
+
+        let duplicate = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            fixture_calibration_json("q4", "packed-q4"),
+        ]);
+        assert!(MlxCalibrationBinding::from_manifest(&duplicate)
+            .expect_err("duplicate request selectors are ambiguous")
+            .contains("ambiguous duplicates"));
+        let mut resident = fixture_calibration_json("q4", "packed-q4");
+        resident["rung"] = serde_json::json!("resident");
+        resident["parameters"] = serde_json::json!({});
+        let ladder = fixture_manifest(vec![fixture_calibration_json("q4", "packed-q4"), resident]);
+        assert_eq!(
+            MlxCalibrationBinding::from_manifest(&ladder)
+                .expect("distinct rungs in one cell are a ladder, not duplicates")
+                .expect("present ladder")
+                .len(),
+            2
+        );
+
+        let mut bundle = fixture_bundle();
+        let mut second_cell_record = bundle.records[0].clone();
+        second_cell_record.target.geometry.width = 512;
+        second_cell_record.target.geometry.height = 512;
+        bundle.records.push(second_cell_record);
+
+        let q4_plan = MlxRequestPlan {
+            calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet {
+                bindings,
+                resolved: fixture_provenance("q4", "packed-q4"),
+            }),
+            ..fixture_plan()
+        };
+        assert_eq!(
+            evidence_admission_route(
+                &bundle,
+                &q4_plan,
+                &fixture_inputs(512, 512),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("the second exact cell is independently selectable")
+            .path,
+            AdmissionPath::Evidence
+        );
+    }
+
+    #[test]
+    fn load_spec_tier_and_resolved_artifact_variant_are_independent() {
+        let manifest = fixture_manifest(vec![
+            fixture_calibration_json("q4", "packed-q4"),
+            fixture_calibration_json("q8", "packed-q8"),
+        ]);
+        let q4 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q4, "packed-q4"),
+            Some(&manifest),
+            Some(fixture_provenance("q4", "packed-q4")),
+        );
+        let MlxCalibrationConfig::Valid(q4_calibration) = &q4.calibration else {
+            panic!("q4 binding");
+        };
+        assert_eq!(q4.tier.quant, Some(gen_core::Quant::Q4));
+        assert_eq!(q4_calibration.resolved.identity.variant, "packed-q4");
+        assert_eq!(
+            evidence_admission_route(
+                &fixture_bundle(),
+                &q4,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("q4 packed artifact is independently verified")
+            .path,
+            AdmissionPath::Evidence
+        );
+
+        let dense_load_q4 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &LoadSpec::new(WeightsSource::Dir("/resolved/packed-q4".into())),
+            Some(&manifest),
+            Some(fixture_provenance("q4", "packed-q4")),
+        );
+        assert_eq!(
+            dense_load_q4.tier.quant,
+            Some(gen_core::Quant::Q4),
+            "resolver tier must win when a packed transformer keeps LoadSpec.quantize=None"
+        );
+        let relabeled_packed_q4 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q8, "packed-q4"),
+            Some(&manifest),
+            Some(fixture_provenance("q4", "packed-q4")),
+        );
+        assert!(
+            matches!(
+                relabeled_packed_q4.calibration,
+                MlxCalibrationConfig::Invalid(_)
+            ),
+            "request quantization must not relabel a fixed packed-q4 artifact as q8"
+        );
+
+        let wrong_variant = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q4, "different-packed-q4"),
+            Some(&manifest),
+            Some(fixture_provenance("q4", "different-packed-q4")),
+        );
+        assert_eq!(
+            evidence_admission_route(
+                &fixture_bundle(),
+                &wrong_variant,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("unverified artifact variant uses legacy")
+            .fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+
+        let q8 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &fixture_spec(gen_core::Quant::Q8, "packed-q8"),
+            Some(&manifest),
+            Some(fixture_provenance("q8", "packed-q8")),
+        );
+        let MlxCalibrationConfig::Valid(q8_calibration) = &q8.calibration else {
+            panic!("q8 binding");
+        };
+        assert_eq!(q8.tier.quant, Some(gen_core::Quant::Q8));
+        assert_eq!(q8_calibration.resolved.identity.variant, "packed-q8");
+
+        let dense_load_q8 = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &LoadSpec::new(WeightsSource::Dir("/resolved/packed-q8".into())),
+            Some(&manifest),
+            Some(fixture_provenance("q8", "packed-q8")),
+        );
+        assert_eq!(
+            dense_load_q8.tier.quant,
+            Some(gen_core::Quant::Q8),
+            "resolved packed q8 must not be mislabeled bf16 by a dense text-encoder LoadSpec"
+        );
+
+        let mut q8_bundle = fixture_bundle();
+        let mut q8_record = q8_bundle.records[0].clone();
+        q8_record.target.tier = "q8".to_owned();
+        q8_record.artifact.variant = "packed-q8".to_owned();
+        q8_record.loadability.resolved_path_fingerprint =
+            sceneworks_core::memory_calibration::RequiredNullable::Value(format!(
+                "SceneWorks/fixture@{}:packed-q8",
+                "c".repeat(40)
+            ));
+        q8_bundle.records.push(q8_record);
+        assert_eq!(
+            evidence_admission_route(
+                &q8_bundle,
+                &q8,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("q8 record is selected independently of q4")
+            .path,
+            AdmissionPath::Evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn flat_default_receipt_keeps_identity_orthogonal_to_q4_q8_execution() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "SceneWorks/fixture";
+        let revision = "c".repeat(40);
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots")
+            .join(&revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot");
+        std::fs::write(snapshot.join("weights.safetensors"), b"flat-q8").expect("weights");
+        let resolved_files = vec!["weights.safetensors".to_owned()];
+        let stamp = crate::model_jobs::resolved_files_tree_stamp(&snapshot, &resolved_files)
+            .expect("tree stamp");
+        let payload = JsonObject::from_iter([
+            ("modelId".to_owned(), serde_json::json!("fixture_model")),
+            ("variant".to_owned(), serde_json::json!("default")),
+            ("mlx".to_owned(), serde_json::json!({ "quantize": 8 })),
+        ]);
+        let resolved_tier = crate::model_jobs::download_payload_resolved_tier(&payload);
+        assert_eq!(
+            resolved_tier, None,
+            "a flat dense artifact is not permanently labeled by its default runtime quantization"
+        );
+        let marker_dir = data
+            .path()
+            .join("models")
+            .join(crate::paths::safe_download_dir("fixture_model"));
+        crate::write_model_download_receipt(
+            &marker_dir,
+            &payload,
+            repo,
+            "job-flat-default",
+            &resolved_files,
+            Some(&revision),
+            crate::imports::DownloadArtifactReceipt {
+                resolved_tier: resolved_tier.as_deref(),
+                tree_stamp: Some(&stamp),
+            },
+        )
+        .await
+        .expect("real receipt writer");
+        let resolved = crate::model_jobs::huggingface_receipt_weights(
+            data.path(),
+            repo,
+            Some("fixture_model"),
+            Some("default"),
+        )
+        .expect("receipt resolver");
+        assert_eq!(resolved.path, snapshot);
+        let provenance = resolved.provenance.expect("trusted provenance");
+        assert_eq!(provenance.fixed_artifact_tier.as_deref(), None);
+
+        let calibration = |tier| {
+            let mut calibration = fixture_calibration_json(tier, "default");
+            calibration["artifactResolvedRevision"] = serde_json::json!(revision);
+            calibration["artifactVariant"] = serde_json::json!("default");
+            calibration["resolvedPathFingerprint"] =
+                serde_json::json!(provenance.identity.fingerprint);
+            calibration
+        };
+        let manifest = fixture_manifest(vec![calibration("q4"), calibration("q8")]);
+        for quant in [gen_core::Quant::Q4, gen_core::Quant::Q8] {
+            let plan = MlxRequestPlan::for_spec_and_manifest(
+                "fixture_provider",
+                "fixture_model",
+                &LoadSpec::new(WeightsSource::Dir(resolved.path.clone())).with_quant(quant),
+                Some(&manifest),
+                Some(provenance.clone()),
+            );
+            assert_eq!(plan.tier.quant, Some(quant));
+            assert!(matches!(plan.calibration, MlxCalibrationConfig::Valid(_)));
+        }
+    }
+
+    #[test]
+    fn decision_two_transition_paths_are_explicit_and_fail_closed_only_when_covered() {
+        let bundle = fixture_bundle();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut uncalibrated = fixture_plan();
+        uncalibrated.calibration = MlxCalibrationConfig::Absent;
+        let route = evidence_admission_route(
+            &bundle,
+            &uncalibrated,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("an uncalibrated model uses legacy");
+        assert_eq!(route.path, AdmissionPath::Legacy);
+        assert_eq!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::NoBinding)
+        );
+
+        let uncovered = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &fixture_inputs(768, 768),
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("an uncovered geometry uses legacy");
+        assert_eq!(uncovered.path, AdmissionPath::Legacy);
+        assert_eq!(
+            uncovered.fallback_reason,
+            Some(LegacyAdmissionReason::OutOfEnvelope)
+        );
+
+        let mut drifted = fixture_plan();
+        let MlxCalibrationConfig::Valid(calibration) = &mut drifted.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings[0].query.fingerprint = "different".to_owned();
+        let drifted = evidence_admission_route(
+            &bundle,
+            &drifted,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("fingerprint drift uses legacy");
+        assert_eq!(drifted.path, AdmissionPath::Legacy);
+        assert_eq!(
+            drifted.fallback_reason,
+            Some(LegacyAdmissionReason::StaleFingerprint)
+        );
+
+        let covered = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("the exact covered cell fits its captured safe envelope");
+        assert_eq!(covered.path, AdmissionPath::Evidence);
+        assert_eq!(
+            covered.process_limit_bytes,
+            None,
+            "the process ceiling is candidate-specific and cannot be chosen before strategy selection"
+        );
+        assert_eq!(
+            budget_for_admission(fixture_budget(8.0), &covered).reserved_headroom_bytes,
+            0,
+            "no sibling candidate reserve may be imposed before strategy selection"
+        );
+        let evidence = covered
+            .evidence
+            .first()
+            .expect("verified selector evidence")
+            .evidence
+            .clone();
+        assert_eq!(evidence.predicted_peak_bytes, gib_to_bytes(5.0));
+        assert_eq!(
+            evidence.observed_peak_bytes,
+            Some(gib_to_bytes(4.0)),
+            "observed telemetry remains the measured counter rather than the predicted maximum"
+        );
+        let evaluated = evaluate_request_with_budget_using_bundle(
+            &fixture_generator(),
+            &fixture_plan(),
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(4.0),
+            0,
+            &[],
+            Some(&bundle),
+        )
+        .expect("selected exact candidate");
+        assert_eq!(evaluated.process_limit_bytes, Some(gib_to_bytes(5.0)));
+        assert_eq!(
+            evaluated.context.budget.reserved_headroom_bytes,
+            gib_to_bytes(3.0)
+        );
+
+        let unfit = evidence_admission_route(
+            &bundle,
+            &fixture_plan(),
+            &inputs,
+            "text_to_image",
+            fixture_budget(6.0),
+        )
+        .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
+        assert!(unfit.to_string().contains("verified MLX evidence"));
+    }
+
+    #[test]
+    fn target_tier_and_artifact_variant_are_independent_identity_mutations() {
+        let bundle = fixture_bundle();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut wrong_tier = fixture_plan();
+        wrong_tier.tier.quant = Some(gen_core::Quant::Q8);
+        let MlxCalibrationConfig::Valid(calibration) = &mut wrong_tier.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.resolved.fixed_artifact_tier = Some("q8".to_owned());
+        let wrong_tier = evidence_admission_route(
+            &bundle,
+            &wrong_tier,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("target-tier mismatch falls back");
+        assert_eq!(
+            wrong_tier.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+
+        let mut wrong_artifact = fixture_plan();
+        let MlxCalibrationConfig::Valid(calibration) = &mut wrong_artifact.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.resolved.identity.variant = "different-packed-q4".to_owned();
+        calibration.resolved.identity.fingerprint =
+            format!("SceneWorks/fixture@{}:different-packed-q4", "c".repeat(40));
+        let wrong_artifact = evidence_admission_route(
+            &bundle,
+            &wrong_artifact,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("artifact mismatch falls back as drift");
+        assert_eq!(
+            wrong_artifact.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+
+        let mut wrong_provider = fixture_plan();
+        let MlxCalibrationConfig::Valid(calibration) = &mut wrong_provider.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings[0].provider = "fixture_model".to_owned();
+        let wrong_provider = evidence_admission_route(
+            &bundle,
+            &wrong_provider,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("provider mismatch falls back as drift");
+        assert_eq!(
+            wrong_provider.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity),
+            "the binding provider must match the actual engine route, not the catalog model id"
+        );
+    }
+
+    #[test]
+    fn covered_cell_selects_exact_strategy_cold_and_warm_without_resident_bypass() {
+        let bundle = fixture_bundle();
+        let generator = fixture_generator();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+        let expected = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: fixture_binding("q4", "packed-q4").selection_parameters,
+            tier: plan.tier,
+        };
+        let exact = evidence_admission_route(
+            &bundle,
+            &plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("covered route")
+        .evidence
+        .into_iter()
+        .next()
+        .expect("exact evidence")
+        .evidence;
+        assert!(
+            exact.validation_errors().is_empty(),
+            "fixture evidence errors: {:?}",
+            exact.validation_errors()
+        );
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.validate_selection(&expected).is_ok(),
+            "fixture contract rejection: {:?}",
+            contract.validate_selection(&expected)
+        );
+        let evaluate = |cache_state, committed_bytes| {
+            evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &inputs,
+                cache_state,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    committed_bytes,
+                    ..fixture_budget(8.0)
+                },
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                Some(&bundle),
+            )
+            .expect("the exact covered request must select its verified rung")
+        };
+        let cold = evaluate(MemoryCacheState::Cold, 0);
+        let warm = evaluate(MemoryCacheState::Warm, gib_to_bytes(3.0));
+        assert_eq!(cold.context.selection, expected);
+        assert_eq!(warm.context.selection, expected);
+        assert!(cold.memory.tile_vae_decode && warm.memory.tile_vae_decode);
+        assert_eq!(cold.context.predicted_peak_bytes, gib_to_bytes(5.0));
+        assert_eq!(
+            warm.context.predicted_peak_bytes,
+            cold.context.predicted_peak_bytes,
+            "warm attribution credits resident assets in the budget without rewriting exact evidence"
+        );
+        assert_eq!(
+            warm.context.budget.committed_bytes, 0,
+            "the provider's three resident GiB are credited exactly once"
+        );
+    }
+
+    #[test]
+    fn verified_ladder_selects_resident_decode_then_attention_as_budget_tightens() {
+        let (bundle, plan) = fixture_ladder();
+        let generator = fixture_generator();
+        let inputs = fixture_inputs(1024, 1024);
+        for (total_gib, expected) in [
+            (10.0, MemoryStrategy::Resident),
+            (8.0, MemoryStrategy::BoundedDecode),
+            (7.0, MemoryStrategy::BoundedAttention),
+        ] {
+            let evaluation = evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(total_gib),
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                Some(&bundle),
+            )
+            .unwrap_or_else(|error| panic!("{total_gib} GiB ladder failed: {error}"));
+            assert_eq!(evaluation.context.selection.strategy, expected);
+            assert!(
+                bundle
+                    .records
+                    .iter()
+                    .any(|record| record.id == evaluation.context.evidence_revision),
+                "telemetry must name the selected evidence record, not the whole candidate list"
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_specific_foreign_reserve_does_not_block_a_fitting_lower_rung() {
+        use sceneworks_core::memory_calibration::Hardware;
+
+        let (mut bundle, plan) = fixture_ladder();
+        let set_reserve = |record: &mut sceneworks_core::memory_calibration::EvidenceRecord,
+                           reserve_gib: f64| {
+            let Hardware::Mlx(hardware) = &mut record.hardware else {
+                panic!("MLX fixture hardware");
+            };
+            hardware.memory_bytes = gib_to_bytes(10.0);
+            hardware.mlx_memory_limit_bytes = gib_to_bytes(10.0 - reserve_gib);
+            hardware.wired_limit_bytes = hardware.memory_bytes;
+        };
+        set_reserve(&mut bundle.records[0], 4.0);
+        set_reserve(&mut bundle.records[1], 2.0);
+        set_reserve(&mut bundle.records[2], 2.0);
+
+        let evaluation = evaluate_request_with_budget_using_bundle(
+            &fixture_generator(),
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(10.0),
+            gib_to_bytes(4.0),
+            0,
+            &[],
+            Some(&bundle),
+        )
+        .expect("the bounded-decode candidate's own 5+2 GiB boundary fits");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedDecode,
+            "resident 7+4 GiB must be excluded without imposing its reserve on bounded decode"
+        );
+        assert_eq!(
+            evaluation.process_limit_bytes,
+            Some(gib_to_bytes(8.0)),
+            "request ceiling comes from the selected candidate's 2 GiB reserve"
+        );
+    }
+
+    #[test]
+    fn packaged_empty_bundle_is_a_normal_legacy_reason_not_drift() {
+        let route = packaged_admission_route(
+            &fixture_plan(),
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(8.0),
+        )
+        .expect("the promoted empty bundle is valid");
+        assert_eq!(route.path, AdmissionPath::Legacy);
+        assert_eq!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::PackagedEmpty)
+        );
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
@@ -1933,9 +3832,11 @@ mod tests {
     fn legacy_provider_credits_only_the_known_generator_assets_on_a_warm_run() {
         let plan = MlxRequestPlan {
             engine_id: "flux_dev",
+            model_id: "flux_dev".to_owned(),
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Absent,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),
@@ -2465,7 +4366,7 @@ mod tests {
     /// Mage-Flow's per-tier dir holds the DiT alone; the text encoder and VAE are bit-identical
     /// across the six variants and staged from a shared mirror. Scanning only `spec.weights` scored a
     /// q4 edit install at the DiT's bytes, so the over-budget message quoted a peak derived from a
-    /// third of the tier, and the permissive `weights_fit_floor` admitted budgets the tier does not
+    /// third of the tier, and the permissive legacy override admitted budgets the tier does not
     /// fit. The pre-fix number is asserted alongside the fixed one — a test that only checked the new
     /// total could pass on a spec that stages nothing.
     #[test]
@@ -2535,7 +4436,7 @@ mod tests {
     /// The epic-14034 acceptance run found emulated caps of **both 6 GB and 7 GB admitting** a q4
     /// edit job. That was not the memory model being wrong; it was this gate seeing 2.17 GiB of
     /// weights (the DiT alone) where the tier installs 6.52 GiB, so the permissive weights-fit floor
-    /// (`Σstaged ≤ budget − OS_RESERVE_GB`) cleared caps the tier cannot hold.
+    /// (`Σstaged ≤ budget − legacy reserve`) cleared caps the tier cannot hold.
     ///
     /// Bytes are the manifest's `estimatedSizeBytes` for `mage_flow_edit` q4:
     /// DiT 2,326,294,167 + shared TE 4,331,077,508 + shared VAE 345,053,168 = 7,002,424,843
@@ -2569,7 +4470,7 @@ mod tests {
             "a 6 GB Mac cannot hold a tier whose measured peak is 7.87 GB"
         );
         // 7 GB: the staged schedule's wired high-water is the text encoder (4.03 GiB), which fits
-        // 7 − OS_RESERVE_GB. Admitting here is the sc-12179 floor working as designed — a machine
+        // 7 − the legacy reserve. Admitting here is the transition override working as designed — a machine
         // that can hold the weights runs, paging the activation transient.
         assert_eq!(
             decide_residency(total, TE, budget(7.0), true),
@@ -2826,8 +4727,8 @@ mod tests {
     }
 
     // The PEAK layer (`decide_residency_by_peak`) still selects Resident / Sequential / Reject exactly
-    // as the pre-sc-12179 gate did — the weights-fit floor is layered on TOP of this in
-    // `decide_residency` (exercised separately below), so this proves the peak selection is intact.
+    // as the pre-sc-12179 gate did — the Decision 2 legacy override is layered on top only for
+    // unverified cells, so this proves the peak selection is intact.
     #[test]
     fn decide_residency_by_peak_picks_resident_sequential_or_reject_by_budget() {
         let gib = 1024 * 1024 * 1024_u64;
@@ -2894,11 +4795,10 @@ mod tests {
         ));
     }
 
-    /// The weights-fit floor (sc-12179, GitHub #1544): a would-be peak-layer REJECT becomes a
-    /// best-effort load whenever the resident weights fit `budget − OS_RESERVE_GB` (2 GiB). This is the
-    /// regression fix — an 8 GB Mac categorically rejected EVERY model because `Σweights + 18 > 8`.
+    /// Decision 1: replacing `weights_fit_floor` must preserve the settled Decision 2 legacy result.
+    /// The renamed transition override uses the typed 2 GiB legacy reserve only for unverified cells.
     #[test]
-    fn weights_fit_floor_admits_small_model_on_a_small_mac() {
+    fn legacy_admission_override_preserves_small_mac_behavior() {
         let gib = 1024 * 1024 * 1024_u64;
 
         // SANA-class small model on an 8 GB Mac: total 2 GiB (TE 1, rest 1). Peak = 2+18 = 20 ≫ 8 and
@@ -2909,7 +4809,7 @@ mod tests {
             decide_residency_by_peak(total, te, budget, true),
             ResidencyOutcome::Reject { .. }
         ));
-        // ...but the staged weights (1 GiB) fit 8 − 2 = 6, so the floor runs it Sequential instead of
+        // ...but the staged weights (1 GiB) fit 8 − 2 = 6, so legacy runs it Sequential instead of
         // walling off the machine. This is exactly the model that generated fine on 0.7.3.
         assert_eq!(
             decide_residency(total, te, budget, true),
@@ -2922,28 +4822,28 @@ mod tests {
         );
 
         // A genuinely-too-big model on 8 GB still rejects: 40 GiB weights (staged max-component 30) can
-        // NOT be held resident under any policy ⇒ the floor returns None and the reject stands.
+        // NOT be held resident under any policy ⇒ the override returns None and the reject stands.
         let (big_total, big_te) = (40 * gib, 10 * gib);
         assert!(matches!(
             decide_residency(big_total, big_te, budget, true),
             ResidencyOutcome::Reject { .. }
         ));
 
-        // The floor never fabricates a decision without a budget signal.
+        // The override never fabricates a decision without a budget signal.
         assert_eq!(
             decide_residency(total, te, None, true),
             ResidencyOutcome::Resident
         );
     }
 
-    /// The 0.7.3 baseline, from REAL on-disk bytes (GitHub #1544): z-image-turbo q4 — the model the
-    /// reporter confirmed generated fine on an 8 GB Mac — must be admitted, not rejected. Measured
+    /// Decision 1's existing 8 GiB policy guard: until an exact cell opts into evidence, the settled
+    /// transition keeps this real on-disk q4 footprint on legacy. This is a policy outcome only, not
+    /// a model calibration or implementation claim. Measured
     /// tier layout: total 5.49 GiB (text_encoder 2.11, transformer 3.23, vae 0.15), so the largest
     /// single component the Sequential schedule ever holds wired is ~3.38 GiB. Against an 8 GB budget
-    /// (OS_RESERVE 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin. If this ever flips to
-    /// Reject, the gate has regressed the exact case #1544 was filed about.
+    /// (legacy reserve 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin.
     #[test]
-    fn z_image_turbo_q4_admits_on_an_8gb_mac() {
+    fn unverified_q4_8gb_guard_remains_on_the_legacy_transition() {
         // Bytes rounded from the measured tier (…/z-image-turbo-mlx/…/q4), following HF-cache symlinks.
         let mib = 1024 * 1024_u64;
         let total = 5624 * mib; // ~5.49 GiB whole model
@@ -3122,7 +5022,7 @@ mod tests {
     /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
     /// of the seam — the staged working set is only real when the text-encoder split is measured. Post
     /// sc-12179 the flip runs through the weights-fit floor: the measured TE lowers the staged WEIGHTS
-    /// (the wired residency), which is what the floor admits against `budget − OS_RESERVE_GB`.
+    /// (the wired residency), which is what legacy admits against `budget − reserve`.
     #[test]
     fn footprint_text_encoder_flips_reject_to_sequential() {
         let gib = 1024 * 1024 * 1024_u64;
@@ -3163,7 +5063,7 @@ mod tests {
     // The pure decode arithmetic (`mochi_decode_peak_gb`: linearity in frames + pixels, the f32
     // anchor) is pinned in `crate::fit_gate`'s tests alongside the formula, which moved there in
     // sc-12306 when the candle video lane grew the same gate. What stays here is what is genuinely
-    // MLX: the unified-memory budget shape, the `OS_RESERVE_GB` reserve, and the Mac-worded message.
+    // MLX: the unified-memory budget shape, the typed unified reserve, and the Mac-worded message.
 
     /// THE gate behavior: on ONE fixed machine, a short Mochi clip is admitted and a long one is
     /// rejected. A frame-blind gate (the plausible wrong implementation — reusing `predicted_peak_gb`
@@ -3237,7 +5137,14 @@ mod tests {
         let mac_64 = Some(MlxMemoryBudget { total_gb: 64.0 });
         // Weights unmeasurable (empty/missing dir ⇒ 0 bytes) ⇒ admit.
         assert!(mochi_fit_error("mochi_1", 0, 151, 848, 480, mac_64).is_none());
-        assert!(mochi_needed_gb(0, 151, 848, 480).is_none());
+        assert!(mochi_needed_gb(
+            0,
+            151,
+            848,
+            480,
+            crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB
+        )
+        .is_none());
         // No budget (off-Mac / probe failed) ⇒ admit.
         assert!(mochi_fit_error("mochi_1", MOCHI_Q4_RESIDENT_BYTES, 151, 848, 480, None).is_none());
     }

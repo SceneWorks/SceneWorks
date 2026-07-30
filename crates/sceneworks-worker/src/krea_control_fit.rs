@@ -126,7 +126,7 @@ use serde_json::Value;
 /// Fixed transient/runtime headroom (GB) added on top of the control-lane peak
 /// ([`predicted_control_peak_gb`]), mirroring [`crate::vram_gate`]'s `HEADROOM_GB` — covers allocator
 /// slack + activation spikes not captured by the steady peak.
-const HEADROOM_GB: f64 = 2.0;
+const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
 
 /// The outcome of walking the Krea control fit ladder. `Unknown` = no signal (no `candle.control` block,
 /// or a non-NVIDIA host) ⇒ never block — exactly like [`crate::vram_gate::FitDecision::Unknown`].

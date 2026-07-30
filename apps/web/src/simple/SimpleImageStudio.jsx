@@ -4,7 +4,8 @@ import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
-import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
+import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredResolution } from "./modelDefaults.js";
@@ -58,7 +59,9 @@ export function SimpleImageStudio() {
   } = useAppContext();
   const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
     useSimpleUi();
-  const unifiedMemoryGb = useUnifiedMemoryGb();
+  const hostMemory = useHostMemory();
+  const memoryBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, memoryBackend);
   const refine = useSimpleRefine("image");
 
   // Sticky across navigation (this studio unmounts when you leave it) — everything the user
@@ -99,10 +102,11 @@ export function SimpleImageStudio() {
     const declared = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTIONS;
-    const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
-    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
+      backend: memoryBackend,
+    });
     return gated.length ? gated : declared;
-  }, [selectedModel, macCapabilities, unifiedMemoryGb]);
+  }, [selectedModel, unifiedMemoryGb, memoryBackend]);
 
   // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
   // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
@@ -236,6 +240,7 @@ export function SimpleImageStudio() {
         convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
         nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
         unifiedMemoryGb,
+        backend: memoryBackend,
       });
       const request = buildSimpleImageRequest({
         prompt: prompt.trim(),

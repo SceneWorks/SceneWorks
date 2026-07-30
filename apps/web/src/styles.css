@@ -16982,3 +16982,198 @@ button.audio-wave {
 .asset-audio-stage__transport .audio-clock {
   font-size: 15px;
 }
+
+/* Dropped-workflow offer (sc-15951, epic 15945) — "Workflow found", opened by an image drop
+   no in-app dropzone claimed. The report block below it is shared with sc-15952. */
+.workflow-drop-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 560px;
+  max-width: calc(100% - 32px);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.workflow-drop-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+.workflow-drop-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.workflow-drop-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.workflow-drop-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.workflow-drop-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.workflow-drop-field-value {
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.workflow-drop-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.workflow-drop-prompt p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.workflow-drop-settings ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 4px 14px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-drop-settings li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.workflow-drop-settings li strong {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+/* A knob that travelled in the file but reaches no Image Studio control. Struck through and
+   labelled rather than merely dimmed: a dimmed row still reads as "applied, quietly", which is
+   the misreading this mark exists to prevent (sc-15951). */
+.workflow-drop-settings li.not-restored strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.workflow-drop-setting-mark {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--warn);
+  white-space: nowrap;
+}
+.workflow-drop-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.workflow-drop-note.warn {
+  color: var(--warn);
+}
+.workflow-drop-error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+.workflow-drop-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The resolution report (sc-15950's output). Shared presentation — sc-15952 renders the same
+   component for an already-imported asset, so nothing here may be drop-specific. */
+.workflow-req {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+}
+.workflow-req-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.workflow-req-verdict {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.workflow-req-verdict.ok {
+  color: var(--success);
+}
+.workflow-req-verdict.warn {
+  color: var(--warn);
+}
+.workflow-req-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-req-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.workflow-req-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.workflow-req-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.workflow-req-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.workflow-req-ok {
+  background: color-mix(in oklch, var(--success) 18%, transparent);
+  color: var(--success);
+}
+.workflow-req-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.workflow-req-bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}

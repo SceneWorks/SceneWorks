@@ -574,6 +574,27 @@ pub(crate) async fn create_model_download_job(
 /// `variant`); `include_family` forwards the model's declared family for the worker's post-download
 /// family reconcile (sc-1663) — pass `false` for co-requisites, whose weights are a different artifact
 /// than the model's primary checkpoint.
+const MEMORY_CALIBRATION_PROVENANCE_REQUIRED: &str = "memoryCalibrationProvenanceRequired";
+
+fn catalog_requires_memory_calibration_provenance(model: &Value) -> bool {
+    model
+        .get("mlx")
+        .and_then(|mlx| mlx.get("calibrations"))
+        .and_then(Value::as_array)
+        .is_some_and(|calibrations| !calibrations.is_empty())
+}
+
+fn insert_memory_calibration_provenance_requirement(
+    job_payload: &mut JsonObject,
+    model: &Value,
+    primary_artifact: bool,
+) {
+    job_payload.insert(
+        MEMORY_CALIBRATION_PROVENANCE_REQUIRED.to_owned(),
+        Value::Bool(primary_artifact && catalog_requires_memory_calibration_provenance(model)),
+    );
+}
+
 fn build_model_download_job_payload(
     model: &Value,
     model_id: &str,
@@ -606,6 +627,10 @@ fn build_model_download_job_payload(
                 .to_owned(),
         ),
     );
+    // The cold install-time digest is authorized only by the server's catalog entry. The typed
+    // client request cannot supply or override this flag, and co-requisites stay inert because the
+    // calibration artifact identity is the primary checkpoint.
+    insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
     job_payload.insert(
         "provider".to_owned(),
         Value::String(required_string_field(download, "provider")?.to_owned()),
@@ -664,6 +689,232 @@ fn build_model_download_job_payload(
         ),
     );
     Ok(job_payload)
+}
+
+struct ModelConvertJobPayload<'a> {
+    model: &'a Value,
+    model_id: &'a str,
+    mlx: &'a JsonObject,
+    source_repo: &'a str,
+    output_dir: &'a FsPath,
+    quantize_only: bool,
+    request: &'a ModelConvertRequest,
+}
+
+fn build_model_convert_job_payload(input: ModelConvertJobPayload<'_>) -> JsonObject {
+    let mut job_payload = JsonObject::new();
+    job_payload.insert(
+        "modelId".to_owned(),
+        Value::String(input.model_id.to_owned()),
+    );
+    job_payload.insert(
+        "modelName".to_owned(),
+        Value::String(
+            input
+                .model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(input.model_id)
+                .to_owned(),
+        ),
+    );
+    // This boolean is catalog-derived. Repository, source revision, output variant, and fixed tier
+    // remain resolver/job facts and are never accepted from the client.
+    insert_memory_calibration_provenance_requirement(&mut job_payload, input.model, true);
+    job_payload.insert(
+        "sourceRepo".to_owned(),
+        Value::String(input.source_repo.to_owned()),
+    );
+    job_payload.insert(
+        "outputDir".to_owned(),
+        Value::String(input.output_dir.display().to_string()),
+    );
+    job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
+    // Optional converter discriminator + inputs (sc-2235). Default (absent) is the
+    // mlx-video Wan converter. A FLUX.2-klein community fine-tune declares
+    // `mlx.converter` + the single-file source + the base repo whose
+    // VAE/text-encoder/tokenizer are borrowed during assembly.
+    if let Some(converter) = input
+        .mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("converter".to_owned(), Value::String(converter.to_owned()));
+    }
+    if let Some(source_file) = input
+        .mlx
+        .get("convertSourceFile")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "sourceFile".to_owned(),
+            Value::String(source_file.to_owned()),
+        );
+    }
+    if let Some(base_repo) = input
+        .mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
+    }
+    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978):
+    // the FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed
+    // VAE/text-encoder/tokenizer live under `<tier>/`, not the snapshot root. Absent for root-layout
+    // diffusers bases.
+    if let Some(base_subdir) = input
+        .mlx
+        .get("convertBaseSubdir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        job_payload.insert(
+            "baseSubdir".to_owned(),
+            Value::String(base_subdir.to_owned()),
+        );
+    }
+    if input.quantize_only {
+        job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
+    }
+    if let Some(bits) = input.request.quantize_bits {
+        job_payload.insert("quantizeBits".to_owned(), Value::from(bits));
+    }
+    if let Some(group_size) = input.request.quantize_group_size {
+        job_payload.insert("quantizeGroupSize".to_owned(), Value::from(group_size));
+    }
+    job_payload
+}
+
+#[cfg(test)]
+mod memory_calibration_job_payload_tests {
+    use super::*;
+
+    fn model(calibrated: bool) -> Value {
+        let calibrations = if calibrated {
+            json!([{ "binding": "fixture" }])
+        } else {
+            json!([])
+        };
+        json!({
+            "id": "fixture-model",
+            "name": "Fixture Model",
+            "family": "fixture",
+            "mlx": {
+                "requiresConversion": true,
+                "convertSourceRepo": "owner/source",
+                "calibrations": calibrations
+            }
+        })
+    }
+
+    fn download() -> Value {
+        json!({
+            "provider": "huggingface",
+            "repo": "owner/artifact",
+            "files": ["weights.safetensors"]
+        })
+    }
+
+    #[test]
+    fn download_payload_derives_provenance_cost_only_from_the_catalog_primary_artifact() {
+        let data = tempfile::tempdir().expect("data dir");
+        let calibrated = model(true);
+        let primary = build_model_download_job_payload(
+            &calibrated,
+            "fixture-model",
+            &download(),
+            None,
+            true,
+            data.path(),
+        )
+        .expect("primary payload");
+        assert_eq!(
+            primary.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(true))
+        );
+
+        let co_requisite = build_model_download_job_payload(
+            &calibrated,
+            "fixture-model",
+            &download(),
+            None,
+            false,
+            data.path(),
+        )
+        .expect("co-requisite payload");
+        assert_eq!(
+            co_requisite.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "co-requisites are not the artifact named by the calibration binding"
+        );
+
+        let client: ModelDownloadRequest = serde_json::from_value(json!({
+            "memoryCalibrationProvenanceRequired": true
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let uncalibrated = build_model_download_job_payload(
+            &model(false),
+            "fixture-model",
+            &download(),
+            client.variant.as_deref(),
+            true,
+            data.path(),
+        )
+        .expect("uncalibrated payload");
+        assert_eq!(
+            uncalibrated.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "a client-supplied lookalike cannot enable the cold provenance cost"
+        );
+    }
+
+    #[test]
+    fn convert_payload_derives_provenance_cost_only_from_the_catalog() {
+        let data = tempfile::tempdir().expect("data dir");
+        let request: ModelConvertRequest = serde_json::from_value(json!({
+            "quantizeBits": 4,
+            "memoryCalibrationProvenanceRequired": false
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let calibrated = model(true);
+        let calibrated_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+            model: &calibrated,
+            model_id: "fixture-model",
+            mlx: calibrated["mlx"].as_object().expect("mlx"),
+            source_repo: "owner/source",
+            output_dir: data.path(),
+            quantize_only: false,
+            request: &request,
+        });
+        assert_eq!(
+            calibrated_payload.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(true)),
+            "a client-supplied lookalike cannot disable catalog-authorized provenance"
+        );
+
+        let spoofed: ModelConvertRequest = serde_json::from_value(json!({
+            "memoryCalibrationProvenanceRequired": true
+        }))
+        .expect("typed request ignores unknown spoofed fields");
+        let uncalibrated = model(false);
+        let uncalibrated_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+            model: &uncalibrated,
+            model_id: "fixture-model",
+            mlx: uncalibrated["mlx"].as_object().expect("mlx"),
+            source_repo: "owner/source",
+            output_dir: data.path(),
+            quantize_only: false,
+            request: &spoofed,
+        });
+        assert_eq!(
+            uncalibrated_payload.get(MEMORY_CALIBRATION_PROVENANCE_REQUIRED),
+            Some(&Value::Bool(false)),
+            "a client-supplied lookalike cannot enable the cold provenance cost"
+        );
+    }
 }
 
 /// Convert a model's native checkpoint into the local MLX format (macOS/Apple
@@ -732,74 +983,15 @@ pub(crate) async fn create_model_convert_job(
             "Model does not require MLX conversion",
         ));
     };
-    let mut job_payload = JsonObject::new();
-    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
-    job_payload.insert(
-        "modelName".to_owned(),
-        Value::String(
-            model
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(&model_id)
-                .to_owned(),
-        ),
-    );
-    job_payload.insert("sourceRepo".to_owned(), Value::String(source_repo));
-    job_payload.insert(
-        "outputDir".to_owned(),
-        Value::String(output_dir.display().to_string()),
-    );
-    job_payload.insert("dtype".to_owned(), Value::String("bfloat16".to_owned()));
-    // Optional converter discriminator + inputs (sc-2235). Default (absent) is the
-    // mlx-video Wan converter. A FLUX.2-klein community fine-tune declares
-    // `mlx.converter` + the single-file source + the base repo whose
-    // VAE/text-encoder/tokenizer are borrowed during assembly.
-    if let Some(converter) = mlx
-        .get("converter")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert("converter".to_owned(), Value::String(converter.to_owned()));
-    }
-    if let Some(source_file) = mlx
-        .get("convertSourceFile")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert(
-            "sourceFile".to_owned(),
-            Value::String(source_file.to_owned()),
-        );
-    }
-    if let Some(base_repo) = mlx
-        .get("convertBaseRepo")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert("baseRepo".to_owned(), Value::String(base_repo.to_owned()));
-    }
-    // The quant-tier subdir under `convertBaseRepo` to borrow the base components from (sc-14978): the
-    // FLUX.2-klein re-host keeps each tier in its own subdir, so the borrowed VAE/text-encoder/tokenizer
-    // live under `<tier>/`, not the snapshot root. Absent for root-layout diffusers bases.
-    if let Some(base_subdir) = mlx
-        .get("convertBaseSubdir")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        job_payload.insert(
-            "baseSubdir".to_owned(),
-            Value::String(base_subdir.to_owned()),
-        );
-    }
-    if quantize_only {
-        job_payload.insert("quantizeOnly".to_owned(), Value::Bool(true));
-    }
-    if let Some(bits) = payload.quantize_bits {
-        job_payload.insert("quantizeBits".to_owned(), Value::from(bits));
-    }
-    if let Some(group_size) = payload.quantize_group_size {
-        job_payload.insert("quantizeGroupSize".to_owned(), Value::from(group_size));
-    }
+    let job_payload = build_model_convert_job_payload(ModelConvertJobPayload {
+        model: &model,
+        model_id: &model_id,
+        mlx,
+        source_repo: &source_repo,
+        output_dir: &output_dir,
+        quantize_only,
+        request: &payload,
+    });
 
     let job = create_generation_job(
         state,

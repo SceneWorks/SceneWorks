@@ -44,6 +44,12 @@
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "type": "string", "minLength": 1 },
         "observedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "requiredHostBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Exact MLX host requirement: max(predicted peak, observed non-reclaimable wired peak) plus the captured foreign unified-memory reserve."
+        },
         "parity": { "$ref": "#/$defs/parityEvidence" }
       }
     },

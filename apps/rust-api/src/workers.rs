@@ -110,8 +110,15 @@ pub(crate) async fn host_capabilities(
         })
         .max()
         .map(mb_to_gb);
+    let (memory_kind, memory_gb) = if std::env::consts::OS == "macos" {
+        (unified_memory_gb.map(|_| "unified"), unified_memory_gb)
+    } else {
+        (gpu_memory_gb.map(|_| "dedicated"), gpu_memory_gb)
+    };
     Ok(Json(HostCapabilitiesResponse {
         platform: std::env::consts::OS,
+        memory_kind,
+        memory_gb,
         unified_memory_gb,
         gpu_memory_gb,
     }))

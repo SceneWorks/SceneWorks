@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   CANDLE_HEADROOM_GB,
   DISK_TO_RESIDENT_MULTIPLIER,
@@ -8,6 +10,8 @@ import {
   cheapestDeclaredTierPeakGb,
   declaredFloorHostGb,
   declaredTiers,
+  evidenceRequiredHostBytes,
+  evidenceRunFitsHostBytes,
   hostGbForPeakGb,
   installedFloorHostGb,
   installedTierPeakGb,
@@ -18,6 +22,17 @@ import {
 } from "./tierSuggestion.js";
 
 const GB = 1024 * 1024 * 1024;
+
+describe("exact evidence host seam", () => {
+  it("fits at equality and rejects one byte below without adding UI policy", () => {
+    const run = { requiredHostBytes: 7 * GB };
+    expect(evidenceRequiredHostBytes(run)).toBe(7 * GB);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB)).toBe(true);
+    expect(evidenceRunFitsHostBytes(run, 7 * GB - 1)).toBe(false);
+    expect(evidenceRequiredHostBytes({ requiredHostBytes: "7 GiB" })).toBeNull();
+    expect(evidenceRunFitsHostBytes({}, 128 * GB)).toBe(false);
+  });
+});
 
 // Build a /models-shaped quant-matrix model. Each entry in `tiers` may be a bare tier key (which
 // gets a disk-only footprint sized from `diskGb`) or an object { variant, diskGb, residentGb } to
@@ -160,9 +175,34 @@ describe("tierFits", () => {
     expect(tierFits(atBudget, budgetGb)).toBe(true);
     expect(tierFits(overBudget, budgetGb)).toBe(false);
   });
+
+  it("uses Candle VRAM evidence and never the variant's MLX footprint on a CUDA host", () => {
+    const variant = { variant: "q4", footprint: { peakMemoryBytes: 100 * GB } };
+    const model = { candle: { vramGbByTier: { q4: 6 } } };
+    expect(tierFits(variant, 8, { backend: "candle", model })).toBe(true);
+    expect(tierFits(variant, 7, { backend: "candle", model })).toBe(false);
+    expect(tierFits(variant, 8, { backend: "mlx", model })).toBe(false);
+  });
+
+  it("fails open when Candle has no evidence instead of borrowing MLX measurements", () => {
+    const variant = { variant: "q8", footprint: { peakMemoryBytes: 100 * GB } };
+    expect(tierFits(variant, 8, { backend: "candle", model: { candle: {} } })).toBe(true);
+  });
 });
 
 describe("suggestTier", () => {
+  it("suggests from the Candle ladder on a dedicated-VRAM host", () => {
+    const model = {
+      ...matrixModel([
+        { variant: "q4", peakGb: 100 },
+        { variant: "q8", peakGb: 100 },
+        { variant: "bf16", peakGb: 100 },
+      ]),
+      candle: { vramGbByTier: { q4: 6, q8: 10, bf16: 20 } },
+    };
+    expect(suggestTier(model, 12, { backend: "candle" })).toBe("q8");
+  });
+
   it("suggests q4 on a 32 GB host when the larger tiers overflow the budget (acceptance)", () => {
     // Peak-based budget on 32 GB = 32 × 0.9 = 28.8 GB. Estimated peak = diskGb × 1.0 + 14 GB transient.
     // Size q8/bf16 to exceed the budget so only q4 fits (a 32 GB user sees q4 pre-selected).
@@ -309,6 +349,26 @@ describe("per-tier memory floor: headroom conversion", () => {
       expect(shown).toBeGreaterThanOrEqual(peak + CANDLE_HEADROOM_GB);
       expect(shown - 1).toBeLessThan(peak + CANDLE_HEADROOM_GB);
     }
+  });
+
+  it("keeps the web and both Rust dedicated-VRAM consumers on one checked reserve", () => {
+    const fitGate = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/fit_gate.rs"),
+      "utf8",
+    );
+    const vramGate = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/vram_gate.rs"),
+      "utf8",
+    );
+    const kreaControl = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/krea_control_fit.rs"),
+      "utf8",
+    );
+    const owner = fitGate.match(/DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = ([0-9.]+);/);
+    expect(owner, "Rust dedicated-VRAM policy constant").not.toBeNull();
+    expect(Number(owner[1])).toBe(CANDLE_HEADROOM_GB);
+    expect(vramGate).toContain("crate::fit_gate::dedicated_vram_reserve().gb");
+    expect(kreaControl).toContain("crate::vram_gate::HEADROOM_GB");
   });
 
   it("returns null for a missing or nonsensical peak rather than 0 or NaN", () => {

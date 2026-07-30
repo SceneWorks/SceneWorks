@@ -2120,6 +2120,7 @@
       "files": [
         "*.safetensors"
       ],
+      "memoryCalibrationProvenanceRequired": false,
       "modelId": "base-model",
       "modelName": "User Model",
       "provider": "huggingface",
