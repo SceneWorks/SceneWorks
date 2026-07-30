@@ -1380,11 +1380,16 @@ fn no_value_in_a_built_envelope_is_path_shaped() {
 
 /// The one deliberate exception to "every filesystem path without exception", made explicit.
 ///
-/// `stylePrompt` and the structured prompt's `intent` / `runtimePrompt` are the same class as
-/// the top-level `prompt`, which the story puts IN: they are what the user typed. Silently
-/// mangling authored text because it mentions a directory would be worse than the leak it
+/// `stylePrompt`, `systemMessage` and the structured prompt's `intent` / `runtimePrompt` are the
+/// same class as the top-level `prompt`, which the story puts IN: they are what the user typed.
+/// Silently mangling authored text because it mentions a directory would be worse than the leak it
 /// prevents — the user wrote it and can see it before sharing. That decision was previously
 /// implicit in a `PROSE_KEYS` constant no test seeded; this pins it in both directions.
+///
+/// All SIX exempt pointers are seeded, `systemMessage` included: the shipped set is what the
+/// privacy callout in `docs/workflow-share-envelope.md` promises, and a test that seeds five of six
+/// lets a reader — and this file's own comment — conclude that an interleave system prompt naming a
+/// directory is path-guarded, when it is not.
 #[test]
 fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
     const STYLE_PROMPT: &str = "C:\\Users\\Michael\\Desktop\\secret_project\\brief.txt";
@@ -1392,6 +1397,7 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
     const RUNTIME_PROMPT: &str = "rendered from ..\\..\\briefs\\acme.json";
     const PROMPT: &str = "a lighthouse, per D:\\briefs\\fog.md";
     const NEGATIVE_PROMPT: &str = "no text, nothing like \\\\fileserver\\rejects\\list.txt";
+    const SYSTEM_MESSAGE: &str = "follow the house style in E:\\Clients\\Acme\\style-guide.md";
 
     let mut payload = golden_payload();
     payload.insert("prompt".to_owned(), json!(PROMPT));
@@ -1401,6 +1407,7 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
         .and_then(Value::as_object_mut)
         .expect("advanced object");
     advanced.insert("stylePrompt".to_owned(), json!(STYLE_PROMPT));
+    advanced.insert("systemMessage".to_owned(), json!(SYSTEM_MESSAGE));
     advanced.insert(
         "structuredPrompt".to_owned(),
         json!({ "intent": INTENT, "runtimePrompt": RUNTIME_PROMPT }),
@@ -1410,6 +1417,7 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
     assert_eq!(share.prompt, PROMPT);
     assert_eq!(share.negative_prompt, NEGATIVE_PROMPT);
     assert_eq!(share.advanced["stylePrompt"], json!(STYLE_PROMPT));
+    assert_eq!(share.advanced["systemMessage"], json!(SYSTEM_MESSAGE));
     let recipe = share.advanced["structuredPrompt"]
         .as_object()
         .expect("structuredPrompt object");
@@ -1417,7 +1425,7 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
     assert_eq!(recipe["runtimePrompt"], json!(RUNTIME_PROMPT));
 
     // The exemption is per key, not a hole in the guard: a NON-prose neighbour with the same
-    // text is still dropped, and the exempt pointers are exactly these five.
+    // text is still dropped, and the exempt pointers are exactly these six.
     let mut offenders = Vec::new();
     collect_strings(
         &serde_json::to_value(&share).expect("serializes"),
@@ -1435,6 +1443,7 @@ fn authored_prose_travels_verbatim_even_when_it_names_a_path() {
             "$.prompt",
             "$.negativePrompt",
             "$.advanced.stylePrompt",
+            "$.advanced.systemMessage",
             "$.advanced.structuredPrompt.intent",
             "$.advanced.structuredPrompt.runtimePrompt",
         ]
