@@ -159,8 +159,8 @@ export const GRANDFATHERED_UNMEASURED = new Set([
  * edit a reviewer cannot miss, and so the set cannot quietly grow to cover a row someone added. Nothing
  * else pinned the list's size before, which made "it may only ever SHRINK" advisory prose.
  *
- * 43 at sc-15799 (the audit's own 42 unmeasured rows) + 13 the sc-15799 review found the audit had MISSED
- * (`krea_2_raw::vae` and the twelve SenseNova-U1 rows) = 55. sc-16015 drives it to 0.
+ * 42 from sc-15799's own audit + 13 the sc-15799 review found it had MISSED (`krea_2_raw::vae` and the
+ * twelve SenseNova-U1 rows) = 55. sc-16015 drives it to 0.
  */
 export const GRANDFATHERED_UNMEASURED_COUNT = 55;
 
