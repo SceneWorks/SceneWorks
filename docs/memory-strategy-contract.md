@@ -30,12 +30,14 @@ needs tolerance must include it in the provider estimate and golden evidence.
 
 SceneWorks invalidation is owned by the provider calibration ABI fingerprint, not by the exact source
 tree. The fallback fingerprint hashes the provider's explicit ABI version, pinned inference revision,
-model/provider/backend/tier/mode/overlay/rung identity, and runtime strategy parameters. Bump a
-provider's entry in `CALIBRATION_ABI_VERSIONS` when its quantization floors, tensor layout, or
-execution structure invalidate measurements; bump the default only for an ecosystem-wide calibration
-contract change. `matrixSourceRevision`, `generatedFrom.sceneWorksRevision`, and cell
-`evidenceRevision.sceneWorks` retain exact source-tree provenance, but comments, formatting, docs, and
-unrelated source edits do not make otherwise matching evidence stale.
+model/provider/backend/tier/mode/overlay/rung identity, runtime strategy parameters, and the
+calibration-relevant manifest values for that backend and tier. Bump a provider's entry in
+`CALIBRATION_ABI_VERSIONS` when its quantization floors, tensor layout, or execution structure
+invalidate measurements; bump the default only for an ecosystem-wide calibration contract change.
+`matrixSourceRevision`, `generatedFrom.sceneWorksRevision`, and cell `evidenceRevision.sceneWorks`
+carry semantic generated-source provenance: the JSONC manifest is hashed after parsing, so comments
+and formatting produce no generated artifact churn. Exact raw-source history remains available in
+version control and must not be used as evidence staleness.
 
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.
