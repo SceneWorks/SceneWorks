@@ -3,7 +3,12 @@ import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useUnifiedMemoryGb } from "../hooks/useUnifiedMemoryGb.js";
-import { cheapestDeclaredTierPeakGb, installedTierPeakGb } from "../tierSuggestion.js";
+import {
+  blanketFloorGb,
+  cheapestDeclaredTierPeakGb,
+  hostGbForPeakGb,
+  installedTierPeakGb,
+} from "../tierSuggestion.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Model Manager (design handoff): a tabbed catalog (Image / Video / Utility /
@@ -25,11 +30,20 @@ const TABS = [
 ];
 
 export function SimpleModelManager() {
-  const { models = [], loras = [], jobs = [], createModelDownloadJob, createLoraDownloadJob } =
-    useAppContext();
+  const {
+    models = [],
+    loras = [],
+    jobs = [],
+    createModelDownloadJob,
+    createLoraDownloadJob,
+    macCapabilities,
+  } = useAppContext();
   const { toast, openInAdvanced } = useSimpleUi();
   const unifiedMemoryGb = useUnifiedMemoryGb();
   const [tab, setTab] = useState("image");
+  // Which lane's memory evidence the rows quote. Same derivation as ImageStudio / SimpleImageStudio —
+  // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
+  const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
 
   const rows = useMemo(() => {
     if (tab === "loras") {
@@ -51,12 +65,12 @@ export function SimpleModelManager() {
       .map((model) => ({
         id: model.id,
         name: model.name ?? model.id,
-        meta: [sizeLabel(model), needsLabel(model)].filter(Boolean).join(" · "),
+        meta: [sizeLabel(model), needsLabel(model, backend)].filter(Boolean).join(" · "),
         installed: model.installState === "installed",
         entry: model,
         kind: "model",
       }));
-  }, [tab, models, loras]);
+  }, [tab, models, loras, backend]);
 
   const activeDownloads = useMemo(
     () =>
@@ -153,14 +167,30 @@ function sizeLabel(entry) {
   return entry.downloadSizeEstimated ? `~${entry.downloadSizeLabel}` : entry.downloadSizeLabel;
 }
 
-// The model's memory requirement, PREFERRING the per-tier measured footprint over the blanket
-// `mlx.minMemoryGb` (sc-15400). That blanket integer is a single per-model value, so it must admit the
+// The model's memory requirement, PREFERRING the per-tier measured peak over the blanket per-lane
+// `minMemoryGb` (sc-15400). That blanket integer is a single per-model value, so it must admit the
 // model's heaviest INSTALLABLE tier — showing it unconditionally over-warns every variant-matrix model
 // whose user only wants a lighter tier (z_image declares 48 while its measured q4 tier peaks at 19.42
 // GiB; krea_realtime_14b declares 64 against a 27.90 GiB q4). The advanced Models screen dodges this by
 // SUPPRESSING the badge for matrix models and deferring to its per-tier download panel
 // (ModelManagerScreen's `hasTierMatrix`); Simple has no such panel — "Manage" hands off to that screen —
 // so instead of hiding the number it shows the one that applies to the tier actually in play.
+//
+// TWO THINGS THE NUMBER MUST GET RIGHT, both of which are one-directional (getting them wrong
+// UNDER-states a requirement, and the user downloads a model that then OOMs):
+//
+// A. HEADROOM. A measured peak is a RAW high-water mark; every other reader of it budgets the peak under
+//    `MEMORY_HEADROOM_FRACTION` (`tierSuggestion.tierFits`, and the resolution gate). Quoting the raw
+//    peak would name a host size the app itself refuses to run the tier on — lens_turbo's 30.50 GiB q4
+//    would read "needs 31 GB" while 31 × 0.9 = 27.9 does not fit it. `hostGbForPeakGb` converts the peak
+//    into the host size that satisfies the app's own criterion, which is also the basis the blanket
+//    integers are already stated in ("~47 GiB active peak. 64 covers that with OS/app headroom").
+//
+// B. LANE. `footprint.peakMemoryBytes` is an Apple unified-memory measurement and `candle.vramGbByTier`
+//    is a discrete-VRAM one; they are not interchangeable in either direction (see the lane note in
+//    tierSuggestion.js). So the row reads the ACTIVE backend's evidence only. When the candle lane has
+//    none, the row says nothing rather than borrowing the MLX figure — `qwen_image` declares mlx 50
+//    against candle 56, so the MLX number is not even reliably the conservative one.
 //
 // Three cases, in order:
 //   1. Measured ceiling over the INSTALLED tiers ⇒ `needs N GB`. Exact: this is what is on disk.
@@ -169,19 +199,19 @@ function sizeLabel(entry) {
 //      models default to a heavier tier than the lightest), so the honest statement is the ENTRY cost —
 //      which is also what a "can I use this model at all" decision needs. Deliberately worded as a
 //      floor, never as a specific tier's requirement.
-//   3. No per-tier measurement ⇒ the blanket floor, exactly as before. Covers every single-variant
-//      model and every matrix model epic 15448 has not measured yet.
-function needsLabel(model) {
-  const installedPeak = installedTierPeakGb(model);
+//   3. No per-tier measurement ⇒ this lane's blanket floor, exactly as before. Covers every
+//      single-variant model and every matrix model epic 15448 has not measured yet.
+function needsLabel(model, backend) {
+  const installedPeak = installedTierPeakGb(model, { backend });
   if (installedPeak !== null) {
-    return `needs ${Math.ceil(installedPeak)} GB`;
+    return `needs ${hostGbForPeakGb(installedPeak)} GB`;
   }
   if (model?.installState !== "installed") {
-    const cheapest = cheapestDeclaredTierPeakGb(model);
+    const cheapest = cheapestDeclaredTierPeakGb(model, { backend });
     if (cheapest !== null) {
-      return `from ${Math.ceil(cheapest)} GB`;
+      return `from ${hostGbForPeakGb(cheapest)} GB`;
     }
   }
-  const floor = model?.mlx?.minMemoryGb;
-  return Number.isFinite(floor) ? `needs ${floor} GB` : null;
+  const floor = blanketFloorGb(model, backend);
+  return floor === null ? null : `needs ${floor} GB`;
 }

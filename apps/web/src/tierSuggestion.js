@@ -104,14 +104,30 @@ function numberOrNull(value) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Per-tier MEASURED memory floor (sc-15400)
+// Per-tier MEASURED memory floor (sc-15400), PER BACKEND
 //
 // `mlx.minMemoryGb` / `candle.minMemoryGb` is a SINGLE per-model integer, so it must admit the model's
 // heaviest INSTALLABLE tier. That over-states the requirement for every user who only installed a
 // lighter one: krea_realtime_14b is forced to 64 while its default q4 tier peaks at 27.90 GiB
 // (`downloads[].footprint.peakMemoryBytes` 29,957,689,344 — with q8 at 34.44 and bf16 at 46.71 GiB).
-// The per-download `footprint` blocks already carry the real ladder, so a consumer that knows WHICH
-// tier is in play should read the tier's measured peak and use the blanket integer only as a fallback.
+// The manifest already carries the real per-tier ladder, so a consumer that knows WHICH tier is in play
+// should read that tier's measured peak and use the blanket integer only as a fallback.
+//
+// THE TWO LANES CARRY INDEPENDENT EVIDENCE AND MUST NEVER BE CROSSED (sc-15613). The per-download
+// `footprint` block is an MLX-ONLY measurement: the harness that produces it is
+// `crates/sceneworks-worker/src/footprint_measure.rs`, sampling `mlx_rs::memory::get_peak_memory` — an
+// Apple unified-memory high-water mark. A discrete CUDA card does not share system RAM, so that number
+// does not describe the VRAM it must hold, and the schema says so outright at the `candle` block
+// (model-manifest.schema.json): "the mlx.minMemoryGb ... does not describe the VRAM a discrete GPU must
+// hold". The candle lane's own per-tier evidence is `candle.vramGbByTier` (populated on 33 catalog
+// entries), with `candle.minMemoryGb` as its blanket.
+//
+// Crossing them is NOT merely imprecise, it can UNDER-state, which is the one direction that OOMs:
+// `lens_turbo` measures 30.50 GiB on MLX but needs 37.3 GB of VRAM at the same q4 tier, and `qwen_image`
+// declares `mlx.minMemoryGb` 50 against a `candle.minMemoryGb` of 56. So there is no "the MLX number is
+// at least conservative" shortcut — every helper below takes the lane explicitly and reads only that
+// lane's fields. `options.backend === "candle"` selects the candle lane; anything else is MLX (the
+// convention every existing caller already uses: `macGatingActive ? "mlx" : "candle"`).
 //
 // These helpers are MEASURED-ONLY on purpose. Unlike `variantFootprintBytes` — which falls back to a
 // resident/disk ESTIMATE so a download suggestion always has something to RANK — a memory FLOOR must
@@ -120,49 +136,120 @@ function numberOrNull(value) {
 // ---------------------------------------------------------------------------------------------------
 
 // A single variant's MEASURED peak memory in GB (base 1024³, the same unit `variantFootprintBytes`
-// budgets in), or null when this tier has no measured `footprint.peakMemoryBytes`.
-export function measuredVariantPeakGb(variant) {
+// budgets in), or null when this tier has no measured `footprint.peakMemoryBytes`. MLX LANE ONLY — see
+// the harness note above.
+function measuredVariantPeakGb(variant) {
   const peak = numberOrNull(variant?.footprint?.peakMemoryBytes);
   return peak !== null && peak > 0 ? peak / BYTES_PER_GB : null;
 }
 
-// Declared quant tier → its catalog variant object. Only real bits-based tiers (bf16/q8/q4) — the
-// "default" pseudo-variant of a single-variant model and the non-quant "training" base are excluded, so
-// neither can ever be mistaken for a generation tier's footprint.
-function variantsByTier(model) {
-  return new Map(
-    (model?.variants ?? [])
-      .filter((variant) => tierQuantize(variant?.variant) !== null)
-      .map((variant) => [variant.variant, variant]),
-  );
+// Declared quant tier → the MLX measured peak (GB) for that tier, for the real bits-based tiers only
+// (bf16/q8/q4). The "default" pseudo-variant of a single-variant model and the non-quant "training" base
+// are excluded, so neither can ever be mistaken for a generation tier's footprint.
+//
+// DUPLICATE tier keys resolve to the MAX measured peak rather than last-write-wins. The manifest
+// legitimately declares several downloads under one `variant` key — `mage_flow` carries each of q4/q8/bf16
+// THREE times (main weights, plus a text_encoder and a vae component), and `wan_2_2_t2v_14b` carries each
+// tier twice (a macOS/MLX entry with footprints and a windows/linux candle entry without).
+//
+// Three upstream filters currently make the emitted keys unique — the component rows are `coRequisite:
+// true` (`is_co_requisite_download`), the per-platform rows are dropped by `retain_downloads_for_os`, and
+// `model_variant_downloads` then de-dupes first-wins (sc-8508) — so no duplicate reaches this Map today.
+// That is verified against the real catalog by memoryFloorCatalogParity.test.js rather than assumed here.
+// A Map keyed blindly on `variant.variant` would nonetheless depend silently on all three: the LAST
+// duplicate is a component row with no `footprint`, so last-write-wins would erase a real measurement and
+// quietly fall back to the blanket. Taking the max over the duplicates that DO carry a measurement agrees
+// with the first-wins projection today and errs toward over-stating if any of those filters ever change.
+function mlxPeakGbByTier(model) {
+  const byTier = new Map();
+  for (const variant of model?.variants ?? []) {
+    const tier = variant?.variant;
+    if (tierQuantize(tier) === null) {
+      continue;
+    }
+    const gb = measuredVariantPeakGb(variant);
+    const prior = byTier.has(tier) ? byTier.get(tier) : null;
+    if (gb === null) {
+      // A duplicate with no footprint is a component subdir, not evidence that the tier is unmeasured.
+      if (!byTier.has(tier)) {
+        byTier.set(tier, null);
+      }
+      continue;
+    }
+    byTier.set(tier, prior === null ? gb : Math.max(prior, gb));
+  }
+  return byTier;
 }
 
-// The MEASURED memory ceiling (GB) for the tier(s) `model` will actually run at, or null when no such
-// measurement exists (caller falls back to the blanket floor).
-//
-// `options.tier` — the tier actually selected for generation. When given, that tier's measurement is
-// used verbatim: it is the exact ceiling of the run about to happen.
-//
-// Without an explicit tier the ceiling is the MAX over the INSTALLED tiers, because a studio tier picker
-// can switch among them at will — and only when EVERY installed tier is measured. One unmeasured
-// installed tier means the set has no known bound, so we return null and keep the curated blanket floor.
-// This never UNDER-states the requirement, which matters: for a memory gate an under-estimate offers a
-// resolution (or hides a warning) that then OOMs, whereas an over-estimate is merely conservative.
-//
-// `options` also forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible).
-export function installedTierPeakGb(model, options = {}) {
-  const byTier = variantsByTier(model);
-  const explicit = typeof options.tier === "string" && options.tier ? options.tier : null;
-  if (explicit) {
-    return measuredVariantPeakGb(byTier.get(explicit));
+// Declared quant tier → the candle/CUDA measured peak VRAM (GB) for that tier, from
+// `candle.vramGbByTier`. Keyed by the same q4/q8/bf16 tier vocabulary, so the two lanes are drop-in
+// alternatives to each other; non-tier keys are dropped for the same reason as above.
+function candlePeakGbByTier(model) {
+  const byTier = new Map();
+  const declared = model?.candle?.vramGbByTier;
+  if (!declared || typeof declared !== "object") {
+    return byTier;
   }
+  for (const [tier, value] of Object.entries(declared)) {
+    if (tierQuantize(tier) === null) {
+      continue;
+    }
+    const gb = numberOrNull(value);
+    byTier.set(tier, gb !== null && gb > 0 ? gb : null);
+  }
+  return byTier;
+}
+
+// Declared quant tier → that tier's measured peak (GB) ON `backend`. The single seam where the lane is
+// chosen; everything below reads through it so no consumer can accidentally mix the two.
+function peakGbByTier(model, backend) {
+  return backend === "candle" ? candlePeakGbByTier(model) : mlxPeakGbByTier(model);
+}
+
+// The model's BLANKET declared floor (GB) on `backend`, or null when that lane declares none. The
+// fallback for every helper below — and deliberately NOT cross-lane: a candle host with no candle
+// evidence gets null (the caller shows nothing) rather than the MLX integer, because `qwen_image`'s
+// mlx 50 / candle 56 proves the MLX blanket can sit BELOW the candle requirement.
+export function blanketFloorGb(model, backend) {
+  const block = backend === "candle" ? model?.candle : model?.mlx;
+  const gb = numberOrNull(block?.minMemoryGb);
+  return gb !== null && gb > 0 ? gb : null;
+}
+
+// The host size (GB) at which a `peakGb` requirement satisfies the app's OWN fit criterion — the same
+// `peak <= host * MEMORY_HEADROOM_FRACTION` budget `tierFits` applies. This is what a USER-FACING
+// "needs N GB" must report: the measured peak is a RAW high-water mark, so quoting it directly claims a
+// host size at which the app itself would not run the tier (a 31 GB host fails lens_turbo's 30.50 GiB
+// q4, because 31 × 0.9 = 27.9). The blanket `minMemoryGb` integers already bake in this headroom — the
+// manifest says so at krea_realtime_14b: "~47 GiB active peak. 64 covers that with OS/app headroom" —
+// so converting here is what makes the measured basis and the blanket basis mean the same thing.
+export function hostGbForPeakGb(peakGb) {
+  if (peakGb == null || !Number.isFinite(peakGb) || peakGb <= 0) {
+    return null;
+  }
+  return Math.ceil(peakGb / MEMORY_HEADROOM_FRACTION);
+}
+
+// The MEASURED memory ceiling (GB) on `options.backend` for the tier(s) `model` will actually run at, or
+// null when no such measurement exists (caller falls back to the blanket floor).
+//
+// The ceiling is the MAX over the INSTALLED tiers, because a studio tier picker can switch among them at
+// will — and only when EVERY installed tier is measured. One unmeasured installed tier means the set has
+// no known bound, so we return null and keep the curated blanket floor. This never UNDER-states the
+// requirement, which matters: for a memory gate an under-estimate hides a warning about a model that
+// then OOMs, whereas an over-estimate is merely conservative.
+//
+// `options` also forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible), so
+// a tier this host cannot serve never contributes to the ceiling.
+export function installedTierPeakGb(model, options = {}) {
+  const byTier = peakGbByTier(model, options.backend);
   const tiers = installedTiers(model, options);
   if (tiers.length === 0) {
     return null;
   }
   let ceiling = null;
   for (const tier of tiers) {
-    const gb = measuredVariantPeakGb(byTier.get(tier));
+    const gb = byTier.get(tier) ?? null;
     if (gb === null) {
       // An installed tier we have no measurement for — the set is unbounded, so defer to the blanket.
       return null;
@@ -174,19 +261,18 @@ export function installedTierPeakGb(model, options = {}) {
   return ceiling;
 }
 
-// The CHEAPEST measured tier peak (GB) among the model's declared quant tiers, or null when none is
-// measured. This answers "what does it take to run this model AT ALL", which is the only honest per-tier
-// statement available for a model that is NOT installed yet: the catalog does not emit the manifest's
-// per-download `default` flag (see the `variant.default` note in quantTier.js `defaultTierSelection`), so
-// the client cannot know which tier a download will fetch — and it must not assume the lightest, because
-// 3 of the 53 shipped matrix models declare a heavier default (krea_2_raw / krea_2_turbo default to q8,
-// instantid_realvisxl to bf16).
+// The CHEAPEST measured tier peak (GB) on `options.backend` among the model's declared quant tiers, or
+// null when none is measured. This answers "what does it take to run this model AT ALL", which is the
+// only honest per-tier statement available for a model that is NOT installed yet: the catalog does not
+// emit the manifest's per-download `default` flag (see the `variant.default` note in quantTier.js
+// `defaultTierSelection`), so the client cannot know which tier a download will fetch — and it must not
+// assume the lightest, because 3 of the 53 shipped matrix models declare a heavier default (krea_2_raw /
+// krea_2_turbo default to q8, instantid_realvisxl to bf16).
 //
 // Callers MUST therefore present this as a FLOOR ("from N GB"), never as a specific tier's requirement.
-export function cheapestDeclaredTierPeakGb(model) {
+export function cheapestDeclaredTierPeakGb(model, options = {}) {
   let cheapest = null;
-  for (const variant of variantsByTier(model).values()) {
-    const gb = measuredVariantPeakGb(variant);
+  for (const gb of peakGbByTier(model, options.backend).values()) {
     if (gb !== null && (cheapest === null || gb < cheapest)) {
       cheapest = gb;
     }

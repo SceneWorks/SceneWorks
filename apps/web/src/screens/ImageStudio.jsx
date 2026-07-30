@@ -1147,23 +1147,16 @@ export function ImageStudio() {
   // that OOMs while a 128 GB Mac gets the full range. A no-op for ≤1536²-only models, an unknown
   // memory reading, and models with no declared memory floor (see resolutionMemory.js). The
   // downstream snap/default effects keep the selection valid within the gated list.
-  //
-  // `tier` is the SELECTED quant tier (sc-15400): the gate budgets against THAT tier's measured peak
-  // rather than the model's blanket worst-tier floor, so picking a lighter tier can re-open a high-res
-  // bucket the heaviest tier would not fit. Re-runs on tier change — `quantTier` is in the deps.
   const resolutionOptions = useMemo(() => {
     const declared = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTION_OPTIONS;
     const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
-    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
-      backend,
-      tier: quantTier,
-    });
+    const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, { backend });
     // Never collapse to an empty picker: if the gate somehow trims everything (it never trims
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, macCapabilities, quantTier]);
+  }, [selectedModel, unifiedMemoryGb, macCapabilities]);
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000

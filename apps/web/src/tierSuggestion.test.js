@@ -3,7 +3,11 @@ import {
   DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
   TRANSIENT_HEADROOM_BYTES,
+  blanketFloorGb,
+  cheapestDeclaredTierPeakGb,
   declaredTiers,
+  hostGbForPeakGb,
+  installedTierPeakGb,
   suggestTier,
   tierFits,
   variantFootprintBytes,
@@ -258,5 +262,129 @@ describe("suggestTier — real SANA-Sprint footprints (epic 10721 Auto default)"
     expect(suggestTier(sanaSprint(), 64)).toBe("bf16");
     // 16 GB: every tier's peak (~19–23 GB) exceeds the 14.4 GB budget → smallest declared (q4).
     expect(suggestTier(sanaSprint(), 16)).toBe("q4");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Per-tier, PER-LANE measured floors (sc-15400 + its review). The catalog-driven counterpart lives in
+// memoryFloorCatalogParity.test.js, which proves the lane independence against the real manifest. These
+// are the shapes the real catalog cannot currently produce — duplicate tier keys (three upstream filters
+// remove them today) and the exact headroom arithmetic.
+// ---------------------------------------------------------------------------------------------------
+describe("per-tier memory floor: headroom conversion", () => {
+  it("converts a raw peak into the smallest host that satisfies the fit criterion", () => {
+    // lens_turbo q4: 30.50 GiB measured. 31 GB does NOT fit it (31 × 0.9 = 27.9), 34 does.
+    const peak = 32749818036 / GB;
+    expect(hostGbForPeakGb(peak)).toBe(34);
+    expect(peak).toBeLessThanOrEqual(34 * MEMORY_HEADROOM_FRACTION);
+    expect(peak).toBeGreaterThan(33 * MEMORY_HEADROOM_FRACTION);
+    // The pre-review behavior, kept explicit so the regression is named: ceil(peak) UNDER-states.
+    expect(Math.ceil(peak)).toBe(31);
+    expect(peak).toBeGreaterThan(31 * MEMORY_HEADROOM_FRACTION);
+  });
+
+  it("returns null for a missing or nonsensical peak rather than 0 or NaN", () => {
+    expect(hostGbForPeakGb(null)).toBeNull();
+    expect(hostGbForPeakGb(undefined)).toBeNull();
+    expect(hostGbForPeakGb(0)).toBeNull();
+    expect(hostGbForPeakGb(-5)).toBeNull();
+    expect(hostGbForPeakGb(Number.NaN)).toBeNull();
+  });
+});
+
+describe("per-tier memory floor: the lane selects the evidence", () => {
+  // A model carrying BOTH lanes' evidence for the same tier, as lens_turbo really does.
+  function bothLanes() {
+    return {
+      id: "lens_turbo",
+      mlx: { minMemoryGb: 60 },
+      candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 } },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 32749818036 } },
+        { variant: "q8", installState: "missing", footprint: { diskSizeBytes: 1 } },
+      ],
+    };
+  }
+
+  it("reads the MLX footprint on mlx and candle.vramGbByTier on candle", () => {
+    const model = bothLanes();
+    expect(installedTierPeakGb(model, { backend: "mlx" })).toBeCloseTo(30.5006, 3);
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(37.3);
+  });
+
+  it("takes the blanket floor from the SAME lane", () => {
+    const model = bothLanes();
+    expect(blanketFloorGb(model, "mlx")).toBe(60);
+    expect(blanketFloorGb(model, "candle")).toBe(44);
+    // A lane that declares no block gets null — never the other lane's integer. qwen_image (mlx 50 /
+    // candle 56) is why: the MLX number is not reliably the conservative one.
+    expect(blanketFloorGb({ mlx: { minMemoryGb: 48 } }, "candle")).toBeNull();
+    expect(blanketFloorGb({ candle: { minMemoryGb: 16 } }, "mlx")).toBeNull();
+  });
+
+  it("returns null on candle when only the MLX footprint exists", () => {
+    // z_image's shape: a measured MLX q4 and no candle block at all.
+    const model = {
+      id: "z_image",
+      mlx: { minMemoryGb: 48 },
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 20852069456 } },
+      ],
+    };
+    expect(installedTierPeakGb(model, { backend: "mlx" })).toBeCloseTo(19.42, 2);
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBeNull();
+    expect(cheapestDeclaredTierPeakGb(model, { backend: "candle" })).toBeNull();
+  });
+
+  it("ignores non-tier keys in candle.vramGbByTier", () => {
+    // The manifest also stores int8-convrot rows there; only real bits-based tiers are generation tiers.
+    const model = {
+      candle: { vramGbByTier: { q4: 25.7, "int8-convrot": 34.7 } },
+      hasVariantMatrix: true,
+      variants: [{ variant: "q4", installState: "installed", footprint: null }],
+    };
+    expect(installedTierPeakGb(model, { backend: "candle" })).toBe(25.7);
+    expect(cheapestDeclaredTierPeakGb(model, { backend: "candle" })).toBe(25.7);
+  });
+});
+
+describe("per-tier memory floor: duplicate tier keys resolve to the MAX", () => {
+  // The real catalog cannot emit duplicates (coRequisite + per-OS + first-wins de-dupe all remove them,
+  // pinned by memoryFloorCatalogParity.test.js). These assert the client no longer DEPENDS on that.
+  it("keeps the measured duplicate rather than letting a footprint-less one erase it", () => {
+    // mage_flow's shape: main weights first, then component rows under the same key with no footprint.
+    // A Map keyed blindly on `variant` would take the LAST and fall back to the blanket.
+    const model = {
+      hasVariantMatrix: true,
+      mlx: { minMemoryGb: 48 },
+      variants: [
+        { variant: "q4", installState: "installed", footprint: { peakMemoryBytes: 20852069456 } },
+        { variant: "q4", installState: "installed", footprint: null },
+        { variant: "q4", installState: "installed", footprint: { diskSizeBytes: 1 } },
+      ],
+    };
+    expect(installedTierPeakGb(model, { backend: "mlx" })).toBeCloseTo(19.42, 2);
+  });
+
+  it("takes the LARGER of two measured duplicates, never the smaller", () => {
+    // Order-independent, and biased toward over-stating: under-stating is the direction that OOMs.
+    const ascending = {
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q8", installState: "installed", footprint: { peakMemoryBytes: 10 * GB } },
+        { variant: "q8", installState: "installed", footprint: { peakMemoryBytes: 20 * GB } },
+      ],
+    };
+    const descending = {
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "q8", installState: "installed", footprint: { peakMemoryBytes: 20 * GB } },
+        { variant: "q8", installState: "installed", footprint: { peakMemoryBytes: 10 * GB } },
+      ],
+    };
+    expect(installedTierPeakGb(ascending, { backend: "mlx" })).toBe(20);
+    expect(installedTierPeakGb(descending, { backend: "mlx" })).toBe(20);
   });
 });
