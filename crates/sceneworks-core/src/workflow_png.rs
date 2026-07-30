@@ -208,11 +208,19 @@ fn io_error(error: &std::io::Error) -> WorkflowChunkError {
 ///
 /// `None` is not a degenerate case, it is the opt-out: it writes the image through the *same*
 /// `save_with_format` call the worker uses today, so the bytes are identical to what SceneWorks
-/// produces now. That is a deliberate implementation choice rather than a coincidence to be
-/// re-derived — matching `image`'s encoder settings by hand would be a mirror that drifts the
-/// first time either side changes a default. `the_none_path_is_byte_identical_to_save_with_format`
-/// in `tests/workflow_png.rs` compares the two files byte for byte and is what keeps this
-/// honest, so sc-15948 can promise users who opt out that nothing about their files changed.
+/// produces now. `the_none_path_is_byte_identical_to_save_with_format` in `tests/workflow_png.rs`
+/// compares the two files byte for byte.
+///
+/// `Some` cannot call `save_with_format` — `image`'s `PngEncoder` has no text-chunk API at all —
+/// so it goes through `png` directly. That makes it the arm that *could* change the encoder, and
+/// the guarantee is deliberately just as strong: its output is the `None` output plus the inserted
+/// `iTXt` chunk, byte for byte, with the encoder settings mirrored from `image` in
+/// `encode_png_with_text` (not linked: it is private, and rustdoc warns on a public doc linking to
+/// one). `the_some_path_is_the_none_path_plus_the_chunk` proves it by stripping the chunk back out
+/// and comparing the remainder.
+///
+/// Both halves matter to sc-15948: opting out changes nothing about a user's files, and opting *in*
+/// costs the chunk and nothing else — no encode-time or file-size change smuggled in alongside.
 ///
 /// The chunk goes between IHDR and IDAT, where a reader finds it without decoding any pixels.
 ///
@@ -257,6 +265,39 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 /// Split out from [`write_workflow_chunk`] so the adversarial tests can build a PNG carrying any
 /// text chunk they like — a wrong keyword, two of ours, an uncompressed one, a payload that
 /// inflates past the cap — through the same encoder that writes the real thing.
+///
+/// # The settings are a mirror of `image`'s, on purpose
+///
+/// This is the one place the two write paths can drift, and drifting is not a cosmetic risk:
+/// sc-15948 turns this arm on for *every* generated image, so anything the settings change here
+/// becomes a change to every file SceneWorks produces. Adding a text chunk must cost a text chunk
+/// and nothing else — not encode time, not output size.
+///
+/// `png::Encoder::new` starts from `Options::default()`, whose compression is
+/// `DeflateCompression::default()` = `from_simple(Compression::Balanced)` = flate2 level 6
+/// (`png-0.18.1/src/common.rs`). `image` does not use that default: its `PngEncoder::new` takes
+/// `CompressionType::default()`, and `CompressionType::Fast` is the variant carrying `#[default]`
+/// (`image-0.25.10/src/codecs/png.rs`), which `encode_inner` maps to `png::Compression::Fast` →
+/// `DeflateCompression::FdeflateUltraFast`. Left unset, `Some` would silently encode ~20× slower
+/// and produce a file about half the size — a product change nobody asked this story for.
+///
+/// So both calls below mirror `image`'s `encode_inner` exactly, in its order:
+///
+/// * `Compression::Fast` for `CompressionType::Fast`.
+/// * `Filter::Adaptive` for `FilterType::Adaptive`, the other `#[default]`.
+///
+/// The filter call looks redundant — `set_compression` already applies
+/// `Filter::from_simple(Fast)`, which is `Adaptive` today — and it is kept anyway because `image`
+/// pins the filter explicitly *after* setting compression. If `png` ever remapped
+/// `from_simple(Fast)`, `image` would keep writing `Adaptive` and this would follow it rather than
+/// diverge. Mirroring the call sequence is what makes that true; mirroring only the outcome would
+/// not.
+///
+/// None of this is trusted to stay true by inspection:
+/// `the_some_path_is_the_none_path_plus_the_chunk` in `tests/workflow_png.rs` strips the `iTXt`
+/// chunk back out of this encoder's output at the byte level and compares what is left against a
+/// real `save_with_format` write of the same pixels, at sizes large enough for a compression
+/// difference to show.
 fn encode_png_with_text<W: Write>(
     rgb: &RgbImage,
     sink: W,
@@ -268,6 +309,8 @@ fn encode_png_with_text<W: Write>(
     let mut encoder = png::Encoder::new(sink, rgb.width(), rgb.height());
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_filter(png::Filter::Adaptive);
     let mut writer = encoder.write_header().map_err(encode_error)?;
     for chunk in chunks {
         writer.write_text_chunk(chunk).map_err(encode_error)?;
@@ -288,12 +331,19 @@ fn encode_png_with_text<W: Write>(
 /// `Ok(None)` means "this is a readable PNG that carries no SceneWorks workflow" — the common
 /// case for every image the user did not generate here, and not a failure.
 ///
-/// Only the metadata BEFORE the first IDAT is searched, which is where [`write_workflow_chunk`]
-/// puts ours. That is deliberate and is itself a hardening property: the whole read costs a chunk
-/// walk and never decodes a pixel, so a hostile file cannot make us decompress an image to look
-/// for text. The cost is that a chunk some other tool relocated after the image data reads as an
-/// absence; no encoder in the wild reorders text chunks that way, and the ones that touch them at
-/// all strip them outright.
+/// The metadata BEFORE the first IDAT is searched first, because that is where
+/// [`write_workflow_chunk`] puts ours: every SceneWorks image answers in one chunk walk that stops
+/// at the image data. Only when that finds nothing is the tail after IDAT searched too — an `iTXt`
+/// there is legal under the PNG spec, and sc-15949 reads files written by tools that are not ours,
+/// so "we never write it there" is not a reason to be blind to it. Silently reporting no recipe for
+/// a file that carries one is the worse failure.
+///
+/// Neither pass decodes a pixel. The second walks the remaining chunk framing with no output buffer,
+/// which `png` handles by skipping the IDAT payload rather than inflating it, so the hardening
+/// property survives: a hostile file still cannot make us decompress an image to look for text.
+/// Both passes run under the same [`MAX_METADATA_BYTES`] budget, resolve the same keyword, and hand
+/// whatever they find to the same capped decompress and the same single parser — the tail is not a
+/// laxer route in, only another place to look.
 ///
 /// # Errors
 /// See [`WorkflowChunkError`]. Never panics, and never inflates more than
@@ -343,7 +393,7 @@ fn read_workflow_chunk_from<R: BufRead + Seek>(
     // exists to bound our own chunk.
     decoder.set_ignore_iccp_chunk(true);
     // `read_info` stops at the first IDAT: all the metadata, none of the pixels.
-    let reader = decoder.read_info().map_err(|error| match error {
+    let mut reader = decoder.read_info().map_err(|error| match error {
         png::DecodingError::LimitsExceeded => WorkflowChunkError::MetadataTooLarge {
             limit: MAX_METADATA_BYTES,
         },
@@ -352,21 +402,20 @@ fn read_workflow_chunk_from<R: BufRead + Seek>(
         },
     })?;
 
-    let matching: Vec<&ITXtChunk> = reader
-        .info()
-        .utf8_text
-        .iter()
-        .filter(|chunk| chunk.keyword == WORKFLOW_CHUNK_KEYWORD)
-        .collect();
-    let chunk = match matching.as_slice() {
-        [] => return Ok(None),
-        [only] => *only,
-        many => return Err(WorkflowChunkError::DuplicateChunk { count: many.len() }),
+    // Pass one: the pre-IDAT metadata, where our own writer puts the chunk. Every image SceneWorks
+    // generated answers here and never touches the tail.
+    let mut found = select_workflow_chunk(reader.info())?;
+    // Pass two: the tail, and ONLY when pass one came up empty. That ordering is the precedence
+    // rule as much as an optimization — a pre-IDAT chunk is the one our encoder wrote in the same
+    // pass that wrote the pixels, so if both places carry one, the pre-IDAT chunk is the recipe
+    // that made the image and a post-IDAT chunk is something appended afterwards.
+    if found.is_none() {
+        found = workflow_chunk_after_image_data(&mut reader)?;
+    }
+    let Some(mut chunk) = found else {
+        return Ok(None);
     };
 
-    // Cloned because decompression mutates the chunk in place and `info()` hands out a shared
-    // reference. The clone is of the COMPRESSED bytes, which `MAX_METADATA_BYTES` already bounded.
-    let mut chunk = chunk.clone();
     chunk
         .decompress_text_with_limit(MAX_WORKFLOW_TEXT_BYTES)
         .map_err(|error| WorkflowChunkError::UnreadableChunk {
@@ -395,6 +444,59 @@ fn read_workflow_chunk_from<R: BufRead + Seek>(
     // arrives from outside. A second `serde_json::from_str::<WorkflowShare>` here would read the
     // same JSON without the value-level guards.
     Ok(Some(parse_workflow_share_json(&text)?))
+}
+
+/// Pick our chunk out of the `iTXt` chunks the decoder has parsed so far.
+///
+/// Shared by both passes so the keyword match and the duplicate rule cannot drift apart. The
+/// returned chunk is CLONED because decompression mutates it in place and `Info` hands out a shared
+/// reference; the clone is of the still-compressed bytes, which [`MAX_METADATA_BYTES`] already
+/// bounded.
+fn select_workflow_chunk(info: &png::Info<'_>) -> Result<Option<ITXtChunk>, WorkflowChunkError> {
+    let matching: Vec<&ITXtChunk> = info
+        .utf8_text
+        .iter()
+        .filter(|chunk| chunk.keyword == WORKFLOW_CHUNK_KEYWORD)
+        .collect();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [only] => Ok(Some((*only).clone())),
+        many => Err(WorkflowChunkError::DuplicateChunk { count: many.len() }),
+    }
+}
+
+/// Pass two: walk the chunks after the image data and look for the keyword there.
+///
+/// `Reader::finish` reads on to IEND with no output buffer, and `png` responds to the absent buffer
+/// by consuming the IDAT payload without handing it to the inflater
+/// (`png-0.18.1/src/decoder/stream.rs`, the `ImageData` state). So this costs chunk framing and CRC
+/// over bytes already on their way past — never an image decode, and never an allocation that
+/// scales with the pixels. Ancillary chunks it passes are parsed under the limits the decoder was
+/// built with, so the metadata budget still applies out here.
+///
+/// A walk that FAILS is reported as an absence rather than an error, with one exception. Pass one
+/// already succeeded and already told us there is no workflow in the metadata proper; a file whose
+/// tail is truncated or corrupt does not change that answer, and turning "this PNG is a bit damaged
+/// and has no recipe" into a hard error would break the `Ok(None)` promise for a case that reads
+/// cleanly today. Discarding the error can only ever yield *fewer* workflows, never one that
+/// bypassed a check, so this is not a soft edge on the trust boundary.
+///
+/// The exception is [`png::DecodingError::LimitsExceeded`], which is not damage — it is the budget
+/// refusing an oversized chunk, the one thing out here worth naming. It surfaces as
+/// [`WorkflowChunkError::MetadataTooLarge`], exactly as it would from pass one.
+fn workflow_chunk_after_image_data<R: BufRead + Seek>(
+    reader: &mut png::Reader<R>,
+) -> Result<Option<ITXtChunk>, WorkflowChunkError> {
+    match reader.finish() {
+        Ok(()) => {}
+        Err(png::DecodingError::LimitsExceeded) => {
+            return Err(WorkflowChunkError::MetadataTooLarge {
+                limit: MAX_METADATA_BYTES,
+            })
+        }
+        Err(_) => return Ok(None),
+    }
+    select_workflow_chunk(reader.info())
 }
 
 /// Size of the compressed `iTXt` chunk `share` would occupy in a PNG, in bytes — the whole chunk
@@ -540,6 +642,218 @@ mod tests {
         out.extend_from_slice(chunk);
         out.extend_from_slice(&png[AFTER_IHDR..]);
         out
+    }
+
+    /// Byte offset of the IEND chunk header, found by walking the framing rather than assuming it
+    /// is the last twelve bytes.
+    fn iend_offset(png: &[u8]) -> usize {
+        let mut cursor = 8;
+        loop {
+            assert!(
+                cursor + 8 <= png.len(),
+                "walked off the end looking for IEND"
+            );
+            if &png[cursor + 4..cursor + 8] == b"IEND" {
+                return cursor;
+            }
+            let length = usize::try_from(u32::from_be_bytes(
+                png[cursor..cursor + 4].try_into().expect("a length field"),
+            ))
+            .expect("a chunk length fits usize");
+            cursor += 12 + length;
+        }
+    }
+
+    /// Splice a hand-framed chunk in AFTER the image data, between the last IDAT and IEND.
+    ///
+    /// A legal home for an ancillary chunk under the PNG spec, and the one `read_info` alone cannot
+    /// see, because it stops at the first IDAT. Our own writer never puts a chunk here — these
+    /// fixtures stand in for the foreign writers sc-15949 will read.
+    fn splice_before_iend(png: &[u8], chunk: &[u8]) -> Vec<u8> {
+        let iend = iend_offset(png);
+        let mut out = png[..iend].to_vec();
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(&png[iend..]);
+        out
+    }
+
+    /// One `iTXt` chunk, framed by `png` itself rather than by hand, ready to splice anywhere.
+    fn framed(chunk: &ITXtChunk) -> Vec<u8> {
+        use png::text_metadata::EncodableTextChunk;
+
+        let mut encoded = Vec::new();
+        chunk.encode(&mut encoded).expect("the chunk encodes");
+        encoded
+    }
+
+    // ---------------------------------------------------------------------
+    // The tail after IDAT
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_workflow_chunk_after_the_image_data_is_still_found() {
+        // `read_info` stops at the first IDAT, so before the second pass existed this file read as
+        // Ok(None) — a silent "no recipe here" about a file that carries one. We never write the
+        // chunk out here, but sc-15949 reads files from strangers and the placement is legal.
+        let text = minimal_envelope_json("a lighthouse behind the image data");
+        let spliced = splice_before_iend(&png_with(&[]), &framed(&workflow_chunk(text)));
+        let share = read_workflow_chunk(&spliced)
+            .expect("a post-IDAT chunk must not be an error")
+            .expect("and must be found");
+        assert_eq!(share.prompt, "a lighthouse behind the image data");
+
+        // The streaming entry point reads the same file the same way — the second pass must not be
+        // an artifact of having the whole slice in memory.
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("post-idat.png");
+        std::fs::write(&path, &spliced).expect("writes the fixture");
+        let from_file = read_workflow_chunk_file(&path)
+            .expect("reads from the path")
+            .expect("carries a workflow");
+        assert_eq!(from_file, share);
+    }
+
+    #[test]
+    fn a_pre_idat_chunk_wins_over_one_appended_after_the_image_data() {
+        // The precedence rule, pinned. The pre-IDAT chunk is the one our encoder wrote in the same
+        // pass that wrote the pixels; a post-IDAT one is something appended afterwards. So a file
+        // carrying both resolves to the pre-IDAT recipe rather than reporting an ambiguity, and the
+        // second pass never runs for a file of ours.
+        let spliced = splice_before_iend(
+            &png_with_workflow_text(&minimal_envelope_json("the recipe that made this image")),
+            &framed(&workflow_chunk(minimal_envelope_json(
+                "appended afterwards",
+            ))),
+        );
+        let share = read_workflow_chunk(&spliced)
+            .expect("reads")
+            .expect("carries a workflow");
+        assert_eq!(share.prompt, "the recipe that made this image");
+    }
+
+    #[test]
+    fn duplicate_workflow_chunks_after_the_image_data_are_refused_too() {
+        // The duplicate rule is the second pass's as much as the first's: two recipes in the tail
+        // is the same ambiguity as two in the metadata, and must not resolve to whichever came
+        // first.
+        let mut tail = framed(&workflow_chunk(minimal_envelope_json("one")));
+        tail.extend_from_slice(&framed(&workflow_chunk(minimal_envelope_json("two"))));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail)),
+            Err(WorkflowChunkError::DuplicateChunk { count: 2 })
+        );
+    }
+
+    #[test]
+    fn a_foreign_keyword_after_the_image_data_still_reads_as_none() {
+        // The second pass must not become a route by which any text chunk counts. A ComfyUI export
+        // whose chunks were relocated past the image data is still an absence, not a workflow.
+        let mut tail = framed(&ITXtChunk::new("parameters", "steps: 28, sampler: euler"));
+        tail.extend_from_slice(&framed(&ITXtChunk::new(
+            "Sceneworks:Workflow",
+            "case matters",
+        )));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn an_oversized_chunk_after_the_image_data_refuses_before_it_is_buffered() {
+        // The metadata budget has to apply out here too, or the tail would be an unbounded place to
+        // put a chunk that the front of the file refuses. Over MAX_METADATA_BYTES of real data,
+        // uncompressed so no ratio is involved and the size on disk is the size in memory.
+        let huge = "A".repeat(MAX_METADATA_BYTES + 1);
+        let tail = framed(&ITXtChunk::new(WORKFLOW_CHUNK_KEYWORD, huge));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail)),
+            Err(WorkflowChunkError::MetadataTooLarge {
+                limit: MAX_METADATA_BYTES
+            }),
+            "an oversized post-IDAT chunk must be refused by the same budget as a pre-IDAT one"
+        );
+    }
+
+    #[test]
+    fn a_zip_bomb_after_the_image_data_refuses_instead_of_inflating() {
+        // The decompression cap is the other guard that must not be bypassed by placement. 8 MiB of
+        // NUL in a small chunk: nothing before the inflate can refuse it, so if the second pass
+        // reached a laxer decompress this would cost 8 MiB for a few kB of theirs.
+        let bomb = "\0".repeat(8 * 1024 * 1024);
+        let tail = framed(&workflow_chunk(bomb));
+        let spliced = splice_before_iend(&png_with(&[]), &tail);
+        assert!(
+            spliced.len() < 64 * 1024,
+            "the bomb must stay small on disk or it is not testing the ratio: {} bytes",
+            spliced.len()
+        );
+        match read_workflow_chunk(&spliced) {
+            Err(WorkflowChunkError::UnreadableChunk { limit, .. }) => {
+                assert_eq!(limit, MAX_WORKFLOW_TEXT_BYTES);
+            }
+            other => panic!("the post-IDAT bomb must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_uncompressed_chunk_over_the_cap_after_the_image_data_is_refused_too() {
+        // Between the text cap and the metadata budget, written with the compression flag clear —
+        // so it is the TEXT cap that has to catch it, on the second pass as on the first.
+        let text = "A".repeat(MAX_WORKFLOW_TEXT_BYTES + 1);
+        let tail = framed(&ITXtChunk::new(WORKFLOW_CHUNK_KEYWORD, text));
+        assert_eq!(
+            read_workflow_chunk(&splice_before_iend(&png_with(&[]), &tail)),
+            Err(WorkflowChunkError::TextTooLarge {
+                bytes: MAX_WORKFLOW_TEXT_BYTES + 1,
+                limit: MAX_WORKFLOW_TEXT_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn a_lying_chunk_length_after_the_image_data_refuses_without_allocating_it() {
+        // The declared-length attack, moved into the tail. 0x7FFF_FFFF is the largest length a PNG
+        // chunk header may declare; the file is a few hundred bytes. A reader that trusted the
+        // header out here would ask for 2 GiB.
+        let plain = png_with(&[]);
+        for declared in [0x7FFF_FFFF, u32::MAX] {
+            let liar = framed_chunk(
+                b"iTXt",
+                &itxt_data(WORKFLOW_CHUNK_KEYWORD, false, b"{}"),
+                Some(declared),
+            );
+            // Either a typed refusal or a clean absence is correct; recovering a workflow from it
+            // is not, and neither is allocating what it claims.
+            let result = read_workflow_chunk(&splice_before_iend(&plain, &liar));
+            assert!(
+                !matches!(result, Ok(Some(_))),
+                "a post-IDAT chunk declaring {declared} bytes must never yield a workflow, got \
+                 {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_tail_is_an_absence_rather_than_an_error() {
+        // Pass one already established there is no workflow in the metadata; a truncated or corrupt
+        // tail cannot change that answer. Turning "this PNG is damaged and has no recipe" into a
+        // hard error would break the Ok(None) promise for files that read cleanly today, so the
+        // second pass swallows its own walk failures.
+        let full = png_with(&[]);
+        // Cut inside the image data, past every pre-IDAT chunk: there is no IEND to walk to.
+        let truncated = &full[..full.len() - 6];
+        assert_eq!(
+            read_workflow_chunk(truncated),
+            Ok(None),
+            "a file with no workflow and a truncated tail must stay a clean absence"
+        );
+
+        // And a byte flipped in the tail must not turn the absence into a failure either.
+        let mut corrupt = full.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        assert_eq!(read_workflow_chunk(&corrupt), Ok(None));
     }
 
     #[test]

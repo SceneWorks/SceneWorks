@@ -2,9 +2,10 @@
 //!
 //! The adversarial corpus lives in the module's own `#[cfg(test)]` tests, because framing a
 //! deliberately broken chunk needs the private encoder. What is here is the outside-facing
-//! contract: the round trip, the byte-identical opt-out that lets sc-15948 promise nothing changes
-//! for users who decline, the non-ASCII prompt that justifies `iTXt` over `tEXt`, and the measured
-//! per-image cost.
+//! contract: the round trip, the two halves of the byte-identity guarantee sc-15948 rests on (the
+//! opt-out is `save_with_format` exactly, and opting *in* is that same file plus the chunk and
+//! nothing else), the non-ASCII prompt that justifies `iTXt` over `tEXt`, and the measured per-image
+//! cost.
 //!
 //! Value comparisons throughout, never serialized text. `serde_json::Map` is a `BTreeMap` (sorted)
 //! or an `IndexMap` (insertion-ordered) depending on the `preserve_order` feature, which Cargo
@@ -216,6 +217,140 @@ fn the_none_path_is_byte_identical_to_save_with_format() {
         chunked_bytes.len() > image_bytes.len(),
         "the embedded file must be the larger of the two"
     );
+}
+
+/// A deterministic image with enough entropy that the DEFLATE level shows up in the output size.
+///
+/// The fixture matters as much as the assertion here. `rgb_fixture` is 9x7 and a smooth gradient —
+/// it compresses to nearly the same size at any level, which is exactly how an encoder-settings
+/// divergence stayed invisible: the `Some` and `None` outputs landed a few hundred bytes apart, near
+/// enough to the chunk size to look correct. Gradient plus cheap xorshift noise keeps a level-6
+/// deflate roughly 2:1 away from the fast one at 1024x1024, so mixing the two up is a loud failure
+/// rather than a plausible one.
+fn noisy_rgb(width: u32, height: u32) -> RgbImage {
+    RgbImage::from_fn(width, height, |x, y| {
+        // An integer hash, so the noise is reproducible on every platform and needs no dependency.
+        let mut hash = x
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(y.wrapping_mul(0x85EB_CA6B));
+        hash ^= hash >> 15;
+        hash = hash.wrapping_mul(0xC2B2_AE35);
+        hash ^= hash >> 13;
+        let byte = |shift: u32, gradient: u32| {
+            let noise = (hash >> shift) & 0xFF;
+            u8::try_from((gradient.wrapping_add(noise)) & 0xFF).expect("masked to a byte")
+        };
+        // A gradient the filters can predict, plus noise they cannot: compressible enough to be a
+        // realistic render, random enough that the level matters.
+        Rgb([byte(0, x / 4), byte(8, y / 4), byte(16, (x + y) / 8)])
+    })
+}
+
+/// Rebuild `png` with every `iTXt` chunk under [`WORKFLOW_CHUNK_KEYWORD`] removed, walking the
+/// chunk framing by hand. Returns the remaining bytes and how many were taken out.
+///
+/// Deliberately does not use the `png` crate: the point is to remove the chunk without re-encoding
+/// anything, so what is left is the original file's own bytes minus a slice.
+fn strip_workflow_chunks(png: &[u8]) -> (Vec<u8>, usize) {
+    assert!(png.len() > 8, "not a PNG");
+    let mut out = png[..8].to_vec();
+    let mut removed = 0;
+    let mut cursor = 8;
+    while cursor < png.len() {
+        let length = usize::try_from(u32::from_be_bytes(
+            png[cursor..cursor + 4].try_into().expect("a length field"),
+        ))
+        .expect("a chunk length fits usize");
+        let kind = &png[cursor + 4..cursor + 8];
+        let data = &png[cursor + 8..cursor + 8 + length];
+        // length + type + data + CRC.
+        let end = cursor + 12 + length;
+        assert!(end <= png.len(), "chunk at {cursor} runs past the end");
+
+        // The keyword is the `iTXt` payload up to its first NUL.
+        let keyword = data
+            .split(|byte| *byte == 0)
+            .next()
+            .expect("split yields one");
+        if kind == b"iTXt" && keyword == WORKFLOW_CHUNK_KEYWORD.as_bytes() {
+            removed += end - cursor;
+        } else {
+            out.extend_from_slice(&png[cursor..end]);
+        }
+        cursor = end;
+    }
+    (out, removed)
+}
+
+#[test]
+fn the_some_path_is_the_none_path_plus_the_chunk() {
+    // The other half of the guarantee, and the half that is easy to assert too weakly. `None` going
+    // through `save_with_format` makes the opt-out structurally identical, but `Some` CANNOT — no
+    // `image` encoder writes a text chunk — so it drives `png` directly and could quietly encode
+    // with different settings. It did: `png::Encoder::new` defaults to a level-6 deflate while
+    // `image` defaults to the fdeflate fast path, so embedding a chunk also halved the file and
+    // cost ~20x the encode time.
+    //
+    // Asserting "the embedded file is bigger" cannot catch that, and neither can a small fixture.
+    // So this strips our chunk back out of the `Some` output at the byte level and requires what
+    // remains to be the `None` output exactly. Any change to compression, filtering or chunking
+    // shows up as a diff no matter which direction it moves the size.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let envelope = golden_envelope();
+    let chunk_size = workflow_chunk_size(&envelope).expect("the chunk encodes");
+
+    // Several sizes, and at least one big enough for a compression difference to dominate the
+    // chunk. The row stride varies too, since that is what the adaptive filter keys off.
+    for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
+        let rgb = noisy_rgb(width, height);
+        let embedded = directory.path().join(format!("some-{width}x{height}.png"));
+        let plain = directory.path().join(format!("none-{width}x{height}.png"));
+
+        write_workflow_chunk(&rgb, &embedded, Some(&envelope)).expect("writes with a chunk");
+        write_workflow_chunk(&rgb, &plain, None).expect("writes without one");
+
+        let embedded_bytes = fs::read(&embedded).expect("reads");
+        let plain_bytes = fs::read(&plain).expect("reads");
+        let (stripped, removed) = strip_workflow_chunks(&embedded_bytes);
+
+        assert_eq!(
+            removed, chunk_size,
+            "at {width}x{height} the stripper removed {removed} bytes but the chunk measures \
+             {chunk_size}"
+        );
+        assert_eq!(
+            stripped.len(),
+            plain_bytes.len(),
+            "at {width}x{height} the two arms disagree on encoded size by {} bytes — the chunk is \
+             {chunk_size} and was already removed, so this is an ENCODER difference, not the chunk",
+            stripped.len().abs_diff(plain_bytes.len())
+        );
+        assert!(
+            stripped == plain_bytes,
+            "at {width}x{height} the Some output is not the None output plus the chunk: the bytes \
+             differ after stripping the {chunk_size}-byte chunk"
+        );
+        // Stated the other way round as well, because this is the number sc-15948 quotes: the file
+        // grows by the chunk and by nothing else.
+        assert_eq!(
+            embedded_bytes.len(),
+            plain_bytes.len() + chunk_size,
+            "at {width}x{height} embedding cost {} bytes, not the {chunk_size}-byte chunk",
+            embedded_bytes.len() - plain_bytes.len()
+        );
+
+        // And the fixture must actually be compression-sensitive at the larger sizes, or the
+        // assertions above would hold for an image where every level produces the same bytes.
+        if width >= 512 {
+            let raw = rgb.as_raw().len();
+            assert!(
+                plain_bytes.len() * 5 > raw * 2,
+                "at {width}x{height} the fixture compressed to {} of {raw} raw bytes — too \
+                 compressible to distinguish deflate levels",
+                plain_bytes.len()
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
