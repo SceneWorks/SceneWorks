@@ -394,8 +394,11 @@ Either way write the reason; the test requires one.
 
 Every rule carries an `AdvancedKeySource`, and `allow` / `deny` are shorthands that hard-code
 `AdvancedKeySource::StudioBuilder`. Reaching for them out of habit is the most likely way to end up
-red: a `buildDetailJobBody` key written as `allow(…)` is classified correctly and tagged wrongly,
-and the tag is what two of the four lints are about.
+red. A `buildDetailJobBody` key written as `allow(…)` is classified correctly and tagged wrongly,
+and **three** tests in `workflow_share.rs` fail on it: the per-builder coverage test for the builder
+that really emits it, the one for the studio builder that is now credited with a key it never
+emits, and `every_registered_builder_has_its_advanced_keys_classified`, whose "is every classified
+key still emitted?" half runs per tag.
 
 <!-- PINNED: rule-helpers -->
 
