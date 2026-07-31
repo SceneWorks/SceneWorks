@@ -2135,22 +2135,40 @@ fn the_core_workflow_surface_is_classified() {
 /// # Exactly what it proves
 ///
 /// * **Discovery, not enumeration.** Every `.rs` file under `crates/sceneworks-worker/src` is
-///   walked. A function is a seam if it calls something on [`WORKFLOW_WRITE_SURFACE`], or calls a
-///   worker function that carries a `WorkflowShare` in its own signature, or carries one itself.
+///   walked. A function is a seam if its body NAMES something on [`WORKFLOW_WRITE_SURFACE`] —
+///   called or taken as a value — or names a worker function that carries a `WorkflowShare` in its
+///   own signature, or carries one itself. `use … as …` renames of those names are resolved first,
+///   so a file that imports the writer under another name is not a file the lint is asleep for.
 ///   That closure is what reaches `upscale_jobs.rs` and `segment_jobs.rs` through
 ///   `write_single_child_asset` without either being named anywhere. A brand-new worker file with
-///   an embedding call is caught the moment it appears.
-/// * **Every seam is declared.** A discovered seam with no [`WORKFLOW_WRITE_SEAMS`] entry fails,
-///   naming the file and the function. An unmapped seam does not pass.
+///   an embedding call is caught the moment it appears
+///   ([`a_brand_new_worker_file_with_an_embedding_call_is_discovered`],
+///   [`a_renamed_import_of_the_write_surface_is_resolved`],
+///   [`the_write_surface_taken_as_a_value_is_still_discovered`]).
+/// * **Every seam is declared, exactly once.** A discovered seam with no
+///   [`WORKFLOW_WRITE_SEAMS`] entry fails, naming the file and the function. Two same-named
+///   functions in one file fail too, because the registry joins on `(path, function)` and the
+///   second would otherwise inherit the first's declaration
+///   ([`two_same_named_seams_in_one_file_fail_the_build`]).
 /// * **A declared lane may not be deferred.** A [`SeamDisposition::Embeds`] entry names the web
 ///   builders that feed it; one that resolves into [`DEFERRED_ADVANCED_BUILDERS`] fails, naming
-///   the seam, the lane and the builder. That is the enforcement the doc comment now describes.
-/// * **Declining is not a dodge.** The disposition is checked against the source:
-///   [`SeamDisposition::Declines`] requires that the seam builds no envelope and passes `None`
-///   wherever a share-carrying field is filled, so a declining seam that starts embedding flips to
-///   a failure rather than staying quiet. [`SeamDisposition::Conduit`] requires that it builds
-///   none AND accepts one — and its callers are seams by construction, so no lane escapes through
-///   it.
+///   the seam, the lane and the builder. That is the enforcement the doc comment now describes
+///   ([`a_seam_that_embeds_for_a_deferred_builder_fails_the_build`]).
+/// * **Declining is not a dodge, whatever the envelope's provenance.** The disposition is checked
+///   POSITIVELY against the source. [`SeamDisposition::Declines`] requires that the seam calls
+///   `write_workflow_chunk` with nothing but a literal `None`, never names `WorkflowShare` in its
+///   body, never accepts one through its signature, and fills every share-carrying field with
+///   `None` — by initializer, by `x.field = ..` assignment, or in shorthand. So a seam that got
+///   its envelope from a parse, a clone or a `from_value::<WorkflowShare>` and wrote it on is
+///   embedding, and flips to a failure rather than staying quiet
+///   ([`a_declining_seam_that_writes_a_carried_envelope_fails_the_build`],
+///   [`a_share_assigned_onto_a_field_after_a_none_initializer_is_read`],
+///   [`a_parsed_envelope_written_on_is_seen_as_embedding`]).
+/// * **The other two dispositions say something true.** [`SeamDisposition::Conduit`] requires that
+///   it accepts a share, reaches a writer, and sources none of its own; a carrier that reaches no
+///   writer is [`SeamDisposition::Inert`] instead, so "writes an envelope its caller built" is
+///   never written about a function that writes nothing
+///   ([`a_conduit_that_writes_nothing_fails_the_build`]).
 /// * **Both directions.** A registry entry whose function no longer touches an envelope fails as a
 ///   stale claim, and every [`ADVANCED_BUILDERS`] entry must be named by some embedding seam — a
 ///   builder classified *because its lane embeds* with no seam behind it is a claim nobody is
@@ -2158,18 +2176,27 @@ fn the_core_workflow_surface_is_classified() {
 ///
 /// # What it does NOT prove
 ///
+/// Re-derived after the sc-16113 review, which found three working evasions that this list did not
+/// mention — two of them worse than anything it did. Those three are closed above; what is left is
+/// what is left.
+///
 /// * **That a seam's declared builder list is the whole truth.** The mapping is an explicit
 ///   declaration, because a Rust write seam has no inherent knowledge of which web builder feeds
 ///   it and every inference available (the job type, the file's directory) fails open. An author
 ///   who declares a video seam as embedding for `buildImageJobAdvanced` has written a false
 ///   statement into a public registry next to prose describing the lane; the lint cannot tell, and
-///   review is what catches it. What the lint does guarantee is that the statement had to be
-///   written at all, and that the honest version of it fails the build.
+///   review is what catches it. **This is the biggest hole, and it is deliberate**: what the lint
+///   guarantees is that the statement had to be written at all, and that the honest version of it
+///   fails the build.
+/// * **That an envelope reaching a seam through a Rust `type` ALIAS is seen.** `use … as …` is
+///   resolved; `type Ws = WorkflowShare; fn f() -> Option<Ws>` is not, and would not register as a
+///   carrier. The same goes for a share reached only through a generic parameter or a trait
+///   object, and for a writer reached through a macro that pastes the name together.
+/// * **That an `Inert` or `Conduit` claim survives an indirection the scan cannot follow.** Both
+///   are checked on the names the body mentions. A helper that reaches a writer through a `dyn`
+///   call or a trait method could be declared inert and pass.
 /// * **Anything about seams outside `crates/sceneworks-worker/src`.** `apps/rust-api` writes
 ///   chunks in its own tests; the product write path is the worker's.
-/// * **That an envelope reaching a seam through a type alias is seen.** Discovery reads the text
-///   `WorkflowShare` in signatures, so `type Ws = WorkflowShare; fn f() -> Option<Ws>` would not
-///   register as a carrier.
 /// * The macOS-gated `image_jobs/detail.rs` is `include!`d rather than a `mod`, and this scan is
 ///   TEXTUAL, so that seam is read on every platform — the same reason the old form could list it
 ///   as a plain path. Test-only code is excluded by name (`tests.rs`, `tests/`) and by stripping
@@ -3844,7 +3871,8 @@ struct WorkflowSeamSite {
     /// Its body gets hold of an envelope of its own: a builder, a parser, or the type named
     /// outright (`from_value::<WorkflowShare>`, `WorkflowShare::…`, a typed local).
     obtains_an_envelope: bool,
-    /// Which surface names its body calls, for the gated-builder assertion.
+    /// Which surface names its body NAMES — called, or taken as a value — for the gated-builder
+    /// assertion. Canonical names, so a rename import is recorded as what it really is.
     calls: Vec<String>,
     /// The first token each share-carrying struct field is given in this body (`None`, `Some`, an
     /// identifier). What separates "declines" from "hands one on" — read from struct-literal
@@ -3966,11 +3994,7 @@ fn discover_workflow_seams(sources: &[(String, String)]) -> Vec<WorkflowSeamSite
             carriers.insert(item.name.clone());
             surface.insert(item.name.clone());
             // A carrier that RETURNS one builds it; a carrier that only accepts one passes it on.
-            if signature
-                .split("->")
-                .skip(1)
-                .any(&names_a_share_type)
-            {
+            if signature.split("->").skip(1).any(&names_a_share_type) {
                 constructors.insert(item.name.clone());
             }
         }
@@ -3986,7 +4010,11 @@ fn discover_workflow_seams(sources: &[(String, String)]) -> Vec<WorkflowSeamSite
         let mut chunk_arguments: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         for name in surface.iter().chain(parsers.iter()) {
             for spelling in spellings(name) {
-                for offset in call_sites(text, &spelling) {
+                // MENTIONS, not calls. A body that names a writer at all is a seam, so taking one
+                // as a value (`let write = write_workflow_chunk; write(..)`) is not an indirection
+                // the scan can be walked around with. Comments and literals are already blanked,
+                // and a `use` at module level sits inside no function body.
+                for offset in name_sites(text, &spelling) {
                     let Some((index, span)) = innermost_owner(&spans, offset) else {
                         continue;
                     };
@@ -4262,8 +4290,39 @@ fn assert_embedded_builders_are_registered(
     }
 }
 
+/// Every offset in `text` where `name` appears as a whole identifier, called or not.
+///
+/// Discovery reads MENTIONS rather than calls, because `let write = write_workflow_chunk;` puts
+/// the writer in a local and `write(..)` is then a call to a name the scan has never heard of.
+/// Comments and string literals are blanked before this runs, and a module-level `use` sits inside
+/// no function body, so the two shapes that would make this noisy do not.
+fn name_sites(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(name) {
+        let at = from + offset;
+        let after = at + name.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        out.push(at);
+    }
+    out
+}
+
 /// Every offset in `text` where `name` is CALLED. Word-boundary, and the parenthesis has to be
 /// there, so `use …::write_workflow_chunk;` and a struct field of the same name are not calls.
+///
+/// The narrow half, used by the safety net: "this call site vanished from the scan" is a different
+/// claim from "this name is mentioned somewhere".
 fn call_sites(text: &str, name: &str) -> Vec<usize> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -5324,6 +5383,28 @@ fn a_renamed_import_of_the_write_surface_is_resolved() {
             ),
         ]
     );
+}
+
+/// Taking the writer as a VALUE is not an indirection the scan can be walked around with.
+///
+/// Found while re-deriving the honest limits after the review: `call_sites` required the `(` to be
+/// there, so a local binding of the function itself was invisible to discovery AND to the safety
+/// net — the same class of hole as the rename import, one level further along.
+#[test]
+fn the_write_surface_taken_as_a_value_is_still_discovered() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_indirect.rs",
+        "fn write_probe_frame(img: &image::RgbImage, path: &Path) {\n    let writer = \
+         write_workflow_chunk;\n    let share = embeddable_workflow_share(&facts, \
+         &payload);\n    let _ = writer(img, path, share.as_ref());\n}\n",
+    );
+    assert_eq!(seam.function, "write_probe_frame");
+    assert!(
+        seam.calls.contains(&"write_workflow_chunk".to_owned()),
+        "the mention counts even though the call goes through a local: {:?}",
+        seam.calls
+    );
+    assert!(seam.constructs);
 }
 
 /// A renamed `WorkflowShare` TYPE still makes its holders carriers.

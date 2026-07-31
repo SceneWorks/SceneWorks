@@ -580,34 +580,73 @@ deferred.
 <!-- END PINNED: write-seams -->
 
 **The seams are discovered, not listed.** The lint walks every `.rs` file under
-`crates/sceneworks-worker/src` and treats a function as a seam if it calls the core write surface
-(`build_workflow_share`, `build_workflow_share_from`, `embeddable_workflow_share`,
-`write_workflow_chunk`), carries a `WorkflowShare` in its own signature — directly or inside a
-struct that holds one — or calls something that does. That last closure is what reaches
-`upscale_jobs.rs` and `segment_jobs.rs` through `write_single_child_asset`, neither of which
-mentions `sceneworks_core` at all. A brand-new worker file with an embedding call is caught the
-moment it appears, and there is no file list anywhere to forget to update.
+`crates/sceneworks-worker/src` and treats a function as a seam if its body NAMES the core write
+surface (`build_workflow_share`, `build_workflow_share_from`, `embeddable_workflow_share`,
+`write_workflow_chunk`) — called or taken as a value — or carries a `WorkflowShare` in its own
+signature, directly or inside a struct that holds one, or names something that does. That last
+closure is what reaches `upscale_jobs.rs` and `segment_jobs.rs` through `write_single_child_asset`,
+neither of which mentions `sceneworks_core` at all. `use … as …` renames are resolved before the
+walk, so importing the writer under another name does not switch the lint off for that file. A
+brand-new worker file with an embedding call is caught the moment it appears, and there is no file
+list anywhere to forget to update.
 
-So the four states are distinct, and every one of them is checked against the source:
+So the five states are distinct, and every one of them is checked against the source:
 
 - **Embeds** — must name at least one builder, and every one must be in `ADVANCED_BUILDERS`. A
   reference into `DEFERRED_ADVANCED_BUILDERS` fails the build, printing the seam, the lane and the
   deferral's own reason. This is the failure sc-15956 will hit, and moving the video builders up —
   which forces every key to be classified — is what clears it.
-- **Conduit** — writes an envelope its caller built. Must build none itself and must accept one,
-  and its callers are seams in their own right, so no lane escapes through it.
-- **Declines** — writes no envelope at all. Must build none, must carry none, and must pass `None`
-  everywhere a share-carrying field is filled. **Declining is not a way to embed without classifying
-  a lane**: a declining seam that starts building one flips to a failure rather than staying quiet.
-- **Undeclared** — fails, naming the file and the function. An unmapped seam does not pass.
+- **Conduit** — writes an envelope its caller built. Must accept one through its signature, must
+  reach a writer, and must obtain none of its own — no builder, no parse, no mention of the type.
+  Its callers are seams in their own right, so no lane escapes through it.
+- **Declines** — writes no envelope at all. Checked positively rather than by the absence of a
+  builder call: it may not pass anything but a literal `None` to `write_workflow_chunk`, may not
+  name `WorkflowShare` in its body, may not accept one, and must fill every share-carrying field
+  with `None` — by initializer, by later assignment, or in shorthand. **Declining is not a way to
+  embed without classifying a lane, and where the envelope came from makes no difference**: a
+  declining seam that starts writing one — built here, parsed back out of another file, or cloned
+  from somewhere else — flips to a failure rather than staying quiet.
+- **Inert** — a share reaches its signature and goes nowhere. A logging or validation helper that
+  takes a spec is this. Must reach no writer at all; the moment it calls one it owes a lane. It
+  exists so that "writes an envelope its caller built" is never written about a function that
+  writes nothing.
+- **Undeclared** — fails, naming the file and the function. An unmapped seam does not pass, and
+  two same-named functions in one file fail too, because one entry cannot describe both.
 
-What this does **not** prove is that a seam's declared builder list is the whole truth. The mapping
-is an explicit declaration because a Rust write seam has no inherent knowledge of which web builder
-feeds it, and every inference available (the job type, the file's directory) fails open. An author
-who declared a video seam as embedding for `buildImageJobAdvanced` would have written a false
-statement into a public registry, beside prose describing the lane; the lint cannot tell, and review
-is what catches it. What it does guarantee is that the statement had to be written at all, and that
-the honest version of it fails the build.
+### What this does not prove
+
+The list below was re-derived after the sc-16113 review, which found three working evasions this
+section did not mention — two of them worse than anything it did. Those three are closed; these are
+what is left.
+
+- **That a seam's declared builder list is the whole truth.** This is the biggest hole and it is
+  deliberate. The mapping is an explicit declaration because a Rust write seam has no inherent
+  knowledge of which web builder feeds it, and every inference available (the job type, the file's
+  directory) fails open. An author who declared a video seam as embedding for
+  `buildImageJobAdvanced` would have written a false statement into a public registry, beside prose
+  describing the lane; the lint cannot tell, and review is what catches it. What it does guarantee
+  is that the statement had to be written at all, and that the honest version of it fails the
+  build.
+- **That an envelope reaching a seam through a Rust `type` alias is seen.** `use … as …` is
+  resolved; `type Ws = WorkflowShare;` is not. Nor is a share reached only through a generic
+  parameter or a trait object, nor a writer whose name a macro pastes together.
+- **That an `Inert` or `Conduit` claim survives an indirection the scan cannot follow** — a `dyn`
+  call or a trait method that reaches a writer is invisible to it.
+- **Anything about seams outside `crates/sceneworks-worker/src`.** `apps/rust-api` writes chunks in
+  its own tests; the product write path is the worker's.
+
+### Wiring a new lane, and the two loud surprises waiting for it
+
+The back-check that every `ADVANCED_BUILDERS` entry is named by some embedding seam means the two
+halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on their own
+would leave `VideoStudio.jsx::submit` registered with no seam behind it, which fails. Move the
+builder up and add the `WORKFLOW_WRITE_SEAMS` entry in the same change.
+
+And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `VideoStudio.jsx::submit`
+as its deferred example, so promoting that builder turns that mutation proof into a "did not panic
+as expected" failure. Re-point it at whatever is still deferred; the proof is that *some* deferred
+builder is refused, not that one particular one is. Both surprises are loud rather than silent,
+which is why they are documented rather than designed away.
 
 ## The setting
 
@@ -715,7 +754,7 @@ code does not have fails, and a thing the code has that is not a row here fails 
 | `omitted-fields` | `OMITTED_FIELDS`. |
 | `ceilings` | Observed behaviour for the collection and string bounds — the largest input that survives, the smallest that does not, and whether the overflow **truncates** or **drops**, which is read out of the last column rather than assumed — and the constants for the envelope and PNG ceilings. |
 | `builders` / `deferred-builders` | `ADVANCED_BUILDERS` and `DEFERRED_ADVANCED_BUILDERS`, file path and function name. |
-| `write-seams` | `WORKFLOW_WRITE_SEAMS`, file path and function name, plus the disposition word (`Embeds` / `Conduit` / `Declines`) read out of the third column — so a seam that switches from declining to embedding cannot leave this table describing the old behaviour. A seam embedding for a builder this document lists as **deferred** fails separately. |
+| `write-seams` | `WORKFLOW_WRITE_SEAMS`, file path and function name, plus the disposition word (`Embeds` / `Conduit` / `Declines` / `Inert`) read out of the third column — so a seam that switches from declining to embedding cannot leave this table describing the old behaviour. A seam embedding for a builder this document lists as **deferred** fails separately. |
 | `builder-fields` | The fields of the `AdvancedBuilder` struct, so a registry entry that grows a field a contributor is never told to fill fails. |
 | `rule-helpers` | The `const fn … -> AdvancedKeyRule` constructors in `workflow_share.rs`, so a helper this section does not mention fails. |
 | `lints` | Each named test exists in `crates/sceneworks-core/tests/workflow_share.rs`. |
