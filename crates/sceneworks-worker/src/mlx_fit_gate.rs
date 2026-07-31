@@ -1214,20 +1214,17 @@ fn evaluate_request_with_budget_using_bundle(
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // after the concrete generator is loaded, then use that tier for every evidence/cache identity
     // in this request so uniform-q4 measurements cannot authorize a mixed-precision provider.
+    let declared_floors = generator
+        .descriptor()
+        .capabilities
+        .component_precision_floors;
+    let provider_floors = active_component_floors(declared_floors, plan.tier.quant);
     let mut effective_plan;
-    let plan = if plan.tier.component_precision_floors
-        == generator
-            .descriptor()
-            .capabilities
-            .component_precision_floors
-    {
+    let plan = if plan.tier.component_precision_floors == provider_floors {
         plan
     } else {
         effective_plan = plan.clone();
-        effective_plan.tier.component_precision_floors = generator
-            .descriptor()
-            .capabilities
-            .component_precision_floors;
+        effective_plan.tier.component_precision_floors = provider_floors;
         &effective_plan
     };
 
@@ -4432,6 +4429,48 @@ mod tests {
     }
 
     #[test]
+    fn provider_floor_binding_stays_inactive_for_q8_and_bf16() {
+        use gen_core::{ComponentPrecisionFloor, PrecisionFloorComponent};
+
+        const Q4_ONLY_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
+            component: PrecisionFloorComponent::TransformerHead,
+            selected_tier: gen_core::Quant::Q4,
+            resident_tier: gen_core::Quant::Q8,
+        }];
+        let mut generator = fixture_generator();
+        generator.descriptor.capabilities.component_precision_floors = Q4_ONLY_FLOORS;
+
+        for (quant, label) in [(Some(gen_core::Quant::Q8), "q8"), (None, "bf16")] {
+            let mut plan = fixture_plan();
+            plan.tier.quant = quant;
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let evaluated = evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(8.0),
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{label} provider binding failed: {error}"));
+
+            assert!(
+                evaluated
+                    .context
+                    .selection
+                    .tier
+                    .component_precision_floors
+                    .is_empty(),
+                "Q4-only component floors must not relabel a {label} request"
+            );
+        }
+    }
+
+    #[test]
     fn target_tier_and_artifact_variant_are_independent_identity_mutations() {
         let bundle = fixture_bundle();
         let inputs = fixture_inputs(1024, 1024);
@@ -5413,9 +5452,13 @@ mod tests {
         let adapter = root.join("adapter.safetensors");
         std::fs::write(&base, vec![0_u8; 100]).unwrap();
         std::fs::write(&adapter, vec![0_u8; 5_750]).unwrap();
-        let spec = LoadSpec::new(WeightsSource::File(base)).with_adapters(vec![
-            gen_core::AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora),
-        ]);
+        let spec = LoadSpec::new(WeightsSource::File(base))
+            .with_quant(gen_core::Quant::Q4)
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                adapter,
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )]);
         let plan =
             MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &spec, None, None);
         assert_eq!(plan.folded_adapter_bytes, 5_750);
