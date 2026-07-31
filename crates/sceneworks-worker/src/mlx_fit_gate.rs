@@ -1171,7 +1171,7 @@ fn evaluate_request_with_budget_using_bundle(
             }) && admission
                 .lower_alternative
                 .as_ref()
-                .is_none_or(|alternative| {
+                .map_or(true, |alternative| {
                     identity.abi == alternative.calibration_abi
                         && identity.fingerprint == alternative.calibration_fingerprint
                         && contract.engaged_composition(alternative.strategy)

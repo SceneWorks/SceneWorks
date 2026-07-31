@@ -12550,6 +12550,7 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn krea_control_calibration_provenance_accepts_only_exact_base_and_verified_default_overlay() {
     let data = tempfile::tempdir().unwrap();
