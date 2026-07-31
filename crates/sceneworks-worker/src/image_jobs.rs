@@ -284,6 +284,12 @@ pub(crate) async fn run_image_generate_job(
     ))]
     let plan = ImagePlan::with_count(&request, request.count * upscale_mult, workflow_source);
 
+    let mut plan = plan;
+    if plan.workflow_source.is_some() {
+        plan.model_hash =
+            trusted_imported_model_hash(api, settings, job, plan.adapter, &request).await;
+    }
+
     // Pre-flight LoRA family-compat guardrail (sc-3027): reject an incompatible LoRA
     // (e.g. a Flux LoRA on an SDXL model, or a Wan 5B LoRA on the 14B base) before any
     // heavy load, with the same message the Python worker raised — instead of failing
@@ -1244,6 +1250,136 @@ pub(crate) struct ImagePlan {
     /// `Arc` because every per-image asset writer clones the plan into a `spawn_blocking` encode
     /// task and a payload carries the resolved model manifest.
     pub(crate) workflow_source: Option<Arc<JsonObject>>,
+    /// Worker-proven SHA-256 of the exact imported checkpoint selected by the resolved route.
+    /// Never populated from the request payload.
+    pub(crate) model_hash: Option<String>,
+}
+
+/// Resolve the exact single-file checkpoint for an imported Krea/SDXL route. The adapter label is
+/// the worker's route decision, so a client cannot opt an arbitrary manifest path into attribution.
+fn imported_checkpoint_file_for_share(
+    adapter: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<PathBuf> {
+    if !matches!(
+        adapter,
+        "mlx_krea_imported" | "candle_krea_imported" | "mlx_sdxl_imported" | "candle_sdxl_imported"
+    ) {
+        return None;
+    }
+    let raw_path = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("paths")
+                .and_then(|paths| paths.get("model"))
+        })
+        .and_then(Value::as_str)?;
+    let path = crate::paths::normalize_app_managed_model_path(
+        settings,
+        raw_path,
+        "Imported checkpoint attribution",
+    )
+    .ok()?;
+    if path.is_file() {
+        return path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+            .then_some(path);
+    }
+    let mut found = None;
+    for entry in std::fs::read_dir(path).ok()?.filter_map(Result::ok) {
+        let candidate = entry.path();
+        if candidate.is_file()
+            && candidate
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+        {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(candidate);
+        }
+    }
+    found
+}
+
+fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String> {
+    let identity = model_file_identity(file)?;
+    (marker.get("modelFileName").and_then(Value::as_str) == Some(identity.name.as_str())
+        && marker.get("modelFileBytes").and_then(Value::as_u64) == Some(identity.bytes)
+        && marker.get("modelFileModifiedNanos").and_then(Value::as_str)
+            == Some(identity.modified_nanos.as_str()))
+    .then(|| {
+        marker
+            .get("modelFileSha256")
+            .and_then(Value::as_str)
+            .and_then(normalize_sha256)
+    })
+    .flatten()
+}
+
+/// Read the digest retained by model import, or backfill one legacy marker once. Hashing failure is
+/// attribution failure, not generation failure: the image remains usable and merely lacks a card.
+async fn trusted_imported_model_hash(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    adapter: &str,
+    request: &ImageRequest,
+) -> Option<String> {
+    let file = imported_checkpoint_file_for_share(adapter, request, settings)?;
+    let marker_path = file.parent()?.join(INSTALL_MARKER);
+    let bytes = tokio::fs::read(&marker_path).await.ok()?;
+    let mut marker = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let object = marker.as_object_mut()?;
+    if let Some(hash) = cached_model_hash_for_file(&file, object) {
+        return Some(hash);
+    }
+
+    let identity_before = model_file_identity(&file)?;
+    let hash = match sha256_file(api, settings, &job.id, &file).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::warn!(path = %file.display(), %error, "checkpoint attribution hash failed");
+            return None;
+        }
+    };
+    let identity_after = model_file_identity(&file)?;
+    if identity_after != identity_before {
+        tracing::warn!(path = %file.display(), "checkpoint changed while attribution hash was being computed");
+        return None;
+    }
+    object.insert(
+        "modelFileName".to_owned(),
+        Value::String(identity_after.name),
+    );
+    object.insert(
+        "modelFileBytes".to_owned(),
+        Value::Number(identity_after.bytes.into()),
+    );
+    object.insert(
+        "modelFileModifiedNanos".to_owned(),
+        Value::String(identity_after.modified_nanos),
+    );
+    object.insert("modelFileSha256".to_owned(), Value::String(hash.clone()));
+    match serde_json::to_vec_pretty(&marker) {
+        Ok(bytes) => {
+            if let Err(error) = tokio::fs::write(&marker_path, bytes).await {
+                tracing::warn!(path = %marker_path.display(), %error, "could not cache checkpoint attribution hash");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(path = %marker_path.display(), %error, "could not serialize checkpoint attribution marker");
+        }
+    }
+    Some(hash)
 }
 
 /// The workflow-envelope source for one job, or `None` for "write the file exactly as today"
@@ -1494,6 +1630,7 @@ impl ImagePlan {
             adapter,
             image_count,
             workflow_source,
+            model_hash: None,
         }
     }
 }
@@ -1608,6 +1745,7 @@ pub(crate) fn write_image_asset(
         if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
+        share.model_hash = plan.model_hash.clone();
         // This function only ever writes a BASE render. The inline-upscale post-pass writes its
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
         // `upscale.enabled: true` from the request would describe, on this file, a pass this file
@@ -1861,10 +1999,13 @@ fn write_upscaled_asset(
     let temp_path = media_path.with_extension("tmp.png");
     // The upscaled variant is the asset users share most, so it carries the workflow that produced
     // IT rather than a stale base-generation envelope (sc-15948) — see `upscaled_workflow_share`.
-    let share = plan
+    let mut share = plan
         .workflow_source
         .as_deref()
         .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+    if let Some(share) = share.as_mut() {
+        share.model_hash = plan.model_hash.clone();
+    }
     write_workflow_chunk(upscaled, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
     std::fs::rename(&temp_path, &media_path).inspect_err(|_| {

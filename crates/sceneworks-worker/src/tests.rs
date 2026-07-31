@@ -78,13 +78,14 @@ use super::supervisor::{
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,
     copy_lora_source, fresh_asset_id, heartbeat_while_blocking, import_lora_source_file_as,
-    import_lora_source_path, is_database_locked, normalize_app_managed_cache_path, now_rfc3339,
-    parse_credentials_env, resolve_model_convert_output, resolve_model_import_target,
-    safe_download_dir, safe_project_path, value_f64, wait_for_shutdown_latch,
-    wan_moe_pair_filenames, write_model_download_receipt, write_model_install_marker,
-    CredentialScheme, IdleHeartbeat, JsonObject, SafetensorsHeaderError, Settings,
-    WorkerCredential, WorkerError, DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES,
-    DEFAULT_TRANSITION_DURATION_SECONDS, INSTALL_MARKER, MODEL_CONVERSION_BACKUPS_DIR_NAME,
+    import_lora_source_path, is_database_locked, model_file_identity,
+    normalize_app_managed_cache_path, now_rfc3339, parse_credentials_env,
+    resolve_model_convert_output, resolve_model_import_target, safe_download_dir,
+    safe_project_path, value_f64, wait_for_shutdown_latch, wan_moe_pair_filenames,
+    write_model_download_receipt, write_model_install_marker, CredentialScheme, IdleHeartbeat,
+    JsonObject, SafetensorsHeaderError, Settings, WorkerCredential, WorkerError,
+    DEFAULT_MAX_LORA_URL_BYTES, DEFAULT_MAX_MODEL_URL_BYTES, DEFAULT_TRANSITION_DURATION_SECONDS,
+    INSTALL_MARKER, MODEL_CONVERSION_BACKUPS_DIR_NAME,
 };
 
 // HF-CLI input validation, downloaded-model family detection, atomic converted-dir finalize, and the
