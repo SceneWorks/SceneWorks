@@ -5616,6 +5616,7 @@ mod candle_request_residency_tests {
                 tier: gen_core::MemoryNumericTier {
                     precision: gen_core::Precision::Bf16,
                     quant: Some(gen_core::Quant::Q8),
+                    component_precision_floors: &[],
                 },
             },
         };
