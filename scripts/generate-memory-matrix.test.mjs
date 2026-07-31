@@ -99,11 +99,11 @@ test("a calibration-relevant manifest value rotates affected fallback fingerprin
   );
 });
 
-test("Krea cumulative bounded-decode and bounded-attention curves stay fingerprint-invalidated", async () => {
+test("Krea cumulative bounded-decode and bounded-attention curves preserve their measured compositions", async () => {
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = JSON.parse(stripJsoncComments(await readFile(manifestUrl, "utf8")));
   const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
-  const expected = "krea-turbo-cuda-phase-curves-v1-superseded-sc-15994";
+  const expected = "krea-turbo-cuda-phase-curves-v1";
   assert.equal(krea.candle.turboFit.calibrationFingerprint, expected);
 
   for (const tier of ["q4", "q8", "bf16"]) {
@@ -132,9 +132,21 @@ test("Krea cumulative bounded-decode and bounded-attention curves stay fingerpri
       (cell) =>
         cell.calibrationFingerprint === expected &&
         cell.state === "Implemented/unverified" &&
-        cell.evidence.currentEnvironmentVerification.length === 0,
+        !cell.engagedRungs.includes("staged_residency") &&
+        cell.engagedRungs.includes(cell.rung) &&
+        cell.evidence.currentEnvironmentVerification.length === 0 &&
+        cell.evidence.historicalVerification.every(
+          (verification) =>
+            verification.engagedRungs.includes("staged_residency") &&
+            verification.engagedRungs.includes(cell.rung),
+        ) &&
+        cell.evidence.strategyParameterVerification.every(
+          (verification) =>
+            verification.engagedRungs.includes("staged_residency") &&
+            verification.engagedRungs.includes(cell.rung),
+        ),
     ),
-    "all six catalog cells must remain unverified under the tombstone fingerprint",
+    "all six catalog cells must remain unverified while retaining the cumulative measured sets",
   );
 });
 

@@ -1,45 +1,45 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:acb74e72aa3bfc302e2300320469e602ce3f69cb3310339bd0315aa39234194b",
-    "matrixRevision": "source-tree:9beb7ffd95f767ca332b34afbe35d0c1f5327da6304e0e336d6185f9329d9f77",
-    "inferenceRevision": "d9b52b4029a9e3e67d8453e7d2d3529b0354ec25",
+    "sceneWorksRevision": "source-tree:a23c6baf8931d8a5c9e1b757913f8d221dde1bb079ac9d104f49ff1f017ef941",
+    "matrixRevision": "source-tree:51bf97f6d85a361fc1167b5033f75a6b7991d0d53aa3b8403f00623368be78bc",
+    "inferenceRevision": "cd5ca51fd1553ca10c0a8263d827aa9e838b8f3f",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "14ad19523f1ac190093119eef44dad7808fdb01b4f61d89a923120ee2287f474"
+        "sha256": "927e298bf79ab2865f661a4280911da04a372c9c86dba0adc1376ff71253b2f4"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "fe43b7ca315b6585d345f41d8acb5fe71a0e0f23e28537cfb6e9ffe38a1b8d06"
+        "sha256": "627942d7ee3ea236c6ce593e224e7597071581e47e635b0016ab6bfa1c030ac1"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "87c2cf706e01090a4037161150b378a561c0eddb4886779884087b5cd8628525"
+        "sha256": "976c159b15359a22f9aca30de22997dd65cc7a2908a18eee78608a45d5ba7467"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "32b858c41470f1b4c5a1553c8242083ea458a84b02f06eaf6ba73c4e186ca4f0"
+        "sha256": "8870d593cb7457bb32f9a1e3186fa2ced005bc575904fadb66f043d0f9c084b3"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "f6cc6e49a5b03f62f5994e7a8d863c90d053f36ece541a96ddf89273467706cf"
+        "sha256": "827565a409126b82ce8ba5a4dc8e65b37a5d22e9d6b77bb674b5c05dba3123e0"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "7e0a838ae55372942ad381950df2d146c14ce53550c17014d7d581d7adaf942a"
+        "sha256": "98bf5332ce0d3f055cc468d5e3ad8a0b2600b0e549f78a589e5fb9d949c5d6a7"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "9ff5019d7ea2ca26f5f92acfee1a8fae22ea200f7d5bba83f52cffb2d6965b1b"
+        "sha256": "24f3c7e49bb2f385905a81049d0c6efa2d201b8d1cda70720e8b0310d3d53e15"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "578900de7b19f033b7d522598cd90521cedf6716a1428c62ffe5afe90a9b5791"
+        "sha256": "1dfe3966c05607da9e1719a112d7fb837517e7df4de7ab62e1e3479b2a05ac3a"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "6c869aeba7f1e53f71e68c0cfa962a701e7b1c3638b9827222c69bee54cfda3f"
+        "sha256": "bcbfc48bf42861c19af5c61e5b9e9fd3135fe84e14def8b216cbe7d3e1b6e4a3"
       }
     }
   },

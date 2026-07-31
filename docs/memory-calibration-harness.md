@@ -9,10 +9,15 @@ as the Draft 2020-12 validation suite.
 
 ## Truth status
 
-The committed v2 evidence bundle is empty. Existing Krea manifest rows do not contain the complete
+The committed v3 evidence bundle is empty. Existing Krea manifest rows do not contain the complete
 phase allocator/device/wired metrics, lifecycle fault-injection results, executed parameter sweep, or
 an exact SceneWorks Git SHA required by this schema. They are therefore not restated as authoritative
-v2 records.
+v3 records. Schema v3 / harness v4 makes `strategy.engagedRungs` part of every record and both logical
+and resolved identity. Pre-composition v2 records are deliberately invalid rather than treated as
+composition-agnostic evidence.
+Each generated matrix cell also carries the current expected `engagedRungs`. `calibrationBinding`
+requires an exact ordered match with the adapter-attested record, so a historical row measured under
+a different prerequisite graph remains visible as provenance but cannot verify the current cell.
 
 The Qwen identical-latent ladder captured at inference `1deefff` remains useful historical tolerance
 input, but lacks required phase memory and lifecycle results and is not the current inference pin.
@@ -22,8 +27,9 @@ authoritative commands below run successfully on clean, exact-final-SHA reposito
 ## Identities and resume
 
 Logical plan IDs contain provider intent only: evidence scope, backend, route, tier/mode/overlay,
-geometry, exact parameters, fingerprint, fixture, and negative-case status. Placeholders never enter
-identity. Resolved record IDs additionally contain both probed Git SHAs and dirty states, the
+geometry, selected rung, the provider-declared ordered set of actually engaged rungs, exact
+parameters, fingerprint, fixture, and negative-case status. Placeholders never enter identity.
+Resolved record IDs additionally contain both probed Git SHAs and dirty states, the
 generated matrix source-tree digest, exact hardware, artifact repository/resolved revision, and
 harness version. The source-tree digest is the matrix comparison domain; the Git SHA remains
 independent provenance. `evidenceScope` is present in both IDs, so fixture results cannot suppress
@@ -222,14 +228,15 @@ and reports the bounded output's maximum and mean pixel error without inventing 
 The record remains `gated` until predicted phase curves, an approved bounded-output tolerance,
 exact-fit/stale/unknown worker selection, and a measured negative mutation execute.
 
-The authoritative plan still names the provider's
+The authoritative plan and manifest name the provider's
 `krea-turbo-cuda-phase-curves-v1` fingerprint and singleton production domain
-`512/128/134217728/window=1`. SC-15994 deliberately moved the manifest to the tombstone fingerprint
-`krea-turbo-cuda-phase-curves-v1-superseded-sc-15994`: the q4/q8/bf16 bounded-decode and
-bounded-attention curves were captured with staged residency active, while those selections no longer
-engage staging. The mismatch keeps every historical Krea phase curve out of current admission until
-SC-15913 produces non-staged captures and updates both sides together. The unsupported `384/...` and
-`640/.../window=2` v2 experiments remain in a separate `candidate` evidence scope. Candidate records
+`512/128/134217728/window=1`. Each historical Krea evidence record now also names the exact measured
+composition for each manifest rung. The three-stage and streamed-block rows still match the current
+provider contract and remain usable. The q4/q8/bf16 bounded-decode and bounded-attention rows were
+captured with staged residency active, while those selections no longer engage staging, so the
+selector returns the dedicated `CompositionMismatch` verdict for those six rows until SC-15913
+recaptures them. The unsupported `384/...` and `640/.../window=2` experiments remain in a separate
+`candidate` evidence scope. Candidate records
 can be measured or gated, but can never become current matrix evidence or impersonate the production
 v1 cell.
 

@@ -23,15 +23,22 @@ semantics are not interchangeable.
 
 The selector accepts only `Verified` evidence with all six generated evidence dimensions, matching
 provider/calibration fingerprints, the current inference revision, an exact tier/mode/overlay match,
-and an in-envelope geometry. `Implemented/unverified`, unknown, stale, fingerprint
-mismatch, structural N/A, route unavailable, or out-of-envelope evidence returns `Unverified`; it
-never selects an optimized rung. Equality fits (`needed_gb <= available_gb`). A calibration that
-needs tolerance must include it in the provider estimate and golden evidence.
+an in-envelope geometry, and an exact ordered engaged composition. The provider contract derives that
+composition from its shared prerequisites, capabilities, and provider-specific prerequisite edges;
+the selected rung alone is not evidence identity. A missing or malformed composition is `Invalid`,
+while a valid measured set that differs from the current contract returns the dedicated
+`CompositionMismatch` verdict. Neither can authorize a guessed fit. `Implemented/unverified`,
+unknown, stale, fingerprint mismatch, structural N/A, route unavailable, or out-of-envelope evidence
+also returns `Unverified`; it never selects an optimized rung. Equality fits
+(`needed_gb <= available_gb`). A calibration that needs tolerance must include it in the provider
+estimate and golden evidence.
 
 SceneWorks invalidation is owned by the provider calibration ABI fingerprint, not by the exact source
 tree. The fallback fingerprint hashes the provider's explicit ABI version, pinned inference revision,
 model/provider/backend/tier/mode/overlay/rung identity, runtime strategy parameters, and the
-calibration-relevant manifest values for that backend and tier. Bump a provider's entry in
+calibration-relevant manifest values for that backend and tier. Captured evidence additionally binds
+the exact composition, so a prerequisite change invalidates only rows whose execution set changed.
+Bump a provider's entry in
 `CALIBRATION_ABI_VERSIONS` when its quantization floors, tensor layout, or execution structure
 invalidate measurements; bump the default only for an ecosystem-wide calibration contract change.
 `matrixSourceRevision`, `generatedFrom.sceneWorksRevision`, and cell `evidenceRevision.sceneWorks`
