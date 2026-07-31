@@ -330,6 +330,12 @@ fn fully_populated_envelope() -> WorkflowShare {
         width: Some(1024),
         height: Some(1024),
         count: Some(2),
+        // The video arm (sc-15956). Populated even though `kind` above is the image one: this
+        // fixture's job is the WIDEST serialized shape the contract can produce, so that the
+        // document is pinned against every field rather than against one lane's.
+        duration_seconds: Some(5.0),
+        fps: Some(24),
+        quality: Some("standard".to_owned()),
         style_preset: Some("cinematic".to_owned()),
         style_id: Some("noir".to_owned()),
         fit_mode: Some("crop".to_owned()),

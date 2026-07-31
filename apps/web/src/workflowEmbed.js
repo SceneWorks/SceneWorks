@@ -111,6 +111,13 @@ const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
 const L_INPUTS = "which kinds of input image the recipe needs and how many of each";
+// The video lane (sc-15956). Its knobs are the same CLASS as the image ones — what to make,
+// never what this machine can afford — so several of them share the labels above.
+const L_CLIP = "the clip length, frame rate and quality preset a video run asked for";
+const L_MOTION = "the camera-motion preset, and which timeline action produced a clip";
+const L_VIDEO_ENGINE =
+  "which video pipeline, checkpoint variant, text encoder and fast-step recipe a video run used";
+const L_CLIP_INPUTS = "how many source or reference CLIPS the recipe needs, but never which ones";
 const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
@@ -171,6 +178,20 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["inputs[].kind", L_INPUTS],
   ["inputs[].count", L_INPUTS],
   ["inputs[].controlMode", L_INPUTS],
+  ["durationSeconds", L_CLIP],
+  ["fps", L_CLIP],
+  ["quality", L_CLIP],
+  ["advanced.motion", L_MOTION],
+  ["advanced.timelineAction", L_MOTION],
+  ["advanced.ltxPipeline", L_VIDEO_ENGINE],
+  ["advanced.distilledVariant", L_VIDEO_ENGINE],
+  ["advanced.textEncoderModel", L_VIDEO_ENGINE],
+  ["advanced.lightning", L_VIDEO_ENGINE],
+  ["advanced.videoCfgGuidanceScale", L_SETTINGS],
+  ["advanced.videoStgGuidanceScale", L_SETTINGS],
+  ["advanced.videoRescaleScale", L_SETTINGS],
+  ["advanced.videoConditioningStrength", L_SETTINGS],
+  ["advanced.bridgeRightVideoConditioningStrength", L_SETTINGS],
   ["omitted", L_OMITTED],
 ]);
 
@@ -184,6 +205,13 @@ const N_SEEDS = "the other seeds in a batch";
 const N_IMAGES = "the input images themselves, though what a pose selection traced from one does travel";
 const N_BUDGET = "this machine's quality tier, attention kernel or GPU";
 const N_LOCAL = "local library ids — a Key Point collection, a control image, a trained overlay, a recipe preset";
+// The strongest claim in this list, and the only one here for PRIVACY rather than for
+// portability: a shared video must not disclose that it was made by replacing a specific
+// person, still less who or in which mode (sc-15956).
+const N_PERSON =
+  "anything about a person replacement — the selected track, the person's name, the original file name, the mask images, or which replacement mode ran";
+const N_TIMELINE = "your timeline's name and the local ids of the clips on it";
+const N_ADVICE = "the on-screen advice the studio shows about a model";
 
 // What the copy claims is absent. Every key here must be absent from BOTH doc tables above, which
 // is the direction that matters: a withheld key that quietly became shared would otherwise leave
@@ -207,6 +235,14 @@ export const WORKFLOW_FIELDS_NOT_IN_FILE = Object.freeze([
   ["advanced.controlWeights", N_LOCAL],
   ["advanced.recipePresetId", N_LOCAL],
   ["advanced.presetMissingLoras", N_LOCAL],
+  ["personTrackId", N_PERSON],
+  ["replacementMode", N_PERSON],
+  ["advanced.selectedPersonTrack", N_PERSON],
+  ["advanced.replacementModeLabel", N_PERSON],
+  ["advanced.timelineContext", N_TIMELINE],
+  ["advanced.precision", N_BUDGET],
+  ["advanced.quantization", N_BUDGET],
+  ["advanced.durationHint", N_ADVICE],
 ]);
 
 // The absences with no field name to pin, because the envelope has no slot for them at all — they
@@ -263,7 +299,14 @@ function writeFlag(key, value) {
   return Boolean(value);
 }
 
-// Whether a generated PNG carries the recipe. Absent means ON, matching the worker's reader.
+// Whether a generated file carries the recipe. Absent means ON, matching the worker's reader.
+//
+// ONE switch for images and videos, not two (sc-15956). It is a privacy control over what leaves
+// in a file, and the reason someone turns it off does not stop applying at the container
+// boundary. A separate video switch would have re-enabled embedding for everyone who had already
+// opted out, the day the video lane shipped. The stored key keeps its `embedWorkflowInImages`
+// name for back-compatibility — renaming it would reset every existing opt-out to the default —
+// so it is the COPY that names both media, which is what the user actually reads.
 export function readEmbedWorkflowInImages() {
   return readFlag(EMBED_STORAGE_KEY, true);
 }

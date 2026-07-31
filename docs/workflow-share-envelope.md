@@ -102,7 +102,7 @@ keys in either direction: a key this table does not name is dropped on write **a
 
 | Field | What it is |
 | --- | --- |
-| `sceneworksWorkflow` | The marker. Always `image` for this lane. |
+| `sceneworksWorkflow` | The marker, naming the workflow **kind**: `image` or `video`. A build that does not know a kind refuses the file rather than presenting it as one it does understand. |
 | `schemaVersion` | The contract version. |
 | `producer.name` | `SceneWorks`. |
 | `producer.url` | The project's repository URL. |
@@ -115,6 +115,9 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `width` | Requested output width. |
 | `height` | Requested output height. |
 | `count` | How many images the run requested — so the file says it was one of a batch of N. |
+| `durationSeconds` | **Video.** The clip length the run asked for. The ask, not the measurement — a 6.0 s ask that rendered 5.96 s replays as 6.0. |
+| `fps` | **Video.** The frame rate the run asked for, for the same reason. |
+| `quality` | **Video.** The quality preset the run was submitted at. A named tier off a menu the receiving install also has. |
 | `stylePreset` | The style preset label the run used. |
 | `styleId` | The catalog style id the user picked. |
 | `fitMode` | How the source image was fitted (`crop`, `contain`, …). |
@@ -229,6 +232,17 @@ smuggled under a scalar key.
 | `systemMessage` | `Scalar` | **Prose.** The interleave system prompt. Path-exempt — see the callout. |
 | `imageGuidanceScale` | `Scalar` | Reference-guidance strength for an interleaved document. |
 | `phases` | `Phases` | Multi-phase denoise schedule, reduced to `{ steps, guidance, loras: [{ index, weight }] }`. LoRA references are indices into this request's own list, not ids. |
+| `motion` | `Scalar` | **Video.** Camera-motion preset off a closed menu (`static`, `slow push-in`, `handheld`). It conditions the generation. |
+| `ltxPipeline` | `Scalar` | **Video.** LTX pipeline selector. It picks which denoise path runs, so two values give two different clips from one prompt. |
+| `distilledVariant` | `Scalar` | **Video.** LTX distilled-checkpoint variant. A different checkpoint is a different model for replay purposes. |
+| `textEncoderModel` | `Scalar` | **Video.** The text-encoder pick — it changes what the model *sees* of the prompt. A catalog-global slug, not a local id. |
+| `lightning` | `Scalar` | **Video.** Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the step count. |
+| `videoCfgGuidanceScale` | `Scalar` | **Video.** LTX native CFG scale — the video lane's `guidanceScale`. |
+| `videoStgGuidanceScale` | `Scalar` | **Video.** LTX spatiotemporal-guidance scale. |
+| `videoRescaleScale` | `Scalar` | **Video.** LTX guidance-rescale factor. |
+| `videoConditioningStrength` | `Scalar` | **Video.** Source-clip conditioning strength for extend / bridge / v2v — the video lane's `strength`. |
+| `bridgeRightVideoConditioningStrength` | `Scalar` | **Video.** The right-clip strength for a bridge. Without it a shared bridge replays lopsided. |
+| `timelineAction` | `Scalar` | **Video.** Which timeline operation made the clip (`extend` / `replace` / `bridge`). A closed vocabulary with no id in it; its companion `timelineContext` is withheld. |
 
 <!-- END PINNED: advanced-shared -->
 
@@ -250,6 +264,12 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 | `controlWeights` | A trained-overlay id plus the resolved weights path stamped onto it. |
 | `recipePresetId` | A local preset id stamped by the API. |
 | `presetMissingLoras` | Local LoRA ids the API could not resolve on this install. |
+| `durationHint` | **Video.** Model-catalog prose the studio echoes back ("Recommended: 5s or less."), not a knob anybody set. The receiving install renders its own. |
+| `precision` | **Video.** LTX weight precision (`fp8` / `bf16`): what this machine can afford to hold the weights in. |
+| `quantization` | **Video.** The torch lane's quant tier — `mlxQuantize` for a different backend. |
+| `selectedPersonTrack` | **Video, and the sharpest object in any payload.** The whole person-track record: a user-typed `name` that is routinely a real person's name, a `sourceDisplayName` that is the original imported filename, local asset ids, and a `frames[].mask` array of filesystem paths. Withheld on privacy first and shape second. |
+| `replacementModeLabel` | **Video.** The display label for a person-replacement mode ("Face Only"). Neither an id nor a path, and withheld anyway — see [Person replacement](#person-replacement-is-withheld-by-default). |
+| `timelineContext` | **Video.** Where in the *local* timeline to write the result: timeline / item / track / asset ids, plus the user's own typed timeline name. `timelineAction` carries the part that travels. |
 
 <!-- END PINNED: advanced-withheld -->
 
@@ -268,6 +288,8 @@ times larger.
 | `reference` | Identity or style reference image(s). One entry with a `count`, not N entries. |
 | `mask` | An inpaint mask. |
 | `control` | A pre-made control map, with the conditioning it feeds in `controlMode`. |
+| `sourceClip` | **Video.** A clip the run continues, re-times or bridges from. Separate from `source` because "needs a still to start from" and "needs a clip to continue" are different asks of whoever replays it. |
+| `referenceClip` | **Video.** A reference clip the run conditions on — the moving counterpart of `reference`. |
 
 <!-- END PINNED: input-kinds -->
 
@@ -320,7 +342,7 @@ measurement found a new way to spend what they left.
 | `PROSE_MAX_BYTES` | 16,384 | Each authored prose field, in bytes. | Truncated at a whole character. Prose still means what it said after its tail is cut. |
 | `LABEL_MAX_CHARS` | 200 | Each non-prose label (model slug, style id, LoRA name, producer block), in characters. | **Dropped**, not truncated — a slug's spelling is its identity. |
 | `MAX_SHARE_LORAS` | 5 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
-| `MAX_SHARE_INPUTS` | 4 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
+| `MAX_SHARE_INPUTS` | 6 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
 | `MAX_SHARE_PHASES` | 8 | Entries in `advanced.phases`. | The key is dropped and `omitted` gains `advanced.phases`. |
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_SHARE_POSE_SLOTS` | 6,144 | Coordinate slots across the whole `advanced.poses` array — a number, or a `null` standing in for one. | The key is dropped and `omitted` gains `advanced.poses`. |
@@ -500,6 +522,12 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/screens/characterPanels.jsx` | `usePoseController` | The Pose Library form's extras. |
 | `apps/web/src/screens/DocumentStudio.jsx` | `submit` | The interleaved-document lane. |
 | `apps/web/src/imageJobs.js` | `buildUpscaleJobBody` | The standalone upscale job. Registered as emitting **no** `advanced` map, so the day it grows a knob the lint demands a classification. |
+| `apps/web/src/screens/VideoStudio.jsx` | `submit` | The Video Studio's ~20-knob builder. |
+| `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | The timeline editor's shared video payload. |
+| `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Timeline extend. |
+| `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
+| `apps/web/src/screens/EditorScreen.jsx` | `bridgeGap` | Timeline bridge. |
+| `apps/web/src/simple/simpleJobs.js` | `buildSimpleVideoRequest` | The Simple shell's video request. |
 
 <!-- END PINNED: builders -->
 
@@ -517,11 +545,11 @@ how to know it still can.
 | `source` | A **new** `AdvancedKeySource` variant for this builder, added to `AdvancedKeySource::ALL` as well as declared. One variant per registered builder, checked both ways, or `every_source_tag_names_exactly_one_registered_builder` fails. |
 | `path` | Repo-relative path of the file that defines it. Read out of the repo, so a move fails loudly. |
 | `function` | The JS function whose body the extractor reads. Read out of the repo, so a rename fails loudly. |
-| `shape` | Which `AdvancedBuilderShape` the JS is written in, and therefore which extractor can read it: `ReturnedObject`, `FlatAdvancedLiteral`, `AssignedObject`, `ExtrasLiteral`, or `NoAdvancedMap` for a builder that posts no `advanced` map at all. |
+| `shape` | Which `AdvancedBuilderShape` the JS is written in, and therefore which extractor can read it: `ReturnedObject`, `FlatAdvancedLiteral`, `SpreadAdvancedLiteral`, `AssignedObject`, `ExtrasLiteral`, or `NoAdvancedMap` for a builder that posts no `advanced` map at all. |
 | `lane` | Prose: the embedding lane this builder's payload ends up written by, so a reader can see why the keys matter. |
 | `anchors` | Keys the extractor **must** still find. The floor against an extractor that has quietly stopped understanding the file — a lint that reads zero keys and passes is the failure mode the whole registry exists to prevent. |
 | `minimum_keys` | The smallest key count the extractor may report before the lint calls itself broken. Set it well under the real count; it is a floor, not a census. |
-| `spread_of` | Identifiers spread into an `AssignedObject` initializer whose keys another registry entry already accounts for. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
+| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
 
 <!-- END PINNED: builder-fields -->
 
@@ -538,12 +566,6 @@ of scope" different states:
 
 | File | Function | Why it is deferred |
 | --- | --- | --- |
-| `apps/web/src/screens/VideoStudio.jsx` | `submit` | Video lane. No video write seam embeds yet. |
-| `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | Video lane — the timeline editor's shared payload. |
-| `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Video lane — a timeline action. |
-| `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Video lane — a timeline action. |
-| `apps/web/src/screens/EditorScreen.jsx` | `bridgeGap` | Video lane — a timeline action. |
-| `apps/web/src/simple/simpleJobs.js` | `buildSimpleVideoRequest` | Video lane. Its image sibling delegates to the studio builder and is already covered. |
 | `apps/web/src/training/trainingConfig.js` | `trainingConfigSnapshot` | Permanently exempt: trainer hyperparameters are a different namespace, and no training write seam embeds. |
 
 <!-- END PINNED: deferred-builders -->
@@ -551,9 +573,22 @@ of scope" different states:
 Until sc-16113 that list was a decision record and nothing more. It said, in its own doc comment,
 that no video lane could start embedding while its keys sat in it — and nothing enforced that.
 Adding a `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
-`crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all ~15 of
+`crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all of
 `VideoStudio.jsx`'s unclassified keys were dropped from the written file, with nothing anywhere to
 say so.
+
+**sc-15956 is the story the gate was built for, and it did its job.** All six video builders moved
+into the table above, which is what forced every key behind them to be classified before a video
+seam could embed. Two findings are worth keeping, because both argue for the enforcement being a
+discovery scan rather than a list:
+
+- the deferral said "~15 keys" and the real count was **17**. `timelineAction` and `timelineContext`
+  are emitted only by the three `EditorScreen.jsx` actions, and nobody had read those builders. A
+  deferral records that a decision is owed; it is a poor estimate of what the decision costs;
+- two of the 17 were **objects**, not scalars — `selectedPersonTrack` carries a person's name, an
+  original imported filename and an array of mask file paths, and `timelineContext` carries local
+  ids plus the user's own timeline name. Under the pre-sc-16113 arrangement those would have
+  travelled, silently, in every shared clip.
 
 ## The write seams, and what each one embeds for
 
@@ -575,6 +610,7 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs/detail.rs` | `run_image_detail_job` | Embeds — writes the refined PNG. macOS-gated; the scan is textual, so it is read on every platform. |
 | `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_image_upscale_job` | Embeds — hands the standalone upscale's envelope to the shared single-child writer. |
 | `crates/sceneworks-worker/src/single_child_asset.rs` | `write_single_child_asset` | Conduit — writes the envelope its caller decided on, and builds none itself. |
+| `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the one funnel every generated clip is encoded through, whatever engine or studio produced it. |
 | `crates/sceneworks-worker/src/segment_jobs.rs` | `run_image_segment_job` | Declines — a smart-select mask has no generation recipe to replay, and is grayscale. |
 
 <!-- END PINNED: write-seams -->

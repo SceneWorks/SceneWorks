@@ -1936,10 +1936,10 @@ mod tests {
                 WorkflowShareError::MissingSchemaVersion,
             ),
             (
-                "{\"sceneworksWorkflow\": \"video\", \"schemaVersion\": 1}",
+                "{\"sceneworksWorkflow\": \"hologram\", \"schemaVersion\": 1}",
                 WorkflowShareError::UnsupportedKind {
-                    found: "video".to_owned(),
-                    supported: "image".to_owned(),
+                    found: "hologram".to_owned(),
+                    supported: "image, video".to_owned(),
                 },
             ),
             (

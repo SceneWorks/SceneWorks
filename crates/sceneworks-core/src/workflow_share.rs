@@ -3727,18 +3727,31 @@ mod tests {
         ));
     }
 
+    /// An unknown kind is refused, and the two known ones are not.
+    ///
+    /// `video` was the example here until sc-15956 made it a lane. That is the whole point of the
+    /// gate: a build refuses a kind it does not understand rather than presenting it as one it
+    /// does, and an OLDER build hits this same branch for a video envelope.
     #[test]
     fn parse_rejects_another_workflow_kind() {
-        let video = json!({
-            "sceneworksWorkflow": "video",
-            "schemaVersion": 1,
-            "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
-            "mode": "image_to_video",
-            "model": "wan_5b",
-            "prompt": "p"
-        });
+        let envelope = |kind: &str| {
+            json!({
+                "sceneworksWorkflow": kind,
+                "schemaVersion": 1,
+                "producer": { "name": "SceneWorks", "url": PRODUCER_URL, "version": "0.8.1" },
+                "mode": "image_to_video",
+                "model": "wan_5b",
+                "prompt": "p"
+            })
+        };
+        for known in WORKFLOW_KINDS {
+            assert!(
+                parse_workflow_share(&envelope(known)).is_ok(),
+                "`{known}` is a kind this build reads"
+            );
+        }
         assert!(matches!(
-            parse_workflow_share(&video).expect_err("video envelope"),
+            parse_workflow_share(&envelope("hologram")).expect_err("an unknown kind"),
             WorkflowShareError::UnsupportedKind { .. }
         ));
     }
@@ -3950,7 +3963,8 @@ mod tests {
         assert_eq!(MAX_SHARE_LORAS, crate::lora_family::MAX_JOB_LORAS);
         assert_eq!(MAX_SHARE_LORAS, 5);
         assert_eq!(MAX_SHARE_INPUTS, INPUT_KINDS.len());
-        assert_eq!(MAX_SHARE_INPUTS, 4);
+        // Four image kinds plus the video lane's two clip kinds (sc-15956).
+        assert_eq!(MAX_SHARE_INPUTS, 6);
         // The worker's `MAX_MULTIPHASE_PHASES`; pinned against its source by
         // `the_phase_cap_matches_the_multi_phase_validators` in tests/workflow_share.rs, which can
         // read the file this crate cannot import.
@@ -4070,8 +4084,12 @@ mod tests {
 
         let built = build_workflow_share(&asset_fixture(), &payload);
         assert_eq!(built.loras.len(), MAX_SHARE_LORAS);
-        // One entry per kind, all four kinds — the widest `inputs` the builder can emit.
-        assert_eq!(built.inputs.len(), MAX_SHARE_INPUTS);
+        // One entry per kind — the widest `inputs` an IMAGE payload can emit, which is the
+        // four image kinds. The two video clip kinds need a video payload to appear, so the
+        // cap is above what this fixture reaches; `clip_ids_become_shape_descriptors` in
+        // tests/workflow_mp4.rs is where the other two are exercised.
+        assert_eq!(built.inputs.len(), 4);
+        assert!(built.inputs.len() <= MAX_SHARE_INPUTS);
         assert_eq!(
             built.advanced["phases"].as_array().expect("phases").len(),
             MAX_SHARE_PHASES
