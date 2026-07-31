@@ -1,0 +1,101 @@
+name: Desktop (Linux typecheck)
+
+# The Linux mirror of desktop-windows.yml's `build-windows` PR job, and the PR-time
+# sibling of desktop-linux.yml's manual packaging lane (sc-16269).
+#
+# Until this existed, `#[cfg(target_os = "linux")]` code in apps/desktop was compiled
+# by NO automatic lane. Two facts combined: the crate is excluded from the workspace
+# `default-members` (it needs GTK/WebKit), so the Linux `Check` lane skips it, and
+# desktop-linux.yml is workflow_dispatch-only. desktop-windows.yml runs on PRs, so
+# only the LINUX branches were dark — which is how sc-16247, itself a Linux bug
+# report, came to add Linux-only desktop code that nothing would have compiled.
+#
+# ## Why this is a separate file, not a job inside desktop-linux.yml
+#
+# That workflow carries a deliberate invariant, asserted by
+# `scripts/check-scaffold.mjs::assertDesktopLinuxPackagingWorkflow`: it must stay
+# workflow_dispatch-only, because "an accidental pull_request/push trigger would turn
+# every desktop edit into a full nvcc release build". Adding a PR trigger there —
+# even with the packaging job gated off — would mean loosening that guard from a
+# simple file-level rule to a job-aware one. Keeping the cheap lane in its own file
+# leaves the heavy lane's invariant literally true and un-bypassable, which is worth
+# more than co-locating the two.
+#
+# ## Why this is affordable per-PR when the packaging lane is not
+#
+# `cargo test` / `cargo clippy` never run tauri's `beforeBuildCommand`, so this needs
+# neither the candle sidecar (nvcc over every provider) nor the CUDA toolkit — only
+# the GTK/WebKit dev headers. `build.rs` -> `tauri_build` does validate
+# tauri.conf.json's `externalBin` + `resources` and panics if any path is missing, so
+# the crate cannot even typecheck without them; `stage-test-sidecars.mjs` (the same
+# script the Windows lane uses) writes tiny placeholders, which suffices because
+# nothing here bundles them. Verified: replacing the real 429 MB sidecar with a
+# 0-byte file still leaves `cargo check -p sceneworks-desktop` at exit 0.
+
+on:
+  pull_request:
+    paths: &desktop_linux_check_paths
+      - "apps/desktop/**"
+      # The only workspace crate apps/desktop depends on.
+      - "crates/sceneworks-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/desktop-linux-check.yml"
+  push:
+    branches: [main]
+    paths: *desktop_linux_check_paths
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-linux-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_OFFLINE: "true"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+
+      # The Tauri/WebKitGTK prerequisites desktop-linux.yml installs, minus the
+      # packaging-only ones: libfuse2/patchelf serve AppImage bundling and
+      # gstreamer1.0-libav is the webview's runtime H.264 decoder. Nothing here
+      # bundles or runs a webview. Ubuntu 22.04 matches the packaging lane's glibc
+      # baseline so both compile against the same headers.
+      - name: Install GTK and WebKitGTK development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+
+      - name: Stage desktop test sidecar placeholders
+        run: node apps/desktop/scripts/stage-test-sidecars.mjs
+
+      - name: Run desktop Rust tests (Linux)
+        run: cargo test -p sceneworks-desktop
+
+      - name: Check desktop Rust lint (Linux)
+        run: npm run desktop:check

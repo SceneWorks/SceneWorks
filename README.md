@@ -567,7 +567,9 @@ npm run rust:test
 npm run rust:build
 ```
 
-Or run the full Rust verification sequence:
+Or run the full Rust verification sequence — which also verifies the generated
+docs derived from the Rust sources (`npm run check:rust-derived-docs`), since a
+Rust-only change can make those stale:
 
 ```powershell
 npm run rust:check

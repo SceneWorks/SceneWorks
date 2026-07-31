@@ -8,6 +8,7 @@ import {
   NA_SELECTION_RULE,
   OVERLAY_LOAD_CONTRACT,
   PRODUCIBILITY_GATES,
+  SOURCE_PATHS,
   buildCostModel,
   cellCensus,
   collapseToRuns,
@@ -19,6 +20,7 @@ import {
   rankUncertainties,
 } from "./calibration-cost-model.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { stripInertLines } from "./lib/source-revision.mjs";
 
 const RUNGS = [
   "resident",
@@ -54,6 +56,64 @@ test("comment-only manifest edits produce no calibration cost-model change", asy
     semanticChange.generatedFrom.sceneWorksRevision,
     baseline.generatedFrom.sceneWorksRevision,
     "the override must be exercised and semantic manifest changes must remain visible",
+  );
+});
+
+test("comment-only Rust and generator-script edits produce no calibration cost-model change", async () => {
+  // sc-16268: this document hashes `vram_gate.rs`, both memory adapters and two generator scripts,
+  // so wiring `check:calibration-cost-model` into `rust:check` without this would just move the
+  // inert churn from CI to the pre-push gate.
+  // DERIVED from the generator's own list, so a source dropped from the fingerprint cannot leave
+  // this test green.
+  const sources = Object.fromEntries(
+    Object.entries(SOURCE_PATHS).filter(
+      ([, relative]) => relative.endsWith(".rs") || relative.endsWith(".mjs"),
+    ),
+  );
+  assert.deepEqual(Object.keys(sources).sort(), [
+    "candleAdapter",
+    "harness",
+    "jsonc",
+    "matrixGenerator",
+    "mlxAdapter",
+    "sourceRevision",
+    "vramGate",
+  ]);
+  const read = (relative) => readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
+  const baseline = await buildCostModel();
+
+  for (const [name, relative] of Object.entries(sources)) {
+    const commentOnly = await buildCostModel({
+      sourceOverrides: {
+        [name]: `${read(relative)}\n// sc-16268 regression: semantically inert comment\n`,
+      },
+    });
+    assert.deepEqual(commentOnly, baseline, `${name}: an appended comment must be inert`);
+  }
+
+  // The load-bearing half, mirroring the matrix suite: regenerating from FULLY comment-stripped
+  // sources must be identical. This exercises the parsers, not just the hash, so a future
+  // cost-model parse anchored on comment text fails here instead of quietly letting a semantic
+  // change past the staleness tripwire.
+  const stripped = await buildCostModel({
+    sourceOverrides: Object.fromEntries(
+      Object.entries(sources).map(([name, relative]) => [
+        name,
+        stripInertLines(read(relative), "//"),
+      ]),
+    ),
+  });
+  assert.deepEqual(stripped, baseline);
+
+  // Mutation check: the override seam is real and a semantic edit to the same file is still visible.
+  const semanticChange = await buildCostModel({
+    sourceOverrides: {
+      vramGate: `${read(sources.vramGate)}\nconst SC_16268_PROBE: f64 = 1.0;\n`,
+    },
+  });
+  assert.notEqual(
+    semanticChange.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
   );
 });
 

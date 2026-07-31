@@ -1870,8 +1870,26 @@ fn shareable_prose(value: &str) -> String {
     stripped.trim().to_owned()
 }
 
-/// True for a character that takes no width of its own but changes how the text AROUND it reads:
-/// Unicode's `Cf` (format) class plus the `Zl`/`Zp` line and paragraph separators.
+/// Non-`Cf` characters whose defined filler/blank glyph is rendered as empty space in ordinary
+/// text despite not being Unicode whitespace.
+///
+/// This is deliberately an explicit set, not an `Lo` / `So` category rule: those categories hold
+/// genuine CJK, emoji and symbol content. A character belongs here only when its own named
+/// filler/blank semantics render it blank, it is not whitespace, and it is outside the `Cc` / `Cf`
+/// classes the general rules already remove.
+const DISPLAY_BLANK_CHARACTERS: &[char] = &[
+    '\u{115F}',  // HANGUL CHOSEONG FILLER
+    '\u{1160}',  // HANGUL JUNGSEONG FILLER
+    '\u{2800}',  // BRAILLE PATTERN BLANK
+    '\u{3164}',  // HANGUL FILLER
+    '\u{FFA0}',  // HALFWIDTH HANGUL FILLER
+    '\u{13441}', // EGYPTIAN HIEROGLYPH FULL BLANK
+    '\u{13442}', // EGYPTIAN HIEROGLYPH HALF BLANK
+];
+
+/// True for a character that can invisibly change how surrounding text is perceived: Unicode's
+/// `Cf` (format) class, the `Zl`/`Zp` line and paragraph separators, plus the narrowly selected
+/// non-`Cf` display blanks in [`DISPLAY_BLANK_CHARACTERS`].
 ///
 /// [`char::is_control`] is `Cc` and only `Cc`, which is why [`shareable_prose`] cannot stop at it.
 /// `Cc` does catch ANSI escapes (ESC is `Cc`), so this is not terminal injection — it is display
@@ -1880,8 +1898,7 @@ fn shareable_prose(value: &str) -> String {
 /// other than what is stored; U+200B and U+FEFF are the same trick without the reversal, splitting
 /// a word the reader believes is whole. Both survived into a recorded envelope before this guard.
 ///
-/// The ranges are the whole `Cf` class (Unicode 16.0 — 16.0 added no `Cf`, so the list is exact for
-/// 15.1 as well) rather than the handful demonstrated,
+/// The ranges are the whole `Cf` class for Unicode 16.0 rather than the handful demonstrated,
 /// because a class is what closes a class. Enumerated instead of taken from a crate because `std`
 /// exposes no general-category API and pulling a Unicode table in for one predicate is a poor
 /// trade: `Cf` additions are rare, additive, and — being new invisible formatting characters — are
@@ -1891,16 +1908,11 @@ fn shareable_prose(value: &str) -> String {
 /// presentation is prompt content. The tag characters at U+E0020..U+E007F are `Cf` and do go, which
 /// costs subdivision-flag emoji (🏴󠁧󠁢󠁳󠁣󠁴󠁿) in a prompt — the right side of that trade, since the same
 /// range is the standard way to smuggle hidden text through a display.
-///
-/// FOLLOW-UP (not this story): `Cf` is not the whole display-spoof class. U+3164 HANGUL FILLER,
-/// U+115F / U+1160 (the jamo fillers), U+2800 BRAILLE PATTERN BLANK and U+FFA0 HALFWIDTH HANGUL
-/// FILLER all render blank and are `Lo` / `So`, so they survive this guard. Same trick, different
-/// general category — a separate decision from "close the `Cf` class", because `Lo` is where real
-/// prompt content lives and a range list there needs its own justification.
 fn is_invisible_formatting(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00AD}'
+    DISPLAY_BLANK_CHARACTERS.contains(&character)
+        || matches!(
+            character,
+            '\u{00AD}'
             | '\u{0600}'..='\u{0605}'
             | '\u{061C}'
             | '\u{06DD}'
@@ -1923,7 +1935,7 @@ fn is_invisible_formatting(character: char) -> bool {
             | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0001}'
             | '\u{E0020}'..='\u{E007F}'
-    )
+        )
 }
 
 /// A Hugging Face repo id (`owner/name`) and nothing else — never a path, never a URL.
@@ -4600,13 +4612,28 @@ mod tests {
     fn prose_strips_invisible_formatting_as_well_as_control_characters() {
         // U+202E RIGHT-TO-LEFT OVERRIDE / U+202D LEFT-TO-RIGHT OVERRIDE reverse how the rest of
         // the line reads; U+200B and U+FEFF split a word invisibly; U+2028 / U+2029 are line and
-        // paragraph separators the renderer never agreed to.
-        let hostile = "a light\u{202e}house\u{202d} in\u{200b} fo\u{feff}g\u{2028}second\u{2029}third\u{200f}\u{00ad}\u{2060}";
+        // paragraph separators the renderer never agreed to. The Hangul fillers, Braille blank and
+        // Egyptian hieroglyph blanks are display-blank Lo/So characters outside Cf.
+        let hostile = "a light\u{202e}house\u{202d} in\u{200b} fo\u{feff}g\u{2028}second\u{2029}third\u{200f}\u{00ad}\u{2060}\u{115f}\u{1160}\u{2800}\u{3164}\u{ffa0}\u{13441}\u{13442}";
         let cleaned = shareable_prose(hostile);
         assert_eq!(cleaned, "a lighthouse in fogsecondthird");
         for smuggled in [
-            '\u{202e}', '\u{202d}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{2029}', '\u{200f}',
-            '\u{00ad}', '\u{2060}',
+            '\u{202e}',
+            '\u{202d}',
+            '\u{200b}',
+            '\u{feff}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{200f}',
+            '\u{00ad}',
+            '\u{2060}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{2800}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{13441}',
+            '\u{13442}',
         ] {
             assert!(
                 !cleaned.contains(smuggled),
@@ -4614,6 +4641,17 @@ mod tests {
                 smuggled as u32
             );
         }
+
+        // Through the real build path, in the field the app writes into its own shared files.
+        let mut payload = payload_fixture();
+        payload.insert("prompt".to_owned(), json!(hostile));
+        payload.insert("advanced".to_owned(), json!({ "systemMessage": hostile }));
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(built.prompt, "a lighthouse in fogsecondthird");
+        assert_eq!(
+            built.advanced["systemMessage"],
+            json!("a lighthouse in fogsecondthird")
+        );
 
         // Through the real parse path, in the field a stranger's file actually fills.
         let share = parse_workflow_share(&json!({
@@ -4632,9 +4670,17 @@ mod tests {
             json!("a lighthouse in fogsecondthird")
         );
 
-        // What must NOT change: the newlines and tabs a multi-line prompt is made of, and the
-        // emoji variation selectors that are prompt content rather than a display trick.
-        let real = "a lighthouse\n\tshot on 35mm \u{2764}\u{fe0f}, rain \u{1f327}\u{fe0f}";
+        // What must NOT change: a realistic multi-line prompt, including CJK, emoji, regional-
+        // indicator flags, variation selectors, newlines and tabs, remains byte-for-byte intact.
+        let real = "海辺の灯台 🇯🇵\n\t35mmで撮影 \u{2764}\u{fe0f}, rain \u{1f327}\u{fe0f}, text \u{2708}\u{fe0e}, flags 🇺🇸";
         assert_eq!(shareable_prose(real), real);
+
+        let mut payload = payload_fixture();
+        payload.insert("prompt".to_owned(), json!(real));
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(built.prompt.as_bytes(), real.as_bytes());
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        let parsed = parse_workflow_share(&envelope).expect("parses");
+        assert_eq!(parsed.prompt.as_bytes(), real.as_bytes());
     }
 }
