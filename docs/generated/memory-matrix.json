@@ -1,7 +1,7 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:23dce29aa5fd970b0c40151f5b2dfa3e582a10da7585cea9abd9243c4295ef5b",
+    "sceneWorksRevision": "source-tree:5726177c501fd82d74f8b21a80c77ae3d4441b34926e43ab342cd5e7330c0a58",
     "inferenceRevision": "138778bdd0fb9e28a4047dce824c94262f4c0959",
     "sources": {
       "manifest": {
@@ -38,7 +38,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "aac4f7f98ff1dd6e6cb17ffa5ca30da7b6af0df1401f9526ff06c4fced7e93d3"
+        "sha256": "5589076a2093b17fad6d7d89bb116ae6027f227e2de52bd849ec24524dc849de"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -82,8 +82,7 @@
       },
       "implementation": {
         "none": 33,
-        "provider-local": 1,
-        "shared-primitive": 1
+        "shared-primitive": 2
       }
     }
   },
@@ -1160,7 +1159,7 @@
       "backend": "candle",
       "structuralApplicability": "partial",
       "requestPeak": "moves",
-      "implementation": "provider-local"
+      "implementation": "shared-primitive"
     },
     {
       "familyStory": 15517,
@@ -198096,9 +198095,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -198120,7 +198119,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -198459,9 +198458,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -198483,7 +198482,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -198822,9 +198821,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -198846,7 +198845,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -199185,9 +199184,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -199209,7 +199208,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -199548,9 +199547,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -199572,7 +199571,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -199911,9 +199910,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -199935,7 +199934,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -200274,9 +200273,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -200298,7 +200297,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -200637,9 +200636,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -200661,7 +200660,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -201000,9 +200999,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -201024,7 +201023,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -201363,9 +201362,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -201387,7 +201386,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -201726,9 +201725,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -201750,7 +201749,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -202089,9 +202088,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -202113,7 +202112,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -208923,9 +208922,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -208947,7 +208946,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -209336,9 +209335,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -209360,7 +209359,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -209749,9 +209748,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -209773,7 +209772,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -210162,9 +210161,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -210186,7 +210185,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -210584,9 +210583,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -210608,7 +210607,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -211106,9 +211105,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -211130,7 +211129,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -211617,9 +211616,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -211641,7 +211640,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -212030,9 +212029,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -212054,7 +212053,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -212443,9 +212442,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -212467,7 +212466,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -212856,9 +212855,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -212880,7 +212879,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -213278,9 +213277,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -213302,7 +213301,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -213875,9 +213874,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -213899,7 +213898,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -214474,9 +214473,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -214498,7 +214497,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -214887,9 +214886,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -214911,7 +214910,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -215300,9 +215299,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -215324,7 +215323,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -215713,9 +215712,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -215737,7 +215736,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -216135,9 +216134,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": true,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -216159,7 +216158,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -216657,9 +216656,9 @@
         "story": 15969,
         "structuralApplicability": "partial",
         "requestPeak": "moves",
-        "implementation": "provider-local",
+        "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+        "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
         "blockStacks": [
           {
             "name": "text_fusion",
@@ -216681,7 +216680,7 @@
           }
         ],
         "findings": [
-          "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+          "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
           "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
         ]
       },
@@ -232704,7 +232703,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -233066,7 +233065,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -233428,7 +233427,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -233790,7 +233789,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -234152,7 +234151,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -234514,7 +234513,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -236946,7 +236945,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -237308,7 +237307,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -237670,7 +237669,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -239067,7 +239066,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -239429,7 +239428,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -239791,7 +239790,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -241188,7 +241187,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -241550,7 +241549,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -241912,7 +241911,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -243309,7 +243308,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -243671,7 +243670,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -244033,7 +244032,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -244395,7 +244394,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -244757,7 +244756,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -245119,7 +245118,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -247551,7 +247550,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -247913,7 +247912,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -248275,7 +248274,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -248637,7 +248636,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -248999,7 +248998,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
@@ -249361,7 +249360,7 @@
         "requestPeak": "unmeasured",
         "implementation": "none",
         "overlayIncompatible": false,
-        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+        "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
         "blockStacks": [
           {
             "name": "transformer_blocks",
