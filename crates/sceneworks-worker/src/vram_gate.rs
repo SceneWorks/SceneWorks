@@ -1589,10 +1589,9 @@ mod tests {
                         "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
                         "measuredCompositions": {
                             "threeStage": ["resident", "staged_residency"],
-                            "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                            "tiledVae": ["resident", "bounded_decode"],
                             "chunkedAttention": [
                                 "resident",
-                                "staged_residency",
                                 "bounded_decode",
                                 "bounded_attention"
                             ],
@@ -2390,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn q8_and_bf16_768_measurements_report_out_of_envelope_without_exact_records() {
+    fn q8_and_bf16_768_measurements_reject_missing_composition_keys_as_invalid() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         for tier in ["q8", "bf16"] {
             assert!(matches!(
@@ -2406,7 +2405,7 @@ mod tests {
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
+                    reason: gen_core::MemoryEvidenceVerdict::Invalid,
                 })
             ));
         }
