@@ -206,8 +206,8 @@ Four things follow, and they are not negotiable individually:
 1. **The packing tier is not a memory lever.** A component's precision is decided by the tier the user
    selected, before any budget is read, and it is identical on a 16 GB card and a 96 GB one. Packing
    something to the tier the user already asked for is not a concession to a tight budget, so it must
-   never sit in an escalation ladder. `gen_core::tier_integrity` is the executable rule;
-   `gen_core::mempolicy` no longer has a `BranchQuant` lever.
+   never sit in an escalation ladder. `gen_core::tier_integrity` is the executable rule; the former
+   provider-local branch-quantization step was deleted rather than retained as a second policy.
 2. **Every above-tier residency is declared.** `config/tier-integrity.jsonc` is the ledger: per entry,
    per component, the precision it is actually resident at, the selected tiers on which that is above
    tier, why, and what it costs. `scripts/check-tier-integrity.mjs` validates it in `npm run check`

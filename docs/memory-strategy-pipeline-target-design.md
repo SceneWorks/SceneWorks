@@ -601,8 +601,9 @@ All three, plus more than the section anticipated.
 - `gen_core::tier_integrity` is the shared executable rule (`control_branch_tier`,
   `is_above_selected_tier`, `fidelity_rank`), consumed by mlx-gen-krea, candle-gen-krea's provider
   contract, and the worker's control fit gate — one decision, three consumers.
-- `Lever::BranchQuant` and `should_quantize_control_branch` are gone; `mempolicy`'s ladder is now
-  residency → decode tiling → resolution, and `MemoryPlan` has no `quantize_branch`. The worker's
+- `Lever::BranchQuant` and `should_quantize_control_branch` are gone. At the SC-15799 checkpoint the
+  interim provider-local ladder still contained residency → decode tiling → resolution; section 8
+  records its subsequent complete deletion rather than presenting that checkpoint as current. The worker's
   control fit ladder lost its fifth rung and rejects below attention chunking rather than spending
   quality the user did not ask for.
 - The q4→q8 floor is declared at `candle.control.branchTierByBaseTier` with its measured evidence, and
@@ -666,8 +667,10 @@ already forbids the duplication:
 - **The cost model half** — first-principles param counts re-fit on real weights on a 128 GB Metal
   Mac (SC-11847), with measured slopes ~44 (bf16) / ~61 (q4) B/(token·hidden) for denoise and
   ~5211 B/px for decode, under an over-predict/never-under-shoot convention. **This is expensive,
-  calibrated evidence and it survives**, retargeted to produce provider estimates that feed
-  `select_strategy` as ordinary candidates.
+  calibrated evidence and it survives**. Its estimates remain calibration inputs; promotion records
+  canonical integer-byte evidence, and the worker feeds those evidence-backed candidates to
+  `select_strategy`. The provider uses the model for calibration and selected-strategy safety math,
+  never for a second live-budget selection.
 
 Deleting the cost model along with the policy would discard the most costly artifact in the module.
 
