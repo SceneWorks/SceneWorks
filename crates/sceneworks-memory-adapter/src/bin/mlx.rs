@@ -36,6 +36,8 @@ const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
 const KREA_FINGERPRINT: &str = "krea-control-mlx-v4-q4-pose-bounded-decode-512-64";
 const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
+const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
+const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const MIB: u64 = 1024 * 1024;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -596,6 +598,7 @@ fn predicted_ceiling(bytes: u64) -> u64 {
 }
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
+    protocol::validate_exact_overlay_target(request, "control:1", KREA_CONTROL_EXECUTION_PATH)?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -997,6 +1000,7 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
+    protocol::validate_plain_overlay_target(request, QWEN_PLAIN_EXECUTION_PATH)?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -1094,42 +1098,46 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
         }
         let blocker =
             "negative mutation is measured, but negative evidence cannot verify a production range";
-        let mut fragment = protocol::gated_fragment(
-            artifact,
-            sweep(parameters, false),
-            blocker,
-            json!({
-                "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
-                "identicalLatents": true,
-                "result": "passed",
-                "maximumError": actual_maximum,
-                "meanError": actual_mean,
-                "maximumErrorThreshold": MAX_THRESHOLD,
-                "meanErrorThreshold": MEAN_THRESHOLD,
-            }),
-            json!({
-                "parameters": parameters,
-                "measured": true,
-                "result": "failed_as_expected",
-                "maximumError": mutated_maximum,
-                "meanError": mutated_mean,
-            }),
-            json!({
-                "result": "passed",
-                "resolvedPathFingerprint": loadability_fingerprint,
-            }),
-            protocol::diagnostics(
-                "memory-mlx-adapter",
-                "executed",
-                [blocker.to_owned()],
-                [
-                    ("untiledDecodeActivePeak", "bytes", untiled_peak),
-                    ("tiledDecodeActivePeak", "bytes", tiled_peak),
-                    ("postDecodeActive", "bytes", active),
-                    ("postDecodeCache", "bytes", cache),
-                ],
-            ),
-        );
+        let mut fragment = protocol::plain_gated_fragment(
+            request,
+            QWEN_PLAIN_EXECUTION_PATH,
+            protocol::PlainGatedFragment {
+                artifact,
+                sweep: sweep(parameters, false),
+                blocker,
+                quality: json!({
+                    "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
+                    "identicalLatents": true,
+                    "result": "passed",
+                    "maximumError": actual_maximum,
+                    "meanError": actual_mean,
+                    "maximumErrorThreshold": MAX_THRESHOLD,
+                    "meanErrorThreshold": MEAN_THRESHOLD,
+                }),
+                negative_mutation: json!({
+                    "parameters": parameters,
+                    "measured": true,
+                    "result": "failed_as_expected",
+                    "maximumError": mutated_maximum,
+                    "meanError": mutated_mean,
+                }),
+                loadability: json!({
+                    "result": "passed",
+                    "resolvedPathFingerprint": loadability_fingerprint,
+                }),
+                diagnostics: protocol::diagnostics(
+                    "memory-mlx-adapter",
+                    "executed",
+                    [blocker.to_owned()],
+                    [
+                        ("untiledDecodeActivePeak", "bytes", untiled_peak),
+                        ("tiledDecodeActivePeak", "bytes", tiled_peak),
+                        ("postDecodeActive", "bytes", active),
+                        ("postDecodeCache", "bytes", cache),
+                    ],
+                ),
+            },
+        )?;
         fragment["strategy"] = strategy;
         fragment["status"] = json!("negative_complete");
         return Ok(fragment);
@@ -1140,36 +1148,40 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
         "quality, but does not expose synchronized conditioning/denoise device/wired/reclaimable phase ",
         "telemetry or the required warm/cancel/error lifecycle injections"
     );
-    let mut fragment = protocol::gated_fragment(
-        artifact,
-        sweep(parameters, actual_passed),
-        blocker,
-        json!({
-            "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
-            "identicalLatents": true,
-            "result": if actual_passed { "passed" } else { "failed" },
-            "maximumError": actual_maximum,
-            "meanError": actual_mean,
-            "maximumErrorThreshold": MAX_THRESHOLD,
-            "meanErrorThreshold": MEAN_THRESHOLD,
-        }),
-        Value::Null,
-        json!({
-            "result": "passed",
-            "resolvedPathFingerprint": loadability_fingerprint,
-        }),
-        protocol::diagnostics(
-            "memory-mlx-adapter",
-            "executed",
-            [blocker.to_owned()],
-            [
-                ("untiledDecodeActivePeak", "bytes", untiled_peak),
-                ("tiledDecodeActivePeak", "bytes", tiled_peak),
-                ("postDecodeActive", "bytes", active),
-                ("postDecodeCache", "bytes", cache),
-            ],
-        ),
-    );
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        QWEN_PLAIN_EXECUTION_PATH,
+        protocol::PlainGatedFragment {
+            artifact,
+            sweep: sweep(parameters, actual_passed),
+            blocker,
+            quality: json!({
+                "contract": "identical encoded latent, tiled versus untiled Qwen VAE decode",
+                "identicalLatents": true,
+                "result": if actual_passed { "passed" } else { "failed" },
+                "maximumError": actual_maximum,
+                "meanError": actual_mean,
+                "maximumErrorThreshold": MAX_THRESHOLD,
+                "meanErrorThreshold": MEAN_THRESHOLD,
+            }),
+            negative_mutation: Value::Null,
+            loadability: json!({
+                "result": "passed",
+                "resolvedPathFingerprint": loadability_fingerprint,
+            }),
+            diagnostics: protocol::diagnostics(
+                "memory-mlx-adapter",
+                "executed",
+                [blocker.to_owned()],
+                [
+                    ("untiledDecodeActivePeak", "bytes", untiled_peak),
+                    ("tiledDecodeActivePeak", "bytes", tiled_peak),
+                    ("postDecodeActive", "bytes", active),
+                    ("postDecodeCache", "bytes", cache),
+                ],
+            ),
+        },
+    )?;
     fragment["strategy"] = strategy;
     Ok(fragment)
 }

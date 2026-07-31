@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const KREA_ID: &str = "krea_2_turbo";
+const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image path";
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 
@@ -468,20 +469,24 @@ fn preflight_fragment(
     repository: &str,
     revision: &str,
 ) -> Result<Value, String> {
-    let mut fragment = protocol::gated_fragment(
-        artifact(repository, revision),
-        sweep(request, protocol::strategy_parameters(request)?, "failed")?,
-        &blocker,
-        json!({ "result": "not_run" }),
-        Value::Null,
-        json!({ "result": "not_run", "resolvedPathFingerprint": null }),
-        protocol::diagnostics(
-            "memory-candle-adapter",
-            "gated_before_execution",
-            [blocker.clone()],
-            [(measurement_name, "count", 1)],
-        ),
-    );
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        KREA_PLAIN_EXECUTION_PATH,
+        protocol::PlainGatedFragment {
+            artifact: artifact(repository, revision),
+            sweep: sweep(request, protocol::strategy_parameters(request)?, "failed")?,
+            blocker: &blocker,
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({ "result": "not_run", "resolvedPathFingerprint": null }),
+            diagnostics: protocol::diagnostics(
+                "memory-candle-adapter",
+                "gated_before_execution",
+                [blocker.clone()],
+                [(measurement_name, "count", 1)],
+            ),
+        },
+    )?;
     fragment["strategy"] = strategy.clone();
     Ok(fragment)
 }
@@ -528,6 +533,7 @@ fn run(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
     let parameters = protocol::strategy_parameters(request)?;
     let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
@@ -883,66 +889,70 @@ fn run(request: &Value) -> Result<Value, String> {
         "curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection, and ",
         "a measured negative mutation"
     );
-    let mut fragment = protocol::gated_fragment(
-        artifact(&repository, &revision),
-        sweep(request, parameters, "passed")?,
-        blocker,
-        json!({ "result": "not_run" }),
-        Value::Null,
-        json!({
-            "result": "passed",
-            "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
-        }),
-        protocol::diagnostics(
-            "memory-candle-adapter",
-            "executed",
-            [blocker.to_owned()],
-            [
-                ("preLoadDeviceUsed", "bytes", baseline),
-                (
-                    "loadDevicePeakDelta",
-                    "bytes",
-                    decimal_gb_to_bytes(report.load_peak_gb),
-                ),
-                ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
-                ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
-                ("decodeDevicePeakDelta", "bytes", decode_bytes),
-                ("overallDevicePeakDelta", "bytes", overall_bytes),
-                ("allocatorCounterAliasesDeviceDelta", "boolean", 1),
-                ("wiredCounterAliasesDiscreteDeviceDelta", "boolean", 1),
-                ("cudaCachingAllocatorPresent", "boolean", 0),
-                ("phaseCancelInjections", "count", 3),
-                ("phaseErrorInjections", "count", 3),
-                ("postFaultWarmFollowUps", "count", 6),
-                (
-                    "maximumPostFaultDeviceGrowth",
-                    "bytes",
-                    maximum_cleanup_growth_bytes,
-                ),
-                (
-                    "postFaultDeviceGrowthTolerance",
-                    "bytes",
-                    cleanup_tolerance_bytes,
-                ),
-                (
-                    "abaResidentRepeatMaximumPixelError",
-                    "u8",
-                    resident_repeat_max_error,
-                ),
-                (
-                    "abaResidentRepeatMeanPixelError",
-                    "pixel-micro-units",
-                    resident_repeat_mean_error,
-                ),
-                ("abaBoundedMaximumPixelError", "u8", bounded_max_error),
-                (
-                    "abaBoundedMeanPixelError",
-                    "pixel-micro-units",
-                    bounded_mean_error,
-                ),
-            ],
-        ),
-    );
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        KREA_PLAIN_EXECUTION_PATH,
+        protocol::PlainGatedFragment {
+            artifact: artifact(&repository, &revision),
+            sweep: sweep(request, parameters, "passed")?,
+            blocker,
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({
+                "result": "passed",
+                "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
+            }),
+            diagnostics: protocol::diagnostics(
+                "memory-candle-adapter",
+                "executed",
+                [blocker.to_owned()],
+                [
+                    ("preLoadDeviceUsed", "bytes", baseline),
+                    (
+                        "loadDevicePeakDelta",
+                        "bytes",
+                        decimal_gb_to_bytes(report.load_peak_gb),
+                    ),
+                    ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                    ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                    ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                    ("overallDevicePeakDelta", "bytes", overall_bytes),
+                    ("allocatorCounterAliasesDeviceDelta", "boolean", 1),
+                    ("wiredCounterAliasesDiscreteDeviceDelta", "boolean", 1),
+                    ("cudaCachingAllocatorPresent", "boolean", 0),
+                    ("phaseCancelInjections", "count", 3),
+                    ("phaseErrorInjections", "count", 3),
+                    ("postFaultWarmFollowUps", "count", 6),
+                    (
+                        "maximumPostFaultDeviceGrowth",
+                        "bytes",
+                        maximum_cleanup_growth_bytes,
+                    ),
+                    (
+                        "postFaultDeviceGrowthTolerance",
+                        "bytes",
+                        cleanup_tolerance_bytes,
+                    ),
+                    (
+                        "abaResidentRepeatMaximumPixelError",
+                        "u8",
+                        resident_repeat_max_error,
+                    ),
+                    (
+                        "abaResidentRepeatMeanPixelError",
+                        "pixel-micro-units",
+                        resident_repeat_mean_error,
+                    ),
+                    ("abaBoundedMaximumPixelError", "u8", bounded_max_error),
+                    (
+                        "abaBoundedMeanPixelError",
+                        "pixel-micro-units",
+                        bounded_mean_error,
+                    ),
+                ],
+            ),
+        },
+    )?;
     fragment["strategy"] = strategy;
     fragment["observedMemory"] = json!({
         "conditioning": cuda_phase_metrics(conditioning_bytes),
@@ -964,44 +974,6 @@ fn run(request: &Value) -> Result<Value, String> {
                 }
                 Some("loadability") => {
                     *scenario = json!({ "name": "loadability", "result": "passed" });
-                }
-                // sc-16069: the overlay verdict is DERIVED from the target, never hardcoded.
-                //
-                // This arm used to emit `not_applicable` with the fixed reason "ordinary Krea Turbo
-                // text-to-image calibration has no overlay" on every run. That describes this
-                // adapter's one code path, not the target it was handed — so a target that declared
-                // `overlay: "control"` would still have produced a `not_applicable` record, i.e. a
-                // considered-and-excused reading of a scenario nobody considered. `overlay` is one of
-                // only two scenarios the validator lets off `passed`, which makes it the one place
-                // where a stock excuse silently becomes coverage.
-                //
-                // A target this adapter CANNOT execute now fails loudly instead. Running an overlay
-                // render needs the control-branch load path (a second resident network beside the
-                // base) and a control-map fixture; this binary has neither, and `bin/mlx.rs` has no
-                // overlay handling at all. The recorded decision, and what would unblock it, live in
-                // `config/memory-calibration-plan.json` → `overlayCoverage` and in
-                // `docs/memory-strategy-contract.md`.
-                Some("overlay") => {
-                    let overlay = protocol::target_overlay(request)?;
-                    if overlay != "none" {
-                        return Err(format!(
-                            "calibration target declares overlay {overlay:?}, but this adapter can \
-                             only execute a plain text-to-image render: it has no control-branch \
-                             load path and no control-map fixture. Refusing rather than emitting a \
-                             not_applicable that would read as overlay coverage (sc-16069). See \
-                             config/memory-calibration-plan.json → overlayCoverage."
-                        ));
-                    }
-                    *scenario = json!({
-                        "name": "overlay",
-                        "result": "not_applicable",
-                        "reason": "the calibration target declares overlay \"none\" — this run holds \
-                                   only the Krea 2 Turbo base, so there is no second resident network \
-                                   to measure. No adapter can execute an overlay target yet; the \
-                                   decision and what would unblock it are recorded in \
-                                   config/memory-calibration-plan.json (overlayCoverage) and \
-                                   docs/memory-strategy-contract.md (sc-16069).",
-                    });
                 }
                 _ => {}
             }

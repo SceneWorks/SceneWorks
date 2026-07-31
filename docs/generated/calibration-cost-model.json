@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:1517ebbd9f2b60734d3f3fcae474685587025275494cecbcc23a567a31328a2a",
+    "sceneWorksRevision": "source-tree:0e0bd9afdfdf459ddc841775d6fd11ebaa389d1015f295842ba5b66a11e27872",
     "matrixRevision": "source-tree:0d640e3b4f85e0b21d73b247fe74c19acda8367a4a3bffc1221cff50a91c7fed",
     "inferenceRevision": "50dbce1bc1574ba7dd20104069f1fd9c2a6e52d9",
     "sources": {
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "d26706be5a3b0cf5d385f787770fe4bfcc4a225bcb1bfc2b2d46e68388f09b04"
+        "sha256": "951bbee1109902afb5a6d7b57c4ee67b460fc4d60b05e8c9f83ce872c18f946e"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "0130f216b06878e981861593c0d03955914fd6b34e1c148ff094f1272cf715d4"
+        "sha256": "2c167f1ea70e383f91d8aa2ba8b35ef496d1ca1d1d12b51c4391e31df83fd52d"
       }
     }
   },
@@ -440,7 +440,39 @@
     "noRuntimeSwapApi": "no detach / unload / remove / clear / disable / swap / unfuse API for an adapter on a loaded generator exists anywhere in `crates/`, and the `gen_core::Generator` trait exposes no such method, so the call is not expressible — the load-axis collapse assumes an operation that is not implemented (SceneWorks' only adapter-facing generator call is the read-only `adapter_apply_reports()`)",
     "adaptersDisableARung": "carrying adapters voids the ENTIRE measured Krea ladder, not just the streamed-blocks rung: `allow_streamed_blocks = adapter_count == 0` (base.rs:5737) sets `overlay: Some(\"adapter\")` on the request scope (vram_gate.rs:609) while every evidence cell carries `overlay: None` (vram_gate.rs:829-830), so memory_strategy.rs:194-200 marks every candidate OutOfEnvelope and the job drops to the older sequential gate. This is the origin of the 6 `Structurally N/A` cells here — all krea_2_turbo/candle x {q4,q8,bf16} x {lora,control} at bounded_transformer_residency, which scripts/generate-memory-matrix.mjs cites to `base.rs#allow_streamed_blocks`, reason \"load-time adapters are incompatible with streamed transformer blocks\"",
     "baselinePerturbation": "DECISIVE: a toggleable LoRA still leaves its weights resident, so a `none` scenario measured on an adapter-loaded generator is inflated by the adapter's own bytes. The collapse perturbs the exact quantity this campaign exists to measure, so sharing the load and measuring an unperturbed `none` peak cannot both be done",
-    "whyTheColumnIsStillReported": "SC-16072 needs to know what the capability would be worth before deciding whether to build it. The overlay-amortised column is that price tag and nothing more — it is NOT an achievable campaign shape, and every surface that prints it says so."
+    "perOverlayKind": {
+      "lora": {
+        "warmAttachDetachWithoutBaseReload": false,
+        "reason": "LoRAs are fixed in LoadSpec::adapters, changing that set changes GeneratorCacheKey, and Generator exposes no detach or swap method",
+        "noneBaselineComparison": {
+          "status": "not_applicable",
+          "toleranceBytes": 0,
+          "reason": "the required warm swap does not exist; even a hypothetical disabled LoRA leaves its weights resident and cannot establish a byte-identical no-adapter baseline"
+        },
+        "loadSharingAvailable": false
+      },
+      "identity": {
+        "warmAttachDetachWithoutBaseReload": false,
+        "reason": "InstantID and PuLID materialise an identity adapter plus face/identity encoder weights, and no loaded-generator API detaches that resident stack",
+        "noneBaselineComparison": {
+          "status": "not_applicable",
+          "toleranceBytes": 0,
+          "reason": "the required warm swap does not exist; the extra resident encoder network makes an adapter-loaded process a different baseline population"
+        },
+        "loadSharingAvailable": false
+      },
+      "control": {
+        "warmAttachDetachWithoutBaseReload": false,
+        "reason": "control branches are supplied at construction through LoadSpec::with_control (including the measured Krea pose path), and no loaded-generator API replaces or clears them",
+        "noneBaselineComparison": {
+          "status": "not_applicable",
+          "toleranceBytes": 0,
+          "reason": "the required warm swap does not exist; a loaded control branch remains a second resident network, so it cannot stand in for the base-only process"
+        },
+        "loadSharingAvailable": false
+      }
+    },
+    "counterfactualPriceTagDisposition": "SC-16072 needs to know what the capability would be worth before deciding whether to build it. The counterfactual count is retained as structured metadata, but the unavailable overlay-amortised COLUMN is dropped from campaign and wall-clock tables. It is not pursued as an achievable campaign shape."
   },
   "collapsing": {
     "runUnit": "One `action:\"run\"` provider invocation. `runProviderPlan` spawns the provider command once per planned case, so this is the unit that costs a model load.",
@@ -563,12 +595,16 @@
       "mlx": 924,
       "candle": 548
     },
-    "overlayAmortisedSessions": {
-      "total": 552,
-      "mlx": 346,
-      "candle": 206
+    "unavailableOverlayLoadPriceTag": {
+      "availability": "unavailable",
+      "disposition": "counterfactual metadata only; excluded from campaign and wall-clock columns",
+      "sessions": {
+        "total": 552,
+        "mlx": 346,
+        "candle": 206
+      },
+      "collapseFactor": 2.67
     },
-    "overlayLoadCollapseFactor": 2.67,
     "recordsPerWarmSession": 4.996,
     "rungCollapseFactor": 5
   },
@@ -738,11 +774,6 @@
           "total": 12.3,
           "mlx": 7.7,
           "candle": 4.6
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 4.6,
-          "mlx": 2.9,
-          "candle": 1.7
         }
       },
       {
@@ -756,11 +787,6 @@
           "total": 24.5,
           "mlx": 15.4,
           "candle": 9.1
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 9.2,
-          "mlx": 5.8,
-          "candle": 3.4
         }
       },
       {
@@ -774,11 +800,6 @@
           "total": 49.1,
           "mlx": 30.8,
           "candle": 18.3
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 18.4,
-          "mlx": 11.5,
-          "candle": 6.9
         }
       },
       {
@@ -792,11 +813,6 @@
           "total": 122.7,
           "mlx": 77,
           "candle": 45.7
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 46,
-          "mlx": 28.8,
-          "candle": 17.2
         }
       },
       {
@@ -810,11 +826,6 @@
           "total": 245.3,
           "mlx": 154,
           "candle": 91.3
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 92,
-          "mlx": 57.7,
-          "candle": 34.3
         }
       },
       {
@@ -828,11 +839,6 @@
           "total": 490.7,
           "mlx": 308,
           "candle": 182.7
-        },
-        "overlayAmortisedSessionHours": {
-          "total": 184,
-          "mlx": 115.3,
-          "candle": 68.7
         }
       }
     ]
