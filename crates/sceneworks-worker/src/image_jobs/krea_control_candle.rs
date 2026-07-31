@@ -359,9 +359,9 @@ struct KreaStrictControl {
     /// denoise-phase activation peak exceeds free VRAM. `false` (the big-card default) is the unchunked
     /// full-speed forward. A *speed* cost (~+6%), byte-identical output.
     chunk_attention: bool,
-    /// Direct residency selection for this bespoke provider. It is not a registered generator, so the
-    /// control fit gate owns this decision instead of consulting `supports_sequential_offload`.
-    offload_policy: gen_core::OffloadPolicy,
+    /// Request-scoped residency selection for this bespoke provider. It is not a registered generator,
+    /// so the control fit gate owns this decision instead of consulting `supports_sequential_offload`.
+    stage_residency: bool,
     prompt: String,
     width: u32,
     height: u32,
@@ -429,7 +429,8 @@ impl CandleStrictControl for KreaStrictControl {
             // Unchunked (full speed) by default; the fit ladder (sc-11745) forces query-row attention
             // chunking only to bound the denoise activation peak on a constrained card — byte-identical.
             chunk_attention: self.chunk_attention,
-            offload_policy: self.offload_policy,
+            // Compatibility-only load field; request-scoped residency is authoritative.
+            offload_policy: gen_core::OffloadPolicy::Resident,
         };
         runtime_cuda::providers::krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
@@ -453,6 +454,7 @@ impl CandleStrictControl for KreaStrictControl {
             text_style_gain: self.text_style_gain,
             seed,
             tile_vae_decode: self.tile_vae_decode,
+            stage_residency: self.stage_residency,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -743,7 +745,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         branch_tier,
         tile_vae_decode,
         chunk_attention,
-        offload_policy,
+        stage_residency: matches!(offload_policy, gen_core::OffloadPolicy::Sequential),
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,

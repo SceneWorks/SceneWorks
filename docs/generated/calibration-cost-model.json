@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0561b598bd9ca2a54ba625cc6ef72026be1b6ad666e7229a767d3f3b1c336b29",
-    "matrixRevision": "source-tree:85f8b9d6bd94a918e8f562ff0c3d3056162adeebc373ee68ebdfc2f7bd6f6e5f",
-    "inferenceRevision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
+    "sceneWorksRevision": "source-tree:61cffcbe20024b35140e2635315c29f1f6ae946fb254eaf989711ee9b853828b",
+    "matrixRevision": "source-tree:556d84acd1f0ab02393acb507412f4c2ffd71a3ecce56007d346ed2b98c2a6f6",
+    "inferenceRevision": "43dc522588514d91dedc40688e93ffa898fe84d5",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "2467fdd3483a4dd6703f74b195c8f33f381143522ed70690794e684da75b48d2"
+        "sha256": "bc0a5934bfc414bd2388a8dd986328a7044cb016e2d59e5e93356c0a5baea90a"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -64,9 +64,9 @@
     },
     "completeRecords": 2,
     "matrixSummaryCalibrationRuns": 2,
-    "matrixSummaryCurrentCalibrationRuns": 2,
+    "matrixSummaryCurrentCalibrationRuns": 0,
     "verifiedCells": 0,
-    "note": "2 complete record(s) exist in the evidence bundle; the matrix reports 2 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "note": "2 complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
