@@ -795,13 +795,13 @@ test("every advertised family/backend has a rung-4 verdict, and it reaches its c
 
 test("the two rung-4 findings stay separate: structural applicability never implies the peak moved", async () => {
   // The epic's non-negotiable in test form. `partial`/`full` says the architecture CAN be windowed;
-  // it must never be readable as evidence that doing so is worth selecting. The only two families
-  // claiming `moves` are the two with measured request-peak evidence.
+  // it must never be readable as evidence that doing so is worth selecting. Only families with
+  // measured request-peak evidence may claim `moves`.
   const matrix = await buildMatrix();
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15517:candle"],
+    ["15510:mlx", "15512:mlx", "15517:candle"],
   );
   assert.ok(
     matrix.rung4SurveyRows.every(
@@ -860,7 +860,9 @@ test("an implemented family is Implemented/unverified only where the provider ac
   assert.ok(implemented.length > 0);
 
   // MLX Z-Image ships rung 4 (SC-15754) and the matrix reported it Missing until this survey.
-  const zImage = implemented.filter((cell) => cell.backend === "mlx");
+  const zImage = implemented.filter(
+    (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15510,
+  );
   assert.deepEqual(
     [...new Set(zImage.map((cell) => cell.modelId))].sort(),
     ["z_image", "z_image_edit", "z_image_turbo"],
@@ -872,6 +874,67 @@ test("an implemented family is Implemented/unverified only where the provider ac
         cell.strategyParameters.transformerWindowComponent === "Dit",
     ),
     "the published window size and default component scope travel with the cell",
+  );
+
+  // Lens' measured win is deliberately tier- and overlay-specific. BF16/no-overlay exposes the
+  // TextEncoder scope for both family entries; the Q4 request non-win and the unmeasured Q8/adapter
+  // cells must not inherit a family-level implementation claim.
+  const lens = implemented.filter(
+    (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15512,
+  );
+  assert.deepEqual(
+    [...new Set(lens.map((cell) => cell.modelId))].sort(),
+    ["lens", "lens_turbo"],
+  );
+  assert.ok(lens.length > 0);
+  assert.ok(lens.every((cell) => cell.tier === "bf16" && cell.overlay === "none"));
+  assert.ok(
+    lens.every(
+      (cell) =>
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.strategyParameters.transformerWindowComponent === "TextEncoder" &&
+        cell.rung4Survey.requestPeak === "moves",
+    ),
+  );
+  assert.equal(
+    matrix.cells.filter(
+      (cell) =>
+        cell.owningFamilyStory === 15512 &&
+        cell.rung === "bounded_transformer_residency" &&
+        cell.state === "Implemented/unverified" &&
+        (cell.tier !== "bf16" || cell.overlay !== "none"),
+    ).length,
+    0,
+    "Lens Q4/Q8 and adapter cells remain Missing",
+  );
+  const lensCells = matrix.cells.filter(
+    (cell) =>
+      cell.backend === "mlx" &&
+      cell.owningFamilyStory === 15512 &&
+      cell.rung === "bounded_transformer_residency",
+  );
+  assert.ok(
+    lensCells
+      .filter((cell) => cell.tier === "q4")
+      .every(
+        (cell) =>
+          cell.state === "Missing" && cell.rung4Survey.requestPeak === "does-not-move",
+      ),
+    "Lens Q4 cells carry the measured request non-win and remain Missing",
+  );
+  assert.ok(
+    lensCells
+      .filter((cell) => cell.tier === "q8")
+      .every(
+        (cell) => cell.state === "Missing" && cell.rung4Survey.requestPeak === "unmeasured",
+      ),
+    "Lens Q8 cells carry no measurement claim and remain Missing",
+  );
+  assert.ok(
+    lensCells
+      .filter((cell) => cell.overlay !== "none")
+      .every((cell) => cell.state === "Missing"),
+    "Lens adapter overlays remain exactly Missing",
   );
 
   // Candle Krea's contract is gated on the turbo descriptor id, and its edit modes route to
@@ -1127,7 +1190,21 @@ test("a survey that contradicts itself or misses a family fails generation", asy
     /cite at least one source/,
   );
 
-  // The positive control for all five: the shipped survey builds.
+  const emptyTiers = await surveyFixture();
+  emptyTiers.families["15512"].backends.mlx.implementedTiers = [];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(emptyTiers) } }),
+    /implementedTiers is empty/,
+  );
+
+  const unknownOverlay = await surveyFixture();
+  unknownOverlay.families["15512"].backends.mlx.implementedOverlays = ["mystery"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unknownOverlay) } }),
+    /implementedOverlays contains an overlay outside the matrix vocabulary/,
+  );
+
+  // Positive control: the shipped survey builds.
   await buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
 });
 
@@ -1293,7 +1370,6 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
 test("`does-not-move` is carried through to the cell rather than collapsed into `unmeasured`", async () => {
   // The epic's non-negotiable has a positive form: a family MEASURED not to move the request peak is
   // a different fact from one nobody has measured, and the selector must be able to tell them apart.
-  // No shipped family records it yet, so this pins the path rather than the data.
   const survey = await surveyFixture();
   survey.families["15511"].backends.mlx.requestPeak = {
     finding: "does-not-move",
@@ -1316,5 +1392,21 @@ test("`does-not-move` is carried through to the cell rather than collapsed into 
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
       .requestPeak,
     "does-not-move",
+  );
+});
+
+test("request-peak tier overrides fail closed", async () => {
+  const badTier = await surveyFixture();
+  badTier.families["15512"].backends.mlx.requestPeak.byTier.fp8 = "moves";
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badTier) } }),
+    /requestPeak\.byTier contains a tier outside the matrix vocabulary/,
+  );
+
+  const badFinding = await surveyFixture();
+  badFinding.families["15512"].backends.mlx.requestPeak.byTier.q4 = "phase-only";
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badFinding) } }),
+    /requestPeak\.byTier\.q4 has unknown finding/,
   );
 });
