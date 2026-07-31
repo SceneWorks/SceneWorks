@@ -427,6 +427,29 @@ fn a_generated_png_round_trips_through_a_gallery_parser() {
 }
 
 #[test]
+fn an_exact_checkpoint_hash_becomes_a_civitai_model_resource_key() {
+    let mut share = built("a lighthouse in heavy fog", "", json!({}));
+    share.model_hash =
+        Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
+
+    let (_path, bytes, _dir) = embedded_png(&share, (64, 48));
+    let parsed = parse_a1111(&parameters_chunk_of(&bytes).text);
+
+    assert_eq!(parsed.params["Model"], "z_image_turbo");
+    assert_eq!(
+        parsed.params["Model hash"],
+        "312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"
+    );
+    assert!(
+        contains(
+            &bytes,
+            b"Model hash: 312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"
+        ),
+        "the exact digest must reach the physical PNG parameters chunk"
+    );
+}
+
+#[test]
 fn a_generated_kreamania_png_with_resolved_steps_is_recognized_by_civitai() {
     // The worker regression covers the original missing-input field and copies the actually executed
     // count into the sanitized envelope. This is the downstream PNG/parser half: the numeric count
@@ -1059,7 +1082,7 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
     // `SETTINGS_FIELDS` is the decision record for "omit rather than approximate", and it is only
     // worth anything if it is the truth. Pinned in BOTH directions: an envelope carrying everything
     // must emit every declared key, and it must emit nothing else.
-    let share = built(
+    let mut share = built(
         "a lighthouse",
         "text",
         json!({
@@ -1086,6 +1109,8 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
             "loras": [{ "name": "Mira", "weight": 0.8, "repo": "acme/mira" }]
         }),
     );
+    share.model_hash =
+        Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
     let text = parameters_text(&share, (64, 48));
     let emitted: BTreeSet<String> = parse_params(text.lines().last().expect("a settings line"))
         .into_keys()

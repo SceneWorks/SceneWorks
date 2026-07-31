@@ -36,6 +36,22 @@ fn read_repo_file(relative_path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+#[test]
+fn malformed_foreign_model_hash_is_ignored_without_losing_the_recipe() {
+    let mut value = serde_json::to_value(build_workflow_share(
+        &golden_asset(),
+        json!({ "projectId": "project_7a10", "prompt": "still import me" })
+            .as_object()
+            .expect("payload object"),
+    ))
+    .expect("serializes");
+    value["modelHash"] = json!("not a sha-256");
+
+    let parsed = parse_workflow_share(&value).expect("the rest of the recipe remains usable");
+    assert_eq!(parsed.prompt, "still import me");
+    assert_eq!(parsed.model_hash, None);
+}
+
 // ---------------------------------------------------------------------------
 // Golden input
 // ---------------------------------------------------------------------------

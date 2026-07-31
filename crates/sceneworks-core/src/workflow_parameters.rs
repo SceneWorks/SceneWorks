@@ -127,8 +127,12 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "Model",
-        "`model`, the catalog slug, verbatim. A1111's companion `Model hash` is omitted: we have no \
-         checkpoint hash to give and inventing one would be a claim about bytes we never read.",
+        "`model`, the safe readable catalog slug, verbatim.",
+    ),
+    (
+        "Model hash",
+        "`modelHash`, only when it is the exact SHA-256 of the executed checkpoint and `Model` is \
+         also present. Civitai uses the pair to resolve its linked model-version resource.",
     ),
     (
         "Version",
@@ -250,6 +254,9 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     }
     if !share.model.is_empty() {
         push("Model", share.model.clone());
+        if let Some(model_hash) = &share.model_hash {
+            push("Model hash", model_hash.clone());
+        }
     }
     // Fed from the envelope's own producer block rather than from `PRODUCER_VERSION` directly, so
     // the two chunks in one file cannot disagree about which build wrote it. An envelope whose

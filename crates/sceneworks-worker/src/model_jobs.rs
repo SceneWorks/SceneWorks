@@ -4102,6 +4102,34 @@ pub(crate) async fn reconcile_downloaded_model_family(
     }
 }
 
+async fn stable_model_file_sha256(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    file: &Path,
+) -> WorkerResult<(String, ModelFileIdentity)> {
+    let before = model_file_identity(file).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Imported checkpoint identity could not be read: {}",
+            file.display()
+        ))
+    })?;
+    let hash = sha256_file(api, settings, job_id, file).await?;
+    let after = model_file_identity(file).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Imported checkpoint identity could not be re-read: {}",
+            file.display()
+        ))
+    })?;
+    if before != after {
+        return Err(WorkerError::InvalidPayload(
+            "The imported checkpoint changed while SceneWorks was hashing it; retry the import after the file is stable."
+                .to_owned(),
+        ));
+    }
+    Ok((hash, after))
+}
+
 pub(crate) async fn run_model_import_job(
     api: &ApiClient,
     settings: &Settings,
@@ -4216,28 +4244,43 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
+    let imported_model_file = first_safetensors_path(&target_dir);
+    let mut model_file_sha256 = None;
+    let mut verified_model_file_identity = None;
+
     // sc-6137: verify a caller-supplied content digest for source-URL/uploaded model
     // imports (HF repo files are per-file verified during download). On mismatch the
     // file is removed and the job fails with an actionable message.
-    if let Some(expected_sha256) = optional_payload_string(&job.payload, "expectedSha256") {
-        if let Some(file) = first_safetensors_path(&target_dir) {
-            if let Err(error) = verify_file_sha256(
-                api,
-                settings,
-                &job.id,
-                &file,
-                expected_sha256,
-                "Imported model",
-            )
-            .await
-            {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "Model import failed.",
-                    Some(error.to_string()),
-                )
-                .await;
+    if let Some(expected_sha256) =
+        optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256)
+    {
+        if let Some(file) = imported_model_file.as_ref() {
+            match stable_model_file_sha256(api, settings, &job.id, file).await {
+                Ok((hash, identity)) if hash == expected_sha256 => {
+                    model_file_sha256 = Some(hash);
+                    verified_model_file_identity = Some(identity);
+                }
+                Ok((hash, _)) => {
+                    let _ = tokio::fs::remove_file(file).await;
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import failed.",
+                        Some(format!(
+                            "Imported model failed its integrity check (sha256 {hash}, but the source declares {expected_sha256}); the download was corrupted. Re-download the file."
+                        )),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import failed.",
+                        Some(error.to_string()),
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -4249,8 +4292,8 @@ pub(crate) async fn run_model_import_job(
     // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
     // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
     // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
-    let base_weight_family = match first_safetensors_path(&target_dir) {
-        Some(weight_file) => match detect_base_weight_file(&weight_file) {
+    let base_weight_family = match imported_model_file.as_ref() {
+        Some(weight_file) => match detect_base_weight_file(weight_file) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
                     return fail_job(
@@ -4329,7 +4372,25 @@ pub(crate) async fn run_model_import_job(
         }
     };
 
-    write_model_install_marker(&target_dir, &job.payload, repo.unwrap_or(""), &job.id).await?;
+    // Attribution is content-derived and retained with the import so generation does not reread a
+    // multi-gigabyte checkpoint on every image job. When integrity verification already streamed
+    // the file, reuse that exact digest; otherwise hash it once now.
+    if model_file_sha256.is_none() {
+        if let Some(file) = imported_model_file.as_ref() {
+            let (hash, identity) = stable_model_file_sha256(api, settings, &job.id, file).await?;
+            model_file_sha256 = Some(hash);
+            verified_model_file_identity = Some(identity);
+        }
+    }
+    write_model_install_marker(
+        &target_dir,
+        &job.payload,
+        repo.unwrap_or(""),
+        &job.id,
+        verified_model_file_identity.as_ref(),
+        model_file_sha256.as_deref(),
+    )
+    .await?;
     if let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
