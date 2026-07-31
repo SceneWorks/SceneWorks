@@ -63,6 +63,10 @@ const KREA_IMPORTED_BASE_TIER: &str = "bf16";
 /// distilled-Turbo dense merges, like variant5). The UI normally supplies `advanced.steps`; this only
 /// applies when it does not.
 const KREA_IMPORTED_DEFAULT_STEPS: u32 = 8;
+// The pinned Krea runtime's curated sampler falls back to Euler when `GenerationRequest.sampler` is
+// absent. Name it explicitly in both the request and telemetry so execution and exported metadata
+// cannot drift if that library default changes.
+const KREA_IMPORTED_SAMPLER: &str = "euler";
 
 /// A single-file checkpoint is one on-disk `.safetensors` FILE (the imported transformer), as opposed to
 /// a diffusers snapshot DIRECTORY (a builtin turnkey tier). This is the single-file-vs-snapshot-dir
@@ -319,6 +323,10 @@ fn krea_imported_raw_settings(
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert(
+        "resolvedSampler".to_owned(),
+        Value::String(KREA_IMPORTED_SAMPLER.to_owned()),
+    );
+    raw.insert(
         "mode".to_owned(),
         Value::String(
             if is_edit {
@@ -537,7 +545,7 @@ async fn generate_krea_imported_stream(
                         &[],
                         None,
                         None,
-                        None,
+                        Some(KREA_IMPORTED_SAMPLER),
                         None,
                         None,
                         None,
@@ -559,6 +567,7 @@ async fn generate_krea_imported_stream(
                     count: 1,
                     seed: Some(seed as u64),
                     steps: Some(steps),
+                    sampler: Some(KREA_IMPORTED_SAMPLER.to_owned()),
                     conditioning: conditioning.clone(),
                     cancel: cancel.clone(),
                     ..Default::default()

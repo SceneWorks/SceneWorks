@@ -168,11 +168,12 @@ appear in it, because the renderer never sees one. `Version:` is fed from `produ
 same envelope, so the two blocks in one file cannot disagree about which build wrote it, and
 [the setting](#the-setting) governs both together — off means neither is written.
 
-For generated base images, the worker adds one post-resolution fact before the two blocks are
-written: when a generation lane chose the actual denoise count after request parsing, its trusted
-`numInferenceSteps` result becomes `advanced.steps`. This is the count that really ran, not a model
-default guessed later. A client-supplied `numInferenceSteps` is never promoted, and multi-phase
-schedules remain uncollapsed.
+For generated base images, the worker adds trusted post-resolution facts before the two blocks are
+written. When a generation lane chose the actual denoise count after request parsing, its trusted
+`numInferenceSteps` result becomes `advanced.steps`. The imported-Krea lane also records and exports
+the actual `euler` sampler it passes to the runtime. These are execution facts, not model defaults
+guessed later. Client-supplied internal telemetry is never promoted, and multi-phase schedules
+remain uncollapsed.
 
 ### Omit rather than approximate
 
@@ -185,7 +186,7 @@ anything without a clean equivalent is **left out rather than approximated**.
 | Field | What it is |
 | --- | --- |
 | `Steps` | `advanced.steps`, when it is a whole number of at least one and no multi-phase schedule overrides it. This includes the worker-resolved count above when the request omitted its own value. |
-| `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. |
+| `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. For imported Krea, the worker overwrites this with the actual `euler` sampler it executes. |
 | `CFG scale` | `advanced.guidanceScale`, only when `advanced.guidanceMethod` is absent. The studio emits that key only for a method that is not plain CFG, so its presence means the number is not a CFG scale. |
 | `Seed` | `seed`, verbatim — the seed of this image, which is the only one the envelope carries. |
 | `Size` | `width` x `height`, only when they are the dimensions of the file being written. |
