@@ -565,6 +565,10 @@ def test_manifest_model_path_is_only_an_optional_override():
     is absent.
     """
     expected_readers = {
+        # sc-16426: gallery attribution reads the imported checkpoint only after the worker has
+        # selected an imported Krea/SDXL route, and declines attribution when every path source is
+        # absent. It does not affect generation's normal repo resolution.
+        "image_jobs.rs",
         "image_jobs/base.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
