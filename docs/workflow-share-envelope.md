@@ -607,13 +607,24 @@ So the editor's `Download` has two behaviours, and its header says which one the
 grade, an AI op, a second layer, a moved or faded or blended layer all fall out of the first case,
 and undoing back to the opened image falls back into it. Note the consequence for a source over
 the editor's canvas ceiling: it is resampled on load, so the canvas is a proxy, and the untouched
-download hands back the **original** file rather than the smaller one on screen. That is what stops
-a recipe claiming a resolution the file it travels in does not have.
+download hands back the **original** file — at its original resolution — rather than the smaller
+one on screen. That is what stops a recipe claiming a resolution the file it travels in does not
+have, and it is why the over-ceiling banner on the canvas states which size the next click writes.
 
 The first case is a genuine egress the editor did not use to have — an authored prompt now leaves
 in a file that previously lost it — which is why the header names it rather than only naming the
-loss. To send that image without the recipe, save it to the Library and use **Save a copy without
-the workflow**.
+loss. To send that image without the recipe, use **Save a copy without the workflow** on it in the
+Library; saving from the editor rasterizes, so a copy saved there has already lost the recipe along
+with everything else the file carried.
+
+**The editor does not decide whether a file carries a recipe — the reader does.** There is one
+implementation of that question, `read_workflow_chunk`, and the editor reaches it over
+`POST /api/v1/workflows/inspect` rather than walking chunk framing itself. That answer is a round
+trip, so the header has two more states than the two above, and neither may be shown as *no
+recipe*: while the answer is outstanding it reads *Checking for a recipe…*, and when the reader
+could not produce one — the app is offline, the file is past the endpoint's own size cap, the file
+claims a workflow this build refuses to read — it reads *Recipe unknown*. Not knowing and knowing
+there is nothing are different facts, and only one of them is safe to stay quiet about.
 
 The strip itself refuses rather than guesses. A PNG whose chunk framing cannot be walked to an IEND,
 or whose unwalkable trailing bytes carry `sceneworks:workflow`, is an error and not a copy: "here is

@@ -1049,6 +1049,17 @@ fn sanitized_export_filename(value: &str) -> String {
         .to_owned()
 }
 
+/// The largest export payload the shell will accept from the webview.
+///
+/// Hoisted out of [`save_image_export`]'s body (sc-15954) so the web half can be pinned against
+/// it. It stopped being unreachable when the Image Editor's untouched download became a byte-exact
+/// passthrough of the source file: every editor export used to be a canvas raster bounded by
+/// `EDITOR_CANVAS_MAX_SIDE`, and a 300 MB source now arrives here whole. The editor keeps its own
+/// mirror (`MAX_DESKTOP_EXPORT_BYTES` in `apps/web/src/screens/ImageEditor.jsx`) and falls back to
+/// the raster BEFORE the invoke, so the user reads a sentence rather than catching this error —
+/// which is why the two numbers have to stay equal, and why a test says so.
+const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
+
 /// Write an export payload to disk EXACTLY as the webview handed it over.
 ///
 /// Split out of [`save_image_export`] so the one property that matters about this path is
@@ -1073,7 +1084,6 @@ pub async fn save_image_export(
     image_bytes: Vec<u8>,
     suggested_filename: String,
 ) -> Result<Option<String>, String> {
-    const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
     if image_bytes.is_empty() {
         return Err("The exported image was empty.".to_owned());
     }
@@ -1483,6 +1493,33 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-15954: the editor's mirror of [`MAX_EXPORT_BYTES`] is the same number.
+    ///
+    /// The mirror is what makes the ceiling a sentence instead of an error. The editor's untouched
+    /// download hands this command the SOURCE FILE rather than a bounded canvas raster, so a large
+    /// original can exceed it — and the editor decides that before the invoke, falling back to the
+    /// raster and saying so in the pill beside the button. If the two numbers drift, the fallback
+    /// fires at the wrong size in one direction or a user gets the raw "exceeds the 256 MB desktop
+    /// limit" on a file that used to download fine in the other.
+    #[test]
+    fn the_desktop_export_ceiling_matches_the_editors_mirror_of_it() {
+        let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/web/src/screens/ImageEditor.jsx");
+        let source = std::fs::read_to_string(&editor)
+            .unwrap_or_else(|error| panic!("read {}: {error}", editor.display()));
+        let declared = format!(
+            "MAX_DESKTOP_EXPORT_BYTES = {} * 1024 * 1024;",
+            MAX_EXPORT_BYTES / (1024 * 1024)
+        );
+        assert!(
+            source.contains(&declared),
+            "apps/web/src/screens/ImageEditor.jsx must declare `export const {declared}` to match \
+             this crate's MAX_EXPORT_BYTES; the editor decides BEFORE the invoke whether the \
+             passthrough fits, so a drift is either a hard error on a file that used to download \
+             or a needless fallback to the raster"
+        );
     }
 
     /// A unique scratch directory under the system temp dir, so the path-resolution

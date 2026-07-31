@@ -9801,6 +9801,31 @@ details[open] > summary.lora-scope-group-heading::before,
   border-color: color-mix(in srgb, var(--ie-warn, #d97706) 40%, var(--ie-border));
   color: color-mix(in srgb, var(--ie-warn, #d97706) 78%, var(--ie-text));
 }
+/* "Recipe unknown" and the resolution note are neither good news nor a loss — the muted default
+   border is right for both, and only the dot distinguishes them from a filled state. */
+.ie-recipe-note[data-tone="pending"]::before {
+  opacity: 0.45;
+}
+/* sc-15954: the live region stays MOUNTED for the life of the document so a screen reader has
+   something to observe changing — a region inserted into the DOM already populated is not
+   reliably announced, because there was no change to observe.
+   Emptied, it is collapsed with the standard visually-hidden recipe and NOT with `display: none`
+   or `visibility: hidden`: both of those drop the element from the accessibility tree, which is
+   the very thing unmounting it did wrong. Taken out of flow so it contributes no flex gap to the
+   header row either. */
+.ie-recipe-note[data-empty] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.ie-recipe-note[data-empty]::before {
+  display: none;
+}
 
 /* Shared unsaved-work pill for the library screens (sc-11971): the Pose Library Create
    review, the Key Point Capture review, and the Collections builder all flag in-progress

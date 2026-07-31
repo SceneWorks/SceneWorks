@@ -65,6 +65,9 @@ import {
   exportEditorFile,
   editorDownloadPlan,
   editorDownloadNote,
+  downloadSizeSentence,
+  MAX_DESKTOP_EXPORT_BYTES,
+  RASTER_REASON_DESKTOP_CAP,
   paintBoxesOnContext,
   colorName,
   composeColorPrompt,
@@ -93,6 +96,7 @@ import {
   InlineLayerName,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 
 // These tests cover the non-canvas surface of the editor (empty state, the inert
 // tool scaffold, and the load affordances). The Konva <Stage> only mounts once a
@@ -653,7 +657,7 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
 // sc-15948's embedded recipe. `editorDownloadPlan` is the single decision both the exported bytes
 // and the header caption are read from, which is what stops the claim and the file drifting.
 describe("editor download plan", () => {
-  const original = { blob: { id: "source-bytes" }, filename: "portrait.png", carriesWorkflow: true };
+  const original = { blob: { id: "source-bytes", size: 4096 }, filename: "portrait.png" };
 
   function doc(overrides = {}, layerOverrides = {}) {
     const installedBlob = overrides.installedBlob ?? original.blob;
@@ -681,10 +685,19 @@ describe("editor download plan", () => {
     };
   }
 
+  // The verdict is a PARAMETER now, not a field the editor derived itself: `read_workflow_chunk`
+  // behind `POST /api/v1/workflows/inspect` decides it, and it arrives after the document is open.
+  // `plan(doc)` with no second argument is therefore the pre-answer state, and it must never be
+  // the same thing as "no recipe" — see the pending/unknown cases below.
+  const plan = (work, state = "present", options = { desktop: false }) =>
+    editorDownloadPlan(work, state, options);
+
   it("hands an untouched PNG straight through, under its own name", () => {
-    expect(editorDownloadPlan(doc())).toEqual({
+    expect(plan(doc())).toEqual({
       mode: "original",
+      reason: null,
       filename: "portrait.png",
+      workflow: "present",
       carriesWorkflow: true,
       hadWorkflow: true,
     });
@@ -693,8 +706,21 @@ describe("editor download plan", () => {
   // The AC's headline case: open a generated image, change nothing, Download. Before this story
   // that produced a re-encode with the recipe gone and nothing said about it.
   it("never re-rasterizes an unmodified generated image", () => {
-    expect(editorDownloadPlan(doc()).mode).toBe("original");
-    expect(editorDownloadNote(editorDownloadPlan(doc())).label).toBe("Recipe included");
+    expect(plan(doc()).mode).toBe("original");
+    expect(editorDownloadNote(plan(doc())).label).toBe("Recipe included");
+  });
+
+  // The passthrough is about the BYTES and the verdict is about their contents, so a document the
+  // reader has not answered for yet still goes out untouched — what changes is only the sentence.
+  it.each([
+    ["pending", "Checking for a recipe…"],
+    ["unknown", "Recipe unknown"],
+    ["absent", null],
+  ])("keeps the passthrough while the verdict is %s", (state, label) => {
+    const result = plan(doc(), state);
+    expect(result.mode).toBe("original");
+    expect(result.carriesWorkflow).toBe(false);
+    expect(editorDownloadNote(result)?.label ?? null).toBe(label);
   });
 
   // Every mutation the editor has replaces or supplements the layer stack, and each one has to
@@ -709,16 +735,16 @@ describe("editor download plan", () => {
     ["a blend mode", {}, { blendMode: "multiply" }],
     ["a hidden layer", {}, { visible: false }],
   ])("re-rasterizes after %s", (_label, overrides, layerOverrides) => {
-    const plan = editorDownloadPlan(doc(overrides, layerOverrides));
-    expect(plan.mode).toBe("raster");
-    expect(plan.carriesWorkflow).toBe(false);
-    expect(plan.filename).toBe("portrait-edited.png");
+    const result = plan(doc(overrides, layerOverrides));
+    expect(result.mode).toBe("raster");
+    expect(result.carriesWorkflow).toBe(false);
+    expect(result.filename).toBe("portrait-edited.png");
   });
 
   it("re-rasterizes once a second layer exists", () => {
     const work = doc();
     work.layers = [...work.layers, { ...work.layers[0], id: "top", blob: { id: "layer-2" } }];
-    expect(editorDownloadPlan(work).mode).toBe("raster");
+    expect(plan(work).mode).toBe("raster");
   });
 
   // An outpaint/pad grows the document past the bitmap sitting in it, so the layer alone no
@@ -726,7 +752,26 @@ describe("editor download plan", () => {
   it("re-rasterizes when the document is bigger than the bitmap in it", () => {
     const work = doc();
     work.width = 1536;
-    expect(editorDownloadPlan(work).mode).toBe("raster");
+    expect(plan(work).mode).toBe("raster");
+  });
+
+  // The desktop shell refuses a payload over `MAX_EXPORT_BYTES` (apps/desktop/src/settings.rs).
+  // Before sc-15954 that ceiling was unreachable — every editor export was a canvas raster bounded
+  // by EDITOR_CANVAS_MAX_SIDE — and the byte-exact passthrough made it reachable, so an untouched
+  // 300 MB source would have hard-errored on a file that used to download fine. The plan falls
+  // back to the raster (the pre-sc-15954 behaviour) and says why, before the click.
+  it("falls back to the raster on desktop for a source over the shell's export ceiling", () => {
+    const work = doc({ originalExport: { blob: { id: "source-bytes", size: MAX_DESKTOP_EXPORT_BYTES + 1 } } });
+    work.layers[0].blob = work.source.originalExport.installedBlob;
+    const result = plan(work, "present", { desktop: true });
+    expect(result.mode).toBe("raster");
+    expect(result.reason).toBe(RASTER_REASON_DESKTOP_CAP);
+    const note = editorDownloadNote(result);
+    expect(note.label).toBe("Recipe not carried");
+    expect(note.detail).toContain("256 MB");
+    // The browser writes through an object URL and has no such ceiling, so the same file passes
+    // through there.
+    expect(plan(work, "present", { desktop: false }).mode).toBe("original");
   });
 
   // THE geometry trap this story exists for. `boundedEditorCanvasDimensions` resamples anything
@@ -740,8 +785,7 @@ describe("editor download plan", () => {
     work.layers[0].image = { naturalWidth: 4096, naturalHeight: 4096 };
     work.source.editorDownscaled = { width: 4096, height: 4096, scaled: true, sourceWidth: 8192, sourceHeight: 8192 };
 
-    const plan = editorDownloadPlan(work);
-    expect(plan.mode).toBe("original");
+    expect(plan(work).mode).toBe("original");
     // The bytes that go out are the source's, so nothing in the file can claim a resolution the
     // file does not have.
     expect(work.source.originalExport.blob).toBe(original.blob);
@@ -757,47 +801,202 @@ describe("editor download plan", () => {
       { width: 10, height: 10, source: { name: "x.png" }, layers: [] },
       null,
     ]) {
-      const plan = editorDownloadPlan(work);
-      if (plan.mode === "raster") expect(plan.carriesWorkflow).toBe(false);
+      const result = plan(work);
+      if (result.mode === "raster") expect(result.carriesWorkflow).toBe(false);
     }
   });
 
+  // A JPEG, a blank canvas, an AI result: none of them can carry the envelope, so the question is
+  // ANSWERED rather than open, and the state is `absent` even when the caller passes something
+  // else. `unknown` here would print "Recipe unknown" over every JPEG the editor ever opens.
   it("falls back to a raster for a source the editor could not vouch for", () => {
     const work = doc();
     delete work.source.originalExport;
-    expect(editorDownloadPlan(work)).toEqual({
+    expect(plan(work, "unknown")).toEqual({
       mode: "raster",
+      reason: null,
       filename: "portrait-edited.png",
+      workflow: "absent",
       carriesWorkflow: false,
       hadWorkflow: false,
     });
+    expect(editorDownloadNote(plan(work, "unknown"))).toBeNull();
   });
 });
 
 describe("editor download note", () => {
-  // Silence is only correct when there was never a recipe to speak about — every image in the
-  // world that did not come out of a SceneWorks generation.
-  it("says nothing about an image that never carried a recipe", () => {
-    expect(editorDownloadNote({ mode: "original", hadWorkflow: false })).toBeNull();
-    expect(editorDownloadNote({ mode: "raster", hadWorkflow: false })).toBeNull();
-    expect(editorDownloadNote(null)).toBeNull();
+  const note = (plan, options) => editorDownloadNote(plan, options);
+  const DOWNSCALED = { width: 4096, height: 4096, scaled: true, sourceWidth: 8192, sourceHeight: 8192 };
+
+  // Silence is only correct when the READER walked the file and found nothing, and the download is
+  // the size it looks. Every other combination says something.
+  it("says nothing about an ordinary image the reader confirmed carries no recipe", () => {
+    expect(note({ mode: "original", workflow: "absent" })).toBeNull();
+    expect(note({ mode: "raster", workflow: "absent" })).toBeNull();
+    expect(note(null)).toBeNull();
   });
 
   it("announces the loss on an edited document, in visible text", () => {
-    const note = editorDownloadNote({ mode: "raster", hadWorkflow: true, carriesWorkflow: false });
-    expect(note.tone).toBe("dropped");
-    expect(note.label).toBe("Recipe not carried");
-    expect(note.detail).toMatch(/is not in it/);
+    const row = note({ mode: "raster", workflow: "present", carriesWorkflow: false });
+    expect(row.tone).toBe("dropped");
+    expect(row.label).toBe("Recipe not carried");
+    expect(row.detail).toMatch(/is not in it/);
   });
 
   // The other direction is announced too. The passthrough puts an authored prompt into a
   // downloaded file where the old behaviour destroyed it, and someone deciding whether to send an
   // image to a client is owed that sentence — which is why it names the control that strips it.
-  it("announces the inclusion too, and names the way to strip it", () => {
-    const note = editorDownloadNote({ mode: "original", hadWorkflow: true, carriesWorkflow: true });
-    expect(note.tone).toBe("included");
-    expect(note.label).toBe("Recipe included");
-    expect(note.detail).toContain("Save a copy without the workflow");
+  //
+  // The control is named from the shared constant and the advice points at the LIBRARY: `runSave`
+  // rasterizes, so an image saved to the Library from the editor never carries the recipe in the
+  // first place and "save it here, then strip it" was directions to a copy that had already lost
+  // what the user was trying to remove.
+  it("announces the inclusion too, and names the real way to strip it", () => {
+    const row = note({ mode: "original", workflow: "present", carriesWorkflow: true });
+    expect(row.tone).toBe("included");
+    expect(row.label).toBe("Recipe included");
+    expect(row.detail).toContain(SAVE_WITHOUT_WORKFLOW_LABEL);
+    expect(row.detail).toContain("in the Library");
+  });
+
+  // ── The two states a first cut left silent ──────────────────────────────────
+  //
+  // Both were `carriesWorkflow: false` before, indistinguishable from "this file has no recipe".
+  // An untouched export then shipped a recipe with no pill at all, and an edited one dropped a
+  // real recipe with no pill at all — the two outcomes AC2 forbids by name.
+  it("renders a verdict that has not arrived rather than reading as 'no recipe'", () => {
+    const row = note({ mode: "original", workflow: "pending" });
+    expect(row.tone).toBe("pending");
+    expect(row.label).toBe("Checking for a recipe…");
+    expect(row.detail).toMatch(/not yet known/);
+  });
+
+  it.each([
+    ["original", /anything in it travels/],
+    ["raster", /anything the original carried is not in it/],
+  ])("renders a verdict the reader could not produce (%s)", (mode, detail) => {
+    const row = note({ mode, workflow: "unknown" });
+    expect(row.tone).toBe("unknown");
+    expect(row.label).toBe("Recipe unknown");
+    expect(row.detail).toMatch(/not that it has none/);
+    expect(row.detail).toMatch(detail);
+  });
+
+  // ── The resolution, which changed for everyone and not only for recipes ─────
+  //
+  // sc-15954 made the over-ceiling banner false: the downscale used to apply to the export too,
+  // and now an untouched download is the ORIGINAL file at its original size. With no recipe in the
+  // file there was no other surface at all, so a large scan's download silently changed size.
+  it("states the resolution for a resampled source even when there is no recipe", () => {
+    const row = note({ mode: "original", workflow: "absent" }, { downscaled: DOWNSCALED });
+    expect(row.tone).toBe("size");
+    expect(row.label).toBe("Original size");
+    expect(row.detail).toContain("8192 × 8192");
+    expect(row.detail).toContain("4096 × 4096");
+
+    const edited = note({ mode: "raster", workflow: "absent" }, { downscaled: DOWNSCALED });
+    expect(edited.label).toBe("Working size");
+    expect(edited.detail).toMatch(/4096 × 4096 working size/);
+  });
+
+  it("keeps the recipe headline and appends the resolution when both apply", () => {
+    const row = note({ mode: "original", workflow: "present" }, { downscaled: DOWNSCALED });
+    expect(row.label).toBe("Recipe included");
+    expect(row.detail).toContain("8192 × 8192");
+  });
+
+  // The banner on the canvas and the pill beside the button render the same helper, so they cannot
+  // describe the same click differently — including under the desktop ceiling, where an untouched
+  // download IS the working copy.
+  it("gives the banner one sentence per plan, and nothing when nothing was resampled", () => {
+    expect(downloadSizeSentence({ mode: "original" }, null)).toBe("");
+    expect(downloadSizeSentence({ mode: "original" }, { scaled: false })).toBe("");
+    expect(downloadSizeSentence({ mode: "original" }, DOWNSCALED)).toMatch(
+      /saves the original file at 8192 × 8192/,
+    );
+    expect(
+      downloadSizeSentence({ mode: "raster", reason: RASTER_REASON_DESKTOP_CAP }, DOWNSCALED),
+    ).toMatch(/writes a new PNG at the 4096 × 4096 working size/);
+  });
+});
+
+// ── The two outcomes AC2 forbids, on the file that provoked them ─────────────
+//
+// An 8192² SeedVR2 upscale output is a routine SceneWorks artifact. It is over
+// EDITOR_CANVAS_MAX_SIDE (so the canvas is a proxy) and it was over the deleted walker's 64 MiB
+// scan ceiling (so the walker answered "no recipe" for it, whatever it carried). With the walker
+// gone the reader answers, and both of the AC's named failures are unreachable:
+//
+// * untouched → the recipe ships FLAGGED, never silently;
+// * edited → the loss is flagged, never silent.
+//
+// The one thing that could reopen either is a state that renders as nothing, which is why the two
+// non-answers are asserted on the same document.
+describe("the AC-forbidden outcomes, on an 8192² over-ceiling source", () => {
+  const DOWNSCALED = { width: 4096, height: 4096, scaled: true, sourceWidth: 8192, sourceHeight: 8192 };
+  const sourceBlob = { id: "8192-source", size: 90 * 1024 * 1024 };
+  const proxyBlob = { id: "4096-proxy" };
+
+  function doc({ edited = false } = {}) {
+    return {
+      width: 4096,
+      height: 4096,
+      source: {
+        kind: "asset",
+        name: "upscale.png",
+        editorDownscaled: DOWNSCALED,
+        originalExport: { blob: sourceBlob, filename: "upscale.png", installedBlob: proxyBlob },
+      },
+      layers: [
+        {
+          id: "bg",
+          blob: edited ? { id: "cropped" } : proxyBlob,
+          image: { naturalWidth: 4096, naturalHeight: 4096 },
+          visible: true,
+          opacity: 1,
+          blendMode: "source-over",
+          transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 },
+        },
+      ],
+    };
+  }
+
+  const noteFor = (work, state) =>
+    editorDownloadNote(editorDownloadPlan(work, state, { desktop: false }), {
+      downscaled: DOWNSCALED,
+    });
+
+  it("flags the recipe on an untouched export instead of shipping it silently", () => {
+    const plan = editorDownloadPlan(doc(), "present", { desktop: false });
+    expect(plan.mode).toBe("original");
+    expect(plan.carriesWorkflow).toBe(true);
+    expect(noteFor(doc(), "present").label).toBe("Recipe included");
+  });
+
+  it("flags the loss on an edited export instead of dropping the recipe silently", () => {
+    const plan = editorDownloadPlan(doc({ edited: true }), "present", { desktop: false });
+    expect(plan.mode).toBe("raster");
+    expect(plan.carriesWorkflow).toBe(false);
+    expect(plan.hadWorkflow).toBe(true);
+    expect(noteFor(doc({ edited: true }), "present").label).toBe("Recipe not carried");
+  });
+
+  // The states that used to be indistinguishable from "no recipe". Neither may render as nothing
+  // on either branch, or one of the two outcomes above reopens for exactly this file.
+  it.each([
+    ["pending", false, "Checking for a recipe…"],
+    ["pending", true, "Checking for a recipe…"],
+    ["unknown", false, "Recipe unknown"],
+    ["unknown", true, "Recipe unknown"],
+  ])("still says something while the verdict is %s (edited: %s)", (state, edited, label) => {
+    expect(noteFor(doc({ edited }), state).label).toBe(label);
+  });
+
+  // And the case with no recipe at all — a large scan, a foreign PNG — where sc-15954 still
+  // changed which resolution the file downloads at.
+  it("states the resolution change even with no recipe in the file", () => {
+    expect(noteFor(doc(), "absent").detail).toContain("8192 × 8192");
+    expect(noteFor(doc({ edited: true }), "absent").detail).toContain("4096 × 4096");
   });
 });
 

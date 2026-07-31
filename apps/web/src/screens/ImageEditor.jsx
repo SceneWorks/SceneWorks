@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
-import { apiFetch } from "../api.js";
+import { apiFetch, inspectWorkflowFile, isAbortError } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
@@ -9,7 +9,15 @@ import { appConfirm } from "../appConfirm.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
-import { describeOpenedImage } from "../pngWorkflowChunk.js";
+import {
+  SOURCE_WORKFLOW_ABSENT,
+  SOURCE_WORKFLOW_PENDING,
+  SOURCE_WORKFLOW_PRESENT,
+  SOURCE_WORKFLOW_UNKNOWN,
+  describeOpenedImage,
+  workflowStateFromInspect,
+} from "../editorSourceWorkflow.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
@@ -720,6 +728,28 @@ export async function exportEditorFile(
 // AI write-back, added layer, transform) replaces or supplements that object. Undo restores the
 // same blob by reference (`snapshotLayers` shares it), so undoing back to the opened image
 // correctly re-enables the passthrough.
+//
+// # Who decides whether the source carries a recipe
+//
+// `POST /api/v1/workflows/inspect`, which runs the one reader
+// (`sceneworks_core::workflow_png::read_workflow_chunk`). Not a chunk walker in this app — see the
+// header of `editorSourceWorkflow.js` for the five files a second implementation got wrong. The
+// consequence for the plan is that the verdict is one of FOUR states and arrives late, so both
+// `pending` and `unknown` have to survive all the way to the pill rather than being flattened into
+// "no recipe" on the way.
+
+/// The desktop shell's export ceiling, mirrored from `MAX_EXPORT_BYTES` in
+/// `apps/desktop/src/settings.rs` and pinned to it by
+/// `the_desktop_export_ceiling_matches_the_editors_mirror_of_it`.
+///
+/// It has to be known HERE rather than discovered from the error, because the byte-exact
+/// passthrough is what can exceed it: before sc-15954 every editor download was a bounded canvas
+/// raster and this limit was unreachable, and afterwards an untouched 300 MB source would hand the
+/// shell 300 MB and get a hard "exceeds the 256 MB desktop limit" on a file that used to download
+/// fine. So the plan falls back to the raster for those — the pre-sc-15954 behaviour, which still
+/// works — and the pill says so BEFORE the click rather than the shell erroring after it. The
+/// browser path has no such ceiling (it writes through an object URL) and keeps the passthrough.
+export const MAX_DESKTOP_EXPORT_BYTES = 256 * 1024 * 1024;
 
 /// Whether a layer sits 1:1 over the document with nothing done to it.
 function layerIsUntouched(layer, working) {
@@ -738,63 +768,175 @@ function layerIsUntouched(layer, working) {
   );
 }
 
+/// Why an untouched document is being rasterized anyway. Null when it is not.
+export const RASTER_REASON_EDITED = null;
+export const RASTER_REASON_DESKTOP_CAP = "desktop-export-cap";
+
 /// What `Download` will produce for this document. Pure, so the claim the header prints and the
 /// bytes the export writes are decided in ONE place and cannot drift.
 ///
-/// * `mode: "original"` — hand the opened file through untouched. `carriesWorkflow` says whether
-///   a recipient gets a recipe out of it.
-/// * `mode: "raster"` — flatten the layer stack to a new PNG. `hadWorkflow` says whether the file
-///   this session started from carried a recipe, which is what makes the loss worth announcing.
-export function editorDownloadPlan(working) {
+/// * `mode: "original"` — hand the opened file through untouched.
+/// * `mode: "raster"` — flatten the layer stack to a new PNG, which carries no recipe ever.
+///   `reason` says why, since one of the two reasons is not "you edited it".
+///
+/// `sourceWorkflow` is the reader's verdict about the OPENED file, one of the four
+/// `SOURCE_WORKFLOW_*` states. It is a parameter and not a field on `working` because it resolves
+/// asynchronously and must not be baked into an undo snapshot: the pill, the export branch and the
+/// banner all read this one value, and `pending` / `unknown` reach all three intact.
+export function editorDownloadPlan(
+  working,
+  sourceWorkflow = SOURCE_WORKFLOW_UNKNOWN,
+  { desktop = isDesktop } = {},
+) {
   const original = working?.source?.originalExport ?? null;
+  // With no `originalExport` the source is not a PNG this editor can hand back — a JPEG, a blank
+  // canvas, an AI result. None of those can carry an envelope, so the question is ANSWERED rather
+  // than open, and `absent` is the honest state instead of `unknown`.
+  const workflow = original ? sourceWorkflow : SOURCE_WORKFLOW_ABSENT;
+  const present = workflow === SOURCE_WORKFLOW_PRESENT;
   const layers = working?.layers ?? [];
   const untouched =
     Boolean(original) &&
     layers.length === 1 &&
     layers[0].blob === original.installedBlob &&
     layerIsUntouched(layers[0], working);
-  if (untouched) {
+  const overDesktopCap =
+    untouched && desktop && Number(original.blob?.size) > MAX_DESKTOP_EXPORT_BYTES;
+  if (untouched && !overDesktopCap) {
     return {
       mode: "original",
+      reason: RASTER_REASON_EDITED,
       filename: original.filename,
-      carriesWorkflow: original.carriesWorkflow === true,
-      hadWorkflow: original.carriesWorkflow === true,
+      workflow,
+      carriesWorkflow: present,
+      hadWorkflow: present,
     };
   }
   return {
     mode: "raster",
+    reason: overDesktopCap ? RASTER_REASON_DESKTOP_CAP : RASTER_REASON_EDITED,
     filename: editedFilename(working?.source),
+    workflow,
     carriesWorkflow: false,
-    hadWorkflow: original?.carriesWorkflow === true,
+    hadWorkflow: present,
   };
 }
 
-/// The line beside the Download button. Null when the source never carried a recipe, which is
-/// every image that did not come out of a SceneWorks generation — there is nothing to say about
-/// those and a permanent notice would be noise.
+/// The sentence about RESOLUTION, for a source the editor resampled on load — or "" when it did
+/// not resample.
 ///
-/// Both states are announced, not just the loss. Passthrough puts a prompt into a downloaded file
-/// where the old behaviour destroyed it, and a user deciding whether to send an image to a client
-/// is owed that sentence as much as the other one.
-export function editorDownloadNote(plan) {
-  if (!plan?.hadWorkflow) return null;
+/// This exists because sc-15954 made the old banner false. `boundedEditorCanvasDimensions`
+/// downscales anything over `EDITOR_CANVAS_MAX_SIDE`, and the banner used to say the scaling was
+/// "for reliable WebKit editing and export" — true until the untouched branch started exporting
+/// the ORIGINAL file at its original size. One sentence, rendered in both places that talk about
+/// it (the canvas banner and the pill beside Download), so the two cannot say different things.
+export function downloadSizeSentence(plan, downscaled) {
+  if (!plan || !downscaled?.scaled) return "";
+  const source = `${downscaled.sourceWidth} × ${downscaled.sourceHeight}`;
+  const working = `${downscaled.width} × ${downscaled.height}`;
   if (plan.mode === "original") {
+    return `Download saves the original file at ${source}, not the ${working} working copy on the canvas.`;
+  }
+  if (plan.reason === RASTER_REASON_DESKTOP_CAP) {
+    return `Download writes a new PNG at the ${working} working size, not the original ${source}.`;
+  }
+  return `This image has been edited, so Download writes a new PNG at the ${working} working size rather than the original ${source}.`;
+}
+
+/// The desktop-ceiling sentence, or "".
+function desktopCapSentence(plan) {
+  if (plan?.reason !== RASTER_REASON_DESKTOP_CAP) return "";
+  return (
+    `This file is larger than the ${Math.round(MAX_DESKTOP_EXPORT_BYTES / (1024 * 1024))} MB ` +
+    "the desktop save dialog accepts, so Download writes a new PNG of the working copy instead of " +
+    "handing the original file through."
+  );
+}
+
+function joinSentences(...parts) {
+  return parts.filter(Boolean).join(" ");
+}
+
+/// The line beside the Download button, or null when there is genuinely nothing to say — an
+/// ordinary-sized image the reader confirmed carries no recipe, which is most images in the world.
+///
+/// Every other combination gets a sentence, including the two that a first cut left silent:
+///
+/// * **`pending` / `unknown`** render rather than reading as "no recipe". A verdict that has not
+///   arrived, or one the reader could not produce, is a different fact from a verdict of "no", and
+///   collapsing the three is what let an over-ceiling export ship a recipe with no pill at all.
+/// * **A resampled source with no recipe** renders too, because sc-15954 changed which RESOLUTION
+///   the file downloads at and `hadWorkflow` has nothing to do with that.
+export function editorDownloadNote(plan, { downscaled = null } = {}) {
+  if (!plan) return null;
+  const size = downloadSizeSentence(plan, downscaled);
+  const cap = desktopCapSentence(plan);
+  if (plan.workflow === SOURCE_WORKFLOW_PRESENT) {
+    if (plan.mode === "original") {
+      return {
+        tone: "included",
+        label: "Recipe included",
+        detail: joinSentences(
+          "Nothing has been changed, so Download saves the file you opened byte for byte — " +
+            "including the SceneWorks recipe embedded in it.",
+          `To send a copy without the recipe, use “${SAVE_WITHOUT_WORKFLOW_LABEL}” on this image ` +
+            "in the Library — saving from the editor rasterizes, so it drops the recipe along " +
+            "with everything else the file carries.",
+          size,
+        ),
+      };
+    }
     return {
-      tone: "included",
-      label: "Recipe included",
-      detail:
-        "Nothing has been changed, so Download saves the file you opened byte for byte — " +
-        "including the SceneWorks recipe embedded in it. To share it without the recipe, save " +
-        "it to the Library and use “Save a copy without the workflow”.",
+      tone: "dropped",
+      label: "Recipe not carried",
+      detail: joinSentences(
+        cap ||
+          "This image has been edited, so Download writes a new PNG of what you see. The " +
+            "SceneWorks recipe from the image you opened is not in it — it describes a run that " +
+            "did not produce these pixels.",
+        cap && "The SceneWorks recipe embedded in the original is not in it.",
+        size,
+      ),
     };
   }
+  if (plan.workflow === SOURCE_WORKFLOW_PENDING) {
+    return {
+      tone: "pending",
+      label: "Checking for a recipe…",
+      detail: joinSentences(
+        "SceneWorks is reading the file you opened to find out whether it carries an embedded " +
+          "recipe. Until that answers, what Download will contain is not yet known.",
+        size,
+      ),
+    };
+  }
+  if (plan.workflow === SOURCE_WORKFLOW_UNKNOWN) {
+    return {
+      tone: "unknown",
+      label: "Recipe unknown",
+      detail: joinSentences(
+        "SceneWorks could not read the file you opened, so whether it carries an embedded recipe " +
+          "is unknown — not that it has none.",
+        plan.mode === "original"
+          ? "Nothing has been changed, so Download saves the file byte for byte and anything in " +
+              "it travels."
+          : joinSentences(
+              cap ||
+                "This image has been edited, so Download writes a new PNG of what you see and " +
+                  "anything the original carried is not in it.",
+              cap && "Anything the original carried is not in it.",
+            ),
+        size,
+      ),
+    };
+  }
+  // `absent`: the reader walked the file and found nothing. The only thing left worth saying is
+  // what sc-15954 changed about the SIZE of the download.
+  if (!size && !cap) return null;
   return {
-    tone: "dropped",
-    label: "Recipe not carried",
-    detail:
-      "This image has been edited, so Download writes a new PNG of what you see. The SceneWorks " +
-      "recipe from the image you opened is not in it — it describes a run that did not produce " +
-      "these pixels.",
+    tone: "size",
+    label: plan.mode === "original" ? "Original size" : "Working size",
+    detail: joinSentences(cap, size),
   };
 }
 
@@ -1776,12 +1918,13 @@ export function ImageEditor() {
       setStatus({ loading: true, error: "" });
       try {
         const prepared = await blobToEditorImage(blob);
-        // Keep the bytes we opened, plus whether they carry a readable recipe (sc-15954). The
-        // blob is retained by reference — no copy — and `installedBlob` is the identity token
-        // `editorDownloadPlan` compares the layer stack against. Note it is `prepared.blob`, not
-        // `blob`: a source over EDITOR_CANVAS_MAX_SIDE is resampled on load, so the two differ
-        // exactly in the case the story calls the sharp edge, and the passthrough branch must
-        // ship the ORIGINAL rather than the proxy the canvas is showing.
+        // Keep the bytes we opened (sc-15954). The blob is retained by reference — no copy — and
+        // `installedBlob` is the identity token `editorDownloadPlan` compares the layer stack
+        // against. Note it is `prepared.blob`, not `blob`: a source over EDITOR_CANVAS_MAX_SIDE is
+        // resampled on load, so the two differ exactly in the case the story calls the sharp edge,
+        // and the passthrough branch must ship the ORIGINAL rather than the proxy the canvas is
+        // showing. Whether those bytes carry a recipe is NOT decided here — `workflow` is a
+        // starting state and the effect below asks the one reader.
         const opened = await describeOpenedImage(blob, source?.name);
         const preparedSource = {
           ...source,
@@ -2713,32 +2856,100 @@ export function ImageEditor() {
     }
   }, [working, saving, workingImageToFile, importAsset, edits]);
 
+  // ── Does the opened file carry a recipe? Ask the one reader (sc-15954) ─────
+  //
+  // `POST /api/v1/workflows/inspect` runs `read_workflow_chunk`, the same function the import path
+  // and the sc-15951 drop panel use. Nothing in this app parses PNG chunks.
+  //
+  // The verdict lives HERE and not on `working.source`, for two reasons. It resolves after the
+  // document is installed, so writing it back through `setWorking` would either race the user's
+  // first edit or bake a stale `pending` into every undo snapshot taken before it landed. And it
+  // is keyed by the source blob, which undo restores BY REFERENCE — so undoing back to the opened
+  // image reuses the answer instead of asking again.
+  const [sourceWorkflow, setSourceWorkflow] = useState({ blob: null, state: SOURCE_WORKFLOW_UNKNOWN });
+  const openedExport = working?.source?.originalExport ?? null;
+  const openedBlob = openedExport?.blob ?? null;
+  const openedStartState = openedExport?.workflow ?? SOURCE_WORKFLOW_UNKNOWN;
+  const openedFilename = openedExport?.filename ?? null;
+  const activeProjectId = activeProject?.id ?? null;
+
+  useEffect(() => {
+    // `describeOpenedImage` already decided whether asking is possible at all: a PNG past the
+    // endpoint's own cap starts `unknown` and is never uploaded, because staging half a gigabyte
+    // server-side to be handed a 413 is a slower way to learn nothing.
+    if (!openedBlob || openedStartState !== SOURCE_WORKFLOW_PENDING) return undefined;
+    let live = true;
+    const controller = new AbortController();
+    setSourceWorkflow({ blob: openedBlob, state: SOURCE_WORKFLOW_PENDING });
+    (async () => {
+      let state = SOURCE_WORKFLOW_UNKNOWN;
+      try {
+        const body = await inspectWorkflowFile(
+          // Named so the multipart part carries a filename, exactly as the drop path's `File`
+          // does. `projectId` only widens the LoRA/preset lookups the resolution report is built
+          // against, and this caller reads `status` alone — but it is passed anyway so the server
+          // does one kind of work for one kind of request.
+          new File([openedBlob], openedFilename ?? "image.png", { type: "image/png" }),
+          { projectId: activeProjectId, token, signal: controller.signal },
+        );
+        state = workflowStateFromInspect(body);
+      } catch (err) {
+        // Offline, a 413, a 500, a 422 for a file this build refuses to read — none of those is
+        // "no recipe", and reporting them as one is the silent loss the AC forbids. `unknown` is
+        // rendered, not swallowed.
+        if (isAbortError(err)) return;
+        state = SOURCE_WORKFLOW_UNKNOWN;
+      }
+      if (live) setSourceWorkflow({ blob: openedBlob, state });
+    })();
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [openedBlob, openedStartState, openedFilename, activeProjectId, token]);
+
+  // The verdict for THIS document. Before the effect has run — and for any blob the store is not
+  // holding an answer for — it falls back to the state the open stamped, which is `pending` for a
+  // file on its way to the reader and `unknown` for one that will never go. Never `absent`.
+  const sourceWorkflowState =
+    sourceWorkflow.blob && sourceWorkflow.blob === openedBlob
+      ? sourceWorkflow.state
+      : openedStartState;
+
+  // The one decision the pill, the banner and the export branch all read.
+  const downloadPlan = useMemo(
+    () => (working ? editorDownloadPlan(working, sourceWorkflowState) : null),
+    [working, sourceWorkflowState],
+  );
+  const downloadNote = useMemo(
+    () =>
+      downloadPlan
+        ? editorDownloadNote(downloadPlan, { downscaled: working?.source?.editorDownscaled ?? null })
+        : null,
+    [downloadPlan, working],
+  );
+
   // Export straight to disk (no project involvement). An untouched PNG goes out as the file it
   // came in as — same bytes, same recipe chunk, same colour profile — and anything else is
   // flattened to a fresh PNG with no recipe in it (sc-15954). `downloadNote`, rendered beside the
-  // button, says which of the two the click will produce.
+  // button, says which of the two the click will produce — and the click reads the SAME plan
+  // object the pill was rendered from, so the two cannot disagree about the file that lands.
   const runDownload = useCallback(async () => {
-    if (!working) return;
+    if (!working || !downloadPlan) return;
     try {
-      const plan = editorDownloadPlan(working);
       const file =
-        plan.mode === "original"
+        downloadPlan.mode === "original"
           ? // The File wraps the SAME blob — no re-encode, so this is the one export path in the
             // editor whose bytes are the source's bytes.
-            new File([working.source.originalExport.blob], plan.filename, { type: "image/png" })
-          : await workingImageToFile(plan.filename);
+            new File([working.source.originalExport.blob], downloadPlan.filename, {
+              type: "image/png",
+            })
+          : await workingImageToFile(downloadPlan.filename);
       await exportEditorFile(file);
     } catch (err) {
       setStatus({ loading: false, error: `Could not export: ${err.message || err}` });
     }
-  }, [working, workingImageToFile]);
-
-  // The header's recipe note. Recomputed with the working document, so an edit (or an undo back
-  // to the opened bitmap) flips it immediately.
-  const downloadNote = useMemo(
-    () => (working ? editorDownloadNote(editorDownloadPlan(working)) : null),
-    [working],
-  );
+  }, [working, downloadPlan, workingImageToFile]);
 
   // Confirm before an action that would discard unsaved edits (Open / drag-drop a
   // new image while dirty). Resolves true when it's safe to proceed. Async + desktop-safe
@@ -3324,17 +3535,23 @@ export function ImageEditor() {
             ) : null}
             {/* Whether the download will carry the embedded recipe (sc-15954). Visible text, not
                 a tooltip: "silent loss is not an acceptable outcome" is the AC, and a title
-                attribute is silence on a touch device. */}
-            {downloadNote ? (
-              <span
-                className="ie-recipe-note"
-                data-tone={downloadNote.tone}
-                role="status"
-                title={downloadNote.detail}
-              >
-                {downloadNote.label}
-              </span>
-            ) : null}
+                attribute is silence on a touch device.
+
+                Mounted UNCONDITIONALLY for the whole life of the document and emptied rather than
+                unmounted. A live region inserted into the DOM already populated is not reliably
+                announced by any screen reader — the region has to exist before its content
+                changes for the change to be a change — and this one's content genuinely does
+                change under the user: "Checking for a recipe…" becomes "Recipe included" when the
+                reader answers, and "Recipe not carried" the moment they crop. */}
+            <span
+              className="ie-recipe-note"
+              data-empty={downloadNote ? undefined : "true"}
+              data-tone={downloadNote?.tone ?? "none"}
+              role="status"
+              title={downloadNote?.detail ?? undefined}
+            >
+              {downloadNote?.label ?? ""}
+            </span>
             <button
               className="ie-btn sm"
               onClick={runDownload}
@@ -3401,6 +3618,15 @@ export function ImageEditor() {
             <span>{toolHint}</span>
           </div>
         ) : null}
+        {/* The canvas is a proxy for an over-ceiling source. The second sentence is not a
+            flourish: before sc-15954 the downscale applied to the export too, and this banner said
+            so ("…for reliable WebKit editing and export"). Now an untouched download hands back
+            the ORIGINAL file at its original size, which makes the old sentence the only
+            user-visible statement about the downscale and a false one. It is rendered from
+            `downloadSizeSentence`, the same helper the pill's detail uses, so the canvas and the
+            button cannot describe the same click differently — and it follows the PLAN, so the
+            desktop-ceiling fallback (where an untouched download IS the working copy) reads
+            correctly too. */}
         {working?.source?.editorDownscaled ? (
           <div
             className="ie-hint"
@@ -3411,7 +3637,8 @@ export function ImageEditor() {
               Large source scaled from{" "}
               {working.source.editorDownscaled.sourceWidth} x{" "}
               {working.source.editorDownscaled.sourceHeight} to {working.width} x{" "}
-              {working.height} for reliable WebKit editing and export.
+              {working.height} for reliable WebKit editing.{" "}
+              {downloadSizeSentence(downloadPlan, working.source.editorDownscaled)}
             </span>
           </div>
         ) : null}

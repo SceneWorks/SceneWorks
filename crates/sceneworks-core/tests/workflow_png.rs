@@ -24,7 +24,9 @@ use sceneworks_core::workflow_png::{
     strip_workflow_chunk, workflow_chunk_size, write_workflow_chunk, MAX_WORKFLOW_TEXT_BYTES,
     WORKFLOW_CHUNK_KEYWORD,
 };
-use sceneworks_core::workflow_share::{build_workflow_share, WorkflowShare};
+use sceneworks_core::workflow_share::{
+    build_workflow_share, WorkflowShare, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_SCHEMA_VERSION,
+};
 use serde_json::{json, Value};
 
 fn repo_root() -> PathBuf {
@@ -730,4 +732,296 @@ fn an_image_the_user_did_not_generate_here_is_a_clean_absence() {
 fn a_missing_file_is_an_io_error_not_a_panic() {
     let missing = Path::new("does-not-exist-sc-15947.png");
     assert!(read_workflow_chunk_file(missing).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// The corpus the Image Editor's verdict is measured against (sc-15954)
+// ---------------------------------------------------------------------------
+//
+// The editor prints a sentence about what its Download will contain, and sc-15954 first answered
+// the question with a PNG chunk walker written in JavaScript. A second implementation of
+// `read_workflow_chunk` is a second set of answers: over this corpus it disagreed on five files,
+// in BOTH directions, and each disagreement broke an acceptance criterion — a false "no" shipped a
+// recipe with no notice, a false "yes" claimed one no recipient could read.
+//
+// So the walker is gone and the editor asks `POST /api/v1/workflows/inspect`, which runs the
+// function below. What this corpus pins is the mapping that makes that safe, in exactly the three
+// buckets the endpoint publishes:
+//
+// | reader               | endpoint                    | editor state |
+// |----------------------|-----------------------------|--------------|
+// | `Ok(Some(envelope))` | 200 `status: "workflow"`    | `present`    |
+// | `Ok(None)`           | 200 `status: "no_workflow"` | `absent`     |
+// | `Err(_)`             | a typed 4xx/5xx             | `unknown`    |
+//
+// `unknown` is a real third state in the UI and never collapses into "no recipe"
+// (`apps/web/src/editorSourceWorkflow.js`). The JS half of the pairing is
+// `editorSourceWorkflow.test.js`, which pins the same three rows from the endpoint's side.
+
+/// What the one reader says about a file, in the three buckets the editor's UI branches on.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// A recipe a recipient can read. The editor may print "Recipe included".
+    Present,
+    /// Walked clean, carries nothing of ours — every image in the world we did not generate.
+    Absent,
+    /// The reader refused. NOT "no recipe": nobody knows.
+    Unreadable,
+}
+
+fn verdict(bytes: &[u8]) -> Verdict {
+    match read_workflow_chunk(bytes) {
+        Ok(Some(_)) => Verdict::Present,
+        Ok(None) => Verdict::Absent,
+        Err(_) => Verdict::Unreadable,
+    }
+}
+
+/// PNG's CRC-32, computed rather than zeroed.
+///
+/// The chunk-span walker never checks one, so the fixtures elsewhere in this tree leave them zero.
+/// The READER goes through the `png` decoder, which does check — so a corpus built with zero CRCs
+/// would prove only that `png` rejects bad checksums, which is not what is under test here.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// `length | type | data | CRC`.
+fn framed(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut checked = kind.to_vec();
+    checked.extend_from_slice(data);
+    let mut chunk = u32::try_from(data.len())
+        .expect("chunk fits u32")
+        .to_be_bytes()
+        .to_vec();
+    chunk.extend_from_slice(&checked);
+    chunk.extend_from_slice(&crc32(&checked).to_be_bytes());
+    chunk
+}
+
+/// An UNCOMPRESSED `iTXt` payload: `keyword \0 flag method language \0 translated \0 text`.
+fn itxt(keyword: &str, text: &str) -> Vec<u8> {
+    let mut data = keyword.as_bytes().to_vec();
+    data.extend_from_slice(&[0, 0, 0, 0, 0]);
+    data.extend_from_slice(text.as_bytes());
+    data
+}
+
+/// A `tEXt` payload: `keyword \0 text`. Latin-1 by spec, which is why the codec does not use it.
+fn text_chunk(keyword: &str, text: &str) -> Vec<u8> {
+    let mut data = keyword.as_bytes().to_vec();
+    data.push(0);
+    data.extend_from_slice(text.as_bytes());
+    data
+}
+
+/// Offset of the LENGTH field of the first chunk of `kind`, walking from the signature.
+fn chunk_offset(bytes: &[u8], kind: &[u8; 4]) -> usize {
+    let mut cursor = 8;
+    while cursor + 8 <= bytes.len() {
+        let length = u32::from_be_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .expect("four length bytes"),
+        ) as usize;
+        if &bytes[cursor + 4..cursor + 8] == kind {
+            return cursor;
+        }
+        cursor += 12 + length;
+    }
+    panic!("no {} chunk in this PNG", String::from_utf8_lossy(kind));
+}
+
+fn spliced(bytes: &[u8], before: &[u8; 4], chunk: &[u8]) -> Vec<u8> {
+    let at = chunk_offset(bytes, before);
+    let mut out = bytes[..at].to_vec();
+    out.extend_from_slice(chunk);
+    out.extend_from_slice(&bytes[at..]);
+    out
+}
+
+/// A plain PNG of the fixture image with no chunk of ours in it.
+fn base_png() -> Vec<u8> {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("base.png");
+    rgb_fixture()
+        .save_with_format(&path, ImageFormat::Png)
+        .expect("writes a plain PNG");
+    fs::read(&path).expect("reads it back")
+}
+
+/// The golden envelope as JSON text, with `mutate` applied to the object first.
+fn envelope_text(mutate: impl FnOnce(&mut serde_json::Map<String, Value>)) -> String {
+    let mut value = as_value(&golden_envelope());
+    mutate(value.as_object_mut().expect("the envelope is an object"));
+    serde_json::to_string(&value).expect("serializes")
+}
+
+/// A PNG carrying `text` under our keyword as a single pre-IDAT `iTXt`.
+fn png_carrying(text: &str) -> Vec<u8> {
+    spliced(
+        &base_png(),
+        b"IDAT",
+        &framed(b"iTXt", &itxt(WORKFLOW_CHUNK_KEYWORD, text)),
+    )
+}
+
+#[test]
+fn the_readers_verdict_over_the_whole_corpus() {
+    let base = base_png();
+    let good = envelope_text(|_| {});
+    let ours = framed(b"iTXt", &itxt(WORKFLOW_CHUNK_KEYWORD, &good));
+
+    let corpus: Vec<(&str, Vec<u8>, Verdict)> = vec![
+        // ---- the two ordinary answers -----------------------------------------------------
+        ("a generated image", png_carrying(&good), Verdict::Present),
+        ("a foreign PNG", base.clone(), Verdict::Absent),
+        // ---- placement is a PRECEDENCE rule, not a count ----------------------------------
+        //
+        // The JS walker pooled both sides of IDAT and answered "2 chunks, so unreadable". The
+        // reader consults the tail only when the pre-IDAT pass came up empty, so a file with one
+        // of each yields the pre-IDAT chunk — the one our own encoder wrote in the pass that wrote
+        // the pixels. This row is the false NEGATIVE that shipped a recipe with no pill at all.
+        (
+            "one chunk before IDAT and one after",
+            spliced(&png_carrying(&good), b"IEND", &ours),
+            Verdict::Present,
+        ),
+        (
+            "a chunk only after IDAT",
+            spliced(&base, b"IEND", &ours),
+            Verdict::Present,
+        ),
+        (
+            "two chunks before IDAT",
+            spliced(&png_carrying(&good), b"IDAT", &ours),
+            Verdict::Unreadable,
+        ),
+        // ---- framing is not readability: the four false POSITIVES -------------------------
+        (
+            "malformed JSON under the keyword",
+            png_carrying("{\"sceneworksWorkflow\": \"image\","),
+            Verdict::Unreadable,
+        ),
+        (
+            "a schemaVersion from a newer build",
+            png_carrying(&envelope_text(|object| {
+                object.insert(
+                    "schemaVersion".to_owned(),
+                    json!(WORKFLOW_SHARE_SCHEMA_VERSION + 1),
+                );
+            })),
+            Verdict::Unreadable,
+        ),
+        (
+            "a marker kind this build does not read",
+            png_carrying(&envelope_text(|object| {
+                object.insert(WORKFLOW_SHARE_MARKER_KEY.to_owned(), json!("video"));
+            })),
+            Verdict::Unreadable,
+        ),
+        (
+            "text over MAX_WORKFLOW_TEXT_BYTES",
+            png_carrying(&"x".repeat(MAX_WORKFLOW_TEXT_BYTES + 1)),
+            Verdict::Unreadable,
+        ),
+        // ---- keywords that are not ours ---------------------------------------------------
+        (
+            "a tEXt spelling of the keyword",
+            spliced(
+                &base,
+                b"IDAT",
+                &framed(b"tEXt", &text_chunk(WORKFLOW_CHUNK_KEYWORD, &good)),
+            ),
+            Verdict::Absent,
+        ),
+        (
+            "a keyword that merely starts with ours",
+            spliced(
+                &base,
+                b"IDAT",
+                &framed(b"iTXt", &itxt(&format!("{WORKFLOW_CHUNK_KEYWORD}2"), &good)),
+            ),
+            Verdict::Absent,
+        ),
+        (
+            "somebody else's iTXt",
+            spliced(&base, b"IDAT", &framed(b"iTXt", &itxt("parameters", &good))),
+            Verdict::Absent,
+        ),
+        (
+            "our keyword with an empty text",
+            png_carrying(""),
+            Verdict::Unreadable,
+        ),
+        // ---- files that are not walkable --------------------------------------------------
+        (
+            "truncated mid-chunk",
+            png_carrying(&good)[..40].to_vec(),
+            Verdict::Unreadable,
+        ),
+        (
+            "truncated after the signature",
+            base[..8].to_vec(),
+            Verdict::Unreadable,
+        ),
+        (
+            "not a PNG at all",
+            b"GIF89a and then some".to_vec(),
+            Verdict::Unreadable,
+        ),
+        ("empty", Vec::new(), Verdict::Unreadable),
+    ];
+
+    assert!(
+        corpus.len() >= 17,
+        "the corpus shrank to {} cases — a class stopped being covered?",
+        corpus.len()
+    );
+    for (label, bytes, expected) in corpus {
+        assert_eq!(
+            verdict(&bytes),
+            expected,
+            "the reader's verdict for {label:?} changed; the Image Editor prints a sentence from \
+             it and `apps/web/src/editorSourceWorkflow.js` maps it to a UI state"
+        );
+    }
+}
+
+#[test]
+fn file_size_is_not_a_gate_on_the_answer() {
+    // The other false negative. The JS walker stopped measuring past a 64 MiB scan ceiling and
+    // reported "no recipe" for anything larger — which an 8192² SeedVR2 upscale output routinely
+    // is. The reader has no such ceiling: its budgets bound METADATA and decompressed TEXT, never
+    // the file, so the chunk is found at whatever size the image happens to be.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("big.png");
+    noisy_rgb(1024, 1024)
+        .save_with_format(&path, ImageFormat::Png)
+        .expect("writes a large PNG");
+    let big = spliced(
+        &fs::read(&path).expect("reads it back"),
+        b"IDAT",
+        &framed(
+            b"iTXt",
+            &itxt(WORKFLOW_CHUNK_KEYWORD, &envelope_text(|_| {})),
+        ),
+    );
+    assert!(
+        big.len() > 2 * 1024 * 1024,
+        "the fixture is meant to be large, got {} bytes",
+        big.len()
+    );
+    assert_eq!(verdict(&big), Verdict::Present);
 }
