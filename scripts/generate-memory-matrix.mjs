@@ -1056,7 +1056,12 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
                   ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
                   parity: {
-                    contract: record.quality.contract,
+                    contract: ["exact", "tolerance", "golden"].includes(record.quality.contract)
+                      ? record.quality.contract
+                      : record.quality.maximumErrorThreshold === 0 &&
+                          record.quality.meanErrorThreshold === 0
+                        ? "exact"
+                        : "tolerance",
                     result: record.quality.result === "not_run" ? "not_run" : record.quality.result,
                     metric: "maximum_absolute_error",
                     maximumError: record.quality.maximumError,

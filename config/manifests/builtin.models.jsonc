@@ -4389,8 +4389,8 @@
           {
             "abi": 1,
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "sc-16099-contract-v1",
-            "matrixSourceRevision": "sc-16099-contract-v1",
+            "sceneWorksRevision": "15bdd36231920d2705234cc2b432542b825a469f",
+            "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
             "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
@@ -4407,8 +4407,8 @@
           {
             "abi": 1,
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "sc-16099-contract-v1",
-            "matrixSourceRevision": "sc-16099-contract-v1",
+            "sceneWorksRevision": "15bdd36231920d2705234cc2b432542b825a469f",
+            "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
             "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
