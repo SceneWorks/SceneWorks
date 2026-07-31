@@ -453,10 +453,14 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
         expect(row.detail.length).toBeGreaterThan(20);
       }
     }
-    // …and the unrestored ones are exactly the lanes an image envelope carries that this studio
-    // has no control for, plus the two the CONTRACT deliberately reduces past the point of replay:
+    // …and the unrestored ones are exactly the lanes an envelope carries that THIS studio has no
+    // control for, plus the two the CONTRACT deliberately reduces past the point of replay:
     // `poses`, whose library ids do not travel, and `structuredPrompt`, whose caption object does
     // not (sc-15952 — the prompt is restored as prose instead, and the row says so).
+    //
+    // The eleven video keys (sc-15956) are here for the first reason, not the second: they travel
+    // intact in a shared MP4 and replay in Video Studio, which is a different panel. A row that
+    // said "restored" here would be claiming this studio had put them somewhere.
     expect(
       rows
         .filter((row) => !row.restored)
@@ -464,11 +468,22 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
         .sort(),
     ).toEqual([
       "angleSet",
+      "bridgeRightVideoConditioningStrength",
       "cnScale",
+      "distilledVariant",
       "imageGuidanceScale",
+      "lightning",
+      "ltxPipeline",
+      "motion",
       "poses",
       "structuredPrompt",
       "systemMessage",
+      "textEncoderModel",
+      "timelineAction",
+      "videoCfgGuidanceScale",
+      "videoConditioningStrength",
+      "videoRescaleScale",
+      "videoStgGuidanceScale",
     ]);
   });
 

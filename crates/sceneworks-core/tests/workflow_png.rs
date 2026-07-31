@@ -927,7 +927,10 @@ fn the_readers_verdict_over_the_whole_corpus() {
         (
             "a marker kind this build does not read",
             png_carrying(&envelope_text(|object| {
-                object.insert(WORKFLOW_SHARE_MARKER_KEY.to_owned(), json!("video"));
+                // `video` was this fixture's unknown kind until sc-15956 made it a lane the
+                // reader understands. The corpus needs a kind NO build reads, which is the
+                // state an older build is in when it meets a video envelope.
+                object.insert(WORKFLOW_SHARE_MARKER_KEY.to_owned(), json!("hologram"));
             })),
             Verdict::Unreadable,
         ),

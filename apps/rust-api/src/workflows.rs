@@ -40,7 +40,7 @@ use sceneworks_core::workflow_png::{read_workflow_chunk_file, WorkflowChunkError
 use sceneworks_core::workflow_resolution::{
     build_resolution_report, CatalogEntry, InstallAction, ResolutionReport, StaticCatalogs,
 };
-use sceneworks_core::workflow_share::{parse_workflow_share, WorkflowShare};
+use sceneworks_core::workflow_share::{parse_workflow_share, WorkflowShare, WORKFLOW_KIND_IMAGE};
 
 /// `status` when the file carried a readable envelope.
 pub(crate) const INSPECT_STATUS_WORKFLOW: &str = "workflow";
@@ -320,6 +320,39 @@ pub(crate) async fn get_asset_workflow(
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         }
     })?;
+    // The SECOND gate, and the one this route owns: the parser accepts EVERY kind in
+    // `WORKFLOW_KINDS`, so `parse_workflow_share` alone stopped being a container check the moment
+    // sc-15956 widened the marker to `image` | `video`. Both other readers assert the kind their
+    // own container carries — `workflow_png::read_workflow_chunk_file` demands `image`,
+    // `workflow_mp4::read_workflow_metadata` demands `video` — and this route is the third reader,
+    // so it owes the same assert against the lane it feeds.
+    //
+    // The lane is what makes this a refusal rather than a widening: the response goes to
+    // `api.js::fetchAssetWorkflow` → `useWorkflowDrop.js` → `recipeFromWorkflowShare`, which builds
+    // an **Image Studio** prefill. A video envelope reaching that produces a made-up image recipe
+    // out of a clip's `durationSeconds` / `fps` / `quality` — the exact "presented as a kind it is
+    // not" failure the kind gate exists to prevent, arriving through the one door with no container
+    // of its own to check. `assetPanels.jsx`'s `asset.type === "image"` button guard is a proxy for
+    // this and not a substitute: a video envelope stored on an image asset passes it unchanged.
+    //
+    // Same code as an unparseable record, because it is the same fact about the same record — ours,
+    // and wrong — and the caller's next move is identical. Pinned by
+    // `tests::workflows::the_asset_route_500s_when_the_stored_envelope_names_another_container`.
+    if share.kind != WORKFLOW_KIND_IMAGE {
+        tracing::error!(
+            event = "asset_workflow_unreadable",
+            %project_id,
+            kind = %share.kind,
+            "the stored envelope names a workflow kind this route has no reader for"
+        );
+        return Err(ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
+                     The image itself is unaffected."
+                .to_owned(),
+            code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
+        });
+    }
     let catalogs = inspect_catalogs(&state, Some(&project_id))
         .await
         .map_err(|error| coded(error, INSPECT_CODE_CATALOG_FAILED))?;

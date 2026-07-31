@@ -79,8 +79,51 @@ a test asserts it is strict semver.
 `schemaVersion` is the contract version and is **the only version the parser branches on**.
 `producer.version` is recorded so a bug report is actionable and is never interpreted. (It is not
 the only *field* the parser branches on: the `sceneworksWorkflow` marker is checked too, and a blob
-whose marker names a lane this build does not read — a future video envelope, say — is refused as an
-unsupported kind rather than parsed as an image one.)
+whose marker names a kind this build has no reader for at all — `hologram`, say — is refused as an
+unsupported kind rather than parsed as an image one. That check runs BEFORE the version check, so a
+kind we do not understand is never reported as a version problem.)
+
+A kind this build *does* know is a different question, and the shared parser is deliberately not
+where it is answered — see [Every container asserts its own
+kind](#every-container-asserts-its-own-kind).
+
+### Every container asserts its own kind
+
+The parser accepts **every** kind in the contract, because an envelope is an envelope. A *reader* is
+narrower: it hands its result to one lane, and a lane can only act on the kind it was built for.
+Offering a clip's recipe to Image Studio is the same failure as parsing an unknown marker as an
+image — it presents a file as a kind it is not — so it is refused in the same way, with the same
+error and the same `UnsupportedKind` shape.
+
+So the rule is per-reader, and there are three readers:
+
+<!-- PINNED: container-kinds -->
+
+| What is being read | File | Reader | Kind it accepts |
+| --- | --- | --- | --- |
+| A PNG's `sceneworks:workflow` chunk | `crates/sceneworks-core/src/workflow_png.rs` | `read_workflow_chunk_from` | `image` |
+| An MP4's `comment` tag | `crates/sceneworks-core/src/workflow_mp4.rs` | `read_workflow_metadata_from` | `video` |
+| The envelope recorded on an imported asset | `apps/rust-api/src/workflows.rs` | `get_asset_workflow` | `image` |
+
+<!-- END PINNED: container-kinds -->
+
+The third row is the one that was missed. Until sc-15956 the marker had exactly one legal value, so
+the shared parser's refusal of `"video"` did every reader's container check for it, for free. Widening
+the marker to `image` | `video` removed that inheritance — silently, from a route in a crate the
+change did not touch. `GET …/assets/:asset_id/workflow` went on calling `parse_workflow_share` alone
+and started answering `200 { status: "workflow" }` for a video envelope, whose response feeds
+`recipeFromWorkflowShare` and an **Image Studio prefill**. The asset panel's `asset.type === "image"`
+button guard is not a substitute: a video envelope recorded on an image asset passes it unchanged.
+
+`the_asset_route_500s_when_the_stored_envelope_names_another_container` in
+`apps/rust-api/src/tests/workflows.rs` pins that reader against a complete, valid video envelope —
+one the parser accepts — so the test fails if the container assert is removed rather than passing on
+a deserialize error. The table above is pinned by `the_doc_lists_exactly_the_container_kind_asserts`,
+which reads each named file and fails if the assert it claims is not there.
+
+**Adding a container, or a reader, means adding a row here and an assert there.** The parser is not
+the place to put it: an envelope that is legal to parse and wrong to act on is exactly the case this
+rule exists for.
 
 | The file says | This build does |
 | --- | --- |
@@ -102,7 +145,7 @@ keys in either direction: a key this table does not name is dropped on write **a
 
 | Field | What it is |
 | --- | --- |
-| `sceneworksWorkflow` | The marker. Always `image` for this lane. |
+| `sceneworksWorkflow` | The marker, naming the workflow **kind**: `image` or `video`. A build that does not know a kind refuses the file rather than presenting it as one it does understand. |
 | `schemaVersion` | The contract version. |
 | `producer.name` | `SceneWorks`. |
 | `producer.url` | The project's repository URL. |
@@ -115,6 +158,9 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `width` | Requested output width. |
 | `height` | Requested output height. |
 | `count` | How many images the run requested — so the file says it was one of a batch of N. |
+| `durationSeconds` | **Video.** The clip length the run asked for. The ask, not the measurement — a 6.0 s ask that rendered 5.96 s replays as 6.0. |
+| `fps` | **Video.** The frame rate the run asked for, for the same reason. |
+| `quality` | **Video.** The quality preset the run was submitted at — `fast`, `balanced` or `best`. A named tier off a menu the receiving install also has (it shows them as "Draft" / "Balanced" / "Final"; the value is what travels). |
 | `stylePreset` | The style preset label the run used. |
 | `styleId` | The catalog style id the user picked. |
 | `fitMode` | How the source image was fitted (`crop`, `contain`, …). |
@@ -229,6 +275,17 @@ smuggled under a scalar key.
 | `systemMessage` | `Scalar` | **Prose.** The interleave system prompt. Path-exempt — see the callout. |
 | `imageGuidanceScale` | `Scalar` | Reference-guidance strength for an interleaved document. |
 | `phases` | `Phases` | Multi-phase denoise schedule, reduced to `{ steps, guidance, loras: [{ index, weight }] }`. LoRA references are indices into this request's own list, not ids. |
+| `motion` | `Scalar` | **Video.** Camera-motion preset off a closed menu (`static`, `slow push-in`, `handheld`). It conditions the generation. |
+| `ltxPipeline` | `Scalar` | **Video.** LTX pipeline selector. It picks which denoise path runs, so two values give two different clips from one prompt. |
+| `distilledVariant` | `Scalar` | **Video.** LTX distilled-checkpoint variant. A different checkpoint is a different model for replay purposes. |
+| `textEncoderModel` | `Scalar` | **Video.** The text-encoder pick — it changes what the model *sees* of the prompt. A catalog-global slug, not a local id. |
+| `lightning` | `Scalar` | **Video.** Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the step count. |
+| `videoCfgGuidanceScale` | `Scalar` | **Video.** LTX native CFG scale — the video lane's `guidanceScale`. |
+| `videoStgGuidanceScale` | `Scalar` | **Video.** LTX spatiotemporal-guidance scale. |
+| `videoRescaleScale` | `Scalar` | **Video.** LTX guidance-rescale factor. |
+| `videoConditioningStrength` | `Scalar` | **Video.** Source-clip conditioning strength for extend / bridge / v2v — the video lane's `strength`. |
+| `bridgeRightVideoConditioningStrength` | `Scalar` | **Video.** The right-clip strength for a bridge. Without it a shared bridge replays lopsided. |
+| `timelineAction` | `Scalar` | **Video.** Which timeline operation made the clip (`extend` / `replace` / `bridge`). A closed vocabulary with no id in it; its companion `timelineContext` is withheld. |
 
 <!-- END PINNED: advanced-shared -->
 
@@ -250,8 +307,68 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 | `controlWeights` | A trained-overlay id plus the resolved weights path stamped onto it. |
 | `recipePresetId` | A local preset id stamped by the API. |
 | `presetMissingLoras` | Local LoRA ids the API could not resolve on this install. |
+| `durationHint` | **Video.** Model-catalog prose the studio echoes back ("Recommended: 5s or less."), not a knob anybody set. The receiving install renders its own. |
+| `precision` | **Video.** LTX weight precision (`fp8` / `bf16`): what this machine can afford to hold the weights in. |
+| `quantization` | **Video.** The torch lane's quant tier — `mlxQuantize` for a different backend. |
+| `selectedPersonTrack` | **Video, and the sharpest object in any payload.** The whole person-track record: a user-typed `name` that is routinely a real person's name, a `sourceDisplayName` that is the original imported filename, local asset ids, and a `frames[].mask` array of filesystem paths. Withheld on privacy first and shape second. |
+| `replacementModeLabel` | **Video.** The display label for a person-replacement mode ("Face Only"). Neither an id nor a path, and withheld anyway — see [Person replacement](#person-replacement-is-withheld-by-default). |
+| `timelineContext` | **Video.** Where in the *local* timeline to write the result: timeline / item / track / asset ids, plus the user's own typed timeline name. `timelineAction` carries the part that travels. |
 
 <!-- END PINNED: advanced-withheld -->
+
+## Person replacement is withheld by default
+
+Four fields carry a person-replacement run's specifics, and none of them travel: `personTrackId` and
+`replacementMode` at the top level of the request, `advanced.selectedPersonTrack` and
+`advanced.replacementModeLabel` inside the map. The first is an install-local id, which alone would
+put it in the same class as `controlImage`. The rest are withheld for a stronger reason.
+
+`selectedPersonTrack` is the sharpest object any payload carries: a `name` the user typed, which is
+routinely a real person's name; a `sourceDisplayName` that is the original imported filename; local
+asset ids; and a `frames[].mask` array of filesystem paths. `replacementModeLabel` is neither an id
+nor a path — it is the string "Face Only" — and it is withheld anyway, because **which variant of a
+replacement ran is a fact about a real person who did not choose to share it**. There is no replay
+value to weigh against that: a recipient has no access to the track, so the field could only ever
+inform, never reproduce.
+
+### What does travel, and why the copy has to say so
+
+`mode` is `replace_person`, verbatim, and `model` names a replacement engine
+(`wan_2_2_vace_fun_14b`). Both are ordinary shared fields, and neither is special-cased. **So the
+file does disclose the technique.** What it withholds is the identity and the variant.
+
+That distinction is not a technicality, because it is the difference between a true sentence and a
+false one on the Settings surface. The "Not in the file" copy read *"anything about a person
+replacement"* until the sc-15956 review measured it against real bytes; the enumerated tail was
+true, the leading clause was not, and the key-level pin joining that copy to the tables above could
+not catch it, because `mode` is not a key in either list. It is asserted directly instead, by
+`the_settings_copy_does_not_overclaim_about_person_replacement` in
+`crates/sceneworks-core/tests/workflow_share_doc.rs`, which builds a real `replace_person` envelope,
+proves the four fields are absent from the serialized bytes, proves `mode` is present, and then
+reads the sentence.
+
+Narrowing the withholding to close that gap was available and was refused: the disclosure that
+matters is *who*, and `mode` is a field every video envelope carries for every mode. Dropping it for
+one mode would be a hole in the field list that a reader could detect — an absent `mode` on a video
+envelope would itself say "this was a replacement".
+
+### Why it is not in `omitted`
+
+This is the one place the contract's "a stated absence beats an invisible one" rule is deliberately
+inverted, and it is worth reading before anyone "fixes" the inconsistency.
+
+`omitted` exists for collections too large to record — `loras`, `inputs`, `advanced.poses` — where
+naming the gap costs nothing and tells the receiving user why their replay is incomplete. Writing
+`omitted: ["personTrackId"]` would cost something: it would **announce the replacement to every
+reader** while withholding only the id. Naming a withheld thing in a field designed to be read is
+worse than an absence, when the absence is the point.
+
+The honest weakness of that argument, recorded here rather than left for someone to rediscover: it
+is weaker than it looks, because `mode` announces the replacement anyway (above). What `omitted`
+would add is not the disclosure — that is already there — but a second, redundant one, in a field
+whose whole purpose is to be surfaced to a reader, naming the private half by key. The inversion
+stands on the narrower ground: the technique travels once, in the field that always carries it, and
+nothing else points at what was withheld.
 
 ## Input images travel by shape, not by id
 
@@ -268,6 +385,8 @@ times larger.
 | `reference` | Identity or style reference image(s). One entry with a `count`, not N entries. |
 | `mask` | An inpaint mask. |
 | `control` | A pre-made control map, with the conditioning it feeds in `controlMode`. |
+| `sourceClip` | **Video.** A clip the run continues, re-times or bridges from. Separate from `source` because "needs a still to start from" and "needs a clip to continue" are different asks of whoever replays it. |
+| `referenceClip` | **Video.** A reference clip the run conditions on — the moving counterpart of `reference`. |
 
 <!-- END PINNED: input-kinds -->
 
@@ -302,6 +421,11 @@ silently lost 70-pose selection and a visible one, which is the point: our own w
 caps, and a recipe that says "no LoRAs" when it had five is exactly the silent loss this contract
 exists to prevent.
 
+There is **one deliberate exception**, and it is the only place this rule is inverted: the
+person-replacement fields are withheld without an `omitted` entry. The argument, and its honest
+weakness, are in [Person replacement](#person-replacement-is-withheld-by-default). Read it before
+adding them here for consistency — the inconsistency is the decision.
+
 ## Ceilings
 
 Two kinds of bound. Per-collection caps, each inherited from the validator that already limits the
@@ -320,7 +444,7 @@ measurement found a new way to spend what they left.
 | `PROSE_MAX_BYTES` | 16,384 | Each authored prose field, in bytes. | Truncated at a whole character. Prose still means what it said after its tail is cut. |
 | `LABEL_MAX_CHARS` | 200 | Each non-prose label (model slug, style id, LoRA name, producer block), in characters. | **Dropped**, not truncated — a slug's spelling is its identity. |
 | `MAX_SHARE_LORAS` | 5 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
-| `MAX_SHARE_INPUTS` | 4 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
+| `MAX_SHARE_INPUTS` | 6 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
 | `MAX_SHARE_PHASES` | 8 | Entries in `advanced.phases`. | The key is dropped and `omitted` gains `advanced.phases`. |
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
 | `MAX_SHARE_POSE_SLOTS` | 6,144 | Coordinate slots across the whole `advanced.poses` array — a number, or a `null` standing in for one. | The key is dropped and `omitted` gains `advanced.poses`. |
@@ -500,6 +624,13 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/screens/characterPanels.jsx` | `usePoseController` | The Pose Library form's extras. |
 | `apps/web/src/screens/DocumentStudio.jsx` | `submit` | The interleaved-document lane. |
 | `apps/web/src/imageJobs.js` | `buildUpscaleJobBody` | The standalone upscale job. Registered as emitting **no** `advanced` map, so the day it grows a knob the lint demands a classification. |
+| `apps/web/src/screens/VideoStudio.jsx` | `submit` | The Video Studio's ~20-knob builder. |
+| `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | The timeline editor's shared video payload. |
+| `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Timeline extend. |
+| `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
+| `apps/web/src/screens/EditorScreen.jsx` | `bridgeGap` | Timeline bridge. |
+| `apps/web/src/simple/simpleJobs.js` | `buildSimpleVideoRequest` | The Simple shell's video request. |
+| `apps/web/src/screens/VideoUpscalePanel.jsx` | `onUpscale` | The standalone video upscale. Registered as emitting **no** `advanced` map, for the same reason `buildUpscaleJobBody` is. |
 
 <!-- END PINNED: builders -->
 
@@ -517,11 +648,11 @@ how to know it still can.
 | `source` | A **new** `AdvancedKeySource` variant for this builder, added to `AdvancedKeySource::ALL` as well as declared. One variant per registered builder, checked both ways, or `every_source_tag_names_exactly_one_registered_builder` fails. |
 | `path` | Repo-relative path of the file that defines it. Read out of the repo, so a move fails loudly. |
 | `function` | The JS function whose body the extractor reads. Read out of the repo, so a rename fails loudly. |
-| `shape` | Which `AdvancedBuilderShape` the JS is written in, and therefore which extractor can read it: `ReturnedObject`, `FlatAdvancedLiteral`, `AssignedObject`, `ExtrasLiteral`, or `NoAdvancedMap` for a builder that posts no `advanced` map at all. |
+| `shape` | Which `AdvancedBuilderShape` the JS is written in, and therefore which extractor can read it: `ReturnedObject`, `FlatAdvancedLiteral`, `SpreadAdvancedLiteral`, `AssignedObject`, `ExtrasLiteral`, or `NoAdvancedMap` for a builder that posts no `advanced` map at all. |
 | `lane` | Prose: the embedding lane this builder's payload ends up written by, so a reader can see why the keys matter. |
 | `anchors` | Keys the extractor **must** still find. The floor against an extractor that has quietly stopped understanding the file — a lint that reads zero keys and passes is the failure mode the whole registry exists to prevent. |
 | `minimum_keys` | The smallest key count the extractor may report before the lint calls itself broken. Set it well under the real count; it is a floor, not a census. |
-| `spread_of` | Identifiers spread into an `AssignedObject` initializer whose keys another registry entry already accounts for. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
+| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
 
 <!-- END PINNED: builder-fields -->
 
@@ -538,12 +669,6 @@ of scope" different states:
 
 | File | Function | Why it is deferred |
 | --- | --- | --- |
-| `apps/web/src/screens/VideoStudio.jsx` | `submit` | Video lane. No video write seam embeds yet. |
-| `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | Video lane — the timeline editor's shared payload. |
-| `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Video lane — a timeline action. |
-| `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Video lane — a timeline action. |
-| `apps/web/src/screens/EditorScreen.jsx` | `bridgeGap` | Video lane — a timeline action. |
-| `apps/web/src/simple/simpleJobs.js` | `buildSimpleVideoRequest` | Video lane. Its image sibling delegates to the studio builder and is already covered. |
 | `apps/web/src/training/trainingConfig.js` | `trainingConfigSnapshot` | Permanently exempt: trainer hyperparameters are a different namespace, and no training write seam embeds. |
 
 <!-- END PINNED: deferred-builders -->
@@ -551,9 +676,22 @@ of scope" different states:
 Until sc-16113 that list was a decision record and nothing more. It said, in its own doc comment,
 that no video lane could start embedding while its keys sat in it — and nothing enforced that.
 Adding a `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
-`crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all ~15 of
+`crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all of
 `VideoStudio.jsx`'s unclassified keys were dropped from the written file, with nothing anywhere to
 say so.
+
+**sc-15956 is the story the gate was built for, and it did its job.** All six video builders moved
+into the table above, which is what forced every key behind them to be classified before a video
+seam could embed. Two findings are worth keeping, because both argue for the enforcement being a
+discovery scan rather than a list:
+
+- the deferral said "~15 keys" and the real count was **17**. `timelineAction` and `timelineContext`
+  are emitted only by the three `EditorScreen.jsx` actions, and nobody had read those builders. A
+  deferral records that a decision is owed; it is a poor estimate of what the decision costs;
+- two of the 17 were **objects**, not scalars — `selectedPersonTrack` carries a person's name, an
+  original imported filename and an array of mask file paths, and `timelineContext` carries local
+  ids plus the user's own timeline name. Under the pre-sc-16113 arrangement those would have
+  travelled, silently, in every shared clip.
 
 ## The write seams, and what each one embeds for
 
@@ -575,6 +713,8 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs/detail.rs` | `run_image_detail_job` | Embeds — writes the refined PNG. macOS-gated; the scan is textual, so it is read on every platform. |
 | `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_image_upscale_job` | Embeds — hands the standalone upscale's envelope to the shared single-child writer. |
 | `crates/sceneworks-worker/src/single_child_asset.rs` | `write_single_child_asset` | Conduit — writes the envelope its caller decided on, and builds none itself. |
+| `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the funnel every *generated* clip is encoded through, whatever engine or studio produced it. |
+| `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` | `seedvr2_workflow_metadata` | Embeds — the SeedVR2 video upscale's own clip. macOS + candle-gated; the scan is textual, so it is read on every platform. |
 | `crates/sceneworks-worker/src/segment_jobs.rs` | `run_image_segment_job` | Declines — a smart-select mask has no generation recipe to replay, and is grayscale. |
 
 <!-- END PINNED: write-seams -->
