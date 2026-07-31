@@ -312,6 +312,72 @@ export const ADVANCED_PREFILL = {
     prefill: PREFILL_NONE,
     detail: "A Document Studio interleave setting. Image Studio has no control for it.",
   },
+  // The VIDEO arm (sc-15956). Every one of these travels in a shared MP4 and lands nowhere HERE,
+  // for one reason that covers all eleven: this registry drives Image Studio, and a video recipe
+  // replays in Video Studio. That is a different panel and a different story, so the honest thing
+  // for this one to say is that the setting arrived and this studio has no control for it —
+  // exactly what the four rows above say about the Detail, Character and Document lanes.
+  //
+  // They are listed individually rather than collapsed because the panel renders a LABEL per key:
+  // "videoStgGuidanceScale arrived" is not a sentence, and a shared clip whose settings show as
+  // raw camelCase reads as a bug rather than as a boundary.
+  motion: {
+    label: "Camera motion",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting. Image Studio has no camera-motion control.",
+  },
+  ltxPipeline: {
+    label: "LTX pipeline",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  distilledVariant: {
+    label: "Distilled variant",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
+  },
+  textEncoderModel: {
+    label: "Text encoder",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which text encoder read the prompt.",
+  },
+  lightning: {
+    label: "Lightning steps",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the Wan2.2 fast four-step recipe.",
+  },
+  videoCfgGuidanceScale: {
+    label: "Video guidance",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoStgGuidanceScale: {
+    label: "Spatiotemporal guidance",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoRescaleScale: {
+    label: "Guidance rescale",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoConditioningStrength: {
+    label: "Clip strength",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: how strongly the source clip conditioned the result.",
+  },
+  bridgeRightVideoConditioningStrength: {
+    label: "Right-clip strength",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the second clip strength in a bridge.",
+  },
+  timelineAction: {
+    label: "Timeline action",
+    prefill: PREFILL_NONE,
+    detail:
+      "Which timeline operation made the clip. The timeline it belonged to deliberately does " +
+      "not travel, so there is nothing here to place it into.",
+  },
 };
 
 function prefillDisposition(key) {

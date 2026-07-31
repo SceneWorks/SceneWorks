@@ -110,14 +110,14 @@ const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
-const L_INPUTS = "which kinds of input image the recipe needs and how many of each";
+const L_INPUTS =
+  "which kinds of input image or CLIP the recipe needs and how many of each, but never which ones";
 // The video lane (sc-15956). Its knobs are the same CLASS as the image ones — what to make,
 // never what this machine can afford — so several of them share the labels above.
 const L_CLIP = "the clip length, frame rate and quality preset a video run asked for";
 const L_MOTION = "the camera-motion preset, and which timeline action produced a clip";
 const L_VIDEO_ENGINE =
   "which video pipeline, checkpoint variant, text encoder and fast-step recipe a video run used";
-const L_CLIP_INPUTS = "how many source or reference CLIPS the recipe needs, but never which ones";
 const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
