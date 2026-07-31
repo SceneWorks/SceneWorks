@@ -393,6 +393,13 @@ fn linux_desktop_paths() -> LinuxDesktopPaths {
 /// Per-OS application support root: `~/Library/Application Support/SceneWorks`
 /// (macOS), `%APPDATA%\SceneWorks` (Windows), `$XDG_DATA_HOME/SceneWorks` or
 /// `~/.local/share/SceneWorks` (Linux).
+///
+/// Unused on Linux: every caller (`default_data_dir`, `config_dir`, `settings_file`,
+/// `gpu_runtime_dir`, `huggingface_home`, the cred-IPC socket, the sidecar pidfile) takes
+/// its `#[cfg(all(unix, not(target_os = "macos")))]` branch through `linux_desktop_paths()`
+/// instead, so the XDG arm below is reachable only in principle. Kept whole rather than
+/// cfg'd out so the three platform arms stay readable side by side (sc-16269).
+#[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
 pub fn app_support_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
