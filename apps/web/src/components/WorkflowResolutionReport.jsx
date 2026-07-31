@@ -65,8 +65,11 @@ function Row({ title, state, detail }) {
 
 // The verdict sentence. Two independent axes, so three sentences rather than a boolean: what this
 // install cannot RESOLVE, and what this studio cannot APPLY. A recipe can fail either alone.
-function verdictText({ report, blocking, notRestored }) {
+function verdictText({ report, blocking, notRestored, replayBlocked }) {
   const lost = `${notRestored.length} setting${notRestored.length === 1 ? "" : "s"} will not be restored`;
+  if (replayBlocked) {
+    return `This recipe cannot be replayed as configured on this install. ${lost[0].toUpperCase()}${lost.slice(1)}.`;
+  }
   if (!report.runnable) {
     const blocked = `${blocking.length} thing${blocking.length === 1 ? "" : "s"} in this recipe cannot be reproduced on this install.`;
     return notRestored.length ? `${blocked} ${lost[0].toUpperCase()}${lost.slice(1)}.` : blocked;
@@ -81,7 +84,7 @@ function verdictText({ report, blocking, notRestored }) {
   return `Everything this recipe names is installed here.${inputClause}`;
 }
 
-export function WorkflowResolutionReport({ report, share = null }) {
+export function WorkflowResolutionReport({ report, share = null, replayNotRestored = [] }) {
   if (!report) {
     return (
       <p className="workflow-req-empty">
@@ -91,7 +94,12 @@ export function WorkflowResolutionReport({ report, share = null }) {
     );
   }
   const blocking = workflowUnresolved(report);
-  const notRestored = workflowNotRestored(share, report);
+  const notRestored = [...workflowNotRestored(share, report)];
+  for (const entry of replayNotRestored) {
+    if (!notRestored.some((existing) => existing.kind === entry.kind && existing.key === entry.key)) {
+      notRestored.push(entry);
+    }
+  }
   const model = report.model ?? null;
   const loras = report.loras ?? [];
   // A resolved `stylePreset` is rendered by the not-restored list below instead — "Ready" would be
@@ -105,7 +113,12 @@ export function WorkflowResolutionReport({ report, share = null }) {
   return (
     <div className="workflow-req">
       <p className={clean ? "workflow-req-verdict ok" : "workflow-req-verdict warn"}>
-        {verdictText({ report, blocking, notRestored })}
+        {verdictText({
+          report,
+          blocking,
+          notRestored,
+          replayBlocked: replayNotRestored.length > 0,
+        })}
       </p>
       <ul className="workflow-req-list">
         {model ? (

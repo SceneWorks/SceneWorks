@@ -76,6 +76,8 @@ export function WorkflowMissingInputs({
   onInstall,
   substituteModelId = "",
   onSubstituteModel,
+  poseSubstituteRequired = false,
+  poseSubstituteDetail = "",
   inputPicks = {},
   onPickInput,
 }) {
@@ -111,11 +113,16 @@ export function WorkflowMissingInputs({
             Model to use instead
           </label>
           <select
+            disabled={poseSubstituteRequired && models.length === 0}
             id="workflow-substitute-model"
             onChange={(event) => onSubstituteModel?.(event.target.value)}
             value={substituteModelId}
           >
-            <option value="">Choose a model…</option>
+            <option value="">
+              {poseSubstituteRequired && models.length === 0
+                ? "No pose-capable model available"
+                : "Choose a model…"}
+            </option>
             {models.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.name ?? model.id}
@@ -126,6 +133,9 @@ export function WorkflowMissingInputs({
             {report.model?.detail} Whichever you pick makes a different image from the one you
             were sent — nothing is chosen for you.
           </p>
+          {poseSubstituteDetail ? (
+            <p className="workflow-fix-detail">{poseSubstituteDetail}</p>
+          ) : null}
         </div>
       ) : null}
 

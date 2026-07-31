@@ -16,6 +16,46 @@ export const GLOBAL_POSES_PROJECT_ID = "project_global_poses";
 //    create/trash poses). Optional + best-effort: any failure degrades to built-ins.
 // Selected poses' keypoints (+ optional hands/face) ride advanced.poses on a job.
 let builtinCache = null;
+const EMPTY_EXTRA_POSES = Object.freeze([]);
+
+export const WORKFLOW_POSE_CATEGORY = "Shared workflow";
+
+// Rehydrate sanitized shared-workflow coordinates as ordinary pose-library records. These
+// records deliberately live only in the Image Studio launch that created them: they are never
+// written to the builtin cache or the reserved user-pose project. Index-based ids preserve two
+// identical poses as two independently selectable outputs.
+export function workflowPoseRecords(poses, launchId) {
+  if (!Array.isArray(poses)) {
+    return [];
+  }
+  const launchKey = String(launchId ?? "unknown");
+  return poses.map((pose, index) => ({
+    id: `workflow:${launchKey}:${index}`,
+    label: `Shared workflow pose ${index + 1}`,
+    category: WORKFLOW_POSE_CATEGORY,
+    keypoints: pose?.keypoints ?? [],
+    ...(pose?.hands !== undefined ? { hands: pose.hands } : {}),
+    ...(pose?.face !== undefined ? { face: pose.face } : {}),
+    source: "workflow",
+  }));
+}
+
+// The ordinary request projection used for every library source. Keeping this beside the
+// transient adapter makes the lossless coordinates → picker record → request round trip explicit.
+export function poseRecordToPayload(pose) {
+  return {
+    id: pose.id,
+    keypoints: pose.keypoints,
+    ...(pose.hands !== undefined ? { hands: pose.hands } : {}),
+    ...(pose.face !== undefined ? { face: pose.face } : {}),
+  };
+}
+
+function libraryFromPoses(poses, { loading = false, error = "" } = {}) {
+  const categories = [...new Set(poses.map((pose) => pose.category).filter(Boolean))];
+  const byId = Object.fromEntries(poses.map((pose) => [pose.id, pose]));
+  return { poses, categories, byId, loading, error };
+}
 
 export function loadBuiltinPoses() {
   if (!builtinCache) {
@@ -76,7 +116,7 @@ export function poseAssetToRecord(asset) {
   };
 }
 
-export async function loadPoseLibrary({ loadUserPoses } = {}) {
+export async function loadPoseLibrary({ loadUserPoses, extraPoses = [] } = {}) {
   const builtin = await loadBuiltinPoses();
   let user = [];
   if (typeof loadUserPoses === "function") {
@@ -86,10 +126,8 @@ export async function loadPoseLibrary({ loadUserPoses } = {}) {
       user = []; // best-effort: never let user-pose fetch failures hide the built-ins
     }
   }
-  const poses = [...builtin, ...user];
-  const categories = [...new Set(poses.map((pose) => pose.category).filter(Boolean))];
-  const byId = Object.fromEntries(poses.map((pose) => [pose.id, pose]));
-  return { poses, categories, byId };
+  const poses = [...builtin, ...user, ...(Array.isArray(extraPoses) ? extraPoses : [])];
+  return libraryFromPoses(poses);
 }
 
 // A memoized fetcher for the user's saved poses (the reserved global project),
@@ -108,16 +146,28 @@ export function useUserPoseLoader() {
 }
 
 // `loadUserPoses` should be a memoized (useCallback) async fetcher or undefined.
-export function usePoseLibrary({ loadUserPoses } = {}) {
-  const [state, setState] = useState({ poses: [], categories: [], byId: {}, loading: true, error: "" });
+export function usePoseLibrary({ loadUserPoses, extraPoses = EMPTY_EXTRA_POSES } = {}) {
+  const [state, setState] = useState(() =>
+    libraryFromPoses(Array.isArray(extraPoses) ? extraPoses : [], { loading: true }),
+  );
   useEffect(() => {
     let active = true;
-    loadPoseLibrary({ loadUserPoses })
+    const transient = Array.isArray(extraPoses) ? extraPoses : [];
+    setState(libraryFromPoses(transient, { loading: true }));
+    loadPoseLibrary({ loadUserPoses, extraPoses: transient })
       .then((library) => active && setState({ ...library, loading: false, error: "" }))
-      .catch((error) => active && setState({ poses: [], categories: [], byId: {}, loading: false, error: String(error.message ?? error) }));
+      .catch((error) =>
+        active &&
+        setState(
+          libraryFromPoses(transient, {
+            loading: false,
+            error: String(error.message ?? error),
+          }),
+        ),
+      );
     return () => {
       active = false;
     };
-  }, [loadUserPoses]);
+  }, [loadUserPoses, extraPoses]);
   return state;
 }

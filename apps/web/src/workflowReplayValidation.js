@@ -28,13 +28,128 @@
 // will not carry, or where the missing piece is supplied. Nothing is silent either way.
 
 import { issue } from "./validation/issues.js";
+import { macModelBlock, macModelFeatureBlock } from "./macGating.js";
+import { imageModelServesMode, supportedControlModes } from "./modelEligibility.js";
 import { workflowInputSlots } from "./workflowShare.js";
+
+export function workflowHasPoseSelection(share) {
+  return Array.isArray(share?.advanced?.poses) && share.advanced.poses.length > 0;
+}
+
+// A substitute must expose the SAME visible pose lane Image Studio will render for the replay's
+// mode. A generic image model is not enough: text mode needs strict pose control, while character
+// mode needs the character pose library and a character-image engine.
+export function modelSupportsWorkflowPoseReplay(
+  model,
+  mode = "text_to_image",
+  macCapabilities = null,
+) {
+  if (
+    !model ||
+    macModelBlock(model, macCapabilities) ||
+    !imageModelServesMode(model, mode, macCapabilities) ||
+    macModelFeatureBlock(model, macCapabilities, "pose")
+  ) {
+    return false;
+  }
+  if (mode === "character_image") {
+    return Boolean(model.ui?.poseLibrary);
+  }
+  if (mode !== "text_to_image") {
+    return false;
+  }
+  return supportedControlModes(model).includes("pose");
+}
+
+export function workflowSubstituteModels(share, models = [], macCapabilities = null) {
+  if (!workflowHasPoseSelection(share)) {
+    return models;
+  }
+  return models.filter((model) =>
+    modelSupportsWorkflowPoseReplay(model, share?.mode, macCapabilities),
+  );
+}
+
+// Resolve the model that would ACTUALLY receive a pose-bearing replay against the live Image
+// Studio catalog. The server report proves that a catalog row resolved when the report was made;
+// it does not prove that the current row still exists or still exposes the pose lane. Catalogs can
+// change while the offer is open, so callers use this on every render and once more on click.
+//
+// An explicit replacement wins only when that exact current row remains compatible. Falling back
+// to the original after the user's choice disappears would be another silent substitution.
+export function workflowPoseReplayCapability({
+  share = null,
+  report = null,
+  substituteModelId = "",
+  models = [],
+  macCapabilities = null,
+} = {}) {
+  if (!workflowHasPoseSelection(share)) {
+    return { ready: true, issue: "", model: null };
+  }
+
+  const compatibleModels = workflowSubstituteModels(share, models, macCapabilities);
+  if (substituteModelId) {
+    const substitute = compatibleModels.find((model) => model.id === substituteModelId) ?? null;
+    if (substitute) {
+      return { ready: true, issue: "", model: substitute };
+    }
+    return {
+      ready: false,
+      issue:
+        "The model you chose is no longer available with pose control for this workflow mode. Poses will not be restored; choose a compatible model again.",
+      model: null,
+    };
+  }
+
+  const requirement = report?.model ?? null;
+  if (requirement?.state === "resolved") {
+    const catalogId = requirement.catalogId ?? requirement.slug ?? "";
+    const original =
+      models.find(
+        (model) =>
+          model.id === catalogId ||
+          (!requirement.catalogId && requirement.slug && model.id === requirement.slug),
+      ) ?? null;
+    const name = requirement.name ?? requirement.slug ?? "The resolved model";
+    if (!original) {
+      return {
+        ready: false,
+        issue: `${name} is no longer available in Image Studio's live model catalog. Poses will not be restored.`,
+        model: null,
+      };
+    }
+    if (!modelSupportsWorkflowPoseReplay(original, share?.mode, macCapabilities)) {
+      return {
+        ready: false,
+        issue: `${name} is installed, but it cannot replay poses for this workflow mode. Poses will not be restored.`,
+        model: original,
+      };
+    }
+    return { ready: true, issue: "", model: original };
+  }
+
+  return {
+    ready: false,
+    issue: compatibleModels.length
+      ? "This workflow includes poses. Choose an installed model with pose control for this workflow mode — nothing is substituted for you."
+      : "This workflow includes poses, but no installed model can run pose control for this workflow mode. Poses will not be restored.",
+    model: null,
+  };
+}
 
 export function workflowReplayValidation({
   report = null,
   // The model id the user chose in the substitute picker, or "" for "not chosen". NEVER defaulted
   // to anything: a default here would be the silent substitution the whole epic exists to prevent.
   substituteModelId = "",
+  // A mode/capability constraint from the live substitute catalog. When present it replaces the
+  // generic "choose a model" sentence so an empty filtered picker never points at an impossible
+  // next action.
+  substituteModelIssue = "",
+  // The live-catalog/capability result for a pose-bearing workflow. Unlike the server report this
+  // is recomputed in the browser whenever the studio catalog changes.
+  poseReplayIssue = "",
   // `{ [slotKey]: assetId }` from the input-image pickers.
   inputPicks = {},
 } = {}) {
@@ -53,17 +168,23 @@ export function workflowReplayValidation({
   }
 
   const model = report.model ?? null;
+  let poseIssueSurfacedAsModel = false;
   if (model && model.state !== "resolved" && !substituteModelId) {
     // Two different sentences, because the user's next move is different. An installable model has
     // a download button beside it; an unknown one has only the picker.
+    const modelMessage =
+      substituteModelIssue ||
+      poseReplayIssue ||
+      (model.state === "installable"
+        ? `${model.name ?? model.slug} is not downloaded here. Install it, or choose a model to use instead — nothing is substituted for you.`
+        : `This install has no model matching \`${model.slug}\`. Choose one to use instead — nothing is substituted for you, and the image will differ from the one you were sent.`);
     issues.push(
-      issue.error(
-        "model",
-        model.state === "installable"
-          ? `${model.name ?? model.slug} is not downloaded here. Install it, or choose a model to use instead — nothing is substituted for you.`
-          : `This install has no model matching \`${model.slug}\`. Choose one to use instead — nothing is substituted for you, and the image will differ from the one you were sent.`,
-      ),
+      issue.error("model", modelMessage),
     );
+    poseIssueSurfacedAsModel = Boolean(poseReplayIssue && modelMessage === poseReplayIssue);
+  }
+  if (poseReplayIssue && !poseIssueSurfacedAsModel) {
+    issues.push(issue.error("poses", poseReplayIssue));
   }
 
   // Every image the recipe needs, counted the way the report counts them. A picker with nothing in

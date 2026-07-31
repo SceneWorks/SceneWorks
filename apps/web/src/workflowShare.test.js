@@ -138,6 +138,23 @@ describe("recipeFromWorkflowShare", () => {
     expect(recipe.normalizedSettings.count).toBe(1);
   });
 
+  it("carries sanitized pose coordinates for replay and does not invent an omitted selection", () => {
+    const poses = [
+      { keypoints: [[0.1, 0.2]], hands: [[[0.3, 0.4]]], face: [[0.5, 0.6]] },
+      { keypoints: [[0.7, 0.8]] },
+    ];
+    const shared = share({ advanced: { poses, faceRestore: true } });
+    const recipe = recipeFromWorkflowShare(shared, report());
+    expect(recipe.rawAdapterSettings.poses).toEqual(poses);
+    expect(workflowSettingRows(shared, report()).find((row) => row.key === "poses")).toMatchObject({
+      restored: true,
+      value: "2 poses",
+    });
+
+    const omitted = recipeFromWorkflowShare(share({ advanced: { faceRestore: true } }), report());
+    expect(omitted.rawAdapterSettings).not.toHaveProperty("poses");
+  });
+
   it("does not prefill a model this install cannot resolve", () => {
     const missing = report({
       model: {
@@ -454,9 +471,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       }
     }
     // …and the unrestored ones are exactly the lanes an envelope carries that THIS studio has no
-    // control for, plus the two the CONTRACT deliberately reduces past the point of replay:
-    // `poses`, whose library ids do not travel, and `structuredPrompt`, whose caption object does
-    // not (sc-15952 — the prompt is restored as prose instead, and the row says so).
+    // control for, plus `structuredPrompt`, whose caption object does not travel (sc-15952 — the
+    // prompt is restored as prose instead, and the row says so). Pose coordinates now hydrate
+    // session-only picker records through the ordinary pose-selection path (sc-16132).
     //
     // The eleven video keys (sc-15956) are here for the first reason, not the second: they travel
     // intact in a shared MP4 and replay in Video Studio, which is a different panel. A row that
@@ -475,7 +492,6 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "lightning",
       "ltxPipeline",
       "motion",
-      "poses",
       "structuredPrompt",
       "systemMessage",
       "textEncoderModel",
@@ -513,16 +529,13 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
 });
 
 describe("workflowNotRestored", () => {
-  it("names the knobs that travelled intact and still land nowhere", () => {
+  it("does not report replayable pose coordinates as unrestored", () => {
     const rows = workflowNotRestored(
       share({
         advanced: { steps: 28, cnScale: 0.4, poses: [{ keypoints: [] }, { keypoints: [] }] },
       }),
     );
-    expect(rows.map((row) => row.key)).toEqual(["cnScale", "poses"]);
-    // Successful transport must not be punished with silence: a 2-pose selection that arrived
-    // perfectly is now reported as loudly as one the writer dropped over its cap (`omitted`).
-    expect(rows.find((row) => row.key === "poses").title).toBe("Poses — 2 poses");
+    expect(rows.map((row) => row.key)).toEqual(["cnScale"]);
   });
 
   it("names a RESOLVED style preset, which is installed here and still not replayed", () => {
