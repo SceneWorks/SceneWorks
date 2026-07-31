@@ -284,6 +284,7 @@
       }
     },
     "cells": {
+      "description": "The 265-item floor is deliberately only a schema-level sanity check: 53 entries in this epic times the five normative rungs. JSON Schema cannot derive the real catalog cross-product of backend, tier, mode, overlay, and rung axes. Exact completeness is enforced before artifact writes by assertCellInventoryMatchesCatalog in scripts/generate-memory-matrix.mjs; do not replace 265 with today's generated cell count, because legitimate catalog drift changes that total.",
       "type": "array",
       "minItems": 265,
       "items": {
