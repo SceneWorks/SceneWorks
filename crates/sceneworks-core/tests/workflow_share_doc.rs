@@ -355,6 +355,9 @@ fn fully_populated_envelope() -> WorkflowShare {
             name: Some("coast".to_owned()),
             weight: Some(0.6),
             repo: Some("acme/coast".to_owned()),
+            hash: Some(
+                "d34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33f".to_owned(),
+            ),
         }],
         inputs: vec![WorkflowInput {
             kind: INPUT_KIND_SOURCE.to_owned(),

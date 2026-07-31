@@ -697,6 +697,89 @@ pub(crate) async fn lora_catalog(
     Ok(loras)
 }
 
+/// Return a worker-cached exact digest only while the marker still describes the selected file.
+/// Missing markers (including external/shared model roots) simply leave the catalog hashless.
+fn cached_lora_sha256(entry: &Value, installed_path: &FsPath, data_dir: &FsPath) -> Option<String> {
+    let declared = entry
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .or_else(|| entry.get("source").and_then(|source| source.get("file")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let file = if installed_path.is_dir() {
+        sceneworks_core::lora_family::resolve_adapter_in_dir(installed_path, declared)?
+    } else {
+        installed_path.to_path_buf()
+    };
+    let source = entry.get("source").and_then(Value::as_object);
+    let hf_repo = source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| entry.get("provider"))
+        .and_then(Value::as_str)
+        .filter(|provider| *provider == "huggingface")
+        .and_then(|_| {
+            source
+                .and_then(|source| source.get("repo"))
+                .or_else(|| entry.get("repo"))
+                .and_then(Value::as_str)
+        });
+    let receipt_marker = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .zip(hf_repo)
+        .map(|(id, repo)| {
+            (
+                data_dir
+                    .join("loras")
+                    .join(safe_download_dir(id))
+                    .join(".sceneworks-download-complete.json"),
+                repo,
+            )
+        })
+        .filter(|(candidate, repo)| {
+            std::fs::read(candidate)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|marker| {
+                    marker
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some(*repo)
+        })
+        .map(|(candidate, _)| candidate);
+    let marker_path = receipt_marker.or_else(|| {
+        file.ancestors()
+            .take(8)
+            .map(|directory| directory.join(".sceneworks-download-complete.json"))
+            .find(|candidate| candidate.is_file())
+    })?;
+    let marker: Value = serde_json::from_slice(&std::fs::read(marker_path).ok()?).ok()?;
+    let metadata = std::fs::metadata(&file).ok()?;
+    let name = file.file_name()?.to_string_lossy();
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .to_string();
+    if marker.get("loraFileName").and_then(Value::as_str) != Some(name.as_ref())
+        || marker.get("loraFileBytes").and_then(Value::as_u64) != Some(metadata.len())
+        || marker.get("loraFileModifiedNanos").and_then(Value::as_str)
+            != Some(modified_nanos.as_str())
+    {
+        return None;
+    }
+    let hash = marker.get("loraFileSha256").and_then(Value::as_str)?.trim();
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| hash.to_ascii_lowercase())
+}
+
 pub(crate) fn normalize_lora_entry(
     mut lora: Value,
     scope: &str,
@@ -736,6 +819,9 @@ pub(crate) fn normalize_lora_entry(
         Some(path) if lora_is_installed(path) => "installed",
         _ => "missing",
     };
+    let installed_hash = installed_path
+        .as_deref()
+        .and_then(|path| cached_lora_sha256(&lora_snapshot, path, data_dir));
     object.insert(
         "manifestPath".to_owned(),
         Value::String(manifest_path.display().to_string()),
@@ -743,6 +829,7 @@ pub(crate) fn normalize_lora_entry(
     object.insert(
         "installedPath".to_owned(),
         installed_path
+            .as_ref()
             .map(|path| Value::String(path.display().to_string()))
             .unwrap_or(Value::Null),
     );
@@ -750,6 +837,11 @@ pub(crate) fn normalize_lora_entry(
         "installState".to_owned(),
         Value::String(install_state.to_owned()),
     );
+    if let Some(hash) = installed_hash {
+        object.insert("sha256".to_owned(), Value::String(hash));
+    } else {
+        object.remove("sha256");
+    }
     let requested_file_present =
         lora_huggingface_requested_file(&lora_snapshot, data_dir).is_some();
     object.insert(
@@ -1826,6 +1918,123 @@ pub(crate) fn lora_base_model(lora: &Value) -> Option<String> {
 #[cfg(test)]
 mod huggingface_receipt_tests {
     use super::*;
+    use crate::tests::support::isolate_hf_cache;
+
+    #[test]
+    fn normalized_catalog_exposes_only_a_file_identity_validated_lora_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let install = data_dir.join("loras").join("author-style");
+        std::fs::create_dir_all(&install).unwrap();
+        let file = install.join("author-style.safetensors");
+        std::fs::write(&file, b"exact adapter bytes").unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let modified_nanos = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+        std::fs::write(
+            install.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "loraFileName": "author-style.safetensors",
+                "loraFileBytes": metadata.len(),
+                "loraFileModifiedNanos": modified_nanos,
+                "loraFileSha256": hash
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let entry = json!({
+            "id": "author-style",
+            "name": "Author Style",
+            "source": { "provider": "local", "path": install },
+            "files": ["author-style.safetensors"]
+        });
+        let normalized = normalize_lora_entry(
+            entry.clone(),
+            "global",
+            FsPath::new("user.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["sha256"], hash);
+
+        std::fs::write(&file, b"changed adapter bytes with another size").unwrap();
+        let changed = normalize_lora_entry(
+            entry,
+            "global",
+            FsPath::new("user.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert!(changed.get("sha256").is_none());
+    }
+
+    #[test]
+    fn hf_catalog_reads_the_app_owned_receipt_for_a_hub_cache_adapter() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "author/style";
+        let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let snapshot = repo_root.join("snapshots").join("revision");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repo_root.join("refs")).unwrap();
+        std::fs::write(repo_root.join("refs").join("main"), "revision").unwrap();
+        let file = snapshot.join("style.safetensors");
+        std::fs::write(&file, b"hub adapter bytes").unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let modified_nanos = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let receipt_dir = data_dir
+            .join("loras")
+            .join(safe_download_dir("author-style"));
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        let hash = "2222222222222222222222222222222222222222222222222222222222222222";
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "repo": repo,
+                "loraFileName": "style.safetensors",
+                "loraFileBytes": metadata.len(),
+                "loraFileModifiedNanos": modified_nanos,
+                "loraFileSha256": hash
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let entry = json!({
+            "id": "author-style",
+            "name": "Author Style",
+            "source": {
+                "provider": "huggingface",
+                "repo": repo,
+                "file": "style.safetensors"
+            }
+        });
+
+        let normalized = normalize_lora_entry(
+            entry,
+            "builtin",
+            FsPath::new("builtin.loras.jsonc"),
+            data_dir,
+            data_dir,
+        )
+        .unwrap();
+        assert_eq!(normalized["installedPath"], file.display().to_string());
+        assert_eq!(normalized["sha256"], hash);
+    }
 
     #[test]
     fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {

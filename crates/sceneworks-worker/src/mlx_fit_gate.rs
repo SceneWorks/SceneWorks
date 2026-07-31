@@ -4103,6 +4103,7 @@ mod tests {
             crate::imports::DownloadArtifactReceipt {
                 resolved_tier: resolved_tier.as_deref(),
                 tree_stamp: Some(&stamp),
+                ..Default::default()
             },
         )
         .await

@@ -564,6 +564,7 @@ fn named_entry(entry: &Value) -> Option<CatalogEntry> {
         id: entry_str(entry, "id")?,
         name: entry_str(entry, "name"),
         repo: None,
+        hash: None,
         installed: false,
         install: None,
     })
@@ -589,6 +590,7 @@ fn model_catalog_entry(entry: &Value) -> Option<CatalogEntry> {
         id,
         name: entry_str(entry, "name"),
         repo: None,
+        hash: None,
         installed,
         install,
     })
@@ -628,6 +630,7 @@ fn lora_catalog_entry(entry: &Value) -> Option<CatalogEntry> {
         id,
         name: entry_str(entry, "name"),
         repo,
+        hash: entry_str(entry, "sha256"),
         installed,
         install,
     })

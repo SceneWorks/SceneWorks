@@ -43,12 +43,12 @@
 //!
 //! | SceneWorks has | A1111 has | Why it is omitted |
 //! | --- | --- | --- |
-//! | `advanced.phases` (multi-phase Krea) | nothing | A schedule of N (steps, guidance) pairs has no single-number form. Its presence also suppresses `Steps` and `CFG scale`, because a top-level number beside a multi-phase schedule describes a run that did not happen. |
+//! | `advanced.phases` (multi-phase Krea) | `Steps` only | The exact total is the sum of the contiguous phase step counts. Guidance remains omitted because it varies by phase. |
 //! | `advanced.textStyleGain` | nothing | A Krea tap-reweight gain. No field means it, and inventing one names a knob no reader can interpret. |
 //! | `advanced.scheduler`, `schedulerShift` | `Schedule type` | A1111's `Schedule type` is a NOISE schedule (Karras, Exponential). Ours is a diffusers scheduler class, which is closer to A1111's *sampler*. Two plausible mappings and no correct one. |
 //! | `advanced.strength` | `Denoising strength` | The sense is lane-dependent — the candle fork lane inverts it (higher is *closer* to the reference). A number whose direction is ambiguous is worse than no number. |
 //! | `upscale.*` | `Hires upscale` / `Hires upscaler` | A1111's hires fix is a specific latent second pass. Ours is a separate post-pass on the decoded image. Same words, different pipeline. |
-//! | `loras[]` | `<lora:name:weight>` in the prompt | A1111 carries LoRAs by rewriting the prompt. Editing the user's prompt to smuggle a resource list in is fabrication — the prompt in this chunk is the prompt they typed. |
+//! | unresolved or unhashed `loras[]` | `<lora:name:weight>` / `Lora hashes` | A readable name is not identity. Only worker-proven adapter bytes are rendered as gallery resources; unresolved recipe hints remain only in the authoritative envelope. |
 //! | `count` | `Batch size` | Ours is how many images the run asked for; A1111's is the sampler's parallel batch. Near-synonyms that are not the same number. |
 //! | `advanced.controlMode` / `controlScale` | ControlNet extension fields | The ControlNet trailer is a whole sub-format with per-unit indices and model hashes. A partial emission of it reads as a full one. |
 //! | `advanced.faceRestore` | `Face restoration: CodeFormer` | A1111's field names the *engine*. Ours is a boolean and we have no engine name to give. |
@@ -103,8 +103,8 @@ pub const SETTINGS_PAIR_FLOOR: usize = 3;
 pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
     (
         "Steps",
-        "`advanced.steps`, when it is a whole number of at least one and no multi-phase schedule \
-         overrides it.",
+        "`advanced.steps` for a single-phase run, or the exact sum of `advanced.phases[].steps` for \
+         a recorded multi-phase schedule.",
     ),
     (
         "Sampler",
@@ -133,6 +133,11 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
         "Model hash",
         "`modelHash`, only when it is the exact SHA-256 of the executed checkpoint and `Model` is \
          also present. Civitai uses the pair to resolve its linked model-version resource.",
+    ),
+    (
+        "Lora hashes",
+        "A quoted name-to-SHA-256 map for every worker-proven adapter. Each key is the same safe, \
+         readable key used by its `<lora:key:weight>` prompt tag.",
     ),
     (
         "Version",
@@ -196,6 +201,18 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
 #[must_use]
 pub fn parameters_text(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     let mut out = share.prompt.clone();
+    for (index, lora) in share.loras.iter().enumerate() {
+        let (Some(name), Some(weight), Some(_hash)) = (&lora.name, lora.weight, &lora.hash) else {
+            continue;
+        };
+        if !civitai_lora_key(name) || weight < 0.0 || !lora_weight_is_fixed(share, index, weight) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("<lora:{name}:{}>", format_number(weight)));
+    }
     if !share.negative_prompt.is_empty() {
         out.push('\n');
         out.push_str(NEGATIVE_PROMPT_LABEL);
@@ -213,11 +230,10 @@ pub fn parameters_text(share: &WorkflowShare, encoded: (u32, u32)) -> String {
 /// maps is too little for a gallery to recognize as a settings line at all.
 fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     let advanced = &share.advanced;
-    // A multi-phase run has no single step count and no single guidance value. Emitting the
-    // top-level ones beside a schedule that overrode them would describe a run that did not happen,
-    // and a gallery reader has no way to tell. So both are suppressed together — the presence of the
-    // schedule is the signal, and `omitted` carries it too when the schedule itself was too large to
-    // record, which is the same fact arriving by the other door.
+    // A multi-phase run has one exact total step count (the sum of its contiguous segments), but no
+    // single guidance value. The top-level values were overridden, so never use them for a phase run.
+    // An `omitted` phase marker means the schedule was too large to record and therefore cannot be
+    // summed exactly here.
     let multi_phase = advanced.contains_key("phases")
         || share
             .omitted
@@ -227,12 +243,23 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     let mut pairs: Vec<(&str, String)> = Vec::with_capacity(SETTINGS_FIELDS.len());
     let mut push = |key: &'static str, value: String| pairs.push((key, value));
 
-    if !multi_phase {
-        if let Some(steps) = advanced.get("steps").and_then(whole_number) {
-            if steps >= 1 {
-                push("Steps", steps.to_string());
-            }
-        }
+    let exact_steps = if multi_phase {
+        advanced
+            .get("phases")
+            .and_then(Value::as_array)
+            .and_then(|phases| {
+                phases.iter().try_fold(0_u64, |total, phase| {
+                    let steps = phase.get("steps").and_then(whole_number)?;
+                    (steps >= 1).then_some(total.checked_add(steps)?)
+                })
+            })
+    } else {
+        advanced.get("steps").and_then(whole_number)
+    };
+    if let Some(steps) = exact_steps.filter(|steps| *steps >= 1) {
+        // Civitai's Automatic parser requires a `Steps` pair before it will inspect `Lora hashes`.
+        // A phase schedule's exact step count is the sum of its contiguous denoise segments.
+        push("Steps", steps.to_string());
     }
     if let Some(sampler) = advanced.get("sampler").and_then(Value::as_str) {
         let sampler = sampler.trim();
@@ -263,6 +290,19 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
             push("Model hash", model_hash.clone());
         }
     }
+    let lora_hashes = share
+        .loras
+        .iter()
+        .filter_map(|lora| {
+            let name = lora.name.as_deref().filter(|name| civitai_lora_key(name))?;
+            let hash = lora.hash.as_deref()?;
+            Some(format!("{name}: {hash}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !lora_hashes.is_empty() {
+        push("Lora hashes", lora_hashes);
+    }
     // Fed from the envelope's own producer block rather than from `PRODUCER_VERSION` directly, so
     // the two chunks in one file cannot disagree about which build wrote it. An envelope whose
     // producer block was reduced to empty (a version that is not strict semver, on the read side)
@@ -292,6 +332,47 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
         .map(|(key, value)| format!("{key}: {}", quote(&value)))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+/// Civitai's Automatic parser recognizes this deliberately narrow key alphabet in prompt tags.
+/// The digest, not this display key, resolves the resource; keeping the key narrow merely ensures
+/// the prompt tag and `Lora hashes` map associate with each other.
+fn civitai_lora_key(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
+/// A phase schedule may vary one adapter's weight across denoise phases. Such a resource still gets
+/// a hash (and therefore an attribution card), but no single prompt-tag weight is emitted unless
+/// the adapter is active in every phase and every explicit override agrees with the top-level
+/// weight. An omitted adapter means that phase runs base-only, so it is not a fixed-weight run.
+fn lora_weight_is_fixed(share: &WorkflowShare, index: usize, weight: f64) -> bool {
+    let Some(phases) = share.advanced.get("phases").and_then(Value::as_array) else {
+        return true;
+    };
+    !phases.is_empty()
+        && phases.iter().all(|phase| {
+            phase
+                .get("loras")
+                .and_then(Value::as_array)
+                .is_some_and(|loras| {
+                    let mut matches = loras.iter().filter(|entry| {
+                        entry.get("index").and_then(Value::as_u64) == Some(index as u64)
+                    });
+                    let fixed = matches.next().is_some_and(|entry| {
+                        entry
+                            .get("weight")
+                            .filter(|value| !value.is_null())
+                            .map_or(true, |value| {
+                                finite_number(value)
+                                    .is_some_and(|phase_weight| phase_weight == weight)
+                            })
+                    });
+                    fixed && matches.next().is_none()
+                })
+        })
 }
 
 /// A1111's own quoting rule, mirrored.
@@ -402,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_phase_run_omits_steps_and_cfg_rather_than_picking_one() {
-        // The AC's named case. A Krea multi-phase schedule is N (steps, guidance) pairs; a single
-        // number beside it describes a run that did not happen.
+    fn a_multi_phase_run_emits_the_exact_total_steps_but_no_single_cfg() {
+        // Steps are contiguous segments of one denoise schedule, so their sum is exact. Guidance
+        // varies by phase and still has no honest single-number representation.
         let share = envelope(serde_json::json!({
             "seed": 4,
             "advanced": {
@@ -419,7 +500,7 @@ mod tests {
             },
         }));
         let text = parameters_text(&share, (1024, 768));
-        assert!(!text.contains("Steps:"), "{text:?}");
+        assert!(text.contains("Steps: 28"), "{text:?}");
         assert!(!text.contains("CFG scale:"), "{text:?}");
         // And nothing invented a field for the schedule or the tap-reweight gain.
         assert!(

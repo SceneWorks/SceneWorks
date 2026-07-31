@@ -189,8 +189,9 @@ pub const INPUT_KIND_SOURCE_CLIP: &str = "sourceClip";
 pub const INPUT_KIND_REFERENCE_CLIP: &str = "referenceClip";
 
 /// A LoRA the run applied, reduced to what another install can act on: the display name, the
-/// weight, and the Hugging Face repo id when the catalog entry resolved to one. No local id,
-/// no installed path, no source path.
+/// weight, the Hugging Face repo id when the catalog entry resolved to one, and (only when the
+/// worker proved it from the exact bytes used) the content digest galleries use for attribution.
+/// No local id, no installed path, no source path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowLora {
@@ -201,6 +202,14 @@ pub struct WorkflowLora {
     /// `owner/name` on Hugging Face, when the payload's catalog entry named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// SHA-256 of the exact adapter file the inference route loaded. The request builder never
+    /// reads this from client input; the worker overlays it after resolving and hashing the file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_sha256"
+    )]
+    pub hash: Option<String>,
 }
 
 /// The upscale pass, when the run enabled one.
@@ -2359,6 +2368,9 @@ fn sanitize_loras(value: Option<&Value>) -> Vec<WorkflowLora> {
                 name: entry.get("name").and_then(Value::as_str).map(str::to_owned),
                 weight: entry.get("weight").and_then(Value::as_f64),
                 repo,
+                // Deliberately never read from the request. Only the worker write seam may attach
+                // a digest after it resolves the same file inference loads.
+                hash: None,
             })
         })
         .collect()
@@ -2704,9 +2716,38 @@ fn reduce_lora(lora: WorkflowLora) -> Option<WorkflowLora> {
         weight: lora.weight.filter(|weight| weight.is_finite()),
         // `owner/name` and nothing else. This is the value sc-15952 turns into a cache path.
         repo: lora.repo.as_deref().and_then(hf_repo_id),
+        hash: lora.hash.as_deref().and_then(normalize_sha256),
     };
-    (reduced.name.is_some() || reduced.weight.is_some() || reduced.repo.is_some())
-        .then_some(reduced)
+    (reduced.name.is_some()
+        || reduced.weight.is_some()
+        || reduced.repo.is_some()
+        || reduced.hash.is_some())
+    .then_some(reduced)
+}
+
+/// Build one LoRA record from worker-resolved facts while retaining the portable repository hint
+/// from the original request. `hash` is trusted only by call-site placement: the ordinary request
+/// sanitizer above never reads a digest, so a client cannot forge one by naming the same field.
+#[must_use]
+pub fn trusted_lora_for_share(
+    raw: &Value,
+    name: String,
+    weight: f64,
+    hash: Option<String>,
+) -> Option<WorkflowLora> {
+    let repo = raw
+        .get("source")
+        .and_then(Value::as_object)
+        .filter(|source| source.get("provider").and_then(Value::as_str) == Some("huggingface"))
+        .and_then(|source| source.get("repo"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    reduce_lora(WorkflowLora {
+        name: Some(name),
+        weight: Some(weight),
+        repo,
+        hash,
+    })
 }
 
 /// One input descriptor, reduced. A kind outside [`INPUT_KINDS`] is dropped — the shape list is

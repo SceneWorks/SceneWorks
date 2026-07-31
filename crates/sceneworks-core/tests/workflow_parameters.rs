@@ -451,6 +451,117 @@ fn an_exact_checkpoint_hash_becomes_a_civitai_model_resource_key() {
 }
 
 #[test]
+fn exact_lora_hashes_become_consistent_civitai_resources() {
+    let mut share = built(
+        "a lighthouse",
+        "",
+        json!({
+            "loras": [
+                { "name": "coast_detail", "weight": 0.65 },
+                { "name": "film-grain", "weight": 1.0 }
+            ]
+        }),
+    );
+    share.loras[0].hash =
+        Some("1111111111111111111111111111111111111111111111111111111111111111".to_owned());
+    share.loras[1].hash =
+        Some("2222222222222222222222222222222222222222222222222222222222222222".to_owned());
+
+    let parsed = parse_a1111(&parameters_text(&share, (64, 48)));
+    assert_eq!(
+        parsed.prompt,
+        "a lighthouse <lora:coast_detail:0.65> <lora:film-grain:1>"
+    );
+    assert_eq!(
+        parsed.params["Lora hashes"],
+        "coast_detail: 1111111111111111111111111111111111111111111111111111111111111111, \
+         film-grain: 2222222222222222222222222222222222222222222222222222222222222222"
+    );
+}
+
+#[test]
+fn unresolved_and_malformed_lora_attribution_is_ignored_without_losing_the_prompt() {
+    let unresolved = built(
+        "a lighthouse",
+        "",
+        json!({ "loras": [{ "name": "coast_detail", "weight": 0.65 }] }),
+    );
+    let unresolved_text = parameters_text(&unresolved, (64, 48));
+    assert!(!unresolved_text.contains("<lora:"));
+    assert!(!unresolved_text.contains("Lora hashes"));
+
+    let malformed = serde_json::to_value(&unresolved).expect("serializes");
+    let mut malformed = malformed.as_object().expect("object").clone();
+    malformed["loras"][0]["hash"] = json!("not-a-digest");
+    let parsed = sceneworks_core::workflow_share::parse_workflow_share(&Value::Object(malformed))
+        .expect("one malformed optional field must not break import");
+    assert_eq!(parsed.prompt, "a lighthouse");
+    assert_eq!(parsed.loras[0].hash, None);
+}
+
+#[test]
+fn a_variable_phase_weight_gets_attribution_without_a_false_fixed_weight_tag() {
+    let mut share = built(
+        "a lighthouse",
+        "",
+        json!({
+            "loras": [{ "name": "coast_detail", "weight": 0.8 }],
+            "advanced": {
+                "phases": [
+                    { "steps": 4, "guidance": 3.0, "loras": [{ "index": 0, "weight": 0.4 }] },
+                    { "steps": 4, "guidance": 2.0, "loras": [{ "index": 0, "weight": 0.8 }] }
+                ]
+            }
+        }),
+    );
+    share.loras[0].hash =
+        Some("3333333333333333333333333333333333333333333333333333333333333333".to_owned());
+    let text = parameters_text(&share, (64, 48));
+    assert!(
+        !text.contains("<lora:"),
+        "no single weight describes this schedule"
+    );
+    assert!(
+        text.contains("Lora hashes"),
+        "the exact resource is still attributable"
+    );
+    assert!(
+        civitai_accepts_automatic_metadata(&text),
+        "the exact summed Steps field must admit Civitai's Automatic parser"
+    );
+}
+
+#[test]
+fn an_inactive_or_duplicate_phase_lora_never_gets_a_false_fixed_weight_tag() {
+    for phases in [
+        json!([
+            { "steps": 4, "loras": [{ "index": 0, "weight": 0.8 }] },
+            { "steps": 4, "loras": [] }
+        ]),
+        json!([
+            { "steps": 4, "loras": [
+                { "index": 0, "weight": 0.8 },
+                { "index": 0, "weight": 0.4 }
+            ] }
+        ]),
+    ] {
+        let mut share = built(
+            "a lighthouse",
+            "",
+            json!({
+                "loras": [{ "name": "coast_detail", "weight": 0.8 }],
+                "advanced": { "phases": phases }
+            }),
+        );
+        share.loras[0].hash =
+            Some("4444444444444444444444444444444444444444444444444444444444444444".to_owned());
+        let text = parameters_text(&share, (64, 48));
+        assert!(!text.contains("<lora:"), "{text:?}");
+        assert!(text.contains("Lora hashes"), "{text:?}");
+    }
+}
+
+#[test]
 fn client_software_input_cannot_replace_the_trusted_sceneworks_badge() {
     let share = built(
         "a lighthouse",
@@ -1122,6 +1233,8 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
     );
     share.model_hash =
         Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
+    share.loras[0].hash =
+        Some("d34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33f".to_owned());
     let text = parameters_text(&share, (64, 48));
     let emitted: BTreeSet<String> = parse_params(text.lines().last().expect("a settings line"))
         .into_keys()
@@ -1139,9 +1252,12 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
         assert!(reason.len() > 20, "`{key}` needs a real reason");
     }
 
+    assert!(text.contains("<lora:Mira:0.8>"));
+    assert!(text.contains("Lora hashes: \"Mira: d34db33f"));
+
     // And the things with no clean A1111 equivalent are absent from the rendered block by VALUE,
-    // not merely un-keyed: a scheduler, a strength, an upscale factor, a LoRA and a style all
-    // travel in the envelope and none of them may appear here.
+    // not merely un-keyed: a scheduler, a strength, an upscale factor and a style all travel in the
+    // envelope and none of them may appear here. The worker-proven LoRA is intentionally present.
     for absent in [
         "karras",
         "textStyleGain",
@@ -1149,9 +1265,7 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
         "Ghibli",
         "crop",
         "real-esrgan",
-        "Mira",
         "acme/mira",
-        "<lora:",
         "Denoising strength",
         "Hires",
         "Schedule type",
@@ -1166,10 +1280,9 @@ fn the_settings_line_emits_exactly_the_declared_keys() {
 }
 
 #[test]
-fn a_multi_phase_krea_recipe_omits_the_fields_it_cannot_state() {
-    // The case the AC names. A Krea multi-phase run has a SCHEDULE of steps and guidance, not one
-    // of each; emitting the top-level numbers beside it would describe a run that did not happen,
-    // and a gallery reader has no way to tell.
+fn a_multi_phase_krea_recipe_emits_exact_total_steps_but_not_variable_guidance() {
+    // Phase steps are contiguous segments of one schedule, so their sum is exact. Guidance varies
+    // by phase and still has no honest single-number representation.
     let share = built(
         "a lighthouse",
         "",
@@ -1193,7 +1306,7 @@ fn a_multi_phase_krea_recipe_omits_the_fields_it_cannot_state() {
     );
     let text = parameters_text(&share, (64, 48));
     let params = parse_params(text.lines().last().expect("a settings line"));
-    assert!(!params.contains_key("Steps"), "{text:?}");
+    assert_eq!(params["Steps"], "28", "{text:?}");
     assert!(!params.contains_key("CFG scale"), "{text:?}");
     // Nothing was invented for the schedule or the tap-reweight gain either.
     for absent in ["Phases", "phases", "1.4", "textStyleGain"] {
