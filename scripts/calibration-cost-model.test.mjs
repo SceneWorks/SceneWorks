@@ -380,6 +380,27 @@ test("a complete record for a covered pair moves its cells into producible-today
   assert.doesNotMatch(result.headline, /ZERO/);
 });
 
+test("a complete passed overlay record unblocks only its exact matrix overlay", () => {
+  const cells = syntheticCells({ overlays: ["none", "lora"] });
+  const result = producibility(cells, {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: ["alpha|mlx"],
+    overlayKeysWithCompleteRecords: ["alpha|mlx|lora"],
+  });
+  const byId = Object.fromEntries(result.partition.map((gate) => [gate.id, gate.cells]));
+
+  assert.equal(byId["overlay-declined"], 5, "beta's uncovered lora cells stay declined");
+  assert.equal(byId["producible-today"], 20, "alpha's none and proven lora cells are runnable");
+});
+
+test("published cost model reports promoted records instead of the obsolete zero baseline", async () => {
+  const model = await buildCostModel();
+  assert.equal(model.completedBaseline.completeRecords, 2);
+  assert.equal(model.completedBaseline.matrixSummaryCurrentCalibrationRuns, 2);
+  assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
+  assert.match(model.completedBaseline.note, /Exact records remain narrower/);
+});
+
 /**
  * MUTATION PROOF for the gate ORDER. If `overlay-declined` were checked after `no-provider-adapter`,
  * the overlay bucket would shrink to only the covered pairs and the "59.5% of the matrix is behind

@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:907cf593698cdbe86ba46b19eb602a94016e2b32385b21fe2778ebe74ff65a84",
-    "matrixRevision": "source-tree:b6185c297d34855fb20e31b0405942a07ac5e7527d3589af9077bd490998f720",
+    "sceneWorksRevision": "source-tree:bb811069dce803f5cb6097af607666a9736a269a2d904a0de4a121e939dade28",
+    "matrixRevision": "source-tree:991a713aa140dc71f558eca17862f15638d4ce9dbe160901c15314dd031351ad",
     "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "2b82ce89531acfa6cb7c20d76c5d0371b59286cb80188e34cd80440b37ebea78"
+        "sha256": "1c212e11da560f1ceac21c98f070d80268ca03e9c46200dbbd304fa761a5cbb4"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -58,7 +58,7 @@
     "matrixSummaryCalibrationRuns": 2,
     "matrixSummaryCurrentCalibrationRuns": 2,
     "verifiedCells": 0,
-    "note": "Every run count in this document is the WHOLE POPULATION, not a remainder. Zero calibration records exist on either backend, zero cells are `Verified`, and both the evidence bundle and the matrix summary agree on that independently."
+    "note": "2 complete record(s) exist in the evidence bundle; the matrix reports 2 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -73,11 +73,11 @@
       },
       {
         "id": "overlay-declined",
-        "label": "Non-`none` overlay: no adapter can emit a truthful overlay scenario",
+        "label": "Non-`none` overlay without a complete truthful overlay record",
         "blockedBy": "provider-adapter code",
-        "citation": "crates/sceneworks-memory-adapter/src/bin/candle.rs hardcodes the overlay scenario to `not_applicable` with the fixed reason \"ordinary Krea Turbo text-to-image calibration has no overlay\", which is false for a lora/identity/control target; crates/sceneworks-memory-adapter/src/bin/mlx.rs contains no overlay handling at all, so its overlay scenario stays `not_run` (from lib.rs#not_run_scenarios), which scripts/memory-calibration-harness.mjs#validateComplete rejects outright",
-        "cells": 4594,
-        "mlx": 2890,
+        "citation": "docs/generated/memory-calibration-evidence.json (complete records whose exact overlay scenario passed, normalized from control:N to the matrix control axis)",
+        "cells": 4564,
+        "mlx": 2860,
         "candle": 1704
       },
       {
@@ -93,7 +93,7 @@
         "id": "adapter-gated",
         "label": "An adapter exists, but it has never emitted a `complete` record",
         "blockedBy": "provider-adapter code (phase telemetry and lifecycle injection)",
-        "citation": "docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); docs/memory-calibration-harness.md documents both adapters as returning `gated` records today",
+        "citation": "docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); a pair remains gated only while that set has no complete record",
         "cells": 60,
         "mlx": 30,
         "candle": 30
@@ -103,8 +103,8 @@
         "label": "A run executed right now could certify this cell",
         "blockedBy": "nothing — GPU hours only",
         "citation": "the remainder after the gates above",
-        "cells": 30,
-        "mlx": 30,
+        "cells": 60,
+        "mlx": 60,
         "candle": 0
       }
     ],
@@ -139,6 +139,13 @@
         "candle": 54
       },
       {
+        "blockers": [],
+        "description": "(none — producible today)",
+        "cells": 60,
+        "mlx": 60,
+        "candle": 0
+      },
+      {
         "blockers": [
           "adapter-gated"
         ],
@@ -152,13 +159,6 @@
           "overlay-declined"
         ],
         "description": "overlay-declined",
-        "cells": 60,
-        "mlx": 60,
-        "candle": 0
-      },
-      {
-        "blockers": [],
-        "description": "(none — producible today)",
         "cells": 30,
         "mlx": 30,
         "candle": 0
@@ -194,10 +194,10 @@
       },
       {
         "id": "overlay-declined",
-        "cellsTouched": 4594,
-        "soleBlockerCells": 60,
+        "cellsTouched": 4564,
+        "soleBlockerCells": 30,
         "coBlockedCells": 4534,
-        "coBlockedShare": 0.9869,
+        "coBlockedShare": 0.9934,
         "coBlockedWith": {
           "adapter-gated": 114,
           "no-provider-adapter": 4420
@@ -209,15 +209,15 @@
         "adapter-gated": 60,
         "no-provider-adapter": 2670,
         "no-run-needed": 6,
-        "overlay-declined": 4594,
-        "producible-today": 30
+        "overlay-declined": 4564,
+        "producible-today": 60
       },
       "adapterCoverageFirst": {
         "adapter-gated": 60,
         "no-provider-adapter": 7090,
         "no-run-needed": 6,
-        "overlay-declined": 174,
-        "producible-today": 30
+        "overlay-declined": 144,
+        "producible-today": 60
       },
       "note": "The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'."
     },
@@ -228,16 +228,16 @@
         "adapter-gated",
         "overlay-declined"
       ],
-      "overlayChargedByFirstMatch": 4594,
+      "overlayChargedByFirstMatch": 4564,
       "overlayAlsoBlockedByAdapterCoverage": 4534,
-      "overlayIndependentlyBlocking": 60,
-      "overlayBindingAfterAdapterCoverage": 174,
-      "finding": "`overlay-declined` is charged 4594 cells by the first-match partition, but it is the SOLE blocker on 60 of them. 4420 of them (96.2%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 174 while `no-provider-adapter` rises to 7090. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2670 cells and it touches 7090. Scoping overlay support in both adapters is still necessary, but on its own it moves 174 cells, not 4594."
+      "overlayIndependentlyBlocking": 30,
+      "overlayBindingAfterAdapterCoverage": 144,
+      "finding": "`overlay-declined` is charged 4564 cells by the first-match partition, but it is the SOLE blocker on 30 of them. 4420 of them (96.8%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 144 while `no-provider-adapter` rises to 7090. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2670 cells and it touches 7090. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 144 cells, not 4564."
     },
-    "behindProviderCode": 7324,
-    "behindProviderCodeShare": 0.9951,
-    "producibleToday": 30,
-    "headline": "30 of 7360 cells could be certified by a run started right now."
+    "behindProviderCode": 7294,
+    "behindProviderCodeShare": 0.991,
+    "producibleToday": 60,
+    "headline": "60 of 7360 cells could be certified by a run started right now."
   },
   "controlCoverage": {
     "declaredControlModels": [
@@ -1174,22 +1174,22 @@
       "howToResolve": "NOT by 'capturing one `complete` record', which is how this was previously phrased. That is the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker string still lists predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is gated on the two code uncertainties above and cannot be scheduled ahead of them. THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX adapter, which already executes 8 real provider invocations today. That needs no new measurement campaign and no `complete` record — it converts an existing green CI step into a per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of a `complete` record that are already implemented. Do that first; treat the end-to-end `complete` record as the thing being scheduled, not the thing that unblocks scheduling."
     },
     {
-      "gate": "overlay-declined",
-      "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4594 cells (62.4% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 60 of them: 4534 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 174 cells, not 4594. It remains necessary work — those 4594 cells cannot be certified without it — but it is not where the schedule is decided.",
-      "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.",
-      "story": 16072,
-      "independentlyBlockingCells": 60,
-      "cellsTouched": 4594
-    },
-    {
       "gate": "adapter-gated",
       "input": "what a `complete` record actually requires from an existing adapter",
-      "why": "60 cells are blocked ONLY by this, and 174 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.",
-      "howToResolve": "Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.",
+      "why": "60 cells are blocked ONLY by this, and 174 in total. The Krea MLX control adapter has now emitted complete exact records, proving the pipeline can close; this bucket applies only to adapter-covered pairs that still have no complete record.",
+      "howToResolve": "Close the harness contract for each remaining adapter-covered pair: real phase telemetry, bounded-output parity, exact-fit/stale/unknown selection, lifecycle recovery, loadability, and a measured negative mutation. Complete records then move those exact targets out of `adapter-gated`.",
       "story": 15508,
       "independentlyBlockingCells": 60,
       "cellsTouched": 174
+    },
+    {
+      "gate": "overlay-declined",
+      "input": "how much provider-adapter work the OVERLAY axis needs",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4564 cells (62% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 30 of them: 4534 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 144 cells, not 4564. It remains necessary work — those 4564 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.",
+      "story": 16072,
+      "independentlyBlockingCells": 30,
+      "cellsTouched": 4564
     },
     {
       "input": "whether the harness can amortise a model load across a target's rungs",

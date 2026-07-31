@@ -388,12 +388,20 @@ struct VerifiedAdmissionCandidate {
 }
 
 #[derive(Clone, Debug)]
+struct VerifiedGeometryAlternative {
+    geometry: CalibrationGeometry,
+    calibration_abi: u32,
+    calibration_fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
 struct AdmissionRoute {
     path: AdmissionPath,
     fallback_reason: Option<LegacyAdmissionReason>,
     evidence: Vec<VerifiedAdmissionCandidate>,
     evidence_revision: Option<String>,
     process_limit_bytes: Option<u64>,
+    lower_alternative: Option<VerifiedGeometryAlternative>,
 }
 
 fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) -> MemoryBudget {
@@ -678,6 +686,7 @@ fn packaged_admission_route(
                 evidence: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
+                lower_alternative: None,
             });
         }
     };
@@ -704,6 +713,7 @@ fn evidence_admission_route(
             evidence: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
+            lower_alternative: None,
         });
     }
     let calibration = match &plan.calibration {
@@ -714,6 +724,7 @@ fn evidence_admission_route(
                 evidence: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
+                lower_alternative: None,
             })
         }
         MlxCalibrationConfig::Valid(calibration) => calibration,
@@ -740,6 +751,7 @@ fn evidence_admission_route(
             evidence: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
+            lower_alternative: None,
         });
     }
     let request_geometry = CalibrationGeometry {
@@ -764,6 +776,14 @@ fn evidence_admission_route(
             evidence: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
+            lower_alternative: verified_lower_alternative(
+                bundle,
+                calibration,
+                plan,
+                inputs,
+                mode_key,
+                budget,
+            ),
         });
     }
     let mut evidence = Vec::new();
@@ -842,36 +862,8 @@ fn evidence_admission_route(
             evidence,
             evidence_revision: None,
             process_limit_bytes: None,
+            lower_alternative: None,
         });
-    }
-    if evidence
-        .iter()
-        .all(|candidate| candidate.required_host_bytes > budget.total_bytes)
-    {
-        let minimum = evidence
-            .iter()
-            .map(|candidate| candidate.required_host_bytes)
-            .min()
-            .unwrap_or(0);
-        let alternative =
-            verified_lower_geometry(bundle, calibration, plan, inputs, mode_key, budget)
-                .map(|geometry| {
-                    format!(
-                        "; current verified alternative: {}x{}",
-                        geometry.width, geometry.height
-                    )
-                })
-                .unwrap_or_default();
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} request {}x{} count {} needs at least {:.2} GiB from verified MLX evidence, but \
-             {:.2} GiB of unified memory is available{alternative}",
-            plan.model_id,
-            inputs.width,
-            inputs.height,
-            inputs.count.max(1),
-            minimum as f64 / BYTES_PER_GIB,
-            budget.total_bytes as f64 / BYTES_PER_GIB,
-        )));
     }
     Ok(AdmissionRoute {
         path: AdmissionPath::Evidence,
@@ -879,20 +871,21 @@ fn evidence_admission_route(
         evidence,
         evidence_revision: None,
         process_limit_bytes: None,
+        lower_alternative: None,
     })
 }
 
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
 /// fits the live host boundary. This is the only source for a named refusal alternative: no formula,
 /// interpolation, tier heuristic, or aspect-ratio rewrite is admitted.
-fn verified_lower_geometry(
+fn verified_lower_alternative(
     bundle: &EvidenceBundle,
     calibration: &MlxCalibrationSet,
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
-) -> Option<CalibrationGeometry> {
+) -> Option<VerifiedGeometryAlternative> {
     let overlay = inputs.overlay.as_deref().unwrap_or("none");
     let requested_width = u64::from(inputs.width);
     let requested_height = u64::from(inputs.height);
@@ -939,15 +932,32 @@ fn verified_lower_geometry(
             let effective = budget.effective_bytes();
             (envelope.required_host_bytes() <= budget.total_bytes
                 && envelope.peak_bytes <= effective)
-                .then_some(binding.geometry)
+                .then_some(VerifiedGeometryAlternative {
+                    geometry: binding.geometry,
+                    calibration_abi: binding.query.abi,
+                    calibration_fingerprint: binding.query.fingerprint.clone(),
+                })
         })
-        .max_by_key(|geometry| {
+        .max_by_key(|alternative| {
+            let geometry = alternative.geometry;
             (
                 u64::from(geometry.width) * u64::from(geometry.height),
                 geometry.width,
                 geometry.height,
             )
         })
+}
+
+fn verified_lower_geometry(
+    bundle: &EvidenceBundle,
+    calibration: &MlxCalibrationSet,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    mode_key: &str,
+    budget: MemoryBudget,
+) -> Option<CalibrationGeometry> {
+    verified_lower_alternative(bundle, calibration, plan, inputs, mode_key, budget)
+        .map(|alternative| alternative.geometry)
 }
 
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
@@ -1035,12 +1045,20 @@ fn evaluate_request_with_budget_using_bundle(
         Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
         None => packaged_admission_route(plan, inputs, mode_key, budget)?,
     };
-    if admission.path == AdmissionPath::Evidence
+    let carries_verified_claim =
+        admission.path == AdmissionPath::Evidence || admission.lower_alternative.is_some();
+    if carries_verified_claim
         && !contract.calibration.as_ref().is_some_and(|identity| {
             admission.evidence.iter().all(|candidate| {
                 identity.abi == candidate.evidence.calibration_abi
                     && identity.fingerprint == candidate.evidence.calibration_fingerprint
-            })
+            }) && admission
+                .lower_alternative
+                .as_ref()
+                .is_none_or(|alternative| {
+                    identity.abi == alternative.calibration_abi
+                        && identity.fingerprint == alternative.calibration_fingerprint
+                })
         })
     {
         admission = AdmissionRoute {
@@ -1049,6 +1067,7 @@ fn evaluate_request_with_budget_using_bundle(
             evidence: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
+            lower_alternative: None,
         };
     }
     // The selector and provider request context must use the same evidence-derived foreign demand
@@ -1247,20 +1266,41 @@ fn evaluate_request_with_budget_using_bundle(
             needed_gb,
             available_gb,
         } => {
+            let alternative = admission
+                .lower_alternative
+                .as_ref()
+                .map(|alternative| {
+                    format!(
+                        "; current verified alternative: {}x{}",
+                        alternative.geometry.width, alternative.geometry.height
+                    )
+                })
+                .unwrap_or_default();
             return Err(WorkerError::InvalidPayload(format!(
-                "{} request {}x{} count {} needs {:.2} GiB but only {:.2} GiB is safely available",
+                "{} request {}x{} count {} needs {:.2} GiB but only {:.2} GiB is safely available{}",
                 plan.engine_id,
                 inputs.width,
                 inputs.height,
                 inputs.count.max(1),
                 needed_gb,
-                available_gb
-            )))
+                available_gb,
+                alternative,
+            )));
         }
         Selection::Unverified { reason } => {
+            let alternative = admission
+                .lower_alternative
+                .as_ref()
+                .map(|alternative| {
+                    format!(
+                        "; current verified alternative: {}x{}",
+                        alternative.geometry.width, alternative.geometry.height
+                    )
+                })
+                .unwrap_or_default();
             let message = format!(
                 "{} request {}x{} count {} has no safely verified MLX memory strategy ({reason:?}); \
-                 refusing to enter MLX's process-terminating allocation path",
+                 refusing to enter MLX's process-terminating allocation path{alternative}",
                 plan.engine_id,
                 inputs.width,
                 inputs.height,
@@ -2791,6 +2831,121 @@ mod tests {
         }
     }
 
+    fn packaged_krea_plan() -> MlxRequestPlan {
+        let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
+            .expect("packaged calibration bundle parses")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => {
+                panic!("packaged Krea evidence must be current: {reason:?}")
+            }
+        };
+        let records = bundle
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(record.backend, CalibrationBackend::Mlx)
+                    && record.target.model_id == "krea_2_turbo"
+                    && record.target.provider == "krea_2_turbo_control"
+                    && record.target.tier == "q4"
+                    && record.target.mode == "text_to_image"
+                    && record.target.overlay == "control:1"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records.len(),
+            2,
+            "the packaged Krea contract has two exact cells"
+        );
+        let first = records[0];
+        let resolved_path_fingerprint =
+            |record: &sceneworks_core::memory_calibration::EvidenceRecord| {
+                let sceneworks_core::memory_calibration::RequiredNullable::Value(fingerprint) =
+                    &record.loadability.resolved_path_fingerprint
+                else {
+                    panic!("complete Krea record must carry a resolved path fingerprint");
+                };
+                fingerprint.clone()
+            };
+        let resolved = ResolvedArtifactProvenance {
+            identity: crate::model_jobs::ResolvedArtifactIdentity {
+                repository: first.artifact.repository.clone(),
+                revision: first.artifact.resolved_revision.clone(),
+                variant: first.artifact.variant.clone(),
+                fingerprint: resolved_path_fingerprint(first),
+            },
+            fixed_artifact_tier: Some(first.target.tier.clone()),
+        };
+        let bindings = records
+            .into_iter()
+            .map(|record| MlxCalibrationBinding {
+                query: CalibrationBinding {
+                    abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                    fingerprint: record.calibration_fingerprint.clone(),
+                    scene_works_revision: "sc-16099-contract-v1".to_owned(),
+                    matrix_source_revision: record
+                        .repositories
+                        .scene_works
+                        .matrix_source_revision
+                        .clone()
+                        .expect("current matrix source revision"),
+                    inference_revision: record.repositories.inference.revision.clone(),
+                    artifact_repository: record.artifact.repository.clone(),
+                    artifact_resolved_revision: record.artifact.resolved_revision.clone(),
+                    artifact_variant: record.artifact.variant.clone(),
+                    resolved_path_fingerprint: resolved_path_fingerprint(record),
+                },
+                provider: record.target.provider.clone(),
+                tier: record.target.tier.clone(),
+                mode: record.target.mode.clone(),
+                overlay: record.target.overlay.clone(),
+                geometry: CalibrationGeometry {
+                    width: record.target.geometry.width,
+                    height: record.target.geometry.height,
+                    batch: record.target.geometry.batch,
+                    frames: record.target.geometry.frames,
+                },
+                rung: record.strategy.rung,
+                selection_parameters: parse_evidence_parameters(
+                    record.strategy.rung,
+                    &record.strategy.parameters,
+                )
+                .expect("packaged Krea strategy parameters"),
+                parameters: record.strategy.parameters.clone(),
+            })
+            .collect();
+        MlxRequestPlan {
+            engine_id: "krea_2_turbo_control",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            asset_bytes: gib_to_bytes(30.0),
+            activation_headroom_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
+        }
+    }
+
+    fn packaged_krea_generator() -> RequestGenerator {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let mut generator = fixture_generator();
+        generator.descriptor.id = "krea_2_turbo_control";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "krea_2_turbo_control".to_owned();
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+        ));
+        let bounded_decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        bounded_decode.parameters.decode_overlaps = vec![64];
+        generator
+    }
+
     fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
         MlxRequestInputs {
             width,
@@ -3074,22 +3229,81 @@ mod tests {
         };
         calibration.bindings.push(lower_binding);
 
-        let error = evidence_admission_route(
-            &bundle,
+        let error = evaluate_request_with_budget_using_bundle(
+            &fixture_generator(),
             &plan,
             &fixture_inputs(1024, 1024),
-            "text_to_image",
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
             fixture_budget(8.0),
+            gib_to_bytes(6.0),
+            0,
+            &[],
+            Some(&bundle),
         )
         .expect_err("the 6 GiB high record plus its 3 GiB foreign reserve must refuse");
         let message = error.to_string();
         assert!(
-            message.contains("verified MLX evidence"),
-            "the refusal must come from the exact evidence precheck: {message}"
+            message.contains("smallest verified MLX host boundary"),
+            "the refusal must come from the post-handshake exact evidence precheck: {message}"
         );
         assert!(
             message.contains("current verified alternative: 768x768"),
             "the refusal must name the lower exact record: {message}"
+        );
+    }
+
+    #[test]
+    fn packaged_krea_1024_refuses_before_render_and_names_only_a_fitting_current_cell() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let plan = packaged_krea_plan();
+        let generator = packaged_krea_generator();
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.overlay = Some("control:1".to_owned());
+
+        for (budget_gib, expected) in [(128.0, "896x896"), (83.0, "768x768")] {
+            let error = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(budget_gib),
+                gib_to_bytes(130.0),
+                0,
+                &[],
+            )
+            .expect_err("the independent legacy estimate must refuse before provider render");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("current verified alternative: {expected}")),
+                "the largest exact current cell that fits {budget_gib} GiB must be named: {message}"
+            );
+        }
+
+        let mut mismatched = packaged_krea_generator();
+        mismatched
+            .contract
+            .as_mut()
+            .expect("Krea contract")
+            .calibration = Some(MemoryCalibrationIdentity::new("mutated-loaded-provider"));
+        let message = evaluate_request_with_budget(
+            &mismatched,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            gib_to_bytes(130.0),
+            0,
+            &[],
+        )
+        .expect_err("the mismatched loaded provider still refuses on the independent estimate")
+        .to_string();
+        assert!(
+            !message.contains("current verified alternative"),
+            "a loaded-provider fingerprint mutation must suppress evidence-derived naming: {message}"
         );
     }
 
@@ -3631,15 +3845,22 @@ mod tests {
             gib_to_bytes(3.0)
         );
 
-        let unfit = evidence_admission_route(
-            &bundle,
+        let unfit = evaluate_request_with_budget_using_bundle(
+            &fixture_generator(),
             &fixture_plan(),
             &inputs,
-            "text_to_image",
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
             fixture_budget(6.0),
+            gib_to_bytes(5.0),
+            0,
+            &[],
+            Some(&bundle),
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
-        assert!(unfit.to_string().contains("verified MLX evidence"));
+        assert!(unfit
+            .to_string()
+            .contains("smallest verified MLX host boundary"));
     }
 
     #[test]
