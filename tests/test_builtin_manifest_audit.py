@@ -1324,7 +1324,7 @@ def test_z_image_turbo_manifest_has_mlx_block():
 
 
 def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
-    """sc-12126/sc-13108/sc-15206: pin resident peaks and every measured Turbo ladder tier."""
+    """sc-12126/sc-13108/sc-15206/sc-15994: pin peaks and the invalidated Turbo ladder."""
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     measured_tiers = {
@@ -1348,7 +1348,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         )
     } == {
         "calibrationAbi": 1,
-        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1-superseded-sc-15994",
         "sceneWorksRevision": "sc-15449-contract-v1",
         "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
         "measured": True,
