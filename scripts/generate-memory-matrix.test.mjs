@@ -8,6 +8,7 @@ import {
   MODEL_STORIES,
   SOURCE_PATHS,
   assertCellOwnershipIsBackendScoped,
+  assertCellInventoryMatchesCatalog,
   assertTwinCoverage,
   backendScopes,
   buildMatrix,
@@ -194,6 +195,73 @@ test("provenance is stamped once on the document, never per row", async () => {
   assert.ok(
     !JSON.stringify(matrix.cells).includes(matrix.generatedFrom.sceneWorksRevision),
     "no cell may embed the source revision under any other key either",
+  );
+});
+
+test("catalog-relative inventory guard rejects whole-scope loss without freezing today's total", async () => {
+  const matrix = await buildMatrix();
+  const candleCells = matrix.cells.filter((cell) => cell.backend === "candle");
+  assert.ok(candleCells.length > matrix.cells.length / 4, "mutation must drop a substantial fraction");
+  await assert.rejects(
+    buildMatrix({
+      // Preserve the bespoke tier-override scope so its older, narrower guard does not mask the new
+      // catalog-wide assertion. Every other Candle scope disappears from the real generator path.
+      cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
+    }),
+    /:candle: catalog cross-product expects .* emitted 0/,
+  );
+
+  // The expectation moves with a legitimate new catalog scope; no committed 7,360-cell ratchet needs
+  // editing. The generator's separate 53-entry and ownership guards still decide whether that scope is
+  // part of this epic, while this guard checks only that an accepted scope emits its full cross-product.
+  const driftRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const driftCells = driftRungs.map((rung) => ({
+    id: `future:future:mlx:bf16:text_to_image:none:${rung}`,
+    modelId: "future",
+    backend: "mlx",
+  }));
+  const driftExpectations = new Map([
+    ["future:mlx", { tiers: 1, modes: 1, overlays: 1, rungs: driftRungs.length, cells: driftRungs.length }],
+  ]);
+  assert.doesNotThrow(() => assertCellInventoryMatchesCatalog(driftCells, driftExpectations));
+});
+
+test("inventory guard rejects duplicate and unknown-scope cells", async () => {
+  const cells = [
+    {
+      id: "known:known:mlx:bf16:text_to_image:none:resident",
+      modelId: "known",
+      backend: "mlx",
+    },
+  ];
+  const expected = new Map([
+    ["known:mlx", { tiers: 1, modes: 1, overlays: 1, rungs: 1, cells: 1 }],
+  ]);
+
+  assert.throws(
+    () => assertCellInventoryMatchesCatalog([...cells, cells[0]], expected),
+    /duplicate memory-matrix cell id/,
+  );
+  assert.throws(
+    () =>
+      assertCellInventoryMatchesCatalog(
+        [
+          ...cells,
+          {
+            id: "other:other:mlx:bf16:text_to_image:none:resident",
+            modelId: "other",
+            backend: "mlx",
+          },
+        ],
+        expected,
+      ),
+    /unexpected catalog scope other:mlx/,
   );
 });
 

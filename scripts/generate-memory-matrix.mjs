@@ -272,6 +272,46 @@ export function assertCellOwnershipIsBackendScoped(cells, scope = buildStoryBack
 }
 
 /**
+ * Prove that the emitted cells still equal the catalog cross-product that was resolved for this run.
+ *
+ * This deliberately does NOT pin today's total. Tiers, modes, overlays, backends, and even catalog
+ * entries legitimately drift; their resolved axis sizes are the expectation. The schema's low
+ * `minItems` can only be a shape sanity check because JSON Schema cannot derive this cross-product.
+ * Keeping the exact check here also makes a dropped generation branch fail before either artifact is
+ * written.
+ */
+export function assertCellInventoryMatchesCatalog(cells, expectedByScope) {
+  const actualByScope = new Map();
+  const seenIds = new Set();
+
+  for (const cell of cells) {
+    if (seenIds.has(cell.id)) {
+      throw new Error(`${cell.id}: duplicate memory-matrix cell id`);
+    }
+    seenIds.add(cell.id);
+
+    const scope = `${cell.modelId}:${cell.backend}`;
+    if (!expectedByScope.has(scope)) {
+      throw new Error(`${cell.id}: emitted a cell for unexpected catalog scope ${scope}`);
+    }
+    actualByScope.set(scope, (actualByScope.get(scope) ?? 0) + 1);
+  }
+
+  for (const [scope, expected] of expectedByScope) {
+    if (!Number.isInteger(expected.cells) || expected.cells < 1) {
+      throw new Error(`${scope}: catalog axes resolved to no memory-matrix cells`);
+    }
+    const actual = actualByScope.get(scope) ?? 0;
+    if (actual !== expected.cells) {
+      throw new Error(
+        `${scope}: catalog cross-product expects ${expected.cells} cells ` +
+          `(${expected.tiers} tiers x ${expected.modes} modes x ${expected.overlays} overlays x ${expected.rungs} rungs), emitted ${actual}`,
+      );
+    }
+  }
+}
+
+/**
  * The reconcile the story originally pinned as an absolute epic story count ("100 -> ~147"), restated
  * relatively so it stops going stale every time a story is filed. Twin coverage is derived from what
  * the catalog advertises: every dual-backend entry needs a Candle twin, and an mlx-only entry must
@@ -1081,7 +1121,13 @@ function strategyStatus({
   return { state: "Missing", source: null, parameters: {} };
 }
 
-function validateMatrix(matrix, expectedIds, backendTierOverrides, rung4Survey) {
+function validateMatrix(
+  matrix,
+  expectedIds,
+  backendTierOverrides,
+  rung4Survey,
+  cellInventoryExpectations,
+) {
   const ids = matrix.models.map((model) => model.id);
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
     throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
@@ -1115,6 +1161,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides, rung4Survey) 
       );
     }
   }
+  assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
   assertTwinCoverage(matrix.models);
   assertCellOwnershipIsBackendScoped(matrix.cells);
   assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
@@ -1169,7 +1216,7 @@ export const SOURCE_PATHS = Object.freeze({
   cargo: "Cargo.toml",
 });
 
-export async function buildMatrix({ sourceOverrides = {} } = {}) {
+export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = {}) {
   const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
@@ -1243,6 +1290,26 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
+
+  // Resolve the complete catalog expectation in its own pass. Keeping this outside the emission loop
+  // is load-bearing: if a later regression skips an entire model/backend branch while emitting cells,
+  // the expected scope must survive so validation can report the loss.
+  const cellInventoryExpectations = new Map();
+  for (const modelSummary of models) {
+    const model = manifestById.get(modelSummary.id);
+    for (const backend of modelSummary.backends) {
+      const tiers = tiersFor(model, backend, backendTierOverrides);
+      const modes = modesFor(model);
+      const overlays = overlaysFor(model, backend);
+      cellInventoryExpectations.set(`${model.id}:${backend}`, {
+        tiers: tiers.length,
+        modes: modes.length,
+        overlays: overlays.length,
+        rungs: RUNGS.length,
+        cells: tiers.length * modes.length * overlays.length * RUNGS.length,
+      });
+    }
+  }
 
   const cells = [];
   for (const modelSummary of models) {
@@ -1361,7 +1428,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                     inference: pin,
                   }) === "current" && record.status === "complete",
               );
-              cells.push({
+              const cell = {
                 id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),
                 modelId: model.id,
                 resolvedRoute: provider,
@@ -1405,7 +1472,10 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   strategyParameterVerification: status.strategyParameterVerification ?? [],
                   structural: status.structural ?? [],
                 },
-              });
+              };
+              // Mutation seam used by the inventory regression test. The CLI never supplies a filter;
+              // every production build emits the full catalog and validates it below before writing.
+              if (!cellFilter || cellFilter(cell)) cells.push(cell);
             }
           }
         }
@@ -1549,7 +1619,13 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
     calibrationRuns,
     modelSlices,
   };
-  validateMatrix(matrix, expectedIds, backendTierOverrides, rung4Survey);
+  validateMatrix(
+    matrix,
+    expectedIds,
+    backendTierOverrides,
+    rung4Survey,
+    cellInventoryExpectations,
+  );
   return matrix;
 }
 
