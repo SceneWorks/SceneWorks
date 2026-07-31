@@ -22,8 +22,10 @@ whole thing by megapixels is wrong twice over:
 
 1. **The OS/app share is fixed overhead.** macOS and other apps draw the same amount from the unified
    pool whether this request renders 512² or 2048². Scaling it is pure invention.
-2. **The transient is not linear in area.** The only prior evidence (sc-5567, SenseNova-U1 8B Q8) had
-   16× the area producing 3.8× the memory.
+2. **The transient was believed not to be linear in area.** The only prior evidence (sc-5567,
+   SenseNova-U1 8B Q8) had 16× the area producing 3.8× the memory. §3 Finding 2 shows this reading
+   does not survive measurement — it is recorded here as the premise the work started from, not as a
+   conclusion.
 
 sc-16194 fixed the dominant term (the job image count was being charged as a batch dimension). This is
 the second-order half, and the story that filed it said explicitly that picking a replacement curve
@@ -53,11 +55,16 @@ Notes on why each piece is what it is:
   observers of the Metal allocator's high-water mark. RSS and `getrusage` maxrss do not see it, so no
   out-of-process sampler could produce these numbers.
 - **`clear_cache()` before sampling resident** is the sc-8516 credibility fix. Without it the
-  generation's freeable scratch is folded into resident and the transient is understated.
+  generation's freeable scratch is folded into resident and the transient is understated. The harness
+  then asserts `get_cache_memory() <= resident/100` at that point — the direct proof that the drain
+  actually happened, rather than an assumption that it did.
 - **Warm is the regime that matters here.** `evaluate_request` runs per request, after the
-  generator-cache lookup and immediately before generation. The cold load+gen ceiling is gated
-  separately and resolution-blind (`decide_residency_for_spec`, the flat `HEADROOM_GB`), so it is
-  recorded as a `"cell":"cold"` row for reference rather than mixed into the fit.
+  generator-cache lookup and immediately before generation. The cold load+gen path is gated separately
+  and resolution-blind (`decide_residency_for_spec`, the flat `HEADROOM_GB`), so it is recorded as a
+  `"cell":"cold"` row for reference rather than mixed into the fit. Read that row as a **lower bound**
+  on the load+gen ceiling, not the ceiling: MLX materialises lazily, so the weights and the full
+  activation set are never simultaneously live on the first pass — measured, the cold peak lands below
+  the warm peak at the same geometry in **all seven** tiers.
 - **Each tier's own recipe** (steps / guidance from `engines.rs`) is used, because a guidance-distilled
   engine rejects a guidance value outright and a true-CFG engine runs a second uncond forward whose
   activations are part of what is being measured. Step *count* does not move the peak — the high-water
@@ -75,6 +82,23 @@ non-square points at nearby areas are both present on purpose: they separate "sc
 harness before any new cell is trusted: illustrious q8 resident 4.74 GiB and 1024² transient 14.04;
 qwen-image q8 1024² transient 7.66 and peak 41.11. The instrument agrees with the calibration it is
 meant to refine.
+
+**Fresh-process cross-check.** A whole tier is swept in one process (one load, `reset_peak_memory()`
+per cell). The exposure that creates is a later cell inheriting allocator state from an earlier one,
+so the *last* cell of a sweep is the one worth re-measuring alone. Re-running z_image_turbo q4 with
+`RS_CELLS=2048x2048` in a fresh process reproduces the in-process row **exactly**:
+
+| | transientBytes |
+|---|---:|
+| in-process, 5th of 5 cells | 59,127,860,816 |
+| fresh process, only cell | 59,127,860,816 |
+
+Byte-identical, so multi-resolution-per-process is sound. Multi-*tier* per process is not, and is
+blocked by a `SWEEP_RAN` guard mirroring `footprint_measure`'s (sc-8925).
+
+```bash
+RS_CELLS=2048x2048 cargo test -p sceneworks-worker --release sweep_z_image_turbo_q4 -- --ignored --nocapture
+```
 
 ---
 
@@ -134,13 +158,28 @@ resolution-independent — text-encoder activations, allocator working set — d
 estimator's pre-existing `.max(1.0)` clamp on the scale is therefore the conservative reading of the
 data, and is kept.
 
-### Finding 4 — the transient is independent of the quant tier
+### Finding 4 — the transient looks tier-independent, but on ONE clean pair, with a known counterexample
 
-`sdxl bf16` (dense) matches `illustrious_xl_v1 q8` (packed) to the byte at every cell, and
-`krea_2_turbo bf16` matches `krea_2_turbo q8` likewise. Activations are bf16 regardless of how the
-weights are encoded, so the transient is a property of *architecture × resolution* only. This is why
-the story's "dense and packed" requirement resolves to a single answer per family rather than two —
-and it is what makes a per-family anchor (§4) characterisable from one tier.
+`krea_2_turbo bf16` (dense) matches `krea_2_turbo q8` (packed) **byte-for-byte at every cell** —
+`transientBytes` deltas are exactly 0. That is a genuine within-model dense-vs-packed pair, and it is
+what the story's "dense and packed" requirement asked for. The mechanism is plausible: activations are
+bf16 regardless of how the weights are encoded.
+
+Two things stop this from generalising, and they are stated here because §4 leans on it:
+
+1. **`sdxl bf16` vs `illustrious_xl_v1 q8` is not a tier pair.** Those are different *models*
+   (`sdxl-base-mlx` vs `illustrious-xl-v1-mlx`) that happen to share the SDXL architecture. They agree
+   to within 0.7 MB (−169 KB at 512² to −677 KB at 2048²) — close, and informative about the
+   architecture, but it is not evidence about tiers. So the clean tier evidence is **one pair, not two**.
+2. **sc-10863 records a counterexample.** lens q4 measured a 14.04 transient; lens-turbo bf16 measured
+   29.88 (`LENS_DENSE_HEADROOM_GB`) — a 2× gap. That pair also crosses models (lens vs lens-turbo), but
+   sc-11924 attributes the gap to the dense tier's gpt-oss text encoder materialising at bf16, which is
+   precisely a *tier* effect on the activation working set. Whatever the split between the two causes,
+   it is a live example of a family where dense and packed do **not** agree.
+
+**Read this as: tier-independence holds where measured, and must be re-measured per family rather than
+assumed.** sc-16209 is written accordingly — one tier per family is the starting point, not a licence
+to skip the dense tier on a family with a heavyweight text encoder.
 
 ### What was actually wrong, and what this changes
 
@@ -183,8 +222,10 @@ qwen-image both measure **7.66–7.67** — 45% under it, because their shared Q
 tiled (sc-11747).
 
 That is sc-11924's axis (per-architecture transient terms), not this story's, and it is filed as
-**sc-16209** with these measurements attached. Finding 4 above is what makes it tractable: because the
-transient is tier-independent, one measured tier characterises a family.
+**sc-16209** with these measurements attached. Finding 4 makes it *cheaper* but not free: the one clean
+dense-vs-packed pair here agrees byte-for-byte, so one tier per family is a reasonable starting point —
+but sc-10863's lens pair is a 2× counterexample, so a family with a heavyweight text encoder still
+needs its dense tier measured rather than inferred.
 
 Why it is not folded in here: this change is a pure *shape* correction that provably cannot lower the
 modeled peak below any measured point, whereas lowering a family's anchor reduces a SIGKILL-guarding
@@ -196,7 +237,9 @@ which must keep the conservative 14. Two different risk profiles, two different 
 ## 5. Conservativeness verification (story requirement 4)
 
 The story requires the estimator to stay conservative at the measured points — the sweep sets the
-shape, not a smaller safety margin. Checked against all 35 warm cells, `modeled − measured peak`:
+shape, not a smaller safety margin. Checked against all **35** warm cells, `modeled − measured peak`.
+The table shows the 28 cells at and above the anchor; the seven 512² cells are omitted only because
+they are uniformly slack (+11.70 to +14.54, since the `.max(1.0)` floor models them as 1024²):
 
 | tier | 1024² | 1024×1536 | 1152×2048 | 2048² |
 |---|---:|---:|---:|---:|

@@ -1,11 +1,15 @@
 //! On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448).
 //!
 //! Purpose: supply the measurements [`crate::mlx_fit_gate`]'s request-scoped generic estimator needs
-//! in order to stop scaling its whole flat activation headroom LINEARLY with megapixels. The
-//! sc-10863 calibration behind `HEADROOM_GB` measured four tiers at 1024² ONLY, so the constant is a
-//! 1024²-worst-case with no shape; `generic_total_peak_bytes` then multiplied all of it by
-//! `w·h/1024²`, which both scales the fixed OS/app reserve (it does not scale) and treats the
-//! activation transient as linear in area (the sc-5567 points say it is markedly sublinear).
+//! in order to stop scaling its whole flat activation headroom with megapixels. The sc-10863
+//! calibration behind `HEADROOM_GB` measured four tiers at 1024² ONLY, so the constant is a
+//! 1024²-worst-case with no shape, and `generic_total_peak_bytes` multiplied all of it by `w·h/1024²`
+//! — including the fixed OS/app reserve, which does not scale with anything.
+//!
+//! The story that commissioned this expected the sweep to justify a SUBLINEAR area term, from two
+//! sc-5567 points. It did the opposite: above 1024² the transient is proportional to area to within
+//! 1.97% across seven tiers, so only the fixed reserve was pulled out and the area term was left
+//! linear. Full results and the refutation in `docs/sc-16195/README.md`.
 //!
 //! This harness is the sibling of [`crate::footprint_measure`] with the axis rotated: that one
 //! measures ONE resolution across tiers, this one measures ONE tier across resolutions. It samples
@@ -34,19 +38,28 @@
 //! WARM is the right regime for this seam: `mlx_fit_gate::evaluate_request` runs per request, after
 //! the generator-cache lookup and immediately before generation, and its formula is
 //! `asset_bytes + headroom·scale` — i.e. resident weights plus the marginal activation cost of THIS
-//! request's geometry. The COLD load+gen ceiling is gated separately and resolution-blind
-//! (`decide_residency_for_spec`, the flat `HEADROOM_GB`), so it is reported here as a bonus row
+//! request's geometry. The cold load+gen path is gated separately and resolution-blind
+//! (`decide_residency_for_spec`, the flat `HEADROOM_GB`), so its row is reported as a bonus
 //! (`"cell":"cold"`) rather than mixed into the fit.
+//!
+//! Read that cold row as a LOWER BOUND on the load+gen ceiling, not as the ceiling. MLX materializes
+//! lazily, so on the first pass the weights are still being realized while the activations allocate —
+//! the two are never fully co-resident. Measured: the cold peak comes in BELOW the warm peak at the
+//! same geometry in all seven swept tiers.
 //!
 //! ## Running it
 //!
-//! One tier per process is NOT required here the way it is for `footprint_measure` — that rule exists
-//! because a second *tier*'s weights land on top of the first tier's allocator residue. Within one
-//! tier the weights are the same arrays throughout, and `reset_peak_memory()` re-bases the high-water
-//! mark per cell, so a whole resolution sweep is measured in one load. Narrowing `RS_CELLS` to a
-//! single cell therefore gives a fresh-process cross-check of that cell's in-process row — the point
-//! worth re-measuring that way, since a sweep's later cells are the ones that could in principle
-//! carry allocator state from the earlier ones.
+//! RUN ONE TIER PER PROCESS — the same rule [`crate::footprint_measure`] enforces (sc-8925), and for
+//! the same reason: the MLX counters are process-global, so a second TIER's weights land on top of
+//! the first tier's allocator residue. [`SWEEP_RAN`] enforces it, so an unfiltered
+//! `cargo test … sweep -- --ignored` fails loudly instead of emitting corrupt rows.
+//!
+//! What is relaxed here is one tier per *cell*, not per tier. Within a single tier the weights are
+//! the same arrays throughout and `reset_peak_memory()` re-bases the high-water mark per cell, so a
+//! whole resolution sweep is measured in one load. Narrowing `RS_CELLS` to a single cell therefore
+//! gives a fresh-process cross-check of that cell's in-process row — worth doing for the last cell of
+//! a sweep, the one that could in principle have carried allocator state from the earlier ones.
+//! `docs/sc-16195/README.md` §2 records such a cross-check.
 //!
 //! ```text
 //! cargo test -p sceneworks-worker --release sweep_illustrious_v1_q8 -- --ignored --nocapture
@@ -65,10 +78,20 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
 use super::smoke_support::{env_or, image_std, is_all_zero, DEGENERATE_STD_FLOOR_DEFAULT};
+
+/// One-tier-per-process guard, mirroring `footprint_measure`'s `FOOTPRINT_RAN` (sc-8925). The MLX
+/// counters and the allocator's peak high-water mark are PROCESS-GLOBAL, so measuring a second tier
+/// in the same binary invocation folds the first tier's resident weights into its numbers. `sweep_tier`
+/// flips this once and asserts it was previously false, so an unfiltered
+/// `cargo test … sweep -- --ignored` run fails loudly instead of silently emitting corrupt
+/// `[[RESSWEEP]]` lines. Multiple RESOLUTIONS in one process are fine and are the point — see the
+/// module doc.
+static SWEEP_RAN: AtomicBool = AtomicBool::new(false);
 
 /// The sweep's default resolution cells — the story's required minimum set: a sub-1024² point, the
 /// 1024² calibration anchor, a portrait 1.5 MP, the 1152×2048 cell from the sc-16194 report, and a
@@ -169,7 +192,8 @@ fn quant_for(tier: &str) -> Option<Quant> {
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// One generation at `(width, height)` with the peak counter re-based first. Returns
-/// `(peak_bytes, resident_after_bytes)`; the caller derives `transient = peak − resident_after`.
+/// `(peak_bytes, resident_after_bytes, render_std)`; the caller derives
+/// `transient = peak − resident_after`.
 fn measure_cell(
     label: &str,
     generator: &dyn gen_core::Generator,
@@ -211,10 +235,22 @@ fn measure_cell(
     // activation transient and not an artifact of retained buffers (the sc-8516 credibility fix).
     mlx_rs::memory::clear_cache();
     let resident_after = mlx_rs::memory::get_active_memory() as u64;
+    // The whole credibility of `transient = peak − resident` rests on that `clear_cache()` having
+    // actually drained the generation's freeable scratch. `get_cache_memory` is the direct proof:
+    // anything still sitting in the allocator's free cache here would be scratch wrongly counted as
+    // resident, understating the transient. Asserted rather than printed, because a silent
+    // regression would corrupt the calibration this harness exists to produce.
+    let cached_after = mlx_rs::memory::get_cache_memory() as u64;
+    assert!(
+        cached_after <= resident_after / 100,
+        "{label}: clear_cache() left {cached_after} bytes in the allocator cache against \
+         {resident_after} resident — the transient would be understated by whatever did not drain"
+    );
     println!(
-        "[sweep] {label}: resident {:.2} GiB (pre-gen {:.2}) | peak {:.2} GiB | transient {:.2} GiB | std {std:.1}",
+        "[sweep] {label}: resident {:.2} GiB (pre-gen {:.2}, cache after drain {:.3}) | peak {:.2} GiB | transient {:.2} GiB | std {std:.1}",
         resident_after as f64 / GIB,
         resident_before as f64 / GIB,
+        cached_after as f64 / GIB,
         peak as f64 / GIB,
         peak.saturating_sub(resident_after) as f64 / GIB,
     );
@@ -258,6 +294,16 @@ fn sweep_tier(
     dir: &Path,
     make_request: impl Fn(u32, u32) -> GenerationRequest,
 ) {
+    // Enforce the one-tier-per-process invariant before touching the GPU (see `SWEEP_RAN`): a second
+    // tier in this process would report numbers contaminated by the first tier's resident weights.
+    assert!(
+        !SWEEP_RAN.swap(true, Ordering::SeqCst),
+        "resolution sweep measured a second TIER in one process — the MLX peak/active counters are \
+         process-global, so run exactly one `sweep_<x>` per `cargo test … -- --ignored` invocation \
+         (see the module doc; multiple RESOLUTIONS per process are fine and are the point). The \
+         just-attempted {model} {tier} sweep would be corrupt."
+    );
+
     let cells = sweep_cells();
     assert!(!cells.is_empty(), "no sweep cells");
 
@@ -277,9 +323,12 @@ fn sweep_tier(
     let generator = crate::inference_runtime::load(engine_id, &spec)
         .unwrap_or_else(|error| panic!("load {engine_id} ({tier}): {error:?}"));
 
-    // COLD row: the first pass materializes the weights, so its peak is the load+gen ceiling the
-    // resolution-blind load-time gate budgets for. Measured at the FIRST sweep cell so the caller
-    // controls which geometry pays for materialization.
+    // COLD row: the first pass is what materializes the weights, so its peak spans load + one
+    // generation — the regime the resolution-blind load-time gate budgets for. It is a LOWER bound on
+    // that ceiling, not the ceiling: lazy materialization means the weights and the full activation
+    // set are never simultaneously live, which is why every swept tier's cold peak lands below its
+    // warm peak at the same geometry. Measured at the FIRST sweep cell so the caller controls which
+    // geometry pays for materialization.
     let (cold_width, cold_height) = cells[0];
     let (cold_peak, cold_resident, cold_std) = measure_cell(
         &format!("{model} {tier} cold {cold_width}x{cold_height}"),
