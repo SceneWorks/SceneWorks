@@ -2914,6 +2914,125 @@ fn load_spec(
     spec
 }
 
+/// Select the independent deferred-materialization shape for the one MLX route whose production
+/// contract has measured it (SC-15800). The fit gate still owns the separate Resident/Sequential
+/// decision: a roomy machine keeps Lens resident, while a constrained machine adds Sequential and
+/// thereby satisfies the provider's exact rung-4 predicate. Keep every overlay exclusion explicit
+/// so an unmeasured load can never inherit the dense, native-decode result.
+fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let lens_dense_native = matches!(engine_id, "lens" | "lens_turbo")
+        && matches!(&spec.weights, WeightsSource::Dir(_))
+        && spec.precision == gen_core::Precision::Bf16
+        && spec.quantize.is_none()
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    if lens_dense_native {
+        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    } else {
+        spec
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod lens_measured_load_shape_tests {
+    use super::*;
+    use gen_core::{
+        AdapterKind, AdapterSpec, MemoryStrategy, MemoryStrategySupport, OffloadPolicy, Quant,
+        TransformerComponent,
+    };
+
+    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+        for component in ["text_encoder", "transformer", "vae"] {
+            let dir = root.join(component);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("model.safetensors"), [0_u8; 8]).unwrap();
+        }
+        std::fs::write(
+            root.join("text_encoder/config.json"),
+            r#"{"dtype":"bfloat16"}"#,
+        )
+        .unwrap();
+        LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+    }
+
+    fn rung_four_support(engine_id: &str, spec: &LoadSpec) -> MemoryStrategySupport {
+        crate::inference_runtime::media()
+            .memory_strategy_contract(engine_id, spec)
+            .unwrap()
+            .expect("Lens registers a memory-strategy contract")
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .expect("compatibility contract contains rung 4")
+            .support
+            .clone()
+    }
+
+    #[test]
+    fn worker_lens_spec_reaches_only_the_measured_bf16_native_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fixture_spec(dir.path());
+
+        for engine_id in ["lens", "lens_turbo"] {
+            let shaped = apply_measured_mlx_load_shape(engine_id, base.clone());
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "the production worker must request the load shape measured by the provider"
+            );
+            assert_eq!(
+                rung_four_support(engine_id, &shaped),
+                MemoryStrategySupport::Missing,
+                "deferred materialization alone must not bypass the Sequential prerequisite"
+            );
+
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(engine_id, &sequential)
+                .unwrap()
+                .expect("Lens contract");
+            let rung = contract
+                .capability(MemoryStrategy::BoundedTransformerResidency)
+                .expect("rung 4");
+            assert_eq!(rung.support, MemoryStrategySupport::Implemented);
+            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
+            assert_eq!(
+                rung.parameters.transformer_window_components,
+                vec![TransformerComponent::TextEncoder]
+            );
+
+            let adapter = AdapterSpec::new(
+                dir.path().join("adapter.safetensors"),
+                1.0,
+                AdapterKind::Lora,
+            );
+            let unsupported = [
+                base.clone().with_quant(Quant::Q4),
+                base.clone().with_quant(Quant::Q8),
+                base.clone().with_adapters(vec![adapter]),
+                base.clone().with_pid(
+                    WeightsSource::File(dir.path().join("pid.safetensors")),
+                    WeightsSource::Dir(dir.path().join("gemma")),
+                ),
+            ];
+            for spec in unsupported {
+                let shaped = apply_measured_mlx_load_shape(engine_id, spec)
+                    .with_offload_policy(OffloadPolicy::Sequential);
+                assert_eq!(
+                    shaped.load_shape,
+                    gen_core::LoadShape::EagerMaterialization,
+                    "unmeasured tiers and overlays must not opt into the deferred Lens load"
+                );
+                assert_eq!(
+                    rung_four_support(engine_id, &shaped),
+                    MemoryStrategySupport::Missing
+                );
+            }
+        }
+    }
+}
+
 /// Stage a media model's caller-provisioned components (epic 13657, sc-13679) onto its `LoadSpec` —
 /// the image/video twin of the audio seam (`audio_jobs.rs run_audio_synthesis_using`). It reads the
 /// model's descriptor `required_components` from the media registry and resolves each declared id to
@@ -5065,6 +5184,7 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+    spec = apply_measured_mlx_load_shape(engine_id, spec);
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,

@@ -802,6 +802,14 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
       if (!RUNG4_REQUEST_PEAKS.includes(verdict.requestPeak?.finding)) {
         throw new Error(`${at}: unknown requestPeak finding ${JSON.stringify(verdict.requestPeak?.finding)}`);
       }
+      for (const [tier, finding] of Object.entries(verdict.requestPeak?.byTier ?? {})) {
+        if (!["bf16", "q4", "q8"].includes(tier)) {
+          throw new Error(`${at}: requestPeak.byTier contains a tier outside the matrix vocabulary`);
+        }
+        if (!RUNG4_REQUEST_PEAKS.includes(finding)) {
+          throw new Error(`${at}: requestPeak.byTier.${tier} has unknown finding ${JSON.stringify(finding)}`);
+        }
+      }
       if (!verdict.evidence?.length) {
         throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
       }
@@ -824,6 +832,27 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
       }
       if (verdict.implementedModes?.length === 0) {
         throw new Error(`${at}: implementedModes is empty — omit it to mean every mode`);
+      }
+      for (const [field, values] of [
+        ["implementedTiers", verdict.implementedTiers],
+        ["implementedOverlays", verdict.implementedOverlays],
+      ]) {
+        if (values && !implemented.length) {
+          throw new Error(`${at}: ${field} narrows implementedEntries, which is empty`);
+        }
+        if (values?.length === 0) {
+          throw new Error(`${at}: ${field} is empty — omit it to mean every cell value`);
+        }
+      }
+      if (verdict.implementedTiers?.some((value) => !["bf16", "q4", "q8"].includes(value))) {
+        throw new Error(`${at}: implementedTiers contains a tier outside the matrix vocabulary`);
+      }
+      if (
+        verdict.implementedOverlays?.some(
+          (value) => !["none", "lora", "control", "identity"].includes(value),
+        )
+      ) {
+        throw new Error(`${at}: implementedOverlays contains an overlay outside the matrix vocabulary`);
       }
       if (familyGroups) {
         // Both fields name catalog entries, and both are published onto cells, so both are checked.
@@ -887,7 +916,7 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
  * the number that matters). A cell can be `partial`/`unmeasured`, which is neither "implemented" nor
  * "not applicable" — the state the five-value conformance vocabulary alone cannot express.
  */
-function rung4SurveyCell(survey, modelId, backend, overlayIncompatible) {
+function rung4SurveyCell(survey, modelId, backend, tier, overlayIncompatible) {
   const verdict = survey.get(`${familyGroup(modelId)}:${backend}`);
   if (!verdict) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
   return {
@@ -898,7 +927,7 @@ function rung4SurveyCell(survey, modelId, backend, overlayIncompatible) {
     // publish `none` for a family whose stack is perfectly windowable, and a consumer filtering that
     // field for architecturally-inapplicable families would read those cells as false positives.
     structuralApplicability: verdict.structuralApplicability,
-    requestPeak: verdict.requestPeak.finding,
+    requestPeak: verdict.requestPeak.byTier?.[tier] ?? verdict.requestPeak.finding,
     implementation: verdict.implementation,
     overlayIncompatible,
     summary: verdict.summary,
@@ -1113,6 +1142,8 @@ function strategyStatus({
     const implementedHere =
       (verdict.implementedEntries ?? []).includes(model.id) &&
       (verdict.implementedModes ?? [mode]).includes(mode) &&
+      (verdict.implementedTiers ?? [tier]).includes(tier) &&
+      (verdict.implementedOverlays ?? [overlay]).includes(overlay) &&
       stagedResidencyIsAvailable({ backend, model, route, sequentialEngines });
     if (verdict.structuralApplicability === "none") {
       return {
@@ -1480,6 +1511,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                         rung4Survey,
                         model.id,
                         backend,
+                        tier,
                         status.overlayIncompatible === true,
                       ),
                     }
@@ -1541,22 +1573,33 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
   );
   // SC-15969. One row per surveyed (family, backend), derived from the cells rather than re-read from
   // the survey file — so a verdict that never reached a cell cannot appear in the summary as if it had.
-  const rung4SurveyRows = [
-    ...new Map(
-      cells
-        .filter((cell) => cell.rung === "bounded_transformer_residency" && cell.overlay === "none")
-        .map((cell) => [
-          `${familyGroup(cell.modelId)}:${cell.backend}`,
-          {
-            familyStory: familyGroup(cell.modelId),
-            backend: cell.backend,
-            structuralApplicability: cell.rung4Survey.structuralApplicability,
-            requestPeak: cell.rung4Survey.requestPeak,
-            implementation: cell.rung4Survey.implementation,
-          },
-        ]),
-    ).values(),
-  ].sort((left, right) =>
+  const requestPeakPriority = new Map([
+    ["unmeasured", 0],
+    ["does-not-move", 1],
+    ["moves", 2],
+  ]);
+  const rung4SurveyRowsByFamily = new Map();
+  for (const cell of cells.filter(
+    (candidate) =>
+      candidate.rung === "bounded_transformer_residency" && candidate.overlay === "none",
+  )) {
+    const key = `${familyGroup(cell.modelId)}:${cell.backend}`;
+    const existing = rung4SurveyRowsByFamily.get(key);
+    const requestPeak =
+      !existing ||
+      requestPeakPriority.get(cell.rung4Survey.requestPeak) >
+        requestPeakPriority.get(existing.requestPeak)
+        ? cell.rung4Survey.requestPeak
+        : existing.requestPeak;
+    rung4SurveyRowsByFamily.set(key, {
+      familyStory: familyGroup(cell.modelId),
+      backend: cell.backend,
+      structuralApplicability: cell.rung4Survey.structuralApplicability,
+      requestPeak,
+      implementation: cell.rung4Survey.implementation,
+    });
+  }
+  const rung4SurveyRows = [...rung4SurveyRowsByFamily.values()].sort((left, right) =>
     `${left.familyStory}:${left.backend}`.localeCompare(`${right.familyStory}:${right.backend}`),
   );
   const tally = (rows, key) =>

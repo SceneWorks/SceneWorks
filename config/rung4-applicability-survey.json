@@ -16,6 +16,8 @@
     },
     "implementedEntries": "The exact catalog entries whose provider exposes the rung-4 code path. Implementation is per ENTRY, not per family — Krea's Candle contract is gated on the turbo descriptor id, so krea_2_raw does not get it — and a family-level claim would over-report. Must be empty exactly when `implementation` is \"none\".",
     "implementedModes": "Optional narrowing of `implementedEntries` to the catalog modes the implementing provider descriptor actually serves. Needed because the matrix collapses a catalog entry's modes onto one provider id while inference may route them to DIFFERENT descriptors: Candle Krea's edit modes are served by the krea_2_edit descriptor and the krea_2_turbo_edit surface tag, neither of which returns the memory contract, so a mode-blind claim would report rung 4 as implemented on a route that does not expose it. Absent means every mode.",
+    "implementedTiers": "Optional narrowing of `implementedEntries` to measured numeric tiers. Absent means every tier. Lens uses this because dense BF16 moves the request peak while Q4 does not; treating a family-level implementation as tier-neutral would turn a measured non-win into a production claim.",
+    "implementedOverlays": "Optional narrowing of `implementedEntries` to the overlay cells admitted by the provider contract. Absent means every overlay. Use this for evidence-gated exclusions such as a contract measured only with no adapter; use `overlayIncompatible` instead when the provider mechanism makes an overlay structurally impossible.",
     "strategyParameters": "The rung's OWN published parameters for an implemented family. Deliberately not the cumulative composition: rung 4 engages rungs 2 and 3 by cost-order default, but this survey has no measured tile/chunk values for the families it marks implemented, and inventing them would put unmeasured numbers in a cell that reads as evidence.",
     "overlayIncompatible": "Present when the provider's adapter mechanism makes a windowed block unable to carry an overlay. It makes the overlay cells of the IMPLEMENTED entries/modes Structurally N/A with the cited evidence, and nothing else: on an entry that has no streaming path at all the rung is Missing for the ordinary reason, and calling it structurally exempt would presuppose a path that does not exist. It is reported on the cell as its own `overlayIncompatible` flag rather than by overwriting `structuralApplicability`, whose meaning is about the ARCHITECTURE — Krea's 28-block trunk is windowable whatever its adapters do.",
     "blockStacks[].entries": "Optional. Present when a stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict.",
@@ -23,7 +25,8 @@
       "moves": "Measured to move the REQUEST peak, not merely a phase peak.",
       "does-not-move": "Measured, and the request peak did not move. Per the epic's non-negotiable this is not a saving and must not be selected by default.",
       "unmeasured": "No request-peak measurement exists for this family/backend at the pinned revision."
-    }
+    },
+    "requestPeak.byTier": "Optional per-tier override of the family/backend request-peak finding. Required when measurements differ by numeric tier; omitted tiers inherit requestPeak.finding."
   },
   "notes": [
     "Rung 4 requires rung 1 engaged in the same request (gen_core::memory_strategy BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES). That prerequisite is NOT restated per family here: the generator reads it from the same rung-1 predicate it already uses for the staged_residency cells, so a family that gains rung-1 capability stops reporting the prerequisite gap without a survey edit.",
@@ -332,8 +335,22 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "One uniform 48-block DiT stack. Its gpt-oss text encoder is a second uniform stack, so both component scopes are structurally available.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "lens",
+            "lens_turbo"
+          ],
+          "implementedTiers": [
+            "bf16"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "TextEncoder"
+          },
+          "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
           "blockStacks": [
             {
               "name": "blocks",
@@ -349,15 +366,46 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/text_encoder/gpt_oss.rs",
               "reason": "The encoder is a uniform stack of GptOssDecoderLayer, so a TextEncoder-scoped window is structurally available too."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/text_encoder/stream.rs",
+              "reason": "LensTextBlockSource rebuilds each exact GptOssDecoderLayer from a re-openable weights view, drains accessed tensors, replays quantization, materializes the carried state, and delegates scheduling to mlx_gen::block_residency::run_windowed."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
+              "reason": "The provider declares BoundedTransformerResidency Implemented only for BF16 + Sequential + DeferredMaterialization + directory weights with no quantization, adapter, or PiD overlay, publishing TextEncoder/window=1."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/registry.rs",
+              "reason": "Both lens and lens_turbo descriptors expose the measured contract and select the streamable text loader only when the exact production predicate holds; Resident keeps the fully resident encoder."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Lens."
+            "finding": "moves",
+            "byTier": {
+              "bf16": "moves",
+              "q4": "does-not-move",
+              "q8": "unmeasured"
+            },
+            "reason": "Real Lens-Turbo BF16 weights on Apple/Metal measured 80.084 GiB unscoped versus 10.037 GiB with TextEncoder/window=1 for the full request, an 87.5% reduction with identical pixels. Q4 is an explicit counterexample: conditioning fell 3.972 -> 1.861 GiB, but the request peak changed 6.367 -> 6.547 GiB, so Q4 remains Missing rather than inheriting the BF16 result.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/text_encoder_request_peak_real_weights.rs",
+                "reason": "Fresh-process, real-weight request comparison pins the BF16 win and the reproducible Q4 non-win while requiring exact generated-pixel identity."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/text_encoder_window_real_weights.rs",
+                "reason": "Real-weight window sweep records conditioning peaks by window, exact conditioning identity, prompt-length behavior, and a zero-layer mutation control."
+              }
+            ]
           },
           "findings": [
             "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
-            "Lens-turbo's encoder is mxfp4 on disk and expands on load, so any window sizing derived from on-disk block bytes will under-predict its resident cost. The sc-10863 table in crates/sceneworks-worker/src/mlx_fit_gate.rs records the effect directly: lens-turbo bf16 is 28.43 GiB on disk and 45.67 GiB resident, the only measured tier where resident exceeds disk.",
+            "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
+            "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
+            "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+            "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
+            "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
             "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
           ]
         },
