@@ -1268,7 +1268,7 @@ fn imported_checkpoint_file_for_share(
     ) {
         return None;
     }
-    let Some(raw_path) = request
+    let raw_path = request
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
@@ -1278,10 +1278,7 @@ fn imported_checkpoint_file_for_share(
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
         })
-        .and_then(Value::as_str)
-    else {
-        return None;
-    };
+        .and_then(Value::as_str)?;
     let path = crate::paths::normalize_app_managed_model_path(
         settings,
         raw_path,
