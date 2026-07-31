@@ -124,8 +124,8 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version.",
-      "const": 2
+      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed — it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure.",
+      "const": 3
     },
     "generatedFrom": { "type": "object" },
     "conformanceStates": {
@@ -205,7 +205,6 @@
           "strategyParameters",
           "engagedRungs",
           "state",
-          "evidenceRevision",
           "calibrationFingerprint",
           "owningFamilyStory",
           "owningModelStory",
@@ -240,10 +239,6 @@
               "Missing",
               "Route unavailable/broken"
             ]
-          },
-          "evidenceRevision": {
-            "type": "object",
-            "required": ["sceneWorks", "inference"]
           },
           "calibrationFingerprint": { "type": ["string", "null"] },
           "owningFamilyStory": { "type": "integer" },

@@ -7,6 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import {
   evidenceSemantics,
   validateBundle as validateCalibrationBundle,
@@ -30,10 +31,6 @@ const RUNGS = [
   "bounded_attention",
   "bounded_transformer_residency",
 ];
-
-export function canonicalSourceText(body) {
-  return body.replace(/\r\n?/g, "\n");
-}
 
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
@@ -497,15 +494,19 @@ function parseEngineRoutes(source) {
   return routes;
 }
 
+// sc-16268: anchored on CODE, not on the `/// An id with no registered generator` doc comment that
+// used to terminate the region. Provenance now hashes these sources with their inert comments
+// stripped, so a parse that reads comment text would let a semantic change slip past the staleness
+// tripwire. The negative control (`assert!(!engine_supports_sequential(...)`) is the real end of the
+// positive sweep and was already the split point, so the parsed set is unchanged.
 function parseMlxSequentialEngines(source) {
   const test = source.match(
-    /fn engine_supports_sequential_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)\n\s*\}\n\n\s*\/\/\/ An id with no registered generator/,
+    /fn engine_supports_sequential_is_derived_from_the_registered_capability\(\)\s*\{([\s\S]*?)assert!\(!engine_supports_sequential/,
   );
   if (!test) {
     throw new Error("could not locate the MLX sequential-capability registry sweep");
   }
-  const beforeNegativeControl = test[1].split("assert!(!engine_supports_sequential")[0];
-  return new Set([...beforeNegativeControl.matchAll(/"([^"]+)"/g)].map((item) => item[1]));
+  return new Set([...test[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]));
 }
 
 function inferencePin(cargo) {
@@ -900,18 +901,25 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
   }
 }
 
+// Every source this document is DERIVED from. Exported (sc-16268) so the tests that prove the
+// staleness tripwire covers all of them derive the list from here instead of mirroring it: a
+// hand-copied mirror lets a source be dropped from the fingerprint with every test still green,
+// which is the quiet-and-stale outcome the tripwire exists to prevent. `generatedFrom.sources` in
+// the artifact is generated from this same map, so the published key set is the assertable copy.
+export const SOURCE_PATHS = Object.freeze({
+  manifest: "config/manifests/builtin.models.jsonc",
+  engines: "crates/sceneworks-worker/src/engines.rs",
+  mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+  memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
+  vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
+  instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+  calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
+  calibrationPlan: "config/memory-calibration-plan.json",
+  cargo: "Cargo.toml",
+});
+
 export async function buildMatrix({ sourceOverrides = {} } = {}) {
-  const sourcePaths = {
-    manifest: "config/manifests/builtin.models.jsonc",
-    engines: "crates/sceneworks-worker/src/engines.rs",
-    mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-    memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
-    vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
-    instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
-    calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
-    calibrationPlan: "config/memory-calibration-plan.json",
-    cargo: "Cargo.toml",
-  };
+  const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
     sourceEntries.map(async ([name, relative]) =>
@@ -932,12 +940,13 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = JSON.parse(bodies.calibrationPlan);
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
-  // JSONC comments and formatting are not part of the manifest contract. Hash the parsed value so
-  // provenance embedded in generated artifacts is stable across semantically inert source edits.
-  const revisionBodies = {
-    ...bodies,
-    manifest: JSON.stringify(manifest),
-  };
+  // Comments and formatting are not part of any of these sources' contracts. Hash each source's
+  // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and
+  // TOML — so provenance is stable across semantically inert edits (sc-16129 did the manifest;
+  // sc-16268 the rest). Parsing below still reads the raw `bodies`; only provenance reads these.
+  const revisionBodies = Object.fromEntries(
+    sourceEntries.map(([name, relative]) => [name, semanticSourceBody(relative, bodies[name])]),
+  );
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
@@ -945,11 +954,14 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const sequentialEngines = parseMlxSequentialEngines(mlxFitBody);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   const pin = inferencePin(cargoBody);
+  // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
+  // bare would let content shift across a source boundary without moving the hash. A NUL cannot
+  // occur in any of these text sources, so it is an unambiguous delimiter.
   const sceneWorksRevision = `source-tree:${sha256(
     sourceEntries
       .filter(([name]) => name !== "calibrationEvidence")
       .map(([name]) => revisionBodies[name])
-      .join(""),
+      .join("\0"),
   )}`;
 
   // sc-16069: no orphaned control measurements — a `[backend].control` block for an undeclared lane means
@@ -1112,10 +1124,6 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                 strategyParameters: status.parameters,
                 engagedRungs,
                 state: status.state,
-                evidenceRevision: {
-                  sceneWorks: sceneWorksRevision,
-                  inference: pin,
-                },
                 calibrationFingerprint: fingerprint,
                 owningFamilyStory,
                 owningModelStory,
@@ -1185,7 +1193,16 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
     // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
     // both, so the two shapes cannot share a version number — that is the whole job of this field.
-    schemaVersion: 2,
+    //
+    // 3 (sc-16268): `cells[].evidenceRevision` was REMOVED. It stamped the same two constants into
+    // every one of the ~7,360 rows — one distinct value, never conditional on the row's evidence
+    // despite the name — so a fingerprint rotation rewrote ~14,700 lines and made any two
+    // concurrent PRs touching a fingerprinted source conflict in a file that cannot be
+    // hand-merged (only regenerated). The values survive verbatim in `generatedFrom`
+    // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
+    // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
+    // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
+    schemaVersion: 3,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,

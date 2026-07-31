@@ -309,3 +309,22 @@ test("Krea lifecycle cleanup uses the established warm follow-up peak contract",
     /"lifecycleMaximumRecoveryPeak", "bytes", lifecycle_max_recovery_peak/,
   );
 });
+
+test("the Rust gate verifies the generated docs derived from Rust sources", async () => {
+  // sc-16268: `check:memory-matrix`, `check:calibration-cost-model` and `check:tier-integrity` all
+  // read Rust sources, but lived only in `npm run check` — so a Rust-only change passed the gate
+  // contributors are told to run and failed `parity` in CI. The fix is one string in `rust:check`,
+  // which is exactly the kind of wiring a later edit silently undoes; this pins it.
+  const scripts = JSON.parse(await source("package.json")).scripts;
+  for (const sub of [
+    "check:memory-matrix",
+    "check:calibration-cost-model",
+    "check:tier-integrity",
+  ]) {
+    assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
+  }
+  assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
+  assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
+  // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
+  assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
+});
