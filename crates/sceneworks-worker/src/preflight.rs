@@ -282,6 +282,45 @@ pub fn cuda_failure_is_blocking(message: &str) -> bool {
     cuda_driver_error_guidance(message).is_some() || message.contains(CUDA_DRIVER_LIBRARY_MISSING)
 }
 
+/// Whether this worker's accelerator is usable, as decided by the startup probe (sc-16260).
+///
+/// The server/Docker lane has no setup screen to refuse startup on, so the verdict has to travel
+/// *into* the worker's own behaviour instead: an [`Self::Unusable`] worker withholds the
+/// capabilities it can no longer serve (so generation stays queued for a host that gets fixed,
+/// rather than being claimed and failed one job at a time) and reports
+/// `WorkerStatus::Unhealthy` carrying [`Self::reason`] so an operator sees the host-side remedy
+/// without reading container logs.
+///
+/// [`Self::Usable`] covers both "the probe passed" and "this lane runs no probe" — the CPU
+/// utility loops, the macOS `mlx` worker (which has its own Metal gate on the desktop), and any
+/// build without the candle lane linked. Those must behave exactly as they did before this
+/// existed, so the absence of a probe is deliberately indistinguishable from a passing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GpuHealth {
+    Usable,
+    Unusable {
+        /// The composed user-facing text from [`cuda_preflight`]: the host-side remedy chosen by
+        /// [`cuda_driver_error_guidance`], then the raw CUDA error. Reused verbatim rather than
+        /// re-authored, so the startup log, the worker status and a mid-job failure all name the
+        /// same fix.
+        reason: String,
+    },
+}
+
+impl GpuHealth {
+    /// The remedy text when unusable; `None` when the accelerator is fine.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Usable => None,
+            Self::Unusable { reason } => Some(reason.as_str()),
+        }
+    }
+
+    pub(crate) fn is_usable(&self) -> bool {
+        matches!(self, Self::Usable)
+    }
+}
+
 /// No-op wherever the candle/CUDA lane isn't linked (macOS, and any off-Mac build without
 /// `backend-candle`): there is no CUDA runtime to probe, and the desktop keeps the lane
 /// dormant in that state anyway. Present on all targets so the `SCENEWORKS_GPU_CHECK`

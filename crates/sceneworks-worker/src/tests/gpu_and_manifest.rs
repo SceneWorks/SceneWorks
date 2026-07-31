@@ -2627,3 +2627,172 @@ fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// sc-16260: an unusable GPU must change what the worker CLAIMS, not just what it logs.
+// ---------------------------------------------------------------------------
+
+/// The routing half of the story. sc-16247 shipped the loud startup log; a driver-mismatch host
+/// still registered, still advertised its full candle capability set, and so still claimed and
+/// failed every routed generation job. Withholding the capability block is what actually stops
+/// that: it degrades the worker to the `[placeholder, gpu, nvidia]` set a non-candle build
+/// advertises, which `jobs_store::worker_supports_job` refuses for every generation job, so the
+/// work stays QUEUED for a host that gets fixed.
+///
+/// Candle-gated because `with_candle_capabilities` is a no-op outside the candle lane — on a
+/// non-candle build BOTH sides would be the bare placeholder set and this test would pass with the
+/// health check ripped out entirely.
+///
+/// Asserts against the HEALTHY set rather than a hardcoded list, so this cannot rot into a false
+/// green as capabilities are added: whatever a healthy candle worker advertises, an unusable one
+/// must advertise none of it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn an_unusable_gpu_withholds_every_candle_capability() {
+    use crate::gpu::with_candle_capabilities;
+    use sceneworks_core::contracts::WorkerCapability;
+
+    let mut settings = crate::Settings::from_env();
+    settings.backend_candle_enabled = true;
+    settings.gpu_id = "0".to_owned();
+    // sm_120, so the compute-cap-gated markers (`int8_convrot`, `nvfp4`) are in the healthy set
+    // too — they are advertised eligibility for a GPU this worker cannot reach, so they must be
+    // withheld as well.
+    let compute_cap = Some(12.0);
+    let descriptor = || crate::gpu::parse_nvidia_smi_gpus("0, Test GPU, 98304, 1024, 97280, 3")
+        .into_iter()
+        .next()
+        .expect("one parsed descriptor");
+
+    let healthy =
+        with_candle_capabilities(descriptor(), &settings, compute_cap, &crate::GpuHealth::Usable);
+    let unusable = with_candle_capabilities(
+        descriptor(),
+        &settings,
+        compute_cap,
+        &crate::GpuHealth::Unusable {
+            reason: "DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, \"...\")".to_owned(),
+        },
+    );
+
+    // The healthy worker must actually have gained something, or the comparison below is vacuous.
+    assert!(
+        healthy.capabilities.len() > unusable.capabilities.len(),
+        "a healthy candle worker must advertise MORE than an unusable one; healthy={:?}",
+        healthy.capabilities
+    );
+    assert!(
+        healthy.capabilities.contains(&WorkerCapability::ImageGenerate),
+        "the healthy baseline must include image_generate, else this test proves nothing"
+    );
+
+    // The withheld worker keeps the descriptor's own base set PLUS the `candle` lane marker, and
+    // nothing else. The marker is not a job capability — it says "this host serves the candle
+    // lane", which `fail_stranded_candle_jobs` needs in order to leave queued work WAITING instead
+    // of terminally failing it as `candle_unavailable`, and which keeps the worker out of the
+    // web's `isPlaceholderOnlyGpuWorker` filter so its card (and remedy) still render.
+    let marker = WorkerCapability::Unknown("candle".to_owned());
+    let mut expected = descriptor().capabilities;
+    expected.push(marker.clone());
+    assert_eq!(
+        unusable.capabilities, expected,
+        "an unusable GPU must advertise the bare nvidia descriptor plus the candle lane marker, \
+         and nothing else"
+    );
+    assert!(
+        healthy.capabilities.contains(&marker),
+        "the marker must be present on BOTH, or the unusable worker looks like a different lane"
+    );
+
+    // Every capability the healthy worker GAINED names work this GPU cannot do. The marker is the
+    // one deliberate exception, so exclude it explicitly rather than silently.
+    for gained in &healthy.capabilities {
+        if descriptor().capabilities.contains(gained) || *gained == marker {
+            continue;
+        }
+        assert!(
+            !unusable.capabilities.contains(gained),
+            "{gained:?} is served by the CUDA device the probe could not acquire, so an unusable \
+             GPU must not advertise it"
+        );
+    }
+}
+
+/// The verdict type's two consumers read it through these accessors — the capability gate asks
+/// `is_usable`, the heartbeat asks `reason` — so an inverted accessor would silently make an
+/// unhealthy worker advertise everything AND report `idle`.
+///
+/// Deliberately NOT candle-gated: `GpuHealth` is compiled on every target, and the parity lane
+/// (macOS / candle-off) is where most contributors run the suite.
+#[test]
+fn gpu_health_reports_usability_and_carries_the_remedy() {
+    assert!(crate::GpuHealth::Usable.is_usable());
+    assert_eq!(crate::GpuHealth::Usable.reason(), None);
+
+    let unusable = crate::GpuHealth::Unusable {
+        reason: "reboot onto the staged driver".to_owned(),
+    };
+    assert!(!unusable.is_usable());
+    assert_eq!(unusable.reason(), Some("reboot onto the staged driver"));
+}
+
+/// Which probe failures may withdraw a worker's capabilities — and AC 3, that the reason it then
+/// reports is the SHARED guidance rather than a second copy of that text.
+///
+/// Both halves run through the real `classify_probe_outcome`, not a value the test composed, so a
+/// future edit that hand-writes a status message or drops the severity check turns this red.
+///
+/// The severity split is the same one sc-16247 drew for the desktop setup screen, and it matters
+/// more here: a transient CUDA OOM (another process, or an orphaned worker from a crashed session,
+/// holding the GPU) says nothing about the driver stack. Treating it as unhealthy would strip every
+/// capability and — with `SCENEWORKS_CANDLE_REQUIRED=1` — fail queued work over a condition that
+/// clears by itself.
+#[test]
+fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
+    use crate::preflight::cuda_preflight_message;
+
+    let classify =
+        |underlying: &str| crate::classify_probe_outcome(Err(cuda_preflight_message(underlying)), "0");
+
+    // A clean probe is usable, obviously — but pin it so an inverted check can't pass the rest.
+    assert!(crate::classify_probe_outcome(Ok(()), "0").is_usable());
+
+    // DISQUALIFYING: the driver-class family this story exists for. The verbatim string from
+    // GH #1966.
+    let health = classify(
+        "DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, \"system has unsupported display driver / \
+         cuda driver combination\")",
+    );
+    assert!(
+        !health.is_usable(),
+        "a driver-stack mismatch must withdraw the worker's capabilities"
+    );
+    let reason = health.reason().expect("an unusable GPU carries a reason");
+    assert!(
+        reason.contains("reboot"),
+        "the reported reason must be the shared host-side remedy, got: {reason}"
+    );
+    assert!(
+        reason.contains("CUDA_ERROR_SYSTEM_DRIVER_MISMATCH"),
+        "the underlying CUDA error must survive into the reason for the logs, got: {reason}"
+    );
+
+    // NOT disqualifying: failures that may clear on their own. The worker keeps advertising and
+    // any job that does run reports the classified error itself.
+    for transient in [
+        "DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")",
+        "cuda error: CUBLAS_STATUS_NOT_INITIALIZED",
+        "the CUDA preflight probe did not complete: task panicked",
+    ] {
+        let health = classify(transient);
+        assert!(
+            health.is_usable(),
+            "{transient:?} may be transient and must NOT strip the worker's capabilities"
+        );
+        assert_eq!(
+            health.reason(),
+            None,
+            "a worker that stays usable must report no unhealthy reason"
+        );
+    }
+}

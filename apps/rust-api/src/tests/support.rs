@@ -137,6 +137,7 @@ pub(crate) fn readiness_worker(
         capabilities,
         loaded_models: Vec::new(),
         utilization: None,
+        status_reason: None,
         registered_at: "2026-05-21T00:00:00Z".to_owned(),
         last_seen_at: "2026-05-21T00:00:00Z".to_owned(),
         extra: Default::default(),

@@ -56,10 +56,16 @@ fn image_edit_job(payload: Value) -> JobSnapshot {
 /// A worker on a real CUDA gpu index advertising `capabilities` (string ids). The candle worker
 /// carries the `candle` marker; a synthetic generic descriptor does not.
 fn gpu_worker(capabilities: &[&str]) -> WorkerSnapshot {
+    gpu_worker_with_status(capabilities, "idle")
+}
+
+/// [`gpu_worker`] with an explicit status, so the sc-16260 unhealthy backstop can be exercised
+/// against a worker that is otherwise fully eligible.
+fn gpu_worker_with_status(capabilities: &[&str], status: &str) -> WorkerSnapshot {
     serde_json::from_value(json!({
         "id": "worker_1",
         "gpuId": "0",
-        "status": "idle",
+        "status": status,
         "capabilities": capabilities,
         "loadedModels": [],
         "registeredAt": "2026-06-12T00:00:00Z",
@@ -3170,4 +3176,116 @@ fn flux1_dev_control_pose_jobs_route_to_candle() {
     // flux_dev now HAS a candle pose lane (so it is not pose-rejected); schnell does not.
     assert!(model_has_candle_pose_lane("flux_dev"));
     assert!(!model_has_candle_pose_lane("flux_schnell"));
+}
+
+// ---------------------------------------------------------------------------
+// sc-16260: an unusable GPU must not be routed generation it is certain to fail.
+// ---------------------------------------------------------------------------
+
+/// CHARACTERIZATION of the routing consequence (sc-16260 AC 2), from the store's side.
+///
+/// It asserts pre-existing `worker_supports_job` behaviour against the two capability sets rather
+/// than any code this story added — the probe→withholding link itself is pinned by
+/// `an_unusable_gpu_withholds_every_candle_capability` in the worker crate. Its value here is that
+/// it fixes the OTHER end of the contract: it turns red if the withheld set ever becomes
+/// claimable, which is the assumption the whole design rests on and which lives in a different
+/// crate from the code that produces it.
+///
+/// The `healthy` side of each pair is the control: it proves the job is genuinely claimable by a
+/// full candle worker, so a `false` from the degraded worker means "withheld", not "this job was
+/// never routable here anyway".
+#[test]
+fn a_gpu_worker_that_withheld_its_candle_capabilities_is_routed_no_generation() {
+    // Exactly what `with_candle_capabilities` leaves behind when the probe fails, and exactly what
+    // a non-candle build advertises: no job capability at all.
+    const WITHHELD_CAPS: &[&str] = &["placeholder", "gpu", "nvidia"];
+    let degraded = gpu_worker(WITHHELD_CAPS);
+    let healthy = gpu_worker(CANDLE_CAPS);
+
+    for job in [
+        image_generate_job(json!({"model": "sdxl", "prompt": "a cat"})),
+        image_edit_job(json!({
+            "model": "z_image_edit",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_1",
+        })),
+    ] {
+        assert!(
+            worker_supports_job(&healthy, &job),
+            "control: a healthy candle worker must claim {} — otherwise the assertion below is \
+             vacuous",
+            job.job_type.as_str()
+        );
+        assert!(
+            !worker_supports_job(&degraded, &job),
+            "a worker whose CUDA probe failed withheld its capabilities, so {} must stay QUEUED \
+             rather than be claimed and failed",
+            job.job_type.as_str()
+        );
+    }
+}
+
+/// THE BACKSTOP (sc-16260). Independent of the capability half: a worker that has declared itself
+/// `unhealthy` is handed nothing, even while still advertising the full candle set.
+///
+/// That combination is reachable in practice — registration and heartbeat are separate round trips,
+/// so a worker that goes unhealthy AFTER registering (or whose unhealthy reason is one whose
+/// capability impact we don't yet know how to trim) still has its advertisement on file. Pinned
+/// against the SAME capability set that the healthy control claims with, so deleting the status
+/// check in `worker_supports_job` turns this red rather than shifting it onto the capability gate.
+#[test]
+fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
+    let job = image_generate_job(json!({"model": "sdxl", "prompt": "a cat"}));
+
+    let idle = gpu_worker_with_status(CANDLE_CAPS, "idle");
+    assert!(
+        worker_supports_job(&idle, &job),
+        "control: the identical worker must claim this job when idle"
+    );
+
+    let unhealthy = gpu_worker_with_status(CANDLE_CAPS, "unhealthy");
+    assert!(
+        !worker_supports_job(&unhealthy, &job),
+        "an unhealthy worker must be routed nothing, even while its registration still advertises \
+         the capability"
+    );
+
+    // "I cannot run work" is the whole claim the status makes, so it holds for the non-GPU job
+    // types too — not just the ones that need an accelerator.
+    let download: JobSnapshot = serde_json::from_value(json!({
+        "id": "job_2",
+        "type": "model_download",
+        "status": "queued",
+        "payload": {"modelId": "sdxl_base"},
+        "result": {},
+        "requestedGpu": "auto",
+        "progress": 0,
+        "stage": "queued",
+        "message": "",
+        "attempts": 1,
+        "cancelRequested": false,
+        "createdAt": "2026-06-12T00:00:00Z",
+        "updatedAt": "2026-06-12T00:00:00Z",
+    }))
+    .expect("valid JobSnapshot");
+    const UTILITY_CAPS: &[&str] = &["gpu", "model_download", "candle"];
+    assert!(
+        worker_supports_job(&gpu_worker_with_status(UTILITY_CAPS, "idle"), &download),
+        "control: the identical worker must claim the download when idle"
+    );
+    assert!(
+        !worker_supports_job(
+            &gpu_worker_with_status(UTILITY_CAPS, "unhealthy"),
+            &download
+        ),
+        "an unhealthy worker must not claim utility work either"
+    );
+
+    // And the ordinary statuses are untouched — this must not have become a general status filter.
+    for status in ["idle", "busy"] {
+        assert!(
+            worker_supports_job(&gpu_worker_with_status(CANDLE_CAPS, status), &job),
+            "{status} routing must be unchanged by the unhealthy backstop"
+        );
+    }
 }

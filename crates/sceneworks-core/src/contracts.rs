@@ -374,10 +374,21 @@ string_enum! {
 }
 
 string_enum! {
+    /// `idle` / `busy` / `offline` are the ordinary lifecycle: ready, running a job, gone.
+    ///
+    /// `unhealthy` (sc-16260) is different in kind — the worker process is alive and
+    /// heartbeating, but its accelerator is unusable, so it has withdrawn the capabilities it
+    /// would otherwise serve and can run nothing. The server/Docker lane has no setup screen to
+    /// refuse startup on, so this is the only place an operator can see WHY a queue is stalled;
+    /// [`WorkerSnapshot::status_reason`] carries the host-side remedy. Distinct from `offline`
+    /// on purpose: `offline` means "stopped heartbeating, may already be gone", and treating an
+    /// unusable-GPU worker as offline would hide a running container behind a message that says
+    /// the opposite of what is true.
     pub enum WorkerStatus {
         Idle => "idle",
         Busy => "busy",
         Offline => "offline",
+        Unhealthy => "unhealthy",
     }
 }
 
@@ -910,6 +921,11 @@ pub struct WorkerHeartbeatRequest {
     pub loaded_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// Why the worker is in [`WorkerStatus::Unhealthy`], as user-facing text (sc-16260).
+    /// `None` for every other status; the store clears the stored reason whenever a
+    /// heartbeat arrives without one, so a recovered worker doesn't keep a stale remedy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1164,6 +1180,11 @@ pub struct WorkerSnapshot {
     pub loaded_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// User-facing reason for a [`WorkerStatus::Unhealthy`] worker (sc-16260) — the host-side
+    /// remedy, so the Queue screen can explain a stalled queue without an operator reading
+    /// container logs. `None` for every healthy worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
     pub registered_at: String,
     pub last_seen_at: String,
     #[serde(flatten)]

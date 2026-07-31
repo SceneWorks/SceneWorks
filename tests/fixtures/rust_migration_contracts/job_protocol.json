@@ -34,7 +34,7 @@
   "activeStatuses": ["preparing", "downloading", "loading_model", "running", "saving"],
   "terminalStatuses": ["completed", "failed", "canceled", "interrupted"],
   "nonGpuJobTypes": ["model_download", "model_import", "model_convert", "lora_import"],
-  "workerStatuses": ["idle", "busy", "offline"],
+  "workerStatuses": ["idle", "busy", "offline", "unhealthy"],
   "progressStages": [
     "queued",
     "preparing",

@@ -13546,6 +13546,17 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--accent);
 }
 
+/* sc-16260: the host-side remedy on a worker whose GPU failed its startup probe. It is the only
+   place that machine's operator is told what to fix, so it reads as a warning rather than as one
+   more stat. `pre-wrap` is set inline alongside this (the reason is a two-part message whose
+   blank line must survive), matching the sc-16247 fix on the setup screen. */
+.worker-card-health {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .worker-stat-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
