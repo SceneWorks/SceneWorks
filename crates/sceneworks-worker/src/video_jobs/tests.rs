@@ -9186,7 +9186,7 @@ fn svd_cuda_real_weights_encode_h264_and_preserve_provenance() {
         .enable_all()
         .build()
         .expect("tokio runtime")
-        .block_on(encode_media(&media_path, decoded, None))
+        .block_on(encode_media(&media_path, decoded, None, None))
         .expect("SceneWorks libx264 encode");
 
     let probe = std::process::Command::new("ffprobe")
@@ -10167,7 +10167,7 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     let dir = std::env::temp_dir().join(format!("sw_vid_{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let media_path = dir.join("clip.mp4");
-    encode_media(&media_path, decoded, None).await.unwrap();
+    encode_media(&media_path, decoded, None, None).await.unwrap();
     assert!(media_path.exists(), "mp4 must be written");
     assert!(media_path.metadata().unwrap().len() > 0);
     assert!(
@@ -10197,7 +10197,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         adapter_apply_reports: Vec::new(),
     };
 
-    let error = encode_media(&media_path, decoded, None)
+    let error = encode_media(&media_path, decoded, None, None)
         .await
         .expect_err("malformed RGB buffer must be rejected before FFmpeg");
 

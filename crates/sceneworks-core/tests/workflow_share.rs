@@ -2028,9 +2028,36 @@ const WORKFLOW_WRITE_SURFACE: &[(&str, &str, &str)] = &[
          seam must call.",
     ),
     (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_video_workflow_share_from",
+        "Builds a VIDEO envelope from per-clip facts. Ungated — no recording ceiling (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "embeddable_video_workflow_share",
+        "The gated VIDEO builder: the one video form that runs the recording ceiling, and the one \
+         a video write seam must call.",
+    ),
+    (
         "crates/sceneworks-core/src/workflow_png.rs",
         "write_workflow_chunk",
         "Writes the PNG, with the envelope in an iTXt chunk when one is handed in.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "ffmetadata_document",
+        "Encodes the envelope as the `ffmetadata` document ffmpeg muxes into an MP4's `comment` \
+         tag (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "write_workflow_metadata_file",
+        "Writes that document to disk for ffmpeg to read — the MP4 lane's `write_workflow_chunk`.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "workflow_metadata_size",
+        "Measures an envelope's encoded size in an MP4's tag store.",
     ),
 ];
 
@@ -2066,6 +2093,16 @@ const WORKFLOW_READ_SURFACE: &[(&str, &str, &str)] = &[
         "workflow_chunk_size",
         "Measures an envelope's encoded size for the recording ceiling.",
     ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata",
+        "Reads the envelope out of MP4 bytes (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata_file",
+        "Reads the envelope out of an MP4 on disk, without buffering `mdat`.",
+    ),
 ];
 
 /// Both halves of the core surface are declared, and nothing in core has slipped between them.
@@ -2100,6 +2137,7 @@ fn the_core_workflow_surface_is_classified() {
     for path in [
         "crates/sceneworks-core/src/workflow_share.rs",
         "crates/sceneworks-core/src/workflow_png.rs",
+        "crates/sceneworks-core/src/workflow_mp4.rs",
     ] {
         let stripped = rust_scannable(&read_repo_file(path));
         for item in rust_fn_spans(&stripped) {
@@ -2423,7 +2461,21 @@ fn an_undeclared_seam_fails_the_build() {
     }]);
 }
 
-/// The named failure sc-15956 must hit: a declared video seam whose builder is still deferred.
+/// A declared seam whose builder is still deferred fails, naming the registry.
+///
+/// **Re-pointed by sc-15956**, exactly as sc-16113 predicted it would have to be. This test used
+/// `VideoStudio.jsx::submit` as its deferred example; sc-15956 promoted that builder into
+/// `ADVANCED_BUILDERS` — which is what the whole gate was built to force — so the mutation stopped
+/// panicking and the proof turned into a "did not panic as expected" failure.
+///
+/// The example is now `trainingConfig.js::trainingConfigSnapshot`, the PERMANENT exemption, and
+/// that is a better anchor than the one it replaces: a story-owned deferral is by definition
+/// temporary, so any test hard-coding one has an expiry date. This one does not — a permanent
+/// exemption only leaves `DEFERRED_ADVANCED_BUILDERS` if a training write seam appears, at which
+/// point its own entry says the whole classification has to be redone anyway.
+///
+/// What is proved is unchanged: SOME deferred builder is refused, and the message names the
+/// registry so the next author knows where to look.
 #[test]
 #[should_panic(expected = "DEFERRED_ADVANCED_BUILDERS")]
 fn a_seam_that_embeds_for_a_deferred_builder_fails_the_build() {
@@ -2432,9 +2484,26 @@ fn a_seam_that_embeds_for_a_deferred_builder_fails_the_build() {
         "append_seedvr2_frames",
         "the SeedVR2 video lane",
         &[WebBuilderRef {
-            path: "apps/web/src/screens/VideoStudio.jsx",
-            function: "submit",
+            path: "apps/web/src/training/trainingConfig.js",
+            function: "trainingConfigSnapshot",
         }],
+    );
+}
+
+/// And the deferral list still HAS an entry to point that test at.
+///
+/// The companion to the re-pointing above: `a_seam_that_embeds_for_a_deferred_builder_fails_the_build`
+/// is only a proof while some builder is deferred, and an empty registry would turn it into a test
+/// that panics for the wrong reason. sc-15956 emptied the list of everything except the permanent
+/// exemption, so this is the floor that says so out loud.
+#[test]
+fn the_deferral_registry_still_has_something_in_it() {
+    assert!(
+        !DEFERRED_ADVANCED_BUILDERS.is_empty(),
+        "`DEFERRED_ADVANCED_BUILDERS` is empty, so \
+         `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` has no example left to \
+         mutate. If the last entry really has been classified, that test needs a different \
+         construction — not a stale reference to a builder nobody defers."
     );
 }
 
@@ -3307,6 +3376,29 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
             );
             (BTreeSet::new(), Vec::new())
         }
+        // The video builders' shape (sc-15956): an `advanced:` literal WITH conditional spreads,
+        // in a payload handed to a call rather than returned. `FlatAdvancedLiteral` refuses a
+        // spread and `ReturnedObject` looks for a `return {`, so neither could read these.
+        AdvancedBuilderShape::SpreadAdvancedLiteral => {
+            let at = body
+                .find("advanced:")
+                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"));
+            let literal = object_literal_body(body, at + "advanced:".len(), &what);
+            let (keys, spreads) = scan_object_literal(&literal, &what, true);
+            let declared: BTreeSet<String> = builder
+                .spread_of
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(
+                spreads, declared,
+                "{what} spreads {spreads:?} into its `advanced` literal, but its registry entry \
+                 declares `spread_of: {declared:?}`. A spread nobody declared is a whole set of \
+                 keys this lint cannot see — either point `spread_of` at it and register the \
+                 builder that produces those keys, or stop spreading it."
+            );
+            (keys, vec![at])
+        }
     };
     refuse_unread_advanced_signals(body, &what, builder, &signals, &consumed);
     keys
@@ -3542,8 +3634,13 @@ fn scan_object_literal(
     let chars: Vec<char> = body.chars().collect();
     let mut keys = BTreeSet::new();
     let mut identifier_spreads = BTreeSet::new();
-    // (is_emit_scope, expecting_a_key)
-    let mut scopes: Vec<(bool, bool)> = vec![(true, true)];
+    // (is_emit_scope, expecting_a_key, paren_depth_at_open)
+    //
+    // The third field is sc-15956's. A `,` only starts a new KEY at the scope's own paren
+    // depth: `timelineContext: generationContext("extend", selectedItem, { .. })` separates
+    // CALL ARGUMENTS with commas, and reading those as keys made `selectedItem` look like an
+    // advanced knob that nobody had classified.
+    let mut scopes: Vec<(bool, bool, usize)> = vec![(true, true, 0)];
     // Open spread expressions, as (open scope count, paren depth at the `...`, produced an
     // object literal). Nested, because `...(a ? { k, ...(b ? { j } : {}) } : {})` happens.
     let mut spreads: Vec<(usize, usize, bool)> = Vec::new();
@@ -3561,14 +3658,14 @@ fn scan_object_literal(
                 let in_spread = spreads
                     .last()
                     .is_some_and(|(scope_count, _, _)| *scope_count == scopes.len());
-                let is_emit = in_spread && scopes.last().is_some_and(|(emit, _)| *emit);
+                let is_emit = in_spread && scopes.last().is_some_and(|(emit, _, _)| *emit);
                 if let (true, Some(spread)) = (is_emit, spreads.last_mut()) {
                     spread.2 = true;
                 }
                 if let Some(scope) = scopes.last_mut() {
                     scope.1 = false;
                 }
-                scopes.push((is_emit, true));
+                scopes.push((is_emit, true, paren_depth));
                 index += 1;
             }
             '}' => {
@@ -3607,13 +3704,15 @@ fn scan_object_literal(
             }
             ',' => {
                 if let Some(scope) = scopes.last_mut() {
-                    scope.1 = true;
+                    // Only at this scope's own depth — a comma deeper in is a call argument
+                    // separator, not the start of the next key (sc-15956).
+                    scope.1 = paren_depth == scope.2;
                 }
                 index += 1;
             }
             '.' => {
                 if index + 2 < chars.len() && chars[index + 1] == '.' && chars[index + 2] == '.' {
-                    if scopes.last().is_some_and(|(emit, _)| *emit) {
+                    if scopes.last().is_some_and(|(emit, _, _)| *emit) {
                         // The scanner follows `...( … )`, plus a bare identifier where the caller
                         // has declared one. Anything else — a call, a member expression — would
                         // leave a spread open forever, so the next nested object VALUE would read
@@ -3629,7 +3728,21 @@ fn scan_object_literal(
                                 .is_some_and(is_identifier_start);
                         if identifier_spread {
                             let start = lookahead;
-                            while lookahead < chars.len() && is_identifier_char(chars[lookahead]) {
+                            // A dotted MEMBER path (`...base.advanced`) reads as one name, not as
+                            // a refusal (sc-15956). The three timeline actions spread
+                            // `buildBasePayload`'s own map that way, and the property the refusal
+                            // protects is unchanged: the whole dotted name goes into
+                            // `identifier_spreads`, so `spread_of` must declare it and a builder
+                            // must account for the keys behind it. A CALL is still refused, below
+                            // — a call's keys have no declarable name.
+                            while lookahead < chars.len()
+                                && (is_identifier_char(chars[lookahead])
+                                    || (chars[lookahead] == '.'
+                                        && chars
+                                            .get(lookahead + 1)
+                                            .copied()
+                                            .is_some_and(is_identifier_start)))
+                            {
                                 lookahead += 1;
                             }
                             let mut after = lookahead;
@@ -3638,10 +3751,10 @@ fn scan_object_literal(
                             }
                             assert!(
                                 matches!(chars.get(after), Some(',') | Some('}') | None),
-                                "{what} spreads something this coverage lint cannot read: a \
-                                 member or call expression (`...{}`). Every key it contributes is \
-                                 invisible to this lint, so a new knob would silently stop \
-                                 travelling.",
+                                "{what} spreads something this coverage lint cannot read: a call \
+                                 expression or a computed member (`...{}`). Every key it \
+                                 contributes is invisible to this lint, so a new knob would \
+                                 silently stop travelling.",
                                 chars[start..]
                                     .iter()
                                     .take(24)
@@ -3690,7 +3803,7 @@ fn scan_object_literal(
                 while index < chars.len() && is_identifier_char(chars[index]) {
                     index += 1;
                 }
-                let (is_emit, expecting) = *scopes.last().expect("a scope is always open");
+                let (is_emit, expecting, _) = *scopes.last().expect("a scope is always open");
                 if is_emit && expecting {
                     let mut lookahead = index;
                     while lookahead < chars.len() && chars[lookahead].is_whitespace() {

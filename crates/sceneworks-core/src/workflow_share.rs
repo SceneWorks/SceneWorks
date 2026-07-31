@@ -1018,6 +1018,13 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         ),
     },
     WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/video_jobs/mod.rs",
+        function: "video_workflow_metadata",
+        lane: "POST /api/v1/jobs type=video_generate — the ONE funnel every generated clip is \
+               encoded through (`encode_media`), whatever engine, route or studio produced it",
+        disposition: SeamDisposition::Embeds(VIDEO_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/segment_jobs.rs",
         function: "run_image_segment_job",
         lane: "POST /api/v1/jobs type=image_segment — the smart-select mask",
@@ -1027,6 +1034,37 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
              grayscale, and the chunk writer encodes RGB8, so embedding would triple its size and \
              change its colour type.",
         ),
+    },
+];
+
+/// Every builder behind a generated clip (sc-15956).
+///
+/// All six feed ONE seam, because all six post `type=video_generate` and every video job funnels
+/// through `encode_media` — the same property that let sc-12371 measure clip length in one place.
+const VIDEO_JOB_BUILDERS: &[WebBuilderRef] = &[
+    WebBuilderRef {
+        path: "apps/web/src/screens/VideoStudio.jsx",
+        function: "submit",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/components/editor/useEditorGeneration.js",
+        function: "buildBasePayload",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "extendSelectedClip",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "replaceSelectedItem",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "bridgeGap",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/simple/simpleJobs.js",
+        function: "buildSimpleVideoRequest",
     },
 ];
 

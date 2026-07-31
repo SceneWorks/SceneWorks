@@ -2062,6 +2062,28 @@ impl TimelineExport<'_> {
 
     /// Mux the rendered segments into the project's render directory, write the
     /// asset sidecar and recipe, index the asset, and report completion.
+    ///
+    /// # No workflow travels in an export (sc-15956)
+    ///
+    /// **A timeline export is not a generation.** Its sidecar recipe is `mode: timeline_export,
+    /// model: ffmpeg` — there is no model, no seed and no prompt to replay, and what sits in the
+    /// recipe's `prompt` slot is the TIMELINE'S NAME, a piece of the user's own project structure
+    /// with no business leaving in a file. An envelope built from that would reproduce nothing
+    /// while disclosing something, which is worse than an absence in both directions.
+    ///
+    /// So this function never touches a `WorkflowShare`, and therefore is deliberately NOT in
+    /// `WORKFLOW_WRITE_SEAMS`: that registry lists functions an envelope can REACH, and an entry
+    /// whose function touches none fails the lint as a stale claim. `SeamDisposition::Declines` is
+    /// for a seam that writes a file with an envelope available to it —
+    /// `segment_jobs::run_image_segment_job` — which is not this.
+    ///
+    /// **What does need enforcing here is inheritance**, and it is enforced where it happens. This
+    /// export's inputs are generated clips that now DO carry envelopes, and ffmpeg's default on a
+    /// multi-input command is to copy input 0's metadata to the output — so a crossfaded export
+    /// would have published its first clip's recipe as its own. Both mux paths pass
+    /// `-map_metadata -1` explicitly; `mux_with_crossfades_args` records the measurement, and
+    /// `a_crossfaded_export_does_not_inherit_a_clips_recipe` in
+    /// `crates/sceneworks-worker/src/tests/workflow_video.rs` fails if either regresses.
     async fn finalize(
         &self,
         segments: &[TimelineSegment],
@@ -2963,6 +2985,12 @@ pub(crate) async fn mux_segments(
             list_path.display().to_string(),
             "-c".to_owned(),
             "copy".to_owned(),
+            // The concat demuxer already drops per-segment metadata, so this changes nothing
+            // today; it is here because "the default happens to be right" is not a property
+            // anyone maintains, and its crossfade sibling proves the default is NOT right on a
+            // multi-input command. See `mux_with_crossfades_args` (sc-15956).
+            "-map_metadata".to_owned(),
+            "-1".to_owned(),
             output_path.display().to_string(),
         ],
         context,
@@ -3007,6 +3035,17 @@ pub(crate) fn mux_with_crossfades_args(
         filter,
         "-map".to_owned(),
         format!("[{output_label}]"),
+        // **Load-bearing since sc-15956.** With several `-i` inputs and no `-map_metadata`, ffmpeg
+        // defaults to input 0 — so the moment generated clips started carrying a workflow tag, a
+        // crossfaded export silently inherited THE FIRST CLIP'S recipe and published it as its own.
+        // Measured, not theorised: the plain `-f concat` path below drops metadata and this one
+        // does not, which is exactly the kind of asymmetry nobody would guess at.
+        //
+        // An export is a mux of several clips and is not the output of any one of their recipes;
+        // presenting one of them as the recipe for the whole is the failure the envelope contract
+        // exists to prevent. So the export carries NO workflow — see `TimelineExport::finalize`.
+        "-map_metadata".to_owned(),
+        "-1".to_owned(),
         output_path.display().to_string(),
     ]);
     Ok(args)
