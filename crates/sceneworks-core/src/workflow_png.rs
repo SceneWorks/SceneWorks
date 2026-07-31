@@ -1732,6 +1732,93 @@ mod tests {
     }
 
     #[test]
+    fn a_parameters_chunk_hiding_past_iend_refuses_only_when_the_file_is_ours() {
+        // The sc-15957 half of the unwalkable-tail guard, and the one place the co-presence rule
+        // had to be applied twice or the two halves would disagree with each other.
+        //
+        // The needle out here is `parameters\0` rather than the bare keyword, because `parameters`
+        // is ordinary English: scanning for the word alone would refuse to copy any file whose
+        // benign trailing note happened to contain it. The NUL is the payload separator every text
+        // chunk type puts after its keyword, so this is the chunk and not the word.
+        let mut hidden_parameters = PARAMETERS_CHUNK_KEYWORD.as_bytes().to_vec();
+        hidden_parameters.push(0);
+        hidden_parameters.extend_from_slice(b"the prompt that must not leave\nSeed: 1");
+        let hidden = framed_chunk(b"tEXt", &hidden_parameters, Some(0x7FFF_FFFF));
+
+        // (1) OURS: an envelope chunk pre-IDAT and a `parameters` chunk hidden in a tail we cannot
+        //     walk. Stripping would have removed the envelope and reported success while the prompt
+        //     rode out in the leftover, which is the exact failure the sc-15953 control exists to
+        //     prevent.
+        let mut ours = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        ours.extend_from_slice(&hidden);
+        let refused = strip_workflow_chunk(&ours);
+        assert!(
+            matches!(refused, Err(WorkflowChunkError::Png { .. })),
+            "a hidden `{PARAMETERS_CHUNK_KEYWORD}` chunk in OUR file must refuse: got {refused:?}"
+        );
+        let Err(WorkflowChunkError::Png { detail }) = refused else {
+            unreachable!("asserted above")
+        };
+        assert!(
+            detail.contains(PARAMETERS_CHUNK_KEYWORD) && detail.contains("trailing"),
+            "the refusal must name what it found and where: {detail:?}"
+        );
+
+        // (2) NOT OURS: the same tail on a file with no envelope chunk. We do not strip a foreign
+        //     A1111 block, walkable or not, so refusing to copy over one would be a refusal about
+        //     something we were never going to remove.
+        let mut foreign = png_with(&[]);
+        foreign.extend_from_slice(&hidden);
+        assert_eq!(
+            strip_workflow_chunk(&foreign),
+            Ok(None),
+            "a foreign file's hidden A1111 block is not ours to remove, so the copy is a no-op"
+        );
+
+        // (3) And the word on its own, in a file that IS ours, is still benign: an appended note
+        //     mentioning parameters must not make the file unsavable.
+        let mut noted = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        noted.extend_from_slice(b"\x00\x01a note about the parameters someone appended");
+        let stripped = strip_workflow_chunk(&noted)
+            .expect("a benign tail must not be an error")
+            .expect("the pre-IDAT chunk is still removed");
+        assert_eq!(read_workflow_chunk(&stripped), Ok(None));
+    }
+
+    #[test]
+    fn a_foreign_parameters_chunk_survives_a_strip_of_our_own() {
+        // Co-presence decides ownership per FILE, not per chunk, so a file carrying both our pair
+        // and a third-party `parameters` chunk is a case the rule cannot split — and it is worth
+        // knowing which way it falls. It falls toward removal: a `parameters` chunk in a file of
+        // ours is treated as ours. Recorded rather than hidden, because the alternative (keeping a
+        // duplicate keyword we cannot tell apart) would leave one of our own blocks behind.
+        //
+        // Our writer never produces this shape: it writes exactly one `parameters` chunk into a
+        // file it encoded from pixels, so a second one is something a third party appended
+        // afterwards.
+        let mut duplicate = PARAMETERS_CHUNK_KEYWORD.as_bytes().to_vec();
+        duplicate.push(0);
+        duplicate.extend_from_slice(b"appended by another tool");
+        let spliced = splice_after_ihdr(
+            &png_with_workflow_text(&minimal_envelope_json("a lighthouse")),
+            &framed_chunk(b"tEXt", &duplicate, None),
+        );
+        let stripped = strip_workflow_chunk(&spliced)
+            .expect("walks")
+            .expect("had something to take out");
+        assert!(
+            !contains_bytes(&stripped, PARAMETERS_CHUNK_KEYWORD.as_bytes()),
+            "no `{PARAMETERS_CHUNK_KEYWORD}` chunk may survive a strip of a file that is ours"
+        );
+        assert!(stripped == png_with(&[]));
+    }
+
+    /// Raw byte search, for assertions about what a stranger's tooling would find.
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
     fn a_png_whose_framing_ends_without_an_iend_refuses() {
         // Reproduced at the head this fixes as `Ok(Some(…))`: every chunk walked cleanly, our chunk
         // was excised, and the caller got a PNG with no IEND in it. "Save a copy without the

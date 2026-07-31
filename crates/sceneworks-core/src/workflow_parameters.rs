@@ -150,6 +150,22 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
 /// derived-pass images where it would have been wrong. The base render — every ordinary generation —
 /// matches by construction, because `write_image_asset` builds its envelope from the same width and
 /// height it hands the encoder.
+///
+/// # Two limits the format has and we inherit
+///
+/// Both are properties of the convention rather than of this renderer, and neither is worth
+/// diverging from it over — a reader that has to guess which dialect it is holding is worse off than
+/// one that occasionally mis-splits.
+///
+/// * **A prompt containing a line that begins `Negative prompt:` will mis-split.** A1111 has the
+///   same behaviour on its own output; the boundary is positional and there is no escape for it.
+/// * **A settings line of fewer than three pairs is prompt text to A1111's parser.** Our floor is
+///   `Seed` + `Model` + `Version`, which every generated image clears —
+///   `the_settings_line_clears_the_pair_floor_a_gallery_parses_with` in
+///   `crates/sceneworks-core/tests/workflow_parameters.rs` pins that rather than assuming it.
+///
+/// The authoritative recipe is unaffected by either: it is the `sceneworks:workflow` chunk, and this
+/// block is for display.
 #[must_use]
 pub fn parameters_text(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     let mut out = share.prompt.clone();
