@@ -597,16 +597,31 @@ def test_manifest_model_path_is_only_an_optional_override():
             relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
             actual_readers.append(relative_path)
             prefix = source[max(0, match.start() - 500) : match.start()]
-            suffix = source[match.start() : match.start() + 500]
-            explicit_optional_branch = (
+            statement_start = source.rfind(
+                "let raw_path = request", max(0, match.start() - 500), match.start()
+            )
+            statement_end = source.find(";", match.end())
+            statement = (
+                source[statement_start : statement_end + 1]
+                if statement_start >= 0 and statement_end >= 0
+                else ""
+            )
+            compact_statement = re.sub(r"\s+", "", statement)
+            # sc-16426's attribution-only reader uses idiomatic `?`, which Clippy requires. Keep
+            # that exception exact: any new source, precedence change, panic/error conversion, or
+            # fallback change must fail this inventory audit and be reviewed explicitly.
+            question_mark_optional = relative_path == "image_jobs.rs" and compact_statement == (
+                'letraw_path=request.advanced.get("modelPath")'
+                '.or_else(||request.model_manifest_entry.get("modelPath"))'
+                '.or_else(||{request.model_manifest_entry.get("paths")'
+                '.and_then(|paths|paths.get("model"))})'
+                ".and_then(Value::as_str)?;"
+            )
+            assert (
                 "if let Some(path) = request" in prefix
                 or "let Some(raw_path) = request" in prefix
-                or (
-                    "let raw_path = request" in prefix
-                    and ".and_then(Value::as_str)?;" in suffix
-                )
-            )
-            assert explicit_optional_branch, (
+                or question_mark_optional
+            ), (
                 f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"
             )
