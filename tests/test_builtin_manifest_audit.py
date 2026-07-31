@@ -565,6 +565,7 @@ def test_manifest_model_path_is_only_an_optional_override():
     is absent.
     """
     expected_readers = {
+        "image_jobs.rs",
         "image_jobs/base.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
@@ -593,7 +594,16 @@ def test_manifest_model_path_is_only_an_optional_override():
             relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
             actual_readers.append(relative_path)
             prefix = source[max(0, match.start() - 500) : match.start()]
-            assert "if let Some(path) = request" in prefix or "let Some(raw_path) = request" in prefix, (
+            suffix = source[match.start() : match.start() + 500]
+            explicit_optional_branch = (
+                "if let Some(path) = request" in prefix
+                or "let Some(raw_path) = request" in prefix
+                or (
+                    "let raw_path = request" in prefix
+                    and ".and_then(Value::as_str)?;" in suffix
+                )
+            )
+            assert explicit_optional_branch, (
                 f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"
             )
