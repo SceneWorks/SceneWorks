@@ -77,6 +77,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "calibrationPlan",
     "cargo",
     "engines",
+    "imageRouting",
     "instantId",
     "manifest",
     "memoryStrategy",
@@ -87,6 +88,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
   assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
     "cargo",
     "engines",
+    "imageRouting",
     "instantId",
     "memoryStrategy",
     "mlxFitGate",
@@ -729,6 +731,24 @@ test("a shipping control lane is declared, not inferred from having been measure
     0,
     "declaring a lane must not manufacture verification — no overlay cell has been measured",
   );
+});
+
+test("every advertised MLX and Candle control route must be declared (sc-16073)", async () => {
+  const { imageRouting } = await readRustSources();
+
+  for (const sourceName of ["WIRED_MLX_POSE_FAMILIES", "WIRED_CANDLE_POSE_FAMILIES"]) {
+    const marker = `const ${sourceName}: &[&str] = &[`;
+    assert.ok(imageRouting.includes(marker), `fixture needs ${sourceName}`);
+    const mutated = imageRouting.replace(marker, `${marker}\n    "lens",`);
+    await assert.rejects(
+      buildMatrix({ sourceOverrides: { imageRouting: mutated } }),
+      new RegExp(
+        `${sourceName.includes("MLX") ? "mlx" : "candle"} control routes and ` +
+          "CONTROL_LANE_MODELS disagree .*advertised but undeclared=lens",
+      ),
+      `${sourceName}: adding a shipping route without a declaration must fail generation`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

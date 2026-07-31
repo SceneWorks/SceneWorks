@@ -657,11 +657,37 @@ function overlaysFor(model, backend) {
   return sortedUnique(overlays);
 }
 
-// Drift in the other direction: a `[backend].control` MEASUREMENT block for a lane nobody declared. That
-// would mean measurements exist for a lane the matrix does not believe ships, so the cells they belong to
-// were never generated and the evidence is orphaned. Fail loudly at generation time rather than emit a
-// matrix that quietly drops them (the same posture as MODEL_STORIES' missing-mapping failure).
-function assertDeclaredControlLanes(models) {
+function rustStringSlice(source, name) {
+  const match = source.match(
+    new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
+  );
+  if (!match) throw new Error(`memory-matrix: could not derive ${name} from image_jobs/base.rs`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+
+// Fail closed in both directions. A worker route missing from CONTROL_LANE_MODELS would otherwise emit
+// zero cells, while a measurement block missing from the declaration would be orphaned. The MLX and
+// Candle router lists are checked independently: their documented twin relationship is not evidence and
+// must not be trusted if either source list drifts.
+function assertDeclaredControlLanes(models, imageRoutingSource) {
+  const declared = new Set(CONTROL_LANE_MODELS);
+  for (const [backend, sourceName] of [
+    ["mlx", "WIRED_MLX_POSE_FAMILIES"],
+    ["candle", "WIRED_CANDLE_POSE_FAMILIES"],
+  ]) {
+    const wired = new Set(rustStringSlice(imageRoutingSource, sourceName));
+    const undeclaredRoutes = [...wired].filter((id) => !declared.has(id)).sort();
+    const unwiredDeclarations = [...declared].filter((id) => !wired.has(id)).sort();
+    if (undeclaredRoutes.length || unwiredDeclarations.length) {
+      throw new Error(
+        `memory-matrix: ${backend} control routes and CONTROL_LANE_MODELS disagree ` +
+          `(advertised but undeclared=${undeclaredRoutes.join(",") || "none"}; ` +
+          `declared but not advertised=${unwiredDeclarations.join(",") || "none"}). ` +
+          "A shipping control route without a declaration would generate zero control cells (sc-16073).",
+      );
+    }
+  }
+
   const undeclared = [];
   for (const model of models) {
     for (const backend of ["mlx", "candle"]) {
@@ -1206,6 +1232,7 @@ function validateMatrix(
 export const SOURCE_PATHS = Object.freeze({
   manifest: "config/manifests/builtin.models.jsonc",
   engines: "crates/sceneworks-worker/src/engines.rs",
+  imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
   memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
@@ -1263,9 +1290,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
       .join("\0"),
   )}`;
 
-  // sc-16069: no orphaned control measurements — a `[backend].control` block for an undeclared lane means
-  // its cells were never generated.
-  assertDeclaredControlLanes(images);
+  // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's MLX
+  // and Candle declarations are checked independently rather than trusting their documented twin set.
+  assertDeclaredControlLanes(images, bodies.imageRouting);
 
   const models = images
     .map((model) => {
