@@ -1734,6 +1734,29 @@ fn the_phase_cap_matches_the_multi_phase_validators() {
     );
 }
 
+/// The share envelope inherits the pose-output ceiling from the Rust request contract, while the
+/// web must repeat the number because it cannot import Rust. Pin all three declarations together
+/// so a valid UI/API job can never first discover a stale limit when it is shared.
+#[test]
+fn the_pose_cap_matches_the_request_and_web_validators() {
+    let request = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    assert!(
+        request.contains("pub(crate) const MAX_COUNT: u32 = 8;")
+            && request.contains("pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;"),
+        "the Rust pose-output ceiling moved; reconcile the API, share envelope, and web picker"
+    );
+    let share = read_repo_file("crates/sceneworks-core/src/workflow_share.rs");
+    assert!(
+        share.contains("const MAX_SHARE_POSES: usize = crate::image_request::MAX_JOB_POSES;"),
+        "the share envelope must derive its pose cap from image_request::MAX_JOB_POSES"
+    );
+    let web = read_repo_file("apps/web/src/poseSelection.js");
+    assert!(
+        web.contains("export const MAX_JOB_POSES = 64;"),
+        "the web pose picker moved; reconcile it with image_request::MAX_JOB_POSES and MAX_SHARE_POSES"
+    );
+}
+
 /// The bounds against REAL requests, not fixtures written to pass them.
 ///
 /// A cap is only correct if nothing legitimate touches it, and the failure mode of getting that
