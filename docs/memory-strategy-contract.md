@@ -62,6 +62,34 @@ gone. A generated artifact must not duplicate document-scoped provenance into it
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.
 
+## Registration-time behavioural conformance
+
+`MemoryRegistration` exposes both halves of a provider's weights-free admission surface: its
+`contract(&LoadSpec)` builder and its `safety_check(&LoadSpec, &MemoryProviderContract,
+&MemoryRunContext)` callback. The load specification is passed through without opening weights so a
+tier- or load-shape-sensitive provider can execute the same safety logic as its loaded `Generator`.
+A registration must point to that production check (directly or through a thin adapter), not a
+test-only approximation.
+
+A PiD-capable contract declares `pid_decode_routes`, with separate native and PiD tile domains. The
+domains must be non-empty, non-zero, internally unique, mutually disjoint, and their union must equal
+the provider's published `BoundedDecode` edges and overlaps. PiD eligibility is therefore explicit in
+the backend-neutral contract; `gen-core` does not infer it from an MLX Cargo dependency.
+
+The complete MLX and Candle catalog tests run a shared registry walk over
+`ProviderRegistry::memory_strategy_registrations()`. Every registration receives static contract
+conformance. For every contract that declares PiD routes, the walk also makes four weights-free,
+device-free admission calls: native geometry on the native route and PiD geometry on the PiD route
+must be accepted, while native geometry with `use_pid: true` and PiD geometry with `use_pid: false`
+must be rejected. The matching-route controls make the proof non-vacuous; always rejecting does not
+conform. Cross-route geometry must never be substituted or re-planned.
+
+This behavioural walk complements inference's `check_pid_decode_route_adoption` workspace gate. The
+static gate fires on provider-source changes and requires production constructor and admission-call
+evidence while excluding comments, literals, and `#[cfg(test)]`-only markers. It cannot prove that a
+textually present `DecodeRoutes::validate` call is reached by admission. The registry walk proves that
+observable rejection through the real callback; both checks are intentionally load-bearing.
+
 ## The cost order is ordinal, and it stays shared across backends
 
 **One ladder, one order, on every backend — even where the same rung costs an order of magnitude more
