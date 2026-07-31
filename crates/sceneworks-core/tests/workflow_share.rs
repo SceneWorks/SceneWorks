@@ -3720,7 +3720,7 @@ fn discover_workflow_seams(sources: &[(String, String)]) -> Vec<WorkflowSeamSite
                     .next()
                     .unwrap_or_default()
                     .trim();
-                if !field.is_empty() && field.bytes().all(|byte| is_rust_identifier_char(byte)) {
+                if !field.is_empty() && field.bytes().all(is_rust_identifier_char) {
                     share_fields.insert(field.to_owned());
                 }
             }

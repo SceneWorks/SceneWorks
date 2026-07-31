@@ -35,10 +35,10 @@ use sceneworks_core::workflow_png::{
 };
 use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedDisposition, AdvancedShape,
-    WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
-    SeamDisposition, ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS,
-    INPUT_KINDS, INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME,
-    PRODUCER_URL, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
+    SeamDisposition, WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
+    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
+    INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
+    WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
     WORKFLOW_SHARE_SCHEMA_VERSION, WORKFLOW_WRITE_SEAMS,
 };
 use serde_json::{json, Value};
