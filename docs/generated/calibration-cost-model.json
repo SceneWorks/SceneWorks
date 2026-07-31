@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:66303041730d0ebe752995d5b4de3a4a1ea6f4052a95d48ae3deb54898b5e255",
-    "matrixRevision": "source-tree:e467a3dfc8810752f9eee797d54bb1b9176a9e556a13743ca63415d476e973ae",
-    "inferenceRevision": "b126174b5ced499103e63ff45d0ea18eff2f3c99",
+    "sceneWorksRevision": "source-tree:ed21a82f8dea55bd01f1fd6079abe50c088872947c36951f49f649600c28b632",
+    "matrixRevision": "source-tree:63c734e86747335ac53c7f500203570e9ffbae1b1c0da64f4e92d2e92f6321db",
+    "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "252d92bfa40da4ac9877954554e9d1b6a93c177172c08ab31c94a39c3ea6aaaf"
+        "sha256": "7645a93b8a8d9075541c6fe9786fc370c3c914cddc56384a050c5dbb89b6818a"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "9904be10035d022a2cce6542ecad8aa2e5156f225a075b8710c4a8f9d50edef2"
+        "sha256": "42a4244df56775ce0d395200844ae8076b229b090def9acdd8749c3fb495b76a"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "ebb3ea77ec6683b0b9a4cd03fd90a096b80c0ea1d3f5fc649b62d0c190cc15b6"
+        "sha256": "b9635a3946a32ea0a82be165a78716a22a5e56faac7ddb0defb0c59ff4c37956"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "695811f2a12f83e8995065966ab5831d68700e02a8eec8772ce889c8d2ea9121"
+        "sha256": "717ec339340e1fdceb08e2e78222b1d8cad0b858ff334e98f0077128016de749"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -370,8 +370,8 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2420,
-      "Missing": 4934,
+      "Implemented/unverified": 2424,
+      "Missing": 4930,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -380,9 +380,9 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 730,
-      "Implemented/unverified @ mlx": 1690,
+      "Implemented/unverified @ mlx": 1694,
       "Missing @ candle": 2004,
-      "Missing @ mlx": 2930,
+      "Missing @ mlx": 2926,
       "Structurally N/A @ candle": 6
     },
     "byRung": {
