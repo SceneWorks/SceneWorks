@@ -9094,11 +9094,11 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 28644241134,
           // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043, 128 GB Apple-Silicon Mac, via
-          // get_peak_memory reset per gen): 18.73 GiB (Lightning off) → 24.48 GiB (Lightning + user LoRA).
-          // Recorded at the 24.5 GiB worst case so the RAM suggestion budgets the realistic ceiling. It is
-          // FAR below diskSizeBytes because A14B is MoE — only ONE 14B expert is resident at a time, not
-          // both — which is exactly why the old model-level minMemoryGb 133 (both experts dense) over-warned.
-          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688, "measuredPixels": 1048576 }
+          // get_peak_memory reset per gen): 18.73 GiB with adapters off. The prior 24.5 GiB worst-case
+          // pin mixed this base measurement with one particular Lightning + user-LoRA stack (24.48 GiB).
+          // Adapter residency is now added from the actual LoadSpec, so this field stays the calibrated
+          // adapter-free base instead of charging every request for an invisible hand-picked stack.
+          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 20111184364, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",

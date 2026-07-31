@@ -209,6 +209,17 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
     candle.get("minMemoryGb").and_then(json_f64)
 }
 
+/// Resident prediction with a load-exact independently resident adapter stack. Callers pass zero
+/// for a dense/folded load; packed providers pass the measured source bytes retained as residuals.
+pub(crate) fn predicted_peak_gb_with_adapter_bytes(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+) -> Option<f64> {
+    predicted_peak_gb(manifest_entry, tier_key)
+        .map(|peak| peak + adapter_bytes as f64 / BYTES_PER_GIB)
+}
+
 /// Predicted SEQUENTIAL peak VRAM (GB) for `tier_key`: `candle.sequentialPeakGb[tier_key]` (the measured
 /// largest single working set of the sequential-residency path, sc-10856) + [`HEADROOM_GB`], mirroring
 /// [`predicted_peak_gb`]'s headroom. `None` when unmeasured (no `sequentialPeakGb`, or no entry for this
@@ -227,6 +238,16 @@ pub(crate) fn predicted_sequential_peak_gb(
     measured(tier_key)
         .or_else(|| (tier_key == NVFP4_TIER).then(|| measured("q8")).flatten())
         .map(|gb| gb + HEADROOM_GB)
+}
+
+/// Sequential prediction with the same adapter residency charged in every lifecycle policy.
+pub(crate) fn predicted_sequential_peak_gb_with_adapter_bytes(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+) -> Option<f64> {
+    predicted_sequential_peak_gb(manifest_entry, tier_key)
+        .map(|peak| peak + adapter_bytes as f64 / BYTES_PER_GIB)
 }
 
 /// Decide whether the predicted peak fits the (possibly capped) live budget. Missing either input ⇒
@@ -2759,6 +2780,47 @@ mod tests {
         assert_eq!(predicted_peak_gb(&sparse, "q4"), Some(40.0));
         // No candle block ⇒ unmeasured ⇒ None (gate no-ops).
         assert_eq!(predicted_peak_gb(&obj(json!({})), "q4"), None);
+    }
+
+    #[test]
+    fn adapter_bytes_change_resident_and_sequential_fit_boundaries() {
+        let manifest = obj(json!({
+            "candle": {
+                "vramGbByTier": { "q4": 7.0 },
+                "sequentialPeakGb": { "q4": 6.0 }
+            }
+        }));
+        let one_gib = BYTES_PER_GIB as u64;
+        assert_eq!(
+            predicted_peak_gb_with_adapter_bytes(&manifest, "q4", 0),
+            Some(7.0 + HEADROOM_GB)
+        );
+        assert_eq!(
+            predicted_peak_gb_with_adapter_bytes(&manifest, "q4", one_gib),
+            Some(8.0 + HEADROOM_GB)
+        );
+        assert_eq!(
+            predicted_sequential_peak_gb_with_adapter_bytes(&manifest, "q4", one_gib),
+            Some(7.0 + HEADROOM_GB)
+        );
+        let boundary = VramBudget {
+            free_gb: 7.5 + HEADROOM_GB,
+            total_gb: 16.0,
+        };
+        assert_eq!(
+            fit_decision(
+                predicted_peak_gb_with_adapter_bytes(&manifest, "q4", 0),
+                Some(boundary)
+            ),
+            FitDecision::Fits
+        );
+        assert!(matches!(
+            fit_decision(
+                predicted_peak_gb_with_adapter_bytes(&manifest, "q4", one_gib),
+                Some(boundary)
+            ),
+            FitDecision::TooBig { .. }
+        ));
     }
 
     /// sc-12090 numeric regression: `krea_2_turbo` Q4-only on a ~30 GB card. Budgeting the tier the
