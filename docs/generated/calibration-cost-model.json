@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7fcb97bfe3a1fa076d01a3df62c3bc5dfb82afa0ede9b4238e1c3de7ce9f3561",
-    "matrixRevision": "source-tree:f885988f2f083b1d705be001b52924eea89758305205593993273ba817ffca33",
+    "sceneWorksRevision": "source-tree:fd718b8aa17807daa3831cd2c774ee9fdacd4e4b360fdb488fa07caf9b838728",
+    "matrixRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
     "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "54e72091e9d1d351edfc363f1f8afb5cb21c5fd5c784af294b74748b9907adcc"
+        "sha256": "25fb831418bfe7f607c3e2d2edd4ca269058e85d62d2157c478e50eba7308eb6"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -39,7 +39,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "c42f5b13582bba0e5213b1863d3d2f53fb2deade71049d2288d2ad7465eff8b8"
+        "sha256": "ac9f9f3e00bde29826b1353e6591dac0841e3892ed9fda19f87a33c34af1d926"
       }
     }
   },
