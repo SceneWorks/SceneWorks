@@ -2250,6 +2250,71 @@ fn every_worker_write_seam_declares_the_lane_it_embeds_for() {
     }
 }
 
+/// Nothing on the core write surface is called in the worker where the scan cannot see it.
+///
+/// The counterpart to the floor and the anchors, and the one that answers "what if the blanking
+/// eats too much?". Every call to a [`WORKFLOW_WRITE_SURFACE`] function in the whole crate is found
+/// in a source that has only comments and literals removed, and each one must then either
+///
+/// * survive `#[cfg(test)]` blanking and land inside a function
+///   [`every_worker_write_seam_declares_the_lane_it_embeds_for`] declared — so a product call site
+///   the seam scan does not own fails here; or
+/// * have been blanked, in which case the `#[cfg(test)]` responsible must have a `#[test]` /
+///   `#[tokio::test]` between it and the call — so blanking that ran past its item and swallowed
+///   product code fails here rather than making a seam quietly disappear.
+#[test]
+fn no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan() {
+    let sources = worker_sources();
+    let seams = discover_workflow_seams(&sources);
+    let mut product = 0usize;
+    for (path, source) in &sources {
+        let light = blank_comments_and_literals(source);
+        let full = rust_scannable(source);
+        let spans = rust_fn_spans(&full);
+        for (_, name, _) in WORKFLOW_WRITE_SURFACE {
+            for offset in call_sites(&light, name) {
+                if !full[offset..].starts_with(name) {
+                    let attribute = light[..offset].rfind("#[cfg(").unwrap_or_else(|| {
+                        panic!(
+                            "{path}: the scan dropped a call to `{name}` with no `#[cfg(` before \
+                             it — the blanking is eating product code"
+                        )
+                    });
+                    let between = &light[attribute..offset];
+                    assert!(
+                        between.contains("#[test]") || between.contains("#[tokio::test]"),
+                        "{path}: the scan dropped a call to `{name}`, but the `#[cfg(test)]` \
+                         before it has no test between the two — that blanking ran past its own \
+                         item and is hiding product code from the seam scan"
+                    );
+                    continue;
+                }
+                let owner = spans
+                    .iter()
+                    .filter(|span| offset >= span.body_start && offset < span.body_end)
+                    .min_by_key(|span| span.body_end - span.body_start)
+                    .unwrap_or_else(|| {
+                        panic!("{path} calls `{name}` outside any function the scan can read")
+                    });
+                assert!(
+                    seams
+                        .iter()
+                        .any(|seam| seam.path == *path && seam.function == owner.name),
+                    "{path}::{} calls `{name}` and the seam scan did not report it — the \
+                     discovery layers no longer reach it, so a lane could embed unmapped",
+                    owner.name
+                );
+                product += 1;
+            }
+        }
+    }
+    assert!(
+        product >= 6,
+        "only {product} product call sites of the core write surface were found in the worker — \
+         the scan has stopped reading the crate"
+    );
+}
+
 /// A brand-new worker file with an embedding call is discovered, with no list to add it to.
 ///
 /// The proof for "seam discovery is not a hard-coded file list", run against the scanner itself so
@@ -4037,6 +4102,15 @@ struct RustFn {
 /// `image_jobs.rs` gates `detail_workflow_share` that way so the lineage contract is tested off
 /// macOS, and it is a real production seam on macOS.
 fn rust_scannable(source: &str) -> String {
+    blank_test_only_items(&blank_comments_and_literals(source))
+}
+
+/// Comments and string/char literals blanked, but `#[cfg(test)]` items left in place.
+///
+/// The half [`no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan`] compares against,
+/// so "the scan dropped this call site" and "the call site is test scaffolding" are two statements
+/// rather than one.
+fn blank_comments_and_literals(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut out = bytes.to_vec();
     let mut index = 0usize;
@@ -4098,10 +4172,15 @@ fn rust_scannable(source: &str) -> String {
         index = end.max(start + 1);
     }
 
-    let mut text = String::from_utf8(out).expect("blanking only ever replaces whole regions");
-    while let Some(at) = test_only_cfg_attribute(&text) {
+    String::from_utf8(out).expect("blanking only ever replaces whole regions")
+}
+
+/// `#[cfg(test)]` items blanked out of an already comment- and literal-blanked source.
+fn blank_test_only_items(source: &str) -> String {
+    let mut text = source.to_owned();
+    while let Some((at, attribute_end)) = test_only_cfg_attribute(&text) {
         let bytes = text.as_bytes();
-        let mut cursor = at;
+        let mut cursor = attribute_end;
         let mut depth = 0i32;
         let mut body = None;
         while cursor < bytes.len() {
@@ -4112,16 +4191,21 @@ fn rust_scannable(source: &str) -> String {
                     body = Some(cursor);
                     break;
                 }
-                // `#[cfg(test)] mod tests;` and `#[cfg(test)] use ..;` have no body to blank, and
-                // blanking forward from one would eat the next item instead.
-                b';' if depth <= 0 => break,
+                // Everything the attribute can sit on that has NO body of its own: a
+                // `mod tests;` / `use ..;` declaration, and — the one that bites — a struct field
+                // or enum variant (`#[cfg(test)] accounting_scans: u64,`), which this crate uses
+                // freely. Without these terminators the scan would run on to the next `{` in the
+                // file and blank a whole unrelated `impl`, hiding every seam inside it.
+                b';' | b',' if depth <= 0 => break,
+                b'}' if depth <= 0 => break,
                 _ => {}
             }
             cursor += 1;
         }
+        // Always at least the attribute itself, so the loop cannot see it a second time.
         let end = match body {
             Some(open) => rust_matching_brace(bytes, open) + 1,
-            None => at + 2,
+            None => attribute_end,
         };
         let mut blanked = text.into_bytes();
         for byte in blanked.iter_mut().take(end).skip(at) {
@@ -4134,8 +4218,8 @@ fn rust_scannable(source: &str) -> String {
     text
 }
 
-/// The offset of the next `#[cfg(test)]`-class attribute still present in `text`.
-fn test_only_cfg_attribute(text: &str) -> Option<usize> {
+/// `(start, end)` of the next `#[cfg(test)]`-class attribute still present in `text`.
+fn test_only_cfg_attribute(text: &str) -> Option<(usize, usize)> {
     let mut from = 0usize;
     while let Some(offset) = text[from..].find("#[cfg(") {
         let at = from + offset;
@@ -4147,7 +4231,7 @@ fn test_only_cfg_attribute(text: &str) -> Option<usize> {
             .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
             .any(|token| token == "test");
         if bare_test && !attribute.contains("any(") {
-            return Some(at);
+            return Some((at, end));
         }
         from = end;
     }
@@ -4361,6 +4445,24 @@ fn the_rust_scanner_survives_a_bodyless_test_module_declaration() {
             .collect::<Vec<&str>>(),
         vec!["kept"]
     );
+}
+
+/// A `#[cfg(test)]` STRUCT FIELD has no body, and blanking forward from one would eat the `impl`
+/// after it — every seam inside included.
+///
+/// Not hypothetical: `catalog_image_fetch.rs` and `catalog_parquet_scanner.rs` both gate fields
+/// that way, and the first cut of this scanner blanked from the attribute to the next `{` it found.
+#[test]
+fn the_rust_scanner_survives_a_test_only_struct_field() {
+    let stripped = rust_scannable(
+        "struct Budget {\n    bytes: u64,\n    #[cfg(test)]\n    probe_scans: u64,\n}\n\nimpl \
+         Budget {\n    fn write(&self) {\n        write_workflow_chunk(a);\n    }\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk("),
+        "the `impl` after the gated field must survive:\n{stripped}"
+    );
+    assert!(!stripped.contains("cfg(test)"));
 }
 
 /// `#[cfg(any(target_os = "macos", test))]` is a real macOS seam, not test scaffolding.
