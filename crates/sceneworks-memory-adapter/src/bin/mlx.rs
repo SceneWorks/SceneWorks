@@ -597,6 +597,19 @@ fn predicted_ceiling(bytes: u64) -> u64 {
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
     let parameters = protocol::strategy_parameters(request)?;
+    let strategy = json!({
+        "rung": "bounded_decode",
+        "engagedRungs": ["resident", "bounded_decode"],
+        "parameters": parameters,
+    });
+    let planned_strategy = protocol::planned(request)?
+        .get("strategy")
+        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
+    if planned_strategy != &strategy {
+        return Err(format!(
+            "plan/provider strategy mismatch: plan={planned_strategy}, MLX adapter measured={strategy}"
+        ));
+    }
     let tile_edge = protocol::parameter(request, "decodeTileEdge")?;
     let overlap = protocol::parameter(request, "decodeOverlap")?;
     if tile_edge != KREA_TILE_EDGES[0] || overlap != KREA_TILE_OVERLAP {
@@ -853,6 +866,7 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
 
     Ok(json!({
         "status": "complete",
+        "strategy": strategy,
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,
