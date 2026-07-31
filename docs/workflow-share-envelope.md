@@ -543,10 +543,11 @@ adding them here for consistency — the inconsistency is the decision.
 ## Ceilings
 
 Two kinds of bound. Per-collection caps, each inherited from the validator that already limits the
-thing — where one exists. Two are not inherited: `MAX_SHARE_INPUTS` is a **shape** rather than a
-validator's number (it is `INPUT_KINDS.len()` — one entry per kind, and the kinds are closed), and
-`MAX_SHARE_POSES` has no upstream validator to inherit at all and is derived from the size of the
-shipped pose library instead. And one ceiling on the serialized envelope, checked after every
+thing. `MAX_SHARE_INPUTS` is a **shape** rather than a validator's number (it is
+`INPUT_KINDS.len()` — one entry per kind, and the kinds are closed). `MAX_SHARE_POSES` derives from
+the API/UI `MAX_JOB_POSES` output-count contract: every pose renders one image, so new jobs are
+stopped at selection or request validation rather than first losing poses in a shared file. And one
+ceiling on the serialized envelope, checked after every
 per-field rule has run. The second is what actually composes: per-field bounds did not, and each new
 measurement found a new way to spend what they left.
 

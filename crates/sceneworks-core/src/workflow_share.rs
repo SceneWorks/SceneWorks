@@ -2412,20 +2412,13 @@ const MAX_SHARE_PHASES: usize = 8;
 
 /// The most pose entries an envelope may carry.
 ///
-/// The one collection with NO upstream validator to inherit, and the review that added it said so:
-/// the pose lane renders one image per pose and nothing in the worker's `pose_entries` or in
-/// `apps/web/src` clamps how many a user may select. So the derivation is the library they are
-/// selected FROM — `apps/web/public/poses/index.json` ships 46 poses — and 64 clears an
-/// all-of-the-library selection with room for user-created Key Point Library entries on top.
-///
-/// Because there is no upstream ceiling, this cap can fire on OUR OWN WRITE SIDE: a user who
-/// selects 65 poses gets an envelope with no `advanced.poses` in it. That is why
-/// [`OMITTED_FIELDS`] exists and is emitted on the build side too — a 70-pose selection that is
-/// not recorded says so, instead of arriving as an absence indistinguishable from "no poses".
-/// Clamping the selection at the source is the better fix and is not this story's to make.
+/// Derived directly from [`crate::image_request::MAX_JOB_POSES`], the request contract enforced by
+/// the API and mirrored by the shared web picker. A valid newly submitted job therefore cannot
+/// first discover this limit when its workflow is embedded in an output image. The sanitizer still
+/// retains its over-cap omission marker for untrusted or legacy envelopes.
 ///
 /// This bounds the ENTRY count only; [`MAX_SHARE_POSE_SLOTS`] is what bounds the volume.
-const MAX_SHARE_POSES: usize = 64;
+const MAX_SHARE_POSES: usize = crate::image_request::MAX_JOB_POSES;
 
 /// The most coordinate SLOTS the whole `advanced.poses` array may carry, across every entry and
 /// field: a number, or a `null` standing in for one.
@@ -4031,6 +4024,8 @@ mod tests {
         // `the_phase_cap_matches_the_multi_phase_validators` in tests/workflow_share.rs, which can
         // read the file this crate cannot import.
         assert_eq!(MAX_SHARE_PHASES, 8);
+        assert_eq!(MAX_SHARE_POSES, crate::image_request::MAX_JOB_POSES);
+        assert_eq!(MAX_SHARE_POSES, 64);
         // The pose budget is 16 whole-body skeletons, and 16 is twice the payload-sanity ceiling on
         // images per job — the thing a pose set is the pose lane's version of. If that ceiling
         // moves, the budget is a decision to re-make, not a number to follow.

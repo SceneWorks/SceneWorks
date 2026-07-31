@@ -63,6 +63,18 @@ const MIN_COUNT: u32 = 1;
 /// measured against.
 pub(crate) const MAX_COUNT: u32 = 8;
 
+/// The maximum number of strict poses one image-generation job may render.
+///
+/// A pose set is not ordinary batch metadata: every entry becomes a separate generated image and
+/// therefore a separate output artifact. Keep that fan-out finite at eight ordinary maximum-size
+/// batches. The resulting 64-pose ceiling still admits the complete shipped 46-pose library plus
+/// 18 user-created Key Point Library entries in one run, while preventing an accidentally huge
+/// library selection from becoming an effectively unbounded job.
+///
+/// This is the product/request contract. The workflow-share envelope derives its entry cap from
+/// this value, and the web's mechanically pinned twin is checked by a cross-file drift test.
+pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
+
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
 /// The fifth and last dead `defaults.*` key, and the widest: **29 of the 45** image models declare
