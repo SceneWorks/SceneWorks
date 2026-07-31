@@ -1563,12 +1563,19 @@ mod tests {
     }
 
     #[test]
-    fn real_packaged_empty_bundle_loads_and_returns_unknown() {
+    fn real_packaged_bundle_loads_promoted_records_and_unrelated_target_stays_unknown() {
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle is stale: {reason:?}"),
         };
-        assert!(bundle.records.is_empty());
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["imc-1f5c99e76d170df1327b", "imc-cd9bbbac7df2f0ee3fbd"]
+        );
         assert_eq!(
             bundle.evidence_for(&exact_query()),
             EvidenceVerdict::Unknown
@@ -1578,7 +1585,7 @@ mod tests {
         assert_eq!(
             bundle.evidence_for(&unsupported_abi),
             EvidenceVerdict::Unknown,
-            "an empty bundle has no evidence to classify as stale"
+            "an unrelated target has no evidence to classify as stale"
         );
     }
 
