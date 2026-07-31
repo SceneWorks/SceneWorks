@@ -2328,9 +2328,9 @@ fn no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan() {
                                 )
                             });
                         assert!(
-                            is_a_test_item(&light[span.0..span.1]),
-                            "{path}: the scan dropped a call to `{name}` inside a `#[cfg(..)]` \
-                             item that contains no test at all — that blanking ran past its own \
+                            blanked_span_is_one_whole_item(&light[span.0..span.1]),
+                            "{path}: the scan dropped a call to `{name}` inside a `#[cfg(test)]` \
+                             region whose braces do not balance — that blanking ran past its own \
                              item and is hiding product code from the seam scan"
                         );
                         continue;
@@ -2360,13 +2360,32 @@ fn no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan() {
     );
 }
 
-/// A blanked `#[cfg(..)]` region really is test scaffolding: it holds a test, or it is a test
-/// module.
-fn is_a_test_item(item: &str) -> bool {
-    ["#[test]", "#[tokio::test]", "#[bench]", "#[rstest]"]
-        .iter()
-        .any(|attribute| item.contains(attribute))
-        || item.contains("mod test")
+/// A blanked `#[cfg(test)]` region is ONE WHOLE item and nothing after it.
+///
+/// The independent structural check on the blanking, and the only one it needs now that the spans
+/// are exact. A runaway — the historical bug, where `#[cfg(test)] probe_scans: u64,` ran on to the
+/// next `{` and swallowed the `impl` after it — starts inside a struct and therefore closes a
+/// brace it never opened. Balanced braces that never dip below zero say the region began and ended
+/// at the same nesting level, which one item does and a runaway does not.
+///
+/// Deliberately NOT "does it contain a `#[test]`". That reading failed the build on a standalone
+/// `#[cfg(test)] fn generic_fixture(..)` and on a `#[cfg(test)] impl`, neither of which carries a
+/// test attribute of its own and both of which are ordinary scaffolding.
+fn blanked_span_is_one_whole_item(item: &str) -> bool {
+    let mut depth = 0i32;
+    for byte in item.bytes() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 /// A brand-new worker file with an embedding call is discovered, with no list to add it to.
@@ -5444,6 +5463,32 @@ fn a_carrier_that_writes_nothing_reaches_no_writer() {
 // The false positives the first cut of this lint produced (sc-16113 review)
 // ---------------------------------------------------------------------------
 
+/// The safety net's rescue, run exactly as the net runs it.
+///
+/// Panics the way the net does, so the shapes below assert on the same code path rather than on a
+/// paraphrase of it.
+fn assert_the_rescue_accepts(source: &str, name: &str) {
+    let light = blank_comments_and_literals(source);
+    let (full, blanked) = blank_test_only_items_with_spans(&light);
+    let offset = call_sites(&light, name)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the fixture calls `{name}`"));
+    assert!(
+        !full[offset..].starts_with(name),
+        "the fixture must be blanked in the first place"
+    );
+    let span = blanked
+        .iter()
+        .find(|(start, end)| offset >= *start && offset < *end)
+        .expect("the blanked call lies inside the `#[cfg(test)]` item's own span");
+    assert!(
+        blanked_span_is_one_whole_item(&light[span.0..span.1]),
+        "and that span is one whole item:\n{}",
+        &light[span.0..span.1]
+    );
+}
+
 /// The house `#[cfg(test)]` layout — fixture ABOVE the first `#[test]` — is not a bug report.
 ///
 /// Eighty-four worker files use inline test modules. The rescue used to require a `#[test]`
@@ -5452,26 +5497,48 @@ fn a_carrier_that_writes_nothing_reaches_no_writer() {
 /// below the first `#[test]` "fixed" it.
 #[test]
 fn a_test_fixture_above_the_first_test_attribute_is_still_test_scaffolding() {
-    let source = "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nmod tests {\n    use \
-                  super::*;\n    fn png_fixture() {\n        write_workflow_chunk(a, b, \
-                  None);\n    }\n    #[test]\n    fn t() {\n        png_fixture();\n    }\n}\n";
-    let light = blank_comments_and_literals(source);
-    let (full, blanked) = blank_test_only_items_with_spans(&light);
-    let offset = call_sites(&light, "write_workflow_chunk")
-        .first()
-        .copied()
-        .expect("the fixture calls it");
-    assert!(
-        !full[offset..].starts_with("write_workflow_chunk"),
-        "the fixture is blanked"
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nmod tests {\n    use super::*;\n    fn \
+         png_fixture() {\n        write_workflow_chunk(a, b, None);\n    }\n    #[test]\n    fn \
+         t() {\n        png_fixture();\n    }\n}\n",
+        "write_workflow_chunk",
     );
-    let span = blanked
-        .iter()
-        .find(|(start, end)| offset >= *start && offset < *end)
-        .expect("the blanked call lies inside the `#[cfg(test)]` item's own span");
+}
+
+/// A STANDALONE `#[cfg(test)]` fixture carries no test attribute of its own, and is scaffolding.
+#[test]
+fn a_standalone_test_only_fixture_is_still_test_scaffolding() {
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nfn generic_fixture<P: AsRef<Path>, S: \
+         Into<String>>(path: P, label: S) {\n    write_workflow_chunk(a, path, None);\n}\n",
+        "write_workflow_chunk",
+    );
+    assert_the_rescue_accepts(
+        "struct Probe<A, B>(A, B);\n#[cfg(test)]\nimpl Probe<u8, u16> {\n    fn fixture(&self) \
+         {\n        write_workflow_chunk(a, b, None);\n    }\n}\n",
+        "write_workflow_chunk",
+    );
+}
+
+/// ... and a RUNAWAY span is still refused, which is what the rescue is for.
+///
+/// The historical bug: a `#[cfg(test)]` struct field whose end was never found, so the blanking ran
+/// to the next `{` and swallowed the `impl` after it. Such a region starts inside the struct and
+/// therefore closes a brace it never opened.
+#[test]
+fn a_runaway_blanking_span_is_refused() {
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\nmod tests {\n    fn f() {}\n}"
+    ));
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\n    probes: u64,"
+    ));
     assert!(
-        is_a_test_item(&light[span.0..span.1]),
-        "and that span really is test scaffolding"
+        !blanked_span_is_one_whole_item(
+            "#[cfg(test)]\n    probes: u64,\n}\n\nimpl Budget {\n    fn write(&self) {\n        \
+             write_workflow_chunk(a, b, c);\n    }\n}"
+        ),
+        "a region that closes the struct it started inside is a runaway"
     );
 }
 
