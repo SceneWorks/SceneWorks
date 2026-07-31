@@ -62,6 +62,9 @@ pub(crate) struct MlxRequestPlan {
     tier: MemoryNumericTier,
     asset_bytes: u64,
     activation_headroom_bytes: u64,
+    /// The resolution-INDEPENDENT slice of `activation_headroom_bytes` (sc-16195). Always
+    /// `<= activation_headroom_bytes`, so the area term below can never go negative.
+    fixed_reserve_bytes: u64,
     calibration: MlxCalibrationConfig,
 }
 
@@ -73,7 +76,7 @@ impl MlxRequestPlan {
         manifest: Option<&JsonObject<String, Value>>,
         resolved_artifact: Option<ResolvedArtifactProvenance>,
     ) -> Self {
-        let (asset_bytes, _, headroom_gb) = spec_component_bytes(engine_id, spec);
+        let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
             quant: spec.quantize,
@@ -120,21 +123,84 @@ impl MlxRequestPlan {
             // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
             // the activation allowance here. Exact evidence supplies its own measured envelope.
             activation_headroom_bytes: gib_to_bytes(
-                (headroom_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+                (headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+            ),
+            // Whatever remains of this family's OS/app reserve once budgeting has taken the legacy
+            // unified reserve out separately. ZERO for an allowance measured as a bare transient —
+            // see [`HeadroomAllowance`] for why holding a reserve out of one of those would make the
+            // estimator less conservative, not more.
+            fixed_reserve_bytes: gib_to_bytes(
+                (headroom.os_reserve_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
+                    .max(0.0),
             ),
             calibration,
         }
     }
 
+    /// Request peak for the generic/legacy path: resident weights + a FIXED OS/app reserve + the
+    /// activation transient scaled by output area (sc-16195).
+    ///
+    /// The predecessor scaled the WHOLE `activation_headroom_bytes` by megapixels. That constant is
+    /// `HEADROOM_GB` (a 1024²-only calibration) minus the legacy reserve, and its own doc comment
+    /// decomposes it as *transient + a ~4 GiB macOS/app reserve*. Scaling the reserve was simply
+    /// wrong: the OS's working set does not grow because this request renders 2048² instead of 1024².
+    ///
+    /// The AREA term, by contrast, is scaled exactly as before — because the sc-16195 sweep
+    /// (`crate::resolution_sweep`, 7 tiers across 5 families × 5 cells, `docs/sc-16195/`) found the
+    /// measured transient to be PROPORTIONAL to megapixels above 1024². Each tier's transient
+    /// normalised by its OWN 1024² value, against the proportional target:
+    ///
+    /// | tier                     | 1024² GiB | ×1.50 area | ×2.25 area | ×4.00 area |
+    /// |--------------------------|----------:|-----------:|-----------:|-----------:|
+    /// | illustrious q8 (SDXL)    |     14.04 |      1.497 |      2.245 |      3.922 |
+    /// | sdxl bf16 (SDXL, dense)  |     14.04 |      1.497 |      2.245 |      3.922 |
+    /// | z_image_turbo q4 (DiT)   |     14.04 |      1.497 |      2.244 |      3.921 |
+    /// | lens q4 (DiT)            |     14.04 |      1.497 |      2.245 |      3.922 |
+    /// | qwen_image q8 (tiled VAE)|      7.66 |      1.498 |      2.246 |      3.994 |
+    /// | krea_2_turbo q8 (tiled)  |      7.67 |      1.498 |      2.245 |      3.992 |
+    /// | krea_2_turbo bf16 (tiled)|      7.67 |      1.498 |      2.245 |      3.992 |
+    /// | **proportional target**  |         — |      1.500 |      2.250 |      4.000 |
+    ///
+    /// Maximum deviation from proportional across every cell above the anchor: **1.97%**.
+    ///
+    /// This matters more as a REFUTATION than as a confirmation. The story that filed this work
+    /// reasoned from the only prior evidence — two sc-5567 points suggesting the transient was
+    /// markedly SUBLINEAR (16× area → 3.8× memory, i.e. an exponent near 0.48) — and expected the fix
+    /// to be a fitted sub-linear curve. Fitting that exponent would have predicted illustrious q8 at
+    /// 2048² as 27.3 GiB against a measured 55.06 — a ~28 GiB UNDER-prediction on a gate whose
+    /// permissive-side failure mode is an OS Jetsam SIGKILL. The area term is left linear because it
+    /// measured linear, not because it was not examined.
+    ///
+    /// What the sweep did NOT settle is the per-family LEVEL: the 1024² column above splits 14.04 vs
+    /// 7.66 on whether the family's VAE decode is tiled (sc-11747), and every family is currently
+    /// charged 14. That is the larger error, and it is tracked as sc-16209 — reducing a family's
+    /// anchor lowers a SIGKILL-guarding margin, which is a different kind of change from this one.
+    ///
+    /// The `.max(1.0)` floor on the scale is likewise kept: below 1024² the measured transient stops
+    /// falling off proportionally (illustrious 0.305× and qwen 0.512× of their anchors at 0.25×
+    /// area, both ABOVE the 0.25× a proportional term would predict), so the floor is the
+    /// conservative reading of the data rather than a leftover.
+    ///
+    /// `batch` continues to multiply the area term only — a genuine batched pass renders more
+    /// pixels, but it does not run more copies of macOS. See [`request_batch`]: on this lane it is
+    /// always 1, because a multi-image job is a sequential loop (sc-16194).
+    ///
+    /// Families whose allowance carries no OS reserve (see [`HeadroomAllowance`]) hold
+    /// `fixed_reserve_bytes == 0` and are therefore left EXACTLY as they were — the whole allowance
+    /// stays in the area term.
     fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
-        self.asset_bytes.saturating_add(
-            (self.activation_headroom_bytes as f64 * request_scale)
-                .round()
-                .clamp(0.0, u64::MAX as f64) as u64,
-        )
+        let fixed_reserve_bytes = self.fixed_reserve_bytes.min(self.activation_headroom_bytes);
+        let area_bytes = self.activation_headroom_bytes - fixed_reserve_bytes;
+        self.asset_bytes
+            .saturating_add(fixed_reserve_bytes)
+            .saturating_add(
+                (area_bytes as f64 * request_scale)
+                    .round()
+                    .clamp(0.0, u64::MAX as f64) as u64,
+            )
     }
 }
 
@@ -416,8 +482,9 @@ fn budget_for_admission(mut budget: MemoryBudget, admission: &AdmissionRoute) ->
 pub(crate) struct MlxRequestInputs {
     pub width: u32,
     pub height: u32,
-    /// Original job count. The provider currently renders one image per invocation, but admitting
-    /// only a single item would hide the aggregate request from Mage's measured estimator.
+    /// Original job image count. This is a SCHEDULING quantity, not a memory one — see
+    /// [`request_batch`] for why it must never reach a geometry's `batch`. Kept here so the
+    /// over-budget message can quote the request the operator actually submitted.
     pub count: u32,
     pub mode: String,
     pub overlay: Option<String>,
@@ -448,6 +515,39 @@ pub(crate) fn add_post_load_external_delta(baseline: u64, before: u64, after: u6
     baseline.saturating_add(after.saturating_sub(before))
 }
 
+/// The batch dimension of ONE provider forward pass, which on this lane is always 1 — NOT the job's
+/// image count.
+///
+/// A multi-image job is a SEQUENTIAL loop, not a batched pass: `image_jobs::base` expands the job
+/// count into one seed per image and hands the vector to `image_jobs::stream::drive_gen_items`, which
+/// calls the provider once per seed with a `GenerationRequest { count: 1, .. }` and releases MLX's
+/// retained-buffer cache between items (`RequestCacheRelease`, a `Drop` guard, so cancel and error
+/// exits release too — sc-5567). Peak unified memory is therefore a MAX over items, not a sum: the
+/// resident weights plus ONE image's transient working set, whatever the count.
+///
+/// This function exists because charging `count` as a batch dimension is not a small over-estimate,
+/// it is unbounded. Both consumers of `geometry.batch` multiply by it — the generic estimator's
+/// `request_scale` and Mage's `generation_peak_gb` — so a 4-image 1152x2048 krea_2_turbo request was
+/// quoted 33.22 GiB of weights + 16 GiB x 2.25 MP x 4 = 177.22 GiB against a 126.00 GiB budget. The
+/// activation term ALONE (144 GiB) exceeded the whole budget, so that cell rejected every model at
+/// every tier on a 128 GiB Mac before a single weight byte was counted.
+///
+/// If a provider ever renders a genuine batched pass, the fix is to thread THAT pass's batch size
+/// here — not to reinstate the job count, which cannot describe serialized work.
+fn request_batch(_inputs: &MlxRequestInputs) -> u32 {
+    1
+}
+
+/// The provider-facing geometry of one forward pass. See [`request_batch`] for the `batch` rule.
+fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
+    MemoryGeometry {
+        width: inputs.width,
+        height: inputs.height,
+        batch: request_batch(inputs),
+        frames: 1,
+    }
+}
+
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
@@ -469,6 +569,7 @@ fn memory_for_selection(
     selection: MemorySelection,
 ) -> GenerationMemory {
     GenerationMemory {
+        stage_residency: contract.engages(selection.strategy, MemoryStrategy::StagedResidency),
         tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
         chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
         stream_transformer_blocks: contract.engages(
@@ -480,7 +581,7 @@ fn memory_for_selection(
 }
 
 fn resident_evidence(
-    route: &str,
+    contract: &MemoryProviderContract,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
@@ -495,13 +596,14 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            resolved_route: route.to_owned(),
+            resolved_route: contract.provider_id.clone(),
             backend: "mlx".to_owned(),
             tier,
             mode: mode.to_owned(),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
+            engaged_composition: contract.engaged_composition(selection.strategy),
             parameters: selection.parameters,
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -754,10 +856,13 @@ fn evidence_admission_route(
             lower_alternative: None,
         });
     }
-    let request_geometry = CalibrationGeometry {
+    // A measured cell is recorded per forward pass (`batch: 1`), so keying the lookup on the job's
+    // image count made every count > 1 request miss its own calibration and fall to the generic
+    // estimator's Legacy/OutOfEnvelope path. See `request_batch`.
+    let request_cell_geometry = CalibrationGeometry {
         width: inputs.width,
         height: inputs.height,
-        batch: inputs.count.max(1),
+        batch: request_batch(inputs),
         frames: 1,
     };
     let overlay = inputs.overlay.as_deref().unwrap_or("none");
@@ -766,7 +871,7 @@ fn evidence_admission_route(
         .filter(|binding| {
             binding.mode == mode_key
                 && binding.overlay == overlay
-                && binding.geometry == request_geometry
+                && binding.geometry == request_cell_geometry
         })
         .collect::<Vec<_>>();
     if matching.is_empty() {
@@ -796,7 +901,7 @@ fn evidence_admission_route(
             tier: binding.tier.clone(),
             mode: mode_key.to_owned(),
             overlay: overlay.to_owned(),
-            geometry: request_geometry,
+            geometry: request_cell_geometry,
             rung: binding.rung,
             parameters: binding.parameters.clone(),
             calibration: binding.query.clone(),
@@ -816,13 +921,15 @@ fn evidence_admission_route(
                         tier: plan.tier,
                         mode: mode_key.to_owned(),
                         overlay: inputs.overlay.clone(),
-                        geometry: MemoryGeometry {
-                            width: inputs.width,
-                            height: inputs.height,
-                            batch: inputs.count.max(1),
-                            frames: 1,
-                        },
+                        geometry: request_geometry(inputs),
                         strategy: evidence_strategy(binding.rung),
+                        engaged_composition: record
+                            .strategy
+                            .engaged_rungs
+                            .iter()
+                            .copied()
+                            .map(evidence_strategy)
+                            .collect(),
                         parameters: binding.selection_parameters,
                     },
                     conformance: MemoryConformanceState::Verified,
@@ -1006,12 +1113,7 @@ fn evaluate_request_with_budget_using_bundle(
 ) -> WorkerResult<MlxRequestEvaluation> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
-    let geometry = MemoryGeometry {
-        width: inputs.width,
-        height: inputs.height,
-        batch: inputs.count.max(1),
-        frames: 1,
-    };
+    let geometry = request_geometry(inputs);
     let (mode, mode_key) = request_mode(&inputs.mode);
     if plan.engine_id.starts_with("mage_flow") && inputs.adapter_count > 0 {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1139,7 +1241,7 @@ fn evaluate_request_with_budget_using_bundle(
         total_peak_bytes - attributable_resident_bytes
     };
     let (resident_selection, resident) = resident_evidence(
-        plan.engine_id,
+        contract,
         plan.tier,
         mode_key,
         inputs.overlay.as_deref(),
@@ -1357,6 +1459,10 @@ fn evaluate_request_with_budget_using_bundle(
         cache_state = ?cache_state,
         load_policy = ?load_policy,
         strategy = ?selection.strategy,
+        cache_eviction = contract.engages(
+            selection.strategy,
+            MemoryStrategy::StagedResidency,
+        ),
         parameters = ?selection.parameters,
         evidence_record_id = selected_record_id.as_deref().unwrap_or("none"),
         predicted_peak_bytes,
@@ -1443,12 +1549,7 @@ pub(crate) fn evaluate_request(
     load_policy: OffloadPolicy,
     external_committed_bytes: u64,
 ) -> WorkerResult<MlxRequestEvaluation> {
-    let geometry = MemoryGeometry {
-        width: inputs.width,
-        height: inputs.height,
-        batch: inputs.count.max(1),
-        frames: 1,
-    };
+    let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
     let total_peak_bytes = request_total_peak_bytes(plan, geometry);
     evaluate_request_with_budget(
@@ -1555,6 +1656,62 @@ const HEADROOM_GB: f64 = 18.0;
 /// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
 /// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
 const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
+
+/// The macOS/app share inside [`HEADROOM_GB`] — the part of that flat allowance that covers the OS and
+/// other apps drawing from the same unified pool, as opposed to this request's activation transient.
+///
+/// This is the sc-10863 decomposition read back out and given a name: `HEADROOM_GB` 18 = the max
+/// common-case measured 1024² transient (14.04, illustrious q8 & lens q4) + this ~4 GiB reserve. It
+/// was previously only prose in that constant's doc comment, which is precisely how it came to be
+/// multiplied by megapixels — the request estimator could not tell the two halves apart.
+///
+/// It applies to [`HEADROOM_GB`] ONLY. See [`HeadroomAllowance`] for why that distinction is load
+/// bearing rather than pedantic.
+const OS_APP_RESERVE_GB: f64 = 4.0;
+
+/// A family's flat 1024² allowance, together with how much of it is fixed OS/app reserve rather than
+/// this request's area-dependent activation transient.
+///
+/// The two constants that fill this slot are NOT the same kind of quantity, and conflating them is a
+/// live correctness bug rather than a naming wart:
+///
+/// * [`HEADROOM_GB`] (18) is a measured transient PLUS an OS/app reserve — sc-10863 built it as
+///   14.04 + ~4.
+/// * [`LENS_DENSE_HEADROOM_GB`] (29.88) is a measured transient ALONE — sc-11924 took it straight
+///   from `peak − resident` on lens-turbo bf16, and the weight half of that family's error is
+///   corrected separately via `materialized_expansion` in [`spec_component_bytes`]. There is no
+///   reserve inside it to hold out.
+///
+/// sc-16195's split therefore cannot be applied blindly. Subtracting a 2 GiB fixed reserve from the
+/// lens-dense allowance would take those 2 GiB out of its AREA term — `27.88·MP` becomes
+/// `2 + 25.88·MP` — which is strictly LESS conservative above 1024², growing as `2·(MP−1)`: about
+/// 2.5 GiB at 1152×2048 and 6 GiB at 2048², on a path that sc-11924 already records as
+/// under-predicting. That is the opposite of what this story was for.
+///
+/// Carrying `os_reserve_gb` alongside the total makes the lens-dense path an exact no-op (reserve 0 ⇒
+/// the whole allowance stays in the area term) and keeps the generic path's 2 + 14 split, so the
+/// change is provably non-regressive for every family rather than only for the measured ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HeadroomAllowance {
+    /// Total GiB the load-time gate adds on top of summed component weights.
+    total_gb: f64,
+    /// How much of `total_gb` is fixed OS/app reserve. Zero when the constant was measured as a bare
+    /// activation transient.
+    os_reserve_gb: f64,
+}
+
+impl HeadroomAllowance {
+    /// The sc-10863 calibration: a 1024² transient plus a macOS/app reserve.
+    const GENERIC: Self = Self {
+        total_gb: HEADROOM_GB,
+        os_reserve_gb: OS_APP_RESERVE_GB,
+    };
+    /// sc-11924's lens-dense measurement: a bare activation transient, no reserve folded in.
+    const LENS_DENSE: Self = Self {
+        total_gb: LENS_DENSE_HEADROOM_GB,
+        os_reserve_gb: 0.0,
+    };
+}
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
@@ -2150,6 +2307,7 @@ fn generic_mlx_shared_observation(
             overlay: Some("resolved_load_spec".into()),
             geometry,
             strategy: MemoryStrategy::Resident,
+            engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -2278,13 +2436,13 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
 /// the `text_encoder*` subdir scan (which reads ZERO for boogu `mllm/`, bernini flat `t5_encoder`,
 /// anima `text_encoders/`, etc.), and folding a separate `spec.control` (qwen_image_control's VACE
 /// branch) into the HEAVY side so the staged split `rest = total − te` counts it on the DiT side.
-fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
+fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, HeadroomAllowance) {
     let footprint = crate::inference_runtime::media()
         .footprint(engine_id, spec)
         .ok()
         .flatten();
     let footprint_te = footprint.map(|fp| fp.text_encoder);
-    let mut headroom_gb = HEADROOM_GB;
+    let mut headroom = HeadroomAllowance::GENERIC;
     let (mut total_bytes, te_bytes) = match &spec.weights {
         WeightsSource::Dir(dir) => {
             let mut total = sum_safetensors_bytes(dir);
@@ -2294,7 +2452,7 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
                 let materialized_expansion = te.saturating_sub(disk_te);
                 total = total.saturating_add(materialized_expansion);
                 if spec.quantize.is_none() && packed_quant_bits(dir, "text_encoder").is_none() {
-                    headroom_gb = LENS_DENSE_HEADROOM_GB;
+                    headroom = HeadroomAllowance::LENS_DENSE;
                 }
             }
             (total, te)
@@ -2327,7 +2485,7 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, f64) {
             total_bytes = total_bytes.saturating_add(weights_source_bytes(source));
         }
     }
-    (total_bytes, te_bytes, headroom_gb)
+    (total_bytes, te_bytes, headroom)
 }
 
 fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
@@ -2346,13 +2504,15 @@ fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
 /// gate uses, so the seam's downtier choice and the cache's admission never disagree.
 pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    let (total_bytes, te_bytes, headroom_gb) = spec_component_bytes(engine_id, spec);
+    let (total_bytes, te_bytes, headroom) = spec_component_bytes(engine_id, spec);
+    // The LOAD-time gate is resolution-blind, so it budgets the family's whole flat allowance and
+    // has no use for the reserve split (sc-16195 changes only the request-scoped estimator).
     decide_residency_with_headroom(
         total_bytes,
         te_bytes,
         budget,
         engine_supports_sequential(engine_id),
-        headroom_gb,
+        headroom.total_gb,
     )
 }
 
@@ -2609,6 +2769,56 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn resident_evidence_is_keyed_by_the_live_contract_composition() {
+        use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
+
+        let mut contract = MemoryProviderContract::compatibility_default(
+            "fixture_provider",
+            MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.additional_prerequisites.push((
+            MemoryStrategy::Resident,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::StagedResidency)
+            .expect("staged-residency capability")
+            .support = gen_core::MemoryStrategySupport::Implemented;
+        let (_, evidence) = resident_evidence(
+            &contract,
+            MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            1,
+            None,
+        );
+        assert_eq!(
+            evidence.key.engaged_composition,
+            vec![MemoryStrategy::Resident, MemoryStrategy::StagedResidency,],
+            "the test must distinguish live derivation from the old hardcoded resident-only key"
+        );
+    }
+
     struct RequestGenerator {
         descriptor: gen_core::ModelDescriptor,
         contract: Option<MemoryProviderContract>,
@@ -2659,7 +2869,11 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(6.0),
-            activation_headroom_bytes: gib_to_bytes(2.0),
+            // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
+            // sitting exactly on the reserve would model resolution-blind and silently stop
+            // exercising the sc-16195 scaling at all.
+            activation_headroom_bytes: gib_to_bytes(6.0),
+            fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
         }
     }
@@ -2821,7 +3035,11 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(3.0),
-            activation_headroom_bytes: gib_to_bytes(2.0),
+            // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
+            // sitting exactly on the reserve would model resolution-blind and silently stop
+            // exercising the sc-16195 scaling at all.
+            activation_headroom_bytes: gib_to_bytes(6.0),
+            fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet {
                 bindings: vec![fixture_binding("q4", variant)],
                 resolved: fixture_provenance("q4", variant),
@@ -2921,6 +3139,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(30.0),
             activation_headroom_bytes: gib_to_bytes(2.0),
+            fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
         }
     }
@@ -3042,9 +3261,24 @@ mod tests {
 
         let mut bundle = fixture_bundle();
         let base = bundle.records.remove(0);
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
         let rung = |rung, parameters: JsonObject<String, Value>, peak_gib: f64| {
             let mut record = base.clone();
             record.strategy.rung = rung;
+            record.strategy.engaged_rungs = contract
+                .engaged_composition(evidence_strategy(rung))
+                .into_iter()
+                .map(|strategy| match strategy {
+                    MemoryStrategy::Resident => StrategyRung::Resident,
+                    MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
+                    MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
+                    MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        StrategyRung::BoundedTransformerResidency
+                    }
+                })
+                .collect();
             record.strategy.parameters = parameters.clone();
             record.sweep.cases[0].parameters = parameters;
             if let RequiredNullable::Value(predicted) = &mut record.predicted_peak_bytes {
@@ -4183,9 +4417,29 @@ mod tests {
             contract
         };
         let memory = memory_for_selection(&all_implemented, deepest);
+        assert!(
+            !memory.stage_residency,
+            "rung 4 must not evict the warm cache by implicitly engaging rung 1"
+        );
         assert!(memory.tile_vae_decode);
         assert!(memory.chunk_attention);
         assert!(memory.stream_transformer_blocks);
+
+        let staged = memory_for_selection(
+            &all_implemented,
+            MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: request_plan().tier,
+            },
+        );
+        assert!(
+            staged.stage_residency,
+            "an explicit rung-1 selection must reach GenerationMemory"
+        );
+        assert!(!staged.tile_vae_decode);
+        assert!(!staged.chunk_attention);
+        assert!(!staged.stream_transformer_blocks);
     }
 
     #[test]
@@ -4237,7 +4491,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(first_a.context.geometry.batch, 3);
+        // A 3-image job is three sequential forward passes, so the modeled batch stays 1 even though
+        // `request_inputs` carried count 3 (see `request_batch`).
+        assert_eq!(first_a.context.geometry.batch, 1);
         assert_eq!(first_a.context.mode, MemoryMode::Edit);
         assert_eq!(
             first_a.context.overlay.as_deref(),
@@ -4250,6 +4506,186 @@ mod tests {
         assert_eq!(
             first_a.context.predicted_peak_bytes, second_a.context.predicted_peak_bytes,
             "the intervening geometry cannot poison a warm follow-up"
+        );
+    }
+
+    /// A multi-image job is a sequential loop with an MLX cache release between items (sc-5567), so
+    /// its peak is one image's working set — the estimator must be INVARIANT in the job count.
+    ///
+    /// The numbers are the real reported rejection: krea_2_turbo bf16 (33.22 GiB of safetensors) at
+    /// 1152x2048 count 4 on a 128 GiB Mac (126.00 GiB after the 2 GiB legacy unified reserve). The
+    /// count multiplier quoted 33.22 + 16 x 2.25 x 4 = 177.22 GiB — the activation term alone
+    /// exceeded the whole budget, so this cell rejected every model at every tier.
+    #[test]
+    fn generic_request_peak_is_invariant_in_the_job_image_count() {
+        let plan = MlxRequestPlan {
+            engine_id: "krea_2_turbo",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+            },
+            asset_bytes: 35_666_644_396,
+            activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
+            fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        // Go through `request_geometry` rather than hand-building a `batch: 1` geometry, so this
+        // exercises the production count -> batch seam instead of asserting a value it supplies.
+        let peak = |count: u32| {
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(1152, 2048, count)))
+        };
+
+        let single = peak(1);
+        for count in [2, 4, 8] {
+            assert_eq!(
+                peak(count),
+                single,
+                "count {count} is {count} sequential passes, not a batched one"
+            );
+        }
+
+        let budget = gib_to_bytes(126.0);
+        assert!(
+            peak(4) <= budget,
+            "the reported cell must admit: needed {:.2} GiB vs {:.2} GiB available",
+            peak(4) as f64 / BYTES_PER_GIB,
+            budget as f64 / BYTES_PER_GIB
+        );
+
+        // Non-constant control: resolution is still a real axis, so an estimator that stopped
+        // scaling entirely would not pass by accident.
+        assert!(
+            peak(1) > plan.generic_total_peak_bytes(request_geometry(&request_inputs(512, 512, 1))),
+            "the estimator must still grow with output resolution"
+        );
+    }
+
+    /// sc-16195: the OS/app reserve inside the flat headroom is FIXED, so only the activation term
+    /// may scale with output area.
+    ///
+    /// Every number here is pinned in absolute GiB rather than re-derived from the formula, so the
+    /// test fails if the split moves — a test that recomputed `fixed + area * mp` would pass against
+    /// any split, including the broken one.
+    #[test]
+    fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
+        let asset_gb = 33.22_f64;
+        let plan = MlxRequestPlan {
+            engine_id: "krea_2_turbo",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+            },
+            asset_bytes: gib_to_bytes(asset_gb),
+            activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
+            fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        let peak_gb = |width, height| {
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
+                as f64
+                / BYTES_PER_GIB
+        };
+        // The split: 16 GiB of allowance = a 2 GiB fixed remainder of the 4 GiB OS/app reserve (the
+        // other 2 are carried separately as the legacy unified reserve) + a 14 GiB area term.
+        let close = |actual: f64, expected: f64| (actual - expected).abs() < 1e-6;
+
+        // 1024² is the calibration anchor and must be BIT-IDENTICAL to the pre-sc-16195 estimator —
+        // the sweep re-derived the shape, it did not re-cut the safety margin.
+        assert!(
+            close(peak_gb(1024, 1024), asset_gb + 16.0),
+            "1024² must be unchanged at asset + 16: got {:.4}",
+            peak_gb(1024, 1024)
+        );
+
+        // Above 1024² only the 14 GiB area term scales. The old estimator scaled all 16.
+        for (width, height, megapixels) in
+            [(1024, 1536, 1.5), (1152, 2048, 2.25), (2048, 2048, 4.0)]
+        {
+            let expected = asset_gb + 2.0 + 14.0 * megapixels;
+            assert!(
+                close(peak_gb(width, height), expected),
+                "{width}x{height}: expected asset + 2 + 14*{megapixels} = {expected:.4}, got {:.4}",
+                peak_gb(width, height)
+            );
+            // Mutation guard: the pre-sc-16195 formula scaled the whole 16, so it is strictly
+            // larger everywhere above the anchor. If the reserve ever starts scaling again, this
+            // fires even if the arithmetic above were loosened.
+            assert!(
+                peak_gb(width, height) < asset_gb + 16.0 * megapixels,
+                "{width}x{height} must model below the old whole-headroom scaling"
+            );
+        }
+
+        // Below 1024² the scale is floored at 1.0: the measured transient stops falling off
+        // proportionally down there (illustrious 0.305x and qwen 0.512x of their anchors at 0.25x
+        // area, both above proportional), so the floor is the conservative reading.
+        assert!(
+            close(peak_gb(512, 512), asset_gb + 16.0),
+            "sub-anchor requests stay floored at the 1024² allowance: got {:.4}",
+            peak_gb(512, 512)
+        );
+    }
+
+    /// sc-16195: a family whose allowance was measured as a BARE activation transient carries no OS
+    /// reserve to hold out, so the split must be an exact no-op for it.
+    ///
+    /// This is the lens dense path ([`HeadroomAllowance::LENS_DENSE`], sc-11924). Holding a 2 GiB
+    /// reserve out of its 27.88 GiB allowance would move 2 GiB from the AREA term into a constant —
+    /// `2 + 25.88·MP` instead of `27.88·MP` — which is strictly LESS conservative above 1024², by
+    /// `2·(MP−1)`. On a path sc-11924 already records as under-predicting, and whose permissive-side
+    /// failure mode is an OS Jetsam SIGKILL, that would be a regression rather than a refinement.
+    #[test]
+    fn a_bare_transient_allowance_keeps_its_whole_area_term() {
+        let asset_gb = 28.43_f64;
+        let plan = |headroom: HeadroomAllowance| MlxRequestPlan {
+            engine_id: "lens_turbo",
+            model_id: "lens_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+            },
+            asset_bytes: gib_to_bytes(asset_gb),
+            activation_headroom_bytes: gib_to_bytes(
+                headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
+            ),
+            fixed_reserve_bytes: gib_to_bytes(
+                (headroom.os_reserve_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
+                    .max(0.0),
+            ),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        let dense = plan(HeadroomAllowance::LENS_DENSE);
+        let peak_gb = |plan: &MlxRequestPlan, width, height| {
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
+                as f64
+                / BYTES_PER_GIB
+        };
+        // LENS_DENSE_HEADROOM_GB 29.88 − the 2 GiB legacy reserve budgeting carries separately.
+        let allowance = LENS_DENSE_HEADROOM_GB - 2.0;
+        for (width, height, megapixels) in [
+            (1024, 1024, 1.0),
+            (1024, 1536, 1.5),
+            (1152, 2048, 2.25),
+            (2048, 2048, 4.0),
+        ] {
+            let expected = asset_gb + allowance * megapixels;
+            assert!(
+                (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
+                "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
+                 expected {expected:.4}, got {:.4}",
+                peak_gb(&dense, width, height)
+            );
+        }
+
+        // Control: the generic allowance, which really does contain a reserve, must NOT behave that
+        // way — otherwise this test would pass against a build that had removed the split entirely.
+        let generic = plan(HeadroomAllowance::GENERIC);
+        let generic_whole = asset_gb + (HEADROOM_GB - 2.0) * 2.25;
+        assert!(
+            peak_gb(&generic, 1152, 2048) < generic_whole - 1e-6,
+            "the generic allowance must still hold its reserve out of the area term"
         );
     }
 
@@ -4308,7 +4744,11 @@ mod tests {
             model_id: "flux_dev".to_owned(),
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
-            activation_headroom_bytes: gib_to_bytes(2.0),
+            // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
+            // sitting exactly on the reserve would model resolution-blind and silently stop
+            // exercising the sc-16195 scaling at all.
+            activation_headroom_bytes: gib_to_bytes(6.0),
+            fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
         };
         let selected = evaluate_request_with_budget(
@@ -4467,6 +4907,7 @@ mod tests {
                     frames: 1,
                 },
                 strategy: selection.strategy,
+                engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,
             },
             conformance: MemoryConformanceState::Verified,
@@ -4768,7 +5209,10 @@ mod tests {
         let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
         assert_eq!(dense_te, expected_te);
         assert_eq!(dense_total, expected_te + 14);
-        assert_eq!(dense_headroom, LENS_DENSE_HEADROOM_GB);
+        assert_eq!(dense_headroom, HeadroomAllowance::LENS_DENSE);
+        // sc-16195: a bare measured transient carries NO OS reserve, so the request estimator
+        // must leave the whole allowance in its area term for this path.
+        assert_eq!(dense_headroom.os_reserve_gb, 0.0);
 
         std::fs::write(
             root.join("text_encoder").join("config.json"),
@@ -4777,7 +5221,7 @@ mod tests {
         .expect("packed marker");
         let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
         assert_eq!((packed_total, packed_te), (27, 13));
-        assert_eq!(packed_headroom, HEADROOM_GB);
+        assert_eq!(packed_headroom, HeadroomAllowance::GENERIC);
         std::fs::remove_dir_all(root).ok();
     }
 

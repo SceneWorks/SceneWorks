@@ -30,16 +30,19 @@ use std::fs;
 use std::path::PathBuf;
 
 use sceneworks_core::contracts::{Asset, JsonObject};
+use sceneworks_core::workflow_parameters::{
+    parameters_text, NEGATIVE_PROMPT_LABEL, PARAMETERS_CHUNK_KEYWORD, SETTINGS_FIELDS,
+};
 use sceneworks_core::workflow_png::{
     MAX_METADATA_BYTES, MAX_WORKFLOW_TEXT_BYTES, WORKFLOW_CHUNK_KEYWORD,
 };
 use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedDisposition, AdvancedShape,
-    WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
+    SeamDisposition, WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
     ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
     INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
-    WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
-    WORKFLOW_SHARE_SCHEMA_VERSION,
+    WORKFLOW_KINDS, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_SHARE_SCHEMA_VERSION, WORKFLOW_WRITE_SEAMS,
 };
 use serde_json::{json, Value};
 
@@ -330,6 +333,12 @@ fn fully_populated_envelope() -> WorkflowShare {
         width: Some(1024),
         height: Some(1024),
         count: Some(2),
+        // The video arm (sc-15956). Populated even though `kind` above is the image one: this
+        // fixture's job is the WIDEST serialized shape the contract can produce, so that the
+        // document is pinned against every field rather than against one lane's.
+        duration_seconds: Some(5.0),
+        fps: Some(24),
+        quality: Some("balanced".to_owned()),
         style_preset: Some("cinematic".to_owned()),
         style_id: Some("noir".to_owned()),
         fit_mode: Some("crop".to_owned()),
@@ -349,7 +358,11 @@ fn fully_populated_envelope() -> WorkflowShare {
             count: 1,
             control_mode: Some("canny".to_owned()),
         }],
-        advanced: json!({ "steps": 8 })
+        // `advanced` is one field path to the envelope pin, so its CONTENTS are free to be the
+        // widest thing too. They carry the three keys the sc-15957 `parameters` trailer reads —
+        // `steps`, `sampler` and `guidanceScale` — so the tests that render this fixture measure a
+        // full settings line rather than a partial one.
+        advanced: json!({ "steps": 8, "sampler": "euler", "guidanceScale": 3.5 })
             .as_object()
             .cloned()
             .expect("advanced object"),
@@ -433,6 +446,45 @@ fn the_doc_lists_exactly_the_envelope_fields() {
 }
 
 #[test]
+fn the_doc_lists_exactly_the_a1111_fields_that_travel() {
+    // The `parameters` trailer's whole discipline is "omit rather than approximate", and the
+    // document is where a reviewer reads which way each field was decided. Pinned in both
+    // directions against `SETTINGS_FIELDS`, so a field added to the renderer without a decision
+    // written here fails, and a row here for a field nothing emits fails too.
+    let doc = doc();
+    let documented: BTreeSet<String> = pinned_set(&doc, "a1111-fields", 0);
+    let declared: BTreeSet<String> = SETTINGS_FIELDS
+        .iter()
+        .map(|(key, _)| (*key).to_owned())
+        .collect();
+    assert_same_set(
+        &documented,
+        &declared,
+        "a1111-fields",
+        "`SETTINGS_FIELDS` in `workflow_parameters.rs`",
+    );
+
+    // And the trailer really is written from the sanitized envelope: the fields a real one emits
+    // must be a subset of the documented list, measured rather than asserted from the same source
+    // the table was checked against.
+    let envelope = fully_populated_envelope();
+    let width = envelope.width.expect("the fixture has a width");
+    let height = envelope.height.expect("the fixture has a height");
+    let rendered = parameters_text(&envelope, (width, height));
+    let settings = rendered.lines().last().expect("a settings line");
+    for token in settings.split(", ") {
+        let Some((key, _)) = token.split_once(": ") else {
+            continue;
+        };
+        assert!(
+            declared.contains(key),
+            "a real envelope rendered `{key}`, which {DOC_PATH}'s `a1111-fields` table does not \
+             name. Every field in that trailer is a decision someone wrote down."
+        );
+    }
+}
+
+#[test]
 fn the_doc_quotes_the_contract_constants() {
     let doc = doc();
     let documented: BTreeMap<String, String> = pinned_rows(&doc, "identity")
@@ -441,6 +493,10 @@ fn the_doc_quotes_the_contract_constants() {
         .collect();
     let actual: BTreeMap<String, String> = [
         ("WORKFLOW_CHUNK_KEYWORD", WORKFLOW_CHUNK_KEYWORD.to_owned()),
+        (
+            "PARAMETERS_CHUNK_KEYWORD",
+            PARAMETERS_CHUNK_KEYWORD.to_owned(),
+        ),
         (
             "WORKFLOW_SHARE_MARKER_KEY",
             WORKFLOW_SHARE_MARKER_KEY.to_owned(),
@@ -552,6 +608,135 @@ fn the_doc_lists_exactly_the_omitted_vocabulary() {
     );
 }
 
+/// Every reader named in the `container-kinds` table really asserts the kind the table claims
+/// (sc-15956 review).
+///
+/// The rule this pins is the one the marker's widening broke: the shared parser accepts every kind
+/// in `WORKFLOW_KINDS`, so a reader that hands its result to one lane owes a container assert of its
+/// own. The PNG reader had one, the MP4 reader had one, and the asset route — the third reader,
+/// in a crate the widening did not touch — silently lost the refusal it used to inherit from the
+/// parser.
+///
+/// Not a prose check. Each row names a file and a function, and this reads that file and fails if
+/// the assert it claims is not in it, so deleting a gate breaks the document as well as the route's
+/// own test.
+#[test]
+fn the_doc_lists_exactly_the_container_kind_asserts() {
+    let rows = pinned_rows(&doc(), "container-kinds");
+    assert!(
+        rows.len() >= WORKFLOW_KINDS.len(),
+        "{DOC_PATH}: the `container-kinds` block lists {} readers for {} kinds — every kind needs \
+         at least one container that accepts it",
+        rows.len(),
+        WORKFLOW_KINDS.len()
+    );
+    let mut accepted: BTreeSet<String> = BTreeSet::new();
+    for row in &rows {
+        assert!(
+            row.len() >= 4,
+            "{DOC_PATH}: a `container-kinds` row has fewer than four columns: {row:?}"
+        );
+        let path = code(&row[1]);
+        let function = code(&row[2]);
+        let kind = code(&row[3]);
+        assert!(
+            WORKFLOW_KINDS.contains(&kind.as_str()),
+            "{DOC_PATH}: `container-kinds` says {function} accepts `{kind}`, which is not a kind \
+             this contract has. Known kinds: {WORKFLOW_KINDS:?}"
+        );
+        accepted.insert(kind.clone());
+
+        let source = read_repo_file(&path);
+        assert!(
+            source.contains(&format!("fn {function}")),
+            "{DOC_PATH}: `container-kinds` names `{function}` in {path}, which has no such \
+             function. A reader that moved needs the table moved with it."
+        );
+        let constant = if kind == WORKFLOW_KIND_IMAGE {
+            "WORKFLOW_KIND_IMAGE"
+        } else {
+            "WORKFLOW_KIND_VIDEO"
+        };
+        assert!(
+            source.contains(&format!("share.kind != {constant}")),
+            "{path} does not assert `share.kind != {constant}` anywhere, and {DOC_PATH}'s \
+             `container-kinds` table says `{function}` accepts only `{kind}`.\n\
+             The shared parser accepts EVERY kind, so a reader that feeds one lane is the only \
+             thing standing between a `{kind}`-only surface and an envelope of another kind being \
+             presented as one it is not."
+        );
+    }
+    assert_eq!(
+        accepted,
+        WORKFLOW_KINDS
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect::<BTreeSet<String>>(),
+        "{DOC_PATH}: every kind the contract has needs a container that accepts it, or the kind is \
+         one nothing can read"
+    );
+}
+
+/// Every in-document `](#anchor)` link resolves to a heading in this document.
+///
+/// The sc-15956 review found `[Person replacement](#person-replacement-is-withheld-by-default)`
+/// pointing at a heading that did not exist — and that dead link was the single pointer a future
+/// author had to the person-replacement rationale, from the withheld table's own row. A reader
+/// following it landed at the top of the page and could reasonably conclude the reasoning had never
+/// been written down.
+///
+/// GitHub's slug rule, near enough for this document: lowercase, drop everything that is not a
+/// letter, digit, space or hyphen, then spaces to hyphens.
+#[test]
+fn every_internal_link_in_the_doc_points_at_a_heading_that_exists() {
+    let doc = doc();
+    let mut headings: BTreeSet<String> = BTreeSet::new();
+    for line in doc.lines() {
+        // The privacy callout is a blockquote, so its headings carry a `>` prefix.
+        let line = line.trim_start().trim_start_matches('>').trim_start();
+        let Some(rest) = line.strip_prefix('#') else {
+            continue;
+        };
+        let title = rest.trim_start_matches('#').trim();
+        if title.is_empty() {
+            continue;
+        }
+        let slug: String = title
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+            .map(|c| if c == ' ' { '-' } else { c })
+            .collect();
+        headings.insert(slug);
+    }
+    assert!(
+        !headings.is_empty(),
+        "{DOC_PATH}: no headings parsed at all"
+    );
+
+    let mut dead: Vec<String> = Vec::new();
+    let mut seen = 0_usize;
+    // Links are hard-wrapped across lines, so search the FLOWED document.
+    let flowed = flowed(&doc);
+    for chunk in flowed.split("](#").skip(1) {
+        let Some(end) = chunk.find(')') else {
+            continue;
+        };
+        seen += 1;
+        // A wrapped link puts a space inside the anchor; the rendered href has none.
+        let anchor = chunk[..end].replace(' ', "");
+        if !headings.contains(&anchor) {
+            dead.push(anchor);
+        }
+    }
+    assert!(seen > 0, "{DOC_PATH}: no internal links parsed at all");
+    assert!(
+        dead.is_empty(),
+        "{DOC_PATH} links to {dead:?}, and no heading in it produces those anchors. \
+         The headings that exist are {headings:?}."
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The registries a contributor is sent to
 // ---------------------------------------------------------------------------
@@ -588,6 +773,80 @@ fn the_doc_lists_exactly_the_deferred_builders() {
         "deferred-builders",
         "`DEFERRED_ADVANCED_BUILDERS`",
     );
+}
+
+/// The write-seam table, and the disposition word each row claims (sc-16113).
+///
+/// The disposition is read out of the prose column rather than trusted, because the whole point of
+/// this story is that a lane can flip from declining to embedding: a row that goes on saying
+/// "Declines" about a seam that now embeds would be the document repeating the exact class of
+/// untrue claim the enforcement was built to end.
+#[test]
+fn the_doc_lists_exactly_the_write_seams() {
+    let rows = pinned_rows(&doc(), "write-seams");
+    let documented: BTreeSet<String> = rows
+        .iter()
+        .map(|row| {
+            let word = ["Embeds", "Conduit", "Declines", "Inert"]
+                .into_iter()
+                .find(|word| row[2].contains(word))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{DOC_PATH}: the `write-seams` row for {} says nothing about what it does \
+                         with the chunk — it must open with `Embeds`, `Conduit`, `Declines` or \
+                         `Inert`",
+                        row[1]
+                    )
+                });
+            format!("{}::{} {word}", code(&row[0]), code(&row[1]))
+        })
+        .collect();
+    assert_same_set(
+        &documented,
+        &WORKFLOW_WRITE_SEAMS
+            .iter()
+            .map(|seam| {
+                let word = match seam.disposition {
+                    SeamDisposition::Embeds(_) => "Embeds",
+                    SeamDisposition::Conduit(_) => "Conduit",
+                    SeamDisposition::Declines(_) => "Declines",
+                    SeamDisposition::Inert(_) => "Inert",
+                };
+                format!("{}::{} {word}", seam.path, seam.function)
+            })
+            .collect(),
+        "write-seams",
+        "`WORKFLOW_WRITE_SEAMS`",
+    );
+}
+
+/// Every builder a documented seam embeds for is a documented REGISTERED builder, never a deferred
+/// one — the enforcement, restated in the two tables a reader actually sees.
+#[test]
+fn no_documented_write_seam_embeds_for_a_documented_deferred_builder() {
+    let deferred = documented_builders(&doc(), "deferred-builders");
+    for seam in WORKFLOW_WRITE_SEAMS {
+        let SeamDisposition::Embeds(builders) = seam.disposition else {
+            continue;
+        };
+        for reference in builders {
+            let key = format!("{}::{}", reference.path, reference.function);
+            assert!(
+                !deferred.contains(&key),
+                "{DOC_PATH} lists {key} in the `deferred-builders` table while \
+                 `WORKFLOW_WRITE_SEAMS` has {}::{} embedding for it. The document would be telling \
+                 a reader that lane does not embed while the code says it does.",
+                seam.path,
+                seam.function
+            );
+            assert!(
+                documented_builders(&doc(), "builders").contains(&key),
+                "{DOC_PATH}: {}::{} embeds for {key}, which the `builders` table does not list",
+                seam.path,
+                seam.function
+            );
+        }
+    }
 }
 
 /// The document tells a contributor which test failed. A renamed test would send them looking for
@@ -866,6 +1125,80 @@ fn the_settings_copy_accounts_for_every_shared_and_withheld_field() {
     );
 }
 
+/// The gallery-readable sentence says only what a real `parameters` trailer actually contains
+/// (sc-15957).
+///
+/// # Why this needs its own test
+///
+/// The same structural gap the person-replacement bullet fell into.
+/// `the_settings_copy_accounts_for_every_shared_and_withheld_field` joins the copy to the document
+/// on KEYS, and the second chunk introduces no key — it is a second rendering of fields the copy
+/// already declares. So the key-level pin is silent about it while the user-visible fact changes:
+/// what leaves in the file is no longer only a block SceneWorks understands, it is also a block
+/// Civitai and most galleries read and DISPLAY. A user who turns the switch on deserves to be told
+/// that, and a sentence claiming otherwise would claim more privacy than the file delivers.
+///
+/// So the sentence is asserted against a real rendered trailer: every field it names has to be one
+/// the trailer emits, and the two claims a reader would act on — that it is the same information,
+/// and that both blocks are removed together — have to be stated.
+#[test]
+fn the_settings_copy_says_the_file_is_also_gallery_readable() {
+    let copy = settings_copy_constant("GALLERY_READABLE_COPY");
+    let envelope = fully_populated_envelope();
+    let width = envelope.width.expect("the fixture has a width");
+    let height = envelope.height.expect("the fixture has a height");
+    let rendered = parameters_text(&envelope, (width, height));
+
+    // Every field the sentence names must be one a real trailer emits. The direction that matters:
+    // a sentence naming a field the block does not carry is a false description of the file.
+    for (phrase, evidence) in [
+        ("negative prompt", NEGATIVE_PROMPT_LABEL),
+        ("seed", "Seed: "),
+        ("size", "Size: "),
+        ("sampler", "Sampler: "),
+        ("steps", "Steps: "),
+        ("guidance", "CFG scale: "),
+    ] {
+        if !copy.contains(phrase) {
+            continue;
+        }
+        assert!(
+            rendered.contains(evidence),
+            "the settings copy tells the user the gallery-readable block carries the {phrase}, but \
+             a real trailer has no {evidence:?} in it: {rendered:?}"
+        );
+    }
+    assert!(
+        copy.contains("prompt") && rendered.starts_with(&envelope.prompt),
+        "the copy must name the prompt, which is the first thing in the block"
+    );
+
+    // It has to name the audience. "In the format image galleries read" is the fact a user acts on
+    // before posting the file somewhere; without it the sentence is a technical note.
+    assert!(
+        copy.contains("galleries read") && copy.contains("Civitai"),
+        "the copy must say who reads this block, not merely that it exists: {copy:?}"
+    );
+    // And the two claims that keep it from reading as a NEW disclosure: no extra information, and
+    // one strip takes both. Both are true of the code — `the_parameters_chunk_cannot_carry_a_
+    // withheld_field` and `save_a_copy_without_the_workflow_removes_the_parameters_chunk_too` in
+    // `crates/sceneworks-core/tests/workflow_parameters.rs` prove them against real bytes — and the
+    // document says the same thing, which is what this joins them to.
+    assert!(
+        copy.contains("nothing more") && copy.contains("removed together"),
+        "the copy must say the block adds no information and that one strip takes both: {copy:?}"
+    );
+    let doc = doc();
+    assert!(
+        doc.contains("excises **both** from the copied bytes"),
+        "{DOC_PATH} must state the both-chunks strip the settings copy promises"
+    );
+    assert!(
+        doc.contains(PARAMETERS_CHUNK_KEYWORD),
+        "{DOC_PATH} must name the keyword the copy is describing"
+    );
+}
+
 #[test]
 fn the_settings_copy_names_the_save_without_workflow_control_once() {
     // Three surfaces name this control — the context menu, the button beside Save As, and the copy
@@ -954,6 +1287,150 @@ fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
         read_repo_file(SETTINGS_COPY_PATH).contains(&link_target),
         "{SETTINGS_COPY_PATH} must link to {link_target} — the copy is a summary, and the summary \
          has to be able to send the user to the exact list"
+    );
+}
+
+/// The value of a `const NAME = "…";` string in the settings copy, unescaped enough to compare.
+///
+/// The person-replacement bullet is the one claim in that file no key-level lint can reach, so it
+/// has to be read as PROSE. Panics when the constant is gone, for the reason every parser here
+/// does: a lint that finds nothing passes against a file that was emptied.
+fn settings_copy_constant(name: &str) -> String {
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let anchor = format!("const {name} =");
+    let start = source.find(&anchor).unwrap_or_else(|| {
+        panic!("{SETTINGS_COPY_PATH} no longer declares `{anchor}`; teach this lint where it went")
+    }) + anchor.len();
+    let rest = &source[start..];
+    let open = rest
+        .find('"')
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: `{name}` has no string literal"));
+    let close = rest[open + 1..]
+        .find('"')
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: `{name}`'s string is never closed"))
+        + open
+        + 1;
+    let value = rest[open + 1..close].to_owned();
+    assert!(
+        !value.trim().is_empty(),
+        "{SETTINGS_COPY_PATH}: `{name}` parsed to an empty string"
+    );
+    value
+}
+
+/// The person-replacement bullet says only what a real `replace_person` envelope actually withholds
+/// (sc-15956 review).
+///
+/// # The failure this exists for
+///
+/// The bullet read *"anything about a person replacement — the selected track, the person's name,
+/// the original file name, the mask images, or which replacement mode ran"*, rendered into the
+/// **"Not in the file"** list. Every item after the dash was true. The leading clause was not:
+/// `mode` is in the **"In the file"** list, and a person-replacement run writes it verbatim as
+/// `replace_person`. `model` says it a second time — `wan_2_2_vace_fun_14b` is a replacement
+/// engine. So the file announces the TECHNIQUE while the copy said it announced nothing, which is
+/// the one direction `workflowEmbed.js`'s own header forbids: claiming more privacy than the
+/// allow-list delivers.
+///
+/// # Why the key-level pins could not catch it
+///
+/// `the_settings_copy_accounts_for_every_shared_and_withheld_field` joins the copy to the doc on
+/// KEYS, and `mode` is not a key in either of the two lists it compares — it is a shared field the
+/// copy already declares correctly. The error was in a sentence about a different key. So this
+/// asserts the sentence against the bytes of a real envelope instead.
+#[test]
+fn the_settings_copy_does_not_overclaim_about_person_replacement() {
+    // A real Video Studio person-replacement payload, with every person-shaped value the builder
+    // can be handed.
+    let payload = json!({
+        "mode": "replace_person",
+        "model": "wan_2_2_vace_fun_14b",
+        "prompt": "the same shot, continuous motion",
+        "duration": 5.0,
+        "fps": 24,
+        "quality": "balanced",
+        "personTrackId": "track_9f3c1b2a",
+        "replacementMode": "full_person_keep_outfit",
+        "advanced": {
+            "motion": "static",
+            "replacementModeLabel": "Full Person, Keep Outfit",
+            "selectedPersonTrack": {
+                "name": "Sarah Whitfield",
+                "sourceDisplayName": "sarah-audition-take3.mov",
+                "frames": [{ "mask": "D:/Clients/Acme/masks/0001.png" }]
+            }
+        }
+    })
+    .as_object()
+    .expect("an object")
+    .clone();
+    let share = sceneworks_core::workflow_share::build_video_workflow_share_from(
+        &sceneworks_core::workflow_share::WorkflowAssetFacts {
+            mode: "replace_person".to_owned(),
+            model: "wan_2_2_vace_fun_14b".to_owned(),
+            prompt: "the same shot, continuous motion".to_owned(),
+            negative_prompt: String::new(),
+            seed: 7,
+            width: Some(832),
+            height: Some(480),
+        },
+        &payload,
+    );
+    let bytes = serde_json::to_string(&share).expect("the envelope serializes");
+
+    // Half one: the withholding is real. These are the things the bullet promises are absent.
+    for withheld in [
+        "track_9f3c1b2a",
+        "Sarah Whitfield",
+        "sarah-audition-take3.mov",
+        "0001.png",
+        "full_person_keep_outfit",
+        "Full Person, Keep Outfit",
+        "selectedPersonTrack",
+    ] {
+        assert!(
+            !bytes.contains(withheld),
+            "`{withheld}` reached a real person-replacement envelope: {bytes}"
+        );
+    }
+
+    // Half two: and the technique is NOT withheld. This is what makes the old leading clause false,
+    // asserted rather than argued — if this ever stops holding, the copy may go back to the
+    // stronger sentence, and this assert is what will say so.
+    assert_eq!(share.mode, "replace_person");
+    assert!(
+        bytes.contains("\"mode\":\"replace_person\""),
+        "the envelope must still carry the generation mode verbatim: {bytes}"
+    );
+    assert!(
+        bytes.contains("wan_2_2_vace_fun_14b"),
+        "and the model, which names a replacement engine: {bytes}"
+    );
+
+    // Half three: the sentence a user reads matches both halves.
+    let copy = settings_copy_constant("N_PERSON");
+    assert!(
+        !copy.contains("anything about a person replacement"),
+        "{SETTINGS_COPY_PATH}: `N_PERSON` claims the file says nothing about a replacement, and \
+         `mode` says `replace_person` in every one: {copy}"
+    );
+    for named in [
+        "who was replaced",
+        "the selected track",
+        "the person's name",
+        "the original file name",
+        "the mask images",
+    ] {
+        assert!(
+            copy.contains(named),
+            "{SETTINGS_COPY_PATH}: `N_PERSON` no longer names {named:?}, which the envelope really \
+             does withhold: {copy}"
+        );
+    }
+    assert!(
+        copy.contains("generation mode") && copy.contains("do travel"),
+        "{SETTINGS_COPY_PATH}: `N_PERSON` must say that the mode and the model travel, because \
+         they do — an absence list that omits this is the overclaim this test exists for: {copy}"
     );
 }
 

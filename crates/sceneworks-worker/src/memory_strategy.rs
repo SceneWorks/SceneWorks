@@ -145,7 +145,8 @@ fn verdict_priority(verdict: MemoryEvidenceVerdict) -> u8 {
         MemoryEvidenceVerdict::OutOfEnvelope => 3,
         MemoryEvidenceVerdict::Stale => 4,
         MemoryEvidenceVerdict::FingerprintMismatch => 5,
-        MemoryEvidenceVerdict::Invalid => 6,
+        MemoryEvidenceVerdict::CompositionMismatch => 6,
+        MemoryEvidenceVerdict::Invalid => 7,
     }
 }
 
@@ -340,12 +341,13 @@ pub fn select_strategy(
 mod tests {
     use super::*;
     use gen_core::{
-        MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity,
-        MemoryConformanceState, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryFormulaKind,
-        MemoryLifecycleCapabilities, MemoryMode, MemoryParameterRanges, MemoryParityContract,
-        MemoryParityResult, MemoryPhase, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
-        MemoryStrategyCapability, MemoryStrategyParameters, MemoryWindowMaterialization, Precision,
-        Quant,
+        LoadShape, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
+        MemoryCalibrationIdentity, MemoryConformanceState, MemoryEvidenceDimensions,
+        MemoryEvidenceKey, MemoryFormulaKind, MemoryLifecycleCapabilities, MemoryMode,
+        MemoryParameterRanges, MemoryParityContract, MemoryParityResult, MemoryPhase,
+        MemoryPrerequisiteScope, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
+        MemoryStrategyCapability, MemoryStrategyParameters, MemoryStrategyPrerequisite,
+        MemoryWindowMaterialization, Precision, Quant,
     };
     use std::sync::{Arc, Mutex};
 
@@ -409,6 +411,11 @@ mod tests {
             attention_chunking: true,
             transformer_window_materialization: true,
         };
+        // Rung 4's shared prerequisite is the independent load-time materialization shape, not
+        // staged residency. This all-rungs fixture must therefore model a generator loaded through
+        // the deferred path; provider-specific rung dependencies belong in
+        // `additional_prerequisites`.
+        contract.load_shape = LoadShape::DeferredMaterialization;
         contract.formula = MemoryFormulaKind::AssetBytesPlusHeadroom;
         contract.calibration = Some(MemoryCalibrationIdentity::new(FP));
         contract
@@ -448,6 +455,7 @@ mod tests {
                     frames: 1,
                 },
                 strategy,
+                engaged_composition: contract().engaged_composition(strategy),
                 parameters: params(strategy),
             },
             conformance: MemoryConformanceState::Verified,
@@ -462,6 +470,10 @@ mod tests {
             parity: MemoryParityContract::Exact,
             parity_result: MemoryParityResult::Passed,
         }
+    }
+
+    fn rekey_composition(evidence: &mut MemoryEvidence, contract: &MemoryProviderContract) {
+        evidence.key.engaged_composition = contract.engaged_composition(evidence.key.strategy);
     }
 
     fn request() -> RequestScope<'static> {
@@ -584,14 +596,6 @@ mod tests {
         let mut staged = evidence(MemoryStrategy::StagedResidency);
         staged.predicted_peak_bytes = (8.0 * BYTES_PER_GIB) as u64;
         staged.observed_peak_bytes = None;
-        let candidate = Candidate {
-            selection: MemorySelection {
-                strategy: MemoryStrategy::StagedResidency,
-                parameters: Default::default(),
-                tier: tier(),
-            },
-            evidence: &staged,
-        };
         let mut provider = contract();
         provider
             .strategies
@@ -600,6 +604,15 @@ mod tests {
             .unwrap()
             .support = MemoryStrategySupport::StructurallyNotApplicable {
             reason: "test".into(),
+        };
+        rekey_composition(&mut staged, &provider);
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &staged,
         };
         assert_eq!(
             select_strategy(
@@ -626,6 +639,8 @@ mod tests {
         staged.dimensions.static_implementation = MemoryEvidenceVerdict::Unverified;
         staged.dimensions.current_environment_verification = MemoryEvidenceVerdict::Stale;
         staged.parity_result = MemoryParityResult::NotRun;
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
         let candidate = Candidate {
             selection: MemorySelection {
                 strategy: MemoryStrategy::StagedResidency,
@@ -637,7 +652,7 @@ mod tests {
         assert_eq!(
             select_strategy(
                 request(),
-                &staged_only_provider(),
+                &provider,
                 Some(Budget {
                     available_gb: 10.0,
                     reclaimable_gb: 0.0,
@@ -661,6 +676,8 @@ mod tests {
         staged.dimensions.current_environment_verification =
             MemoryEvidenceVerdict::FingerprintMismatch;
         staged.parity_result = MemoryParityResult::NotRun;
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
         let candidate = Candidate {
             selection: MemorySelection {
                 strategy: MemoryStrategy::StagedResidency,
@@ -672,7 +689,7 @@ mod tests {
         assert_eq!(
             select_strategy(
                 request(),
-                &staged_only_provider(),
+                &provider,
                 Some(Budget {
                     available_gb: 10.0,
                     reclaimable_gb: 0.0,
@@ -683,6 +700,44 @@ mod tests {
             ),
             Selection::Unverified {
                 reason: MemoryEvidenceVerdict::FingerprintMismatch,
+            }
+        );
+    }
+
+    #[test]
+    fn non_default_engagement_edge_makes_formerly_green_evidence_ineligible() {
+        let captured = evidence(MemoryStrategy::BoundedDecode);
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::BoundedDecode,
+                parameters: params(MemoryStrategy::BoundedDecode),
+                tier: tier(),
+            },
+            evidence: &captured,
+        };
+        let mut changed_contract = contract();
+        changed_contract.additional_prerequisites.push((
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+
+        assert_eq!(
+            select_strategy(
+                request(),
+                &changed_contract,
+                Some(Budget {
+                    available_gb: 10.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 10.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[candidate],
+            ),
+            Selection::Unverified {
+                reason: MemoryEvidenceVerdict::CompositionMismatch,
             }
         );
     }
@@ -716,6 +771,23 @@ mod tests {
         stale_staged.inference_revision = "1111111111111111111111111111111111111111".into();
         let mut bounded_decode = evidence(MemoryStrategy::BoundedDecode);
         bounded_decode.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
+        let mut provider = contract();
+        for strategy in [
+            MemoryStrategy::Resident,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            provider
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == strategy)
+                .unwrap()
+                .support = MemoryStrategySupport::StructurallyNotApplicable {
+                reason: "selector unit-test envelope".into(),
+            };
+        }
+        rekey_composition(&mut stale_staged, &provider);
+        rekey_composition(&mut bounded_decode, &provider);
         let candidates = [
             Candidate {
                 selection: MemorySelection {
@@ -734,21 +806,6 @@ mod tests {
                 evidence: &bounded_decode,
             },
         ];
-        let mut provider = contract();
-        for strategy in [
-            MemoryStrategy::Resident,
-            MemoryStrategy::BoundedAttention,
-            MemoryStrategy::BoundedTransformerResidency,
-        ] {
-            provider
-                .strategies
-                .iter_mut()
-                .find(|capability| capability.strategy == strategy)
-                .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "selector unit-test envelope".into(),
-            };
-        }
         assert!(matches!(
             select_strategy(
                 request(),
@@ -865,6 +922,8 @@ mod tests {
     #[test]
     fn canonical_predicted_peak_bytes_are_the_only_admission_number() {
         let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
         staged.predicted_peak_bytes = 8 * 1024 * 1024 * 1024 + 1;
         let selection = MemorySelection {
             strategy: MemoryStrategy::StagedResidency,
@@ -882,7 +941,7 @@ mod tests {
             reserved_headroom_gb: 0.0,
         });
         assert!(matches!(
-            select_strategy(request(), &staged_only_provider(), budget, &[candidate]),
+            select_strategy(request(), &provider, budget, &[candidate]),
             Selection::Reject { .. }
         ));
 
@@ -890,7 +949,7 @@ mod tests {
         assert!(matches!(
             select_strategy(
                 request(),
-                &staged_only_provider(),
+                &provider,
                 budget,
                 &[Candidate {
                     selection,
@@ -907,7 +966,9 @@ mod tests {
 
     #[test]
     fn route_and_backend_identity_are_bound_across_request_contract_and_evidence() {
-        let staged = evidence(MemoryStrategy::StagedResidency);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
         let candidate = Candidate {
             selection: MemorySelection {
                 strategy: MemoryStrategy::StagedResidency,
@@ -925,7 +986,7 @@ mod tests {
         let mut wrong_route = request();
         wrong_route.resolved_route = "other";
         assert_eq!(
-            select_strategy(wrong_route, &staged_only_provider(), budget, &[candidate],),
+            select_strategy(wrong_route, &provider, budget, &[candidate],),
             Selection::Unverified {
                 reason: MemoryEvidenceVerdict::Invalid,
             }
@@ -936,7 +997,7 @@ mod tests {
         assert_eq!(
             select_strategy(
                 request(),
-                &staged_only_provider(),
+                &provider,
                 budget,
                 &[Candidate {
                     selection: candidate.selection,
@@ -956,18 +1017,6 @@ mod tests {
         high.key.parameters.decode_tile_edge = Some(768);
         let mut low = evidence(MemoryStrategy::BoundedDecode);
         low.predicted_peak_bytes = 7 * 1024 * 1024 * 1024;
-        let high_candidate = Candidate {
-            selection: MemorySelection {
-                strategy: MemoryStrategy::BoundedDecode,
-                parameters: params(MemoryStrategy::BoundedDecode),
-                tier: tier(),
-            },
-            evidence: &high,
-        };
-        let low_candidate = Candidate {
-            evidence: &low,
-            ..high_candidate
-        };
         let mut provider = contract();
         for strategy in [
             MemoryStrategy::Resident,
@@ -991,6 +1040,20 @@ mod tests {
             .unwrap()
             .parameters
             .decode_tile_edges = vec![512, 768];
+        rekey_composition(&mut high, &provider);
+        rekey_composition(&mut low, &provider);
+        let high_candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::BoundedDecode,
+                parameters: params(MemoryStrategy::BoundedDecode),
+                tier: tier(),
+            },
+            evidence: &high,
+        };
+        let low_candidate = Candidate {
+            evidence: &low,
+            ..high_candidate
+        };
         let mut high_selection = high_candidate.selection;
         high_selection.parameters.decode_tile_edge = Some(768);
         let high_candidate = Candidate {
@@ -1543,6 +1606,16 @@ mod tests {
     #[test]
     fn selector_and_validator_agree_rung_by_rung_when_rung_one_is_missing() {
         let mut provider = contract();
+        // Candle Krea retains this realization-specific dependency even though rung 1 is no longer
+        // the shared rung-4 prerequisite. Keep the selector/validator regression pinned to that
+        // additive graph edge instead of recreating the obsolete global rule.
+        provider.additional_prerequisites.push((
+            MemoryStrategy::BoundedTransformerResidency,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
         provider
             .strategies
             .iter_mut()
@@ -1611,7 +1684,8 @@ mod tests {
                 MemoryStrategy::Resident
                 | MemoryStrategy::BoundedDecode
                 | MemoryStrategy::BoundedAttention => true,
-                // Rung 1 is Missing; rung 4 declares an engagement prerequisite on it.
+                // Rung 1 is Missing; this provider declares an additive rung-4 engagement
+                // prerequisite on it.
                 MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency => {
                     false
                 }

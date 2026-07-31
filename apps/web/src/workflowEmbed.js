@@ -110,7 +110,14 @@ const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
-const L_INPUTS = "which kinds of input image the recipe needs and how many of each";
+const L_INPUTS =
+  "which kinds of input image or CLIP the recipe needs and how many of each, but never which ones";
+// The video lane (sc-15956). Its knobs are the same CLASS as the image ones — what to make,
+// never what this machine can afford — so several of them share the labels above.
+const L_CLIP = "the clip length, frame rate and quality preset a video run asked for";
+const L_MOTION = "the camera-motion preset, and which timeline action produced a clip";
+const L_VIDEO_ENGINE =
+  "which video pipeline, checkpoint variant, text encoder and fast-step recipe a video run used";
 const L_OMITTED = "a note naming any list that was too long to record";
 
 // Every field the envelope can carry, and what the copy says about it. Keys prefixed `advanced.`
@@ -171,6 +178,20 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["inputs[].kind", L_INPUTS],
   ["inputs[].count", L_INPUTS],
   ["inputs[].controlMode", L_INPUTS],
+  ["durationSeconds", L_CLIP],
+  ["fps", L_CLIP],
+  ["quality", L_CLIP],
+  ["advanced.motion", L_MOTION],
+  ["advanced.timelineAction", L_MOTION],
+  ["advanced.ltxPipeline", L_VIDEO_ENGINE],
+  ["advanced.distilledVariant", L_VIDEO_ENGINE],
+  ["advanced.textEncoderModel", L_VIDEO_ENGINE],
+  ["advanced.lightning", L_VIDEO_ENGINE],
+  ["advanced.videoCfgGuidanceScale", L_SETTINGS],
+  ["advanced.videoStgGuidanceScale", L_SETTINGS],
+  ["advanced.videoRescaleScale", L_SETTINGS],
+  ["advanced.videoConditioningStrength", L_SETTINGS],
+  ["advanced.bridgeRightVideoConditioningStrength", L_SETTINGS],
   ["omitted", L_OMITTED],
 ]);
 
@@ -184,6 +205,26 @@ const N_SEEDS = "the other seeds in a batch";
 const N_IMAGES = "the input images themselves, though what a pose selection traced from one does travel";
 const N_BUDGET = "this machine's quality tier, attention kernel or GPU";
 const N_LOCAL = "local library ids — a Key Point collection, a control image, a trained overlay, a recipe preset";
+// The only claim in this list made for PRIVACY rather than for portability: a shared video must not
+// disclose WHO was replaced, or which variant of a replacement ran (sc-15956).
+//
+// It carries its own caveat for the same reason `N_IMAGES` does, and the caveat is load-bearing.
+// This bullet used to read "anything about a person replacement", and that was FALSE in the leading
+// clause while true in every item it went on to enumerate: `mode` is in the "In the file" list
+// above, and a person-replacement run writes it verbatim as `replace_person`. `model` says the same
+// thing again — `wan_2_2_vace_fun_14b` is a replacement engine. So the TECHNIQUE travels, and a
+// bullet claiming otherwise claimed more privacy than the allow-list delivers, which is the one
+// direction this file's header forbids. What the allow-list actually withholds is the IDENTITY and
+// the VARIANT — the track, the name, the source filename, the masks, and the Face Only / Full
+// Person label — and that is what the sentence now says.
+//
+// The key-level pin in `workflow_share_doc.rs` cannot catch a copy error of this shape, because
+// `mode` is not a key in either list; `the_settings_copy_does_not_overclaim_about_person_
+// replacement` in that file asserts this text against a real `replace_person` envelope instead.
+const N_PERSON =
+  "who was replaced or which variant of a replacement ran — the selected track, the person's name, the original file name, the mask images, and the Face Only / Full Person label. The generation mode and the model do travel, so the file does say that a replacement is what ran";
+const N_TIMELINE = "your timeline's name and the local ids of the clips on it";
+const N_ADVICE = "the on-screen advice the studio shows about a model";
 
 // What the copy claims is absent. Every key here must be absent from BOTH doc tables above, which
 // is the direction that matters: a withheld key that quietly became shared would otherwise leave
@@ -207,12 +248,40 @@ export const WORKFLOW_FIELDS_NOT_IN_FILE = Object.freeze([
   ["advanced.controlWeights", N_LOCAL],
   ["advanced.recipePresetId", N_LOCAL],
   ["advanced.presetMissingLoras", N_LOCAL],
+  ["personTrackId", N_PERSON],
+  ["replacementMode", N_PERSON],
+  ["advanced.selectedPersonTrack", N_PERSON],
+  ["advanced.replacementModeLabel", N_PERSON],
+  ["advanced.timelineContext", N_TIMELINE],
+  ["advanced.precision", N_BUDGET],
+  ["advanced.quantization", N_BUDGET],
+  ["advanced.durationHint", N_ADVICE],
 ]);
 
 // The absences with no field name to pin, because the envelope has no slot for them at all — they
 // are left behind by the field list being closed rather than by a rule written against a key. Kept
 // beside the keyed list so the sentence reads as one thought.
 const UNKEYED_ABSENCES = Object.freeze([N_IDENTITY, N_TIME, N_IMAGES]);
+
+// The second block (sc-15957), and the reason it needs its own sentence rather than a row in the
+// list above.
+//
+// Both lists are pinned per KEY against the two doc tables, and every key in this block is already
+// in `WORKFLOW_FIELDS_IN_FILE` — it carries no field the envelope does not. So the key-level pin is
+// silent about it, exactly the way it was silent about the person-replacement bullet, and for the
+// same structural reason: the claim is about a FORMAT rather than about a field.
+//
+// And it is a claim a user acts on. Someone who reads "your recipe is in the file" pictures a block
+// only SceneWorks understands; what is actually written is a second copy of the prompt, seed and
+// settings in the format Civitai and most galleries read and DISPLAY. Those are different facts
+// about what happens when the image is posted somewhere, and the narrower one would be claiming more
+// privacy than the file delivers — the one direction this file's header forbids.
+//
+// Pinned as prose by `the_settings_copy_says_the_file_is_also_gallery_readable` in
+// `crates/sceneworks-core/tests/workflow_share_doc.rs`, which renders a real envelope's trailer and
+// checks this sentence against it.
+export const GALLERY_READABLE_COPY =
+  "A second copy of the prompt, negative prompt, seed, size, sampler, steps and guidance is written in the format image galleries read, so a site like Civitai displays them beside your image instead of showing it as plain pixels. It is the same information as the block above and nothing more; both are removed together.";
 
 // The bullets of the "Also in the file" list: every declared label, in order, repeats collapsed.
 //
@@ -263,7 +332,14 @@ function writeFlag(key, value) {
   return Boolean(value);
 }
 
-// Whether a generated PNG carries the recipe. Absent means ON, matching the worker's reader.
+// Whether a generated file carries the recipe. Absent means ON, matching the worker's reader.
+//
+// ONE switch for images and videos, not two (sc-15956). It is a privacy control over what leaves
+// in a file, and the reason someone turns it off does not stop applying at the container
+// boundary. A separate video switch would have re-enabled embedding for everyone who had already
+// opted out, the day the video lane shipped. The stored key keeps its `embedWorkflowInImages`
+// name for back-compatibility — renaming it would reset every existing opt-out to the default —
+// so it is the COPY that names both media, which is what the user actually reads.
 export function readEmbedWorkflowInImages() {
   return readFlag(EMBED_STORAGE_KEY, true);
 }

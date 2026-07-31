@@ -706,15 +706,33 @@ async fn append_seedvr2_frames(
 /// the whole-clip `encode_media` path (`libx264` / `yuv420p` / `-framerate fps` / `-r fps`), so the
 /// streamed output matches the old path frame-for-frame. Audio muxing stays the caller's source
 /// passthrough step (SeedVR2 emits no audio).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn encode_seedvr2_stream(
+///
+/// `workflow_metadata` is the sanitized envelope as an `ffmetadata` document, or `None` for
+/// "encode exactly as before" (sc-15956 review). It rides in HERE for the same reason
+/// `encode_media` takes it: the tag is part of the file from the moment it exists, with no window
+/// in which an upscaled clip is on disk without its recipe and no second pass over what can be
+/// gigabytes. This is the SECOND libx264 site in the worker; the review that found it noted the
+/// seam lint structurally cannot — it discovers by `WorkflowShare` mentions, and before this change
+/// nothing in this file mentioned one.
+///
+/// **Not cfg-gated**, unlike the SeedVR2 engine work above it. It is pure ffmpeg plumbing over
+/// ungated helpers, and gating it would put the one thing that has to be *proved* — that an
+/// upscaled clip really carries its recipe — behind a platform no CI lane runs `cargo test` on.
+/// The lane that calls it is still gated; the neither build allows the resulting dead code
+/// explicitly rather than by making it unreachable to a test.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+pub(super) async fn encode_seedvr2_stream(
     media_path: &Path,
     frames_dir: &Path,
     frame_count: usize,
     fps: u32,
+    workflow_metadata: Option<&Path>,
     ctx: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
     if frame_count == 0 {
@@ -725,28 +743,38 @@ async fn encode_seedvr2_stream(
     let fps = fps.max(1);
     let enc_tmp = media_path.with_extension("enc.mp4");
     let pattern = frames_dir.join("frame_%05d.png");
-    let result = run_ffmpeg(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-framerate".to_owned(),
-            fps.to_string(),
-            "-start_number".to_owned(),
-            "0".to_owned(),
-            "-i".to_owned(),
-            pattern.to_string_lossy().into_owned(),
-            "-c:v".to_owned(),
-            "libx264".to_owned(),
-            "-pix_fmt".to_owned(),
-            "yuv420p".to_owned(),
-            "-r".to_owned(),
-            fps.to_string(),
-            enc_tmp.to_string_lossy().into_owned(),
-        ],
-        ctx,
-    )
-    .await;
+    let mut args = vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-framerate".to_owned(),
+        fps.to_string(),
+        "-start_number".to_owned(),
+        "0".to_owned(),
+        "-i".to_owned(),
+        pattern.to_string_lossy().into_owned(),
+    ];
+    if let Some(metadata_path) = workflow_metadata {
+        // Input 1, exactly as `encode_media` does it: the frames are input 0 and stay mapped by
+        // ffmpeg's own stream selection, because an `ffmetadata` input carries no streams to
+        // compete with.
+        args.extend(sceneworks_core::workflow_mp4::ffmetadata_input_args(
+            metadata_path,
+        ));
+    }
+    args.extend([
+        "-c:v".to_owned(),
+        "libx264".to_owned(),
+        "-pix_fmt".to_owned(),
+        "yuv420p".to_owned(),
+        "-r".to_owned(),
+        fps.to_string(),
+    ]);
+    if workflow_metadata.is_some() {
+        args.extend(sceneworks_core::workflow_mp4::ffmetadata_map_args(1));
+    }
+    args.push(enc_tmp.to_string_lossy().into_owned());
+    let result = run_ffmpeg(args, ctx).await;
     match result {
         Ok(()) => {
             // Publish atomically, then best-effort faststart + poster (mirrors `encode_media`).
@@ -759,6 +787,128 @@ async fn encode_seedvr2_stream(
             let _ = tokio::fs::remove_file(&enc_tmp).await;
             let _ = tokio::fs::remove_file(media_path).await;
             Err(error)
+        }
+    }
+}
+
+/// Build the sanitized workflow envelope for the UPSCALED clip and write it beside the media as an
+/// `ffmetadata` document, returning whether the encoder should attach it (sc-15956 review).
+///
+/// **The video-upscale write seam** — the exact counterpart of
+/// `upscale_jobs::run_image_upscale_job`'s `standalone_upscale_workflow_share` call, and declared in
+/// `WORKFLOW_WRITE_SEAMS` for the same reason. sc-15956 shipped with the seam prose claiming
+/// `encode_media` was "the ONE funnel every generated clip is encoded through". It was not: this
+/// file has a libx264 site of its own, and it embedded nothing, while the image lane's analogue
+/// embedded. The two lanes now make the same call.
+///
+/// # A distinct job, so a distinct envelope
+///
+/// A video upscale is its own job with its own payload, and the envelope describes THIS pass — it
+/// inherits nothing from whatever generated the source clip, which is the rule sc-15948 set for the
+/// image upscale and the same rule `media_jobs`'s export refuses to break in the other direction.
+/// The source clip's own embedded recipe is not read, not copied and not merged: an upscale of
+/// somebody else's video must not acquire their prompt.
+///
+/// Three overlays onto the job payload, and nothing else:
+///
+/// * `upscale` — the APPLIED engine, factor and (for the one engine that has the knob) softness,
+///   validated above rather than the requested values. It is the only record of what this pass did;
+/// * `sourceClipAssetId` replaces `sourceAssetId`, so `describe_inputs` records the shape as
+///   [`INPUT_KIND_SOURCE_CLIP`](sceneworks_core::workflow_share::INPUT_KIND_SOURCE_CLIP) — "this
+///   recipe needs a CLIP to start from" — rather than as a still. The id itself never travels
+///   either way; only the kind and the count do;
+/// * the geometry is the SOURCE geometry, for the reason the image lane states: the envelope is a
+///   recipe, and "take this clip and upscale it 4x" replays to this file where the upscaled
+///   dimensions would replay to something four times larger again.
+///
+/// `displayName` is in the payload and is not an envelope field, so the source clip's file name —
+/// routinely a person's name — is left behind by the field list being closed. `prompt` is empty:
+/// an upscale has none.
+///
+/// Returns `false` for the same three reasons `video_jobs::video_workflow_metadata` does, logged at
+/// `debug` for the same reason, and a write failure degrades to no-workflow rather than failing a
+/// clip that upscaled fine.
+///
+/// **Not cfg-gated**, for the reason [`encode_seedvr2_stream`] is not: this is the function whose
+/// OUTPUT the acceptance criterion is about, and a test that cannot call it proves nothing.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn seedvr2_workflow_metadata(
+    settings: &Settings,
+    job: &JobSnapshot,
+    req: &sceneworks_core::contracts::VideoUpscaleRequest,
+    engine_id: &str,
+    factor: u32,
+    seed: i64,
+    src_w: u32,
+    src_h: u32,
+    metadata_path: &Path,
+) -> bool {
+    if job.payload.is_empty() {
+        tracing::debug!(
+            reason = "empty_job_payload",
+            "not embedding a workflow: the job carries no payload to describe"
+        );
+        return false;
+    }
+    if !sceneworks_core::app_paths::embed_workflow_in_images(&settings.config_dir) {
+        tracing::debug!(
+            reason = "preference_off",
+            config_dir = %settings.config_dir.display(),
+            "not embedding a workflow: `embedWorkflowInImages` did not resolve to true"
+        );
+        return false;
+    }
+    let mut upscale = json!({ "enabled": true, "engine": engine_id, "factor": factor });
+    if engine_id == "seedvr2" {
+        // SeedVR2 is a generative one-step upscaler, so its detail knob changes the output. The
+        // image lane records it for the same reason and for the same engine only.
+        upscale["softness"] = json!(req.softness);
+    }
+    let mut overlay = job.payload.clone();
+    overlay.insert("upscale".to_owned(), upscale);
+    if let Some(source) = overlay.remove("sourceAssetId") {
+        overlay.insert("sourceClipAssetId".to_owned(), source);
+    }
+    let facts = sceneworks_core::workflow_share::WorkflowAssetFacts {
+        mode: "video_upscale".to_owned(),
+        // The payload's own `model` (`seedvr2_3b`) wins inside the builder, so this is the
+        // fallback for a payload that somehow has none. Either way it agrees with the sidecar
+        // fact's `model`, which is the property that keeps a shared file and its record honest.
+        model: req.model.clone(),
+        prompt: String::new(),
+        negative_prompt: String::new(),
+        seed,
+        width: Some(src_w),
+        height: Some(src_h),
+    };
+    let Some(share) =
+        sceneworks_core::workflow_share::embeddable_video_workflow_share(&facts, &overlay)
+    else {
+        tracing::debug!(
+            reason = "over_recording_ceiling",
+            "not embedding a workflow: the envelope is larger than the recording ceiling"
+        );
+        return false;
+    };
+    match sceneworks_core::workflow_mp4::write_workflow_metadata_file(&share, metadata_path) {
+        Ok(()) => {
+            tracing::debug!("embedding the sanitized workflow in the upscaled clip");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                reason = "metadata_write_failed",
+                %error,
+                "not embedding a workflow: the metadata document could not be written"
+            );
+            false
         }
     }
 }
@@ -1214,15 +1364,42 @@ pub(crate) async fn run_video_upscale_job(
     .await?;
     // Encode the streamed PNG sequence to a (silent) mp4 + poster + faststart (byte-identical ffmpeg
     // args to the old whole-clip `encode_media` path), then drop the output scratch dir.
+    //
+    // sc-15956 review: the sanitized workflow for THIS pass, written beside the clip for the
+    // encoder to read. Written here rather than earlier so the only thing between the document
+    // appearing and being removed is the encode itself.
+    let workflow_metadata = media_path.with_extension("workflow.ffmeta");
+    let embedded = seedvr2_workflow_metadata(
+        settings,
+        job,
+        &req,
+        "seedvr2",
+        factor,
+        seed as i64,
+        src_w,
+        src_h,
+        &workflow_metadata,
+    );
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
-    let encode_result =
-        encode_seedvr2_stream(&media_path, &out_frames_dir, out_count, out_fps, Some(ctx)).await;
+    let encode_result = encode_seedvr2_stream(
+        &media_path,
+        &out_frames_dir,
+        out_count,
+        out_fps,
+        embedded.then_some(workflow_metadata.as_path()),
+        Some(ctx),
+    )
+    .await;
     // Free the multi-GB PNG scratch as soon as the encode returns (before the mux step), on BOTH the
     // ok and err arms; then disarm the guard so its Drop doesn't redundantly re-remove. `encode_result`
     // is propagated AFTER cleanup — an encode error still leaves no scratch behind (and if this early
     // removal is itself skipped by an unwind, the still-armed guard's Drop is the backstop).
     let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
     out_scratch.disarm();
+    // The metadata document goes on every path too, and before the `?`. It holds the whole envelope
+    // with the prompt in plaintext, and a failed or cancelled encode must not leave one sitting in
+    // the user's project beside no video.
+    let _ = tokio::fs::remove_file(&workflow_metadata).await;
     encode_result?;
     let mux_tmp = media_path.with_extension("audiomux.mp4");
     let mut output_guard = Seedvr2OutputGuard::new(&media_path, &mux_tmp);
@@ -1262,6 +1439,14 @@ pub(crate) async fn run_video_upscale_job(
                 "copy".to_owned(),
                 "-c:a".to_owned(),
                 "aac".to_owned(),
+                // Explicit, though it is also ffmpeg's default for a multi-input command: the
+                // container metadata — including the sc-15956 workflow tag the encode above wrote
+                // — comes from the UPSCALED VIDEO (input 0), never from the source clip (input 1).
+                // Input 1 is the user's own source file and may carry container tags of its own;
+                // inheriting those is the failure `media_jobs`'s export exists to refuse. Stated
+                // because "the default happens to be right" is not a property anyone maintains.
+                "-map_metadata".to_owned(),
+                "0".to_owned(),
                 "-movflags".to_owned(),
                 "+faststart".to_owned(),
                 "-shortest".to_owned(),

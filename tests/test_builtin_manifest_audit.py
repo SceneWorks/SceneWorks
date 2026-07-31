@@ -1324,7 +1324,7 @@ def test_z_image_turbo_manifest_has_mlx_block():
 
 
 def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
-    """sc-12126/sc-13108/sc-15206: pin resident peaks and every measured Turbo ladder tier."""
+    """sc-12126/sc-13108/sc-15206/sc-16211: pin peaks and composition-keyed Turbo evidence."""
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     measured_tiers = {

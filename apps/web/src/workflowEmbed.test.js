@@ -127,6 +127,20 @@ describe("the two lists a user acts on (sc-15953)", () => {
     expect(sentence).toContain("what a pose selection traced from one does travel");
   });
 
+  it("does not claim the file says nothing about a person replacement", () => {
+    // The finding: the bullet read "anything about a person replacement — …", and `mode` travels
+    // as `replace_person` in every one. The enumerated tail was true; the leading clause claimed
+    // more privacy than the allow-list delivers. What is withheld is the identity and the variant.
+    // Asserted against a real envelope's bytes by
+    // `the_settings_copy_does_not_overclaim_about_person_replacement` in
+    // `crates/sceneworks-core/tests/workflow_share_doc.rs`.
+    const sentence = notInFileItems().join(" | ");
+    expect(sentence).not.toContain("anything about a person replacement");
+    expect(sentence).toContain("who was replaced");
+    expect(sentence).toContain("the person's name");
+    expect(sentence).toContain("a replacement is what ran");
+  });
+
   it("renders every declared label into its sentence, with repeats collapsed", () => {
     const rendered = inFileItems().join(" | ");
     for (const [, label] of WORKFLOW_FIELDS_IN_FILE) {

@@ -33,6 +33,8 @@ pub mod training;
 pub mod training_store;
 pub mod video_request;
 pub mod voice_store;
+pub mod workflow_mp4;
+pub mod workflow_parameters;
 pub mod workflow_png;
 pub mod workflow_resolution;
 pub mod workflow_share;

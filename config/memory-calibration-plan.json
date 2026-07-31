@@ -21,6 +21,7 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
+      "engagedRungs": ["resident", "bounded_decode"],
       "calibrationFingerprint": "qwen-vae-identical-latent-v3",
       "fixture": "qwen-vae-encoded-latent-1024",
       "cases": [
@@ -47,6 +48,7 @@
         "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
+      "engagedRungs": ["resident", "bounded_decode"],
       "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
@@ -66,6 +68,7 @@
         "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
+      "engagedRungs": ["resident", "bounded_decode"],
       "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
@@ -85,6 +88,13 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "fixture": "krea-q4-1024-seed42",
       "cases": [
@@ -104,6 +114,13 @@
         "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v2",
       "fixture": "krea-q4-1024-seed42-v2-candidate",
       "cases": [

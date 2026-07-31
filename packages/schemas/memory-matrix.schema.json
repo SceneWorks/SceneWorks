@@ -11,6 +11,20 @@
       "additionalProperties": false,
       "properties": { "source": { "type": "string", "minLength": 1 } }
     },
+    "engagedRungs": {
+      "type": ["array", "null"],
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ]
+      }
+    },
     "declaredEvidence": {
       "type": "object",
       "required": ["source", "tier"],
@@ -43,6 +57,7 @@
         "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "type": "string", "minLength": 1 },
+        "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
         "observedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
         "requiredHostBytes": {
           "type": "integer",
@@ -72,6 +87,7 @@
         "tier": { "type": "string", "minLength": 1 },
         "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
         "predictedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
         "exactParameters": { "type": "object" }
       }
     },
@@ -187,6 +203,7 @@
           "rung",
           "geometryEnvelope",
           "strategyParameters",
+          "engagedRungs",
           "state",
           "evidenceRevision",
           "calibrationFingerprint",
@@ -214,6 +231,7 @@
           },
           "geometryEnvelope": { "type": "object" },
           "strategyParameters": { "type": "object" },
+          "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
           "state": {
             "enum": [
               "Verified",

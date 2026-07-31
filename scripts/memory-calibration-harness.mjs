@@ -12,15 +12,16 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
-export const HARNESS_VERSION = "sceneworks-memory-v3";
+export const HARNESS_VERSION = "sceneworks-memory-v4";
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
 ];
-const RUNGS = new Set([
+const RUNGS = [
   "resident", "staged_residency", "bounded_decode",
   "bounded_attention", "bounded_transformer_residency",
-]);
+];
+const RUNG_SET = new Set(RUNGS);
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -157,6 +158,23 @@ export function recordId(record) {
     calibrationFingerprint: record.calibrationFingerprint,
     fixture: record.fixture,
   }).slice(0, 20)}`;
+}
+
+function validateEngagedRungs(strategy, label) {
+  const engaged = strategy.engagedRungs;
+  if (!Array.isArray(engaged) || engaged.length === 0) {
+    fail(`${label}.engagedRungs must be a non-empty canonical rung set`);
+  }
+  if (engaged.some((rung) => !RUNG_SET.has(rung))) {
+    fail(`${label}.engagedRungs contains an invalid rung`);
+  }
+  const canonical = RUNGS.filter((rung) => engaged.includes(rung));
+  if (!equal(engaged, canonical)) {
+    fail(`${label}.engagedRungs must be unique and in canonical rung order`);
+  }
+  if (!engaged.includes("resident") || !engaged.includes(strategy.rung)) {
+    fail(`${label}.engagedRungs must include resident and the selected rung`);
+  }
 }
 
 function validateRepositories(record) {
@@ -347,7 +365,8 @@ export function validateRecord(record) {
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
   object(record.strategy, `${record.id}.strategy`);
-  if (!RUNGS.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
+  if (!RUNG_SET.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
+  validateEngagedRungs(record.strategy, `${record.id}.strategy`);
   object(record.strategy.parameters, `${record.id}.strategy.parameters`);
   text(record.fixture, `${record.id}.fixture`);
   text(record.calibrationFingerprint, `${record.id}.calibrationFingerprint`);
@@ -367,7 +386,7 @@ export function validateRecord(record) {
 export function validateBundle(bundle) {
   validateSchema(bundle);
   object(bundle, "bundle");
-  if (bundle.schemaVersion !== 2 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
+  if (bundle.schemaVersion !== 3 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
   const ids = new Set();
@@ -401,7 +420,7 @@ export function mergeBundles(left, right) {
     if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
     records.set(record.id, record);
   }
-  return { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+  return { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
 
 function completedLogicalIds(record) {
@@ -412,7 +431,11 @@ function completedLogicalIds(record) {
       evidenceScope: record.evidenceScope,
       backend: record.backend,
       target: record.target,
-      strategy: { rung: record.strategy.rung, parameters: item.parameters },
+      strategy: {
+        rung: record.strategy.rung,
+        engagedRungs: record.strategy.engagedRungs,
+        parameters: item.parameters,
+      },
       calibrationFingerprint: record.calibrationFingerprint,
       fixture: record.fixture,
       negative: item.result === "failed",
@@ -438,7 +461,11 @@ export function expandPlan(config, completed = []) {
         evidenceScope: provider.evidenceScope,
         backend: provider.backend,
         target: provider.target,
-        strategy: { rung: provider.rung, parameters: candidate.parameters },
+        strategy: {
+          rung: provider.rung,
+          engagedRungs: provider.engagedRungs,
+          parameters: candidate.parameters,
+        },
         calibrationFingerprint: provider.calibrationFingerprint,
         fixture: provider.fixture,
         negative: candidate.negative === true,
@@ -506,7 +533,7 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume ? validateBundle(resume) : { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [] };
+  const existing = resume ? validateBundle(resume) : { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [] };
   const selectedConfig = providerName
     ? { ...config, providers: config.providers.filter((provider) => provider.name === providerName) }
     : config;
@@ -541,6 +568,13 @@ export async function runProviderPlan({
     );
     await assertRepositoriesStable();
     const fragment = JSON.parse(providerOutput);
+    if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
+      fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
+    }
+    validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
+    if (!equal(fragment.strategy, planned.strategy)) {
+      fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
+    }
     const record = {
       ...fragment,
       logicalCaseId: planned.logicalCaseId,
@@ -549,7 +583,7 @@ export async function runProviderPlan({
       repositories,
       hardware: probe.hardware,
       target: planned.target,
-      strategy: planned.strategy,
+      strategy: fragment.strategy,
       calibrationFingerprint: planned.calibrationFingerprint,
       fixture: planned.fixture,
       harnessVersion: HARNESS_VERSION,
@@ -564,7 +598,7 @@ export async function runProviderPlan({
     validateRecord(record);
     incoming.push(record);
   }
-  return mergeBundles(existing, { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: incoming });
+  return mergeBundles(existing, { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: incoming });
 }
 
 async function readJson(file) {

@@ -9186,7 +9186,7 @@ fn svd_cuda_real_weights_encode_h264_and_preserve_provenance() {
         .enable_all()
         .build()
         .expect("tokio runtime")
-        .block_on(encode_media(&media_path, decoded, None))
+        .block_on(encode_media(&media_path, decoded, None, None))
         .expect("SceneWorks libx264 encode");
 
     let probe = std::process::Command::new("ffprobe")
@@ -10167,7 +10167,9 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     let dir = std::env::temp_dir().join(format!("sw_vid_{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let media_path = dir.join("clip.mp4");
-    encode_media(&media_path, decoded, None).await.unwrap();
+    encode_media(&media_path, decoded, None, None)
+        .await
+        .unwrap();
     assert!(media_path.exists(), "mp4 must be written");
     assert!(media_path.metadata().unwrap().len() > 0);
     assert!(
@@ -10197,7 +10199,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         adapter_apply_reports: Vec::new(),
     };
 
-    let error = encode_media(&media_path, decoded, None)
+    let error = encode_media(&media_path, decoded, None, None)
         .await
         .expect_err("malformed RGB buffer must be rejected before FFmpeg");
 
@@ -10653,4 +10655,723 @@ mod candle_video_label_tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&flat).ok();
     }
+}
+
+// ---------------------------------------------------------------------------
+// The embedded workflow envelope (sc-15956)
+// ---------------------------------------------------------------------------
+
+/// Build the envelope a clip of `payload` would carry, and write it where the encoder reads it.
+fn workflow_document(directory: &Path, payload: serde_json::Map<String, Value>) -> PathBuf {
+    use sceneworks_core::workflow_share::{embeddable_video_workflow_share, WorkflowAssetFacts};
+    let facts = WorkflowAssetFacts {
+        mode: "text_to_video".to_owned(),
+        model: "ltx_2_3".to_owned(),
+        prompt: "a fox crossing a frozen river".to_owned(),
+        negative_prompt: String::new(),
+        seed: 4242,
+        width: Some(128),
+        height: Some(128),
+    };
+    let share = embeddable_video_workflow_share(&facts, &payload).expect("under the ceiling");
+    let path = directory.join("workflow.ffmeta");
+    sceneworks_core::workflow_mp4::write_workflow_metadata_file(&share, &path).expect("written");
+    path
+}
+
+fn video_workflow_payload() -> serde_json::Map<String, Value> {
+    json!({
+        "mode": "text_to_video",
+        "model": "ltx_2_3",
+        "prompt": "a fox crossing a frozen river",
+        "duration": 1.0,
+        "fps": 9,
+        "quality": "balanced",
+        "width": 128,
+        "height": 128,
+        "personTrackId": "track_9f3c1b2a",
+        "replacementMode": "full_person_replace_outfit",
+        "advanced": {
+            "motion": "slow push-in",
+            "precision": "fp8",
+            "replacementModeLabel": "Full Person, Replace Outfit",
+            "selectedPersonTrack": { "name": "Sarah Whitfield" }
+        }
+    })
+    .as_object()
+    .expect("an object")
+    .clone()
+}
+
+/// **The end-to-end proof.** The envelope written before the encode is readable out of the
+/// finished mp4, after every step the encoder runs.
+///
+/// That chain is three ffmpeg invocations, not one — the libx264 encode, the AAC audio mux, and the
+/// `+faststart` remux — and the tag has to survive all three. The audio arm matters most: it is the
+/// only step with two inputs, and ffmpeg's multi-input metadata default is the exact behaviour that
+/// bites the timeline export (see `media_jobs::export_metadata_tests`).
+///
+/// Skips when no ffmpeg is reachable, like every other real-binary test in this file.
+#[tokio::test]
+async fn the_envelope_survives_the_whole_encode_chain() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping the_envelope_survives_the_whole_encode_chain: ffmpeg not found");
+        return;
+    }
+    // `ltx_2_3` makes the stub emit an audio track, so the two-input mux step runs.
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let decoded = generate_stub_video(&request, 11);
+    assert!(decoded.audio.is_some(), "the audio arm must actually run");
+
+    let dir = std::env::temp_dir().join(format!("sw_wf_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("clip.mp4");
+    let document = workflow_document(&dir, video_workflow_payload());
+
+    encode_media(&media_path, decoded, Some(document.as_path()), None)
+        .await
+        .unwrap();
+
+    let read = sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path)
+        .expect("the clip is readable")
+        .expect("the clip carries its recipe through encode + audio mux + faststart");
+    assert_eq!(
+        read.kind,
+        sceneworks_core::workflow_share::WORKFLOW_KIND_VIDEO
+    );
+    assert_eq!(read.prompt, "a fox crossing a frozen river");
+    assert_eq!(read.duration_seconds, Some(1.0));
+    assert_eq!(read.fps, Some(9));
+    assert_eq!(read.advanced.get("motion"), Some(&json!("slow push-in")));
+
+    // The clip still plays: the tag did not displace the moov or break the framing.
+    assert!(media_path.metadata().unwrap().len() > 0);
+    assert!(media_path.with_extension("poster.jpg").exists());
+
+    // And the withholding holds all the way to the bytes on disk — the acceptance criterion, read
+    // out of a real file rather than off a struct.
+    let bytes = std::fs::read(&media_path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    for secret in [
+        "track_9f3c1b2a",
+        "Sarah Whitfield",
+        "full_person_replace_outfit",
+        "Full Person, Replace Outfit",
+        "selectedPersonTrack",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "`{secret}` reached the mp4 on disk — a shared video must not disclose that it was \
+             made by replacing a specific person"
+        );
+    }
+    // A hardware-budget knob is dropped too, so this is the allow-list running and not a blanket.
+    assert!(
+        !text.contains("fp8"),
+        "`precision` is a hardware budget and must not travel"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `None` still writes exactly the file it wrote before — the setting-off / no-payload path.
+#[tokio::test]
+async fn no_document_means_no_tag_and_an_otherwise_identical_clip() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping no_document_means_no_tag_and_an_otherwise_identical_clip: no ffmpeg");
+        return;
+    }
+    let request = request(json!({
+        "projectId": "p", "model": "wan2_2_t2v_14b", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let dir = std::env::temp_dir().join(format!("sw_wf_off_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("clip.mp4");
+    encode_media(&media_path, generate_stub_video(&request, 11), None, None)
+        .await
+        .unwrap();
+    assert!(media_path.exists());
+    assert_eq!(
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path).expect("readable"),
+        None,
+        "with the setting off there must be no recipe in the file at all"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The survival measurement, as a test.** The tag outlives a representative re-encode, and dies
+/// on a deliberate strip.
+///
+/// The negative case is asserted alongside the positive one on purpose: "it survives everything"
+/// would be a false claim about this container, and the story asks for the honest matrix. What is
+/// proved here is the boundary — a transcode that carries metadata forward keeps the recipe, and a
+/// pipeline that strips metadata removes it, which is what a platform re-encode does.
+#[tokio::test]
+async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip: no ffmpeg"
+        );
+        return;
+    }
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let dir = std::env::temp_dir().join(format!("sw_wf_re_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("clip.mp4");
+    let document = workflow_document(&dir, video_workflow_payload());
+    encode_media(
+        &source,
+        generate_stub_video(&request, 11),
+        Some(document.as_path()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let read_back = |path: &Path| {
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(path).expect("readable")
+    };
+    assert!(read_back(&source).is_some(), "the source must carry it");
+
+    // 1. A `-c copy` remux — a container rewrite, what a "fix this file" tool does.
+    let remux = dir.join("remux.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            remux.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_back(&remux).is_some(),
+        "a `-c copy` remux must keep it"
+    );
+
+    // 2. A scale + bitrate change — the shape of a delivery transcode.
+    let scaled = dir.join("scaled.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-vf".to_owned(),
+            "scale=64:64".to_owned(),
+            "-b:v".to_owned(),
+            "200k".to_owned(),
+            scaled.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let survived = read_back(&scaled).expect("a scale + bitrate re-encode must keep it");
+    assert_eq!(
+        survived.prompt, "a fox crossing a frozen river",
+        "and keep it INTACT, not truncated"
+    );
+
+    // 3. THE NEGATIVE CASE: a pipeline that strips metadata. This is what a platform re-encode
+    //    does, and it is why the sharing premise for video is weaker than for a PNG chunk.
+    let stripped = dir.join("stripped.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-map_metadata".to_owned(),
+            "-1".to_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            stripped.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_back(&stripped),
+        None,
+        "a deliberate strip removes it — stated as a fact of this container rather than hidden"
+    );
+
+    // 4. THE SECOND NEGATIVE (sc-15956 review): HLS segmentation, at `-c copy` throughout. Nothing
+    //    is re-encoded and the streams are untouched, so this is the case a reader would predict
+    //    survives — and it does not, because MPEG-TS has no `ilst` to carry the tag through and the
+    //    mp4 is rebuilt from segments that never held it. Named rather than inferred, because
+    //    "I only re-packaged it" is exactly the reasoning that gets this wrong.
+    let segments = dir.join("hls");
+    std::fs::create_dir_all(&segments).unwrap();
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            "-f".to_owned(),
+            "hls".to_owned(),
+            "-hls_time".to_owned(),
+            "1".to_owned(),
+            "-hls_list_size".to_owned(),
+            "0".to_owned(),
+            "-hls_segment_filename".to_owned(),
+            segments.join("seg%03d.ts").to_string_lossy().into_owned(),
+            segments.join("out.m3u8").to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let reassembled = dir.join("reassembled.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            segments.join("out.m3u8").to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            reassembled.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_back(&reassembled),
+        None,
+        "an HLS round trip loses the tag even at `-c copy` — MPEG-TS has no `ilst`, so the mp4 is          rebuilt from segments that never carried it. Recorded as a measured limit of this          container, not hidden behind \"it survives a remux\"."
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The SECOND libx264 site: the video upscale (sc-15956 review)
+// ---------------------------------------------------------------------------
+
+/// Worker settings pointed at a scratch config dir, so the embed toggle is this test's rather than
+/// the install's. The preference defaults to ON when the file is absent, which is what an empty
+/// scratch dir gives.
+fn upscale_settings(config_dir: &Path) -> Settings {
+    let mut settings = Settings::from_env();
+    settings.config_dir = config_dir.to_path_buf();
+    settings
+}
+
+/// A `video_upscale` job carrying the payload `VideoUpscalePanel.onUpscale` really posts.
+fn upscale_job_snapshot(payload: Value) -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-upscale-1",
+        "type": "video_upscale",
+        "status": "running",
+        "projectId": "p",
+        "projectName": null,
+        "payload": payload,
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-07-16T00:00:00Z",
+        "updatedAt": "2026-07-16T00:00:00Z",
+        "startedAt": null,
+        "finishedAt": null
+    }))
+    .expect("the upscale job snapshot parses")
+}
+
+/// The payload the panel posts, with the source clip's display name in it — which is routinely
+/// somebody's original filename, and must not travel.
+fn upscale_payload() -> Value {
+    json!({
+        "projectId": "p",
+        "sourceAssetId": "asset_9f3c1b2a",
+        "factor": 4,
+        "engine": "seedvr2",
+        "model": "seedvr2_3b",
+        "softness": 0.25,
+        "displayName": "sarah-audition-take3 (4x upscaled)"
+    })
+}
+
+/// **The upscale lane's end-to-end proof.** An upscaled clip carries a recipe of its OWN.
+///
+/// sc-15956 shipped with `encode_media` described as "the ONE funnel every generated clip is
+/// encoded through". There are two libx264 sites in this crate, and this was the other one: a
+/// `video_upscale` wrote a clip with no envelope at all while the image lane's exact analogue
+/// (`upscale_jobs::run_image_upscale_job`) embedded one. The seam lint could not see it, because it
+/// discovers by `WorkflowShare` mentions and this file had none.
+///
+/// What is asserted is the whole chain the job runs: build the envelope from the real payload,
+/// write the `ffmetadata` document, encode a PNG sequence through `encode_seedvr2_stream`, and read
+/// the recipe back out of the finished mp4.
+#[tokio::test]
+async fn the_upscaled_clip_carries_its_own_recipe() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping the_upscaled_clip_carries_its_own_recipe: ffmpeg not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sw_up_wf_{}", Uuid::new_v4().simple()));
+    let frames = dir.join("frames");
+    std::fs::create_dir_all(&frames).unwrap();
+    for index in 0..3_u32 {
+        image::RgbImage::from_pixel(64, 64, image::Rgb([16, 32, 48]))
+            .save(frames.join(format!("frame_{index:05}.png")))
+            .unwrap();
+    }
+
+    let job = upscale_job_snapshot(upscale_payload());
+    let req: sceneworks_core::contracts::VideoUpscaleRequest =
+        serde_json::from_value(upscale_payload()).unwrap();
+    let settings = upscale_settings(&dir.join("config"));
+    let media_path = dir.join("upscaled.mp4");
+    let document = media_path.with_extension("workflow.ffmeta");
+
+    let embedded = seedvr2_workflow_metadata(
+        &settings, &job, &req, "seedvr2", 4, 8080, 640, 360, &document,
+    );
+    assert!(
+        embedded,
+        "with the preference at its default the upscale lane must embed"
+    );
+    assert!(document.exists(), "the ffmetadata document must be written");
+
+    encode_seedvr2_stream(&media_path, &frames, 3, 8, Some(document.as_path()), None)
+        .await
+        .unwrap();
+
+    let read = sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path)
+        .expect("the upscaled clip is readable")
+        .expect("...and carries its recipe");
+    assert_eq!(
+        read.kind,
+        sceneworks_core::workflow_share::WORKFLOW_KIND_VIDEO
+    );
+    // THIS pass, not the source clip's: an upscale has no prompt, and its mode and model name the
+    // upscaler rather than whatever generated the input.
+    assert_eq!(read.mode, "video_upscale");
+    assert_eq!(read.model, "seedvr2_3b");
+    assert_eq!(read.prompt, "");
+    let upscale = read.upscale.expect("the applied pass is recorded");
+    assert!(upscale.enabled);
+    assert_eq!(upscale.factor, Some(4));
+    assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
+    assert_eq!(upscale.softness, Some(0.25));
+    // The geometry is the SOURCE geometry — the recipe is "take this clip and upscale it 4x".
+    assert_eq!((read.width, read.height), (Some(640), Some(360)));
+    // And the input travels by SHAPE: a clip to start from, never the asset id.
+    assert_eq!(read.inputs.len(), 1);
+    assert_eq!(
+        read.inputs[0].kind,
+        sceneworks_core::workflow_share::INPUT_KIND_SOURCE_CLIP
+    );
+    assert_eq!(read.inputs[0].count, 1);
+
+    // The two things in that payload that must never reach a shared file.
+    let bytes = std::fs::read(&media_path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    for secret in ["asset_9f3c1b2a", "sarah-audition-take3"] {
+        assert!(
+            !text.contains(secret),
+            "`{secret}` reached the upscaled mp4 on disk"
+        );
+    }
+
+    assert!(media_path.with_extension("poster.jpg").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same lane with the preference OFF writes exactly the clip it wrote before.
+#[tokio::test]
+async fn an_upscale_with_the_setting_off_carries_nothing() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping an_upscale_with_the_setting_off_carries_nothing: ffmpeg not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sw_up_off_{}", Uuid::new_v4().simple()));
+    let frames = dir.join("frames");
+    let config = dir.join("config");
+    std::fs::create_dir_all(&frames).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        sceneworks_core::app_paths::ui_preferences_file(&config),
+        r#"{"embedWorkflowInImages":false}"#,
+    )
+    .unwrap();
+    for index in 0..2_u32 {
+        image::RgbImage::from_pixel(64, 64, image::Rgb([8, 8, 8]))
+            .save(frames.join(format!("frame_{index:05}.png")))
+            .unwrap();
+    }
+
+    let job = upscale_job_snapshot(upscale_payload());
+    let req: sceneworks_core::contracts::VideoUpscaleRequest =
+        serde_json::from_value(upscale_payload()).unwrap();
+    let settings = upscale_settings(&config);
+    let media_path = dir.join("upscaled.mp4");
+    let document = media_path.with_extension("workflow.ffmeta");
+
+    assert!(
+        !seedvr2_workflow_metadata(&settings, &job, &req, "seedvr2", 4, 1, 640, 360, &document),
+        "the video upscale honours the SAME switch as every other lane"
+    );
+    assert!(
+        !document.exists(),
+        "and writes no metadata document when it is off"
+    );
+
+    encode_seedvr2_stream(&media_path, &frames, 2, 8, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path).expect("readable"),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `.workflow.ffmeta` scratch is removed BEFORE the encode's error propagates, on both lanes.
+///
+/// A structural pin rather than a behavioural one, for the reason `media_jobs`'s
+/// "`mux_segments` must pass `-map_metadata` explicitly" is: the failure is an ORDERING inside an
+/// async job function that needs a live `ApiClient` to reach, and the ordering is exactly what a
+/// future edit would undo. `encode_media(...).await?` used to sit in front of the `remove_file`, so
+/// a failed or cancelled encode left the full envelope — prompt in plaintext — in the user's
+/// project permanently, beside no video.
+#[test]
+fn the_workflow_metadata_scratch_does_not_outlive_a_failed_encode() {
+    for (name, source, call) in [
+        (
+            "video_jobs/mod.rs",
+            include_str!("mod.rs"),
+            "let encoded = encode_media(",
+        ),
+        (
+            "video_jobs/seedvr2.rs",
+            include_str!("seedvr2.rs"),
+            "let encode_result = encode_seedvr2_stream(",
+        ),
+    ] {
+        let start = source
+            .find(call)
+            .unwrap_or_else(|| panic!("{name} no longer binds its encode result: {call}"));
+        let rest = &source[start..];
+        let removal = rest
+            .find("remove_file(&workflow_metadata)")
+            .unwrap_or_else(|| panic!("{name} never removes the workflow metadata scratch"));
+        let propagation = rest
+            .find("?;")
+            .unwrap_or_else(|| panic!("{name} never propagates the encode result"));
+        assert!(
+            removal < propagation,
+            "{name} propagates the encode error before removing `*.workflow.ffmeta`. \
+             That leaves the whole envelope — the prompt in plaintext — in the user's project \
+             after a failed or cancelled encode. Bind the result, remove the scratch, THEN `?`."
+        );
+    }
+}
+
+/// Every person-shaped string a hostile payload can carry, checked against the PUBLISHED bytes of
+/// both encode lanes and of the poster frame beside them (sc-15956 review).
+///
+/// The story's acceptance criterion is about a file, so this reads files. The existing
+/// `the_envelope_survives_the_whole_encode_chain` greps five strings out of one clip; this is the
+/// widened form the review asked to see re-run after the second write seam landed: every id, name,
+/// filename, path, label and KEY NAME the payload carries, against the generated clip, the upscaled
+/// clip, and both posters — a poster is a separate file written from the same source and is just as
+/// shareable.
+///
+/// Key names are in the list on purpose. A key that survived would mean the allow-list emitted an
+/// empty-valued entry rather than dropping the field, which is the shape a sanitizer regression
+/// takes before it starts leaking values.
+const PERSON_TRACK_STRINGS: &[&str] = &[
+    "track_9f3c1b2a",
+    "Sarah Whitfield",
+    "Whitfield",
+    "sarah-audition-take3.mov",
+    "sarah-audition-take3",
+    "asset_7c1d3e",
+    "D:/Clients/Acme",
+    "Clients/Acme",
+    "/Users/michael",
+    "0001.png",
+    "0002.png",
+    "selectedPersonTrack",
+    "sourceDisplayName",
+    "replacementModeLabel",
+    "Full Person, Keep Outfit",
+    "full_person_keep_outfit",
+    "personTrackId",
+    "replacementMode",
+    "timelineContext",
+    "Acme Q4 Cut",
+    "tl_44ff21",
+    "quantTier",
+];
+
+/// The widest person-replacement payload the Video Studio can post.
+fn hostile_person_payload() -> serde_json::Map<String, Value> {
+    json!({
+        "mode": "replace_person",
+        "model": "wan_2_2_vace_fun_14b",
+        "prompt": "the same shot, continuous motion",
+        "duration": 1.0,
+        "fps": 9,
+        "quality": "balanced",
+        "width": 128,
+        "height": 128,
+        "personTrackId": "track_9f3c1b2a",
+        "replacementMode": "full_person_keep_outfit",
+        "advanced": {
+            "motion": "static",
+            "quantTier": "q8",
+            "replacementModeLabel": "Full Person, Keep Outfit",
+            "selectedPersonTrack": {
+                "id": "track_9f3c1b2a",
+                "name": "Sarah Whitfield",
+                "sourceDisplayName": "sarah-audition-take3.mov",
+                "sourceAssetId": "asset_7c1d3e",
+                "frames": [
+                    { "mask": "D:/Clients/Acme/masks/0001.png" },
+                    { "mask": "/Users/michael/masks/0002.png" }
+                ]
+            },
+            "timelineContext": {
+                "timelineId": "tl_44ff21",
+                "timelineName": "Acme Q4 Cut",
+                "sourceAssetId": "asset_7c1d3e"
+            }
+        }
+    })
+    .as_object()
+    .expect("an object")
+    .clone()
+}
+
+fn assert_no_person_track_strings(path: &Path, what: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{what} reads: {error}"));
+    let text = String::from_utf8_lossy(&bytes);
+    for secret in PERSON_TRACK_STRINGS {
+        assert!(
+            !text.contains(secret),
+            "`{secret}` reached {what} on disk. A shared video must not disclose WHO was replaced, \
+             which track, or which variant of a replacement ran."
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping no_person_track_string_reaches_a_published_clip_or_its_poster: no ffmpeg"
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("sw_regrep_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Lane one: a GENERATED clip, through `encode_media` and its three ffmpeg steps.
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "the same shot, continuous motion",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let generated = dir.join("generated.mp4");
+    let document = workflow_document(&dir, hostile_person_payload());
+    encode_media(
+        &generated,
+        generate_stub_video(&request, 11),
+        Some(document.as_path()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(&generated)
+            .expect("readable")
+            .is_some(),
+        "the clip must be carrying an envelope, or this test proves nothing"
+    );
+    assert_no_person_track_strings(&generated, "the generated clip");
+    assert_no_person_track_strings(&generated.with_extension("poster.jpg"), "its poster");
+
+    // Lane two: an UPSCALED clip, through `encode_seedvr2_stream`. Its payload has no person track
+    // in it at all — the point is that the SOURCE clip's recipe is never inherited, so nothing the
+    // source disclosed can arrive by that route either.
+    let frames = dir.join("frames");
+    std::fs::create_dir_all(&frames).unwrap();
+    for index in 0..2_u32 {
+        image::RgbImage::from_pixel(64, 64, image::Rgb([9, 9, 9]))
+            .save(frames.join(format!("frame_{index:05}.png")))
+            .unwrap();
+    }
+    let job = upscale_job_snapshot(upscale_payload());
+    let req: sceneworks_core::contracts::VideoUpscaleRequest =
+        serde_json::from_value(upscale_payload()).unwrap();
+    let settings = upscale_settings(&dir.join("config"));
+    let upscaled = dir.join("upscaled.mp4");
+    let upscale_document = upscaled.with_extension("workflow.ffmeta");
+    assert!(seedvr2_workflow_metadata(
+        &settings,
+        &job,
+        &req,
+        "seedvr2",
+        4,
+        3,
+        640,
+        360,
+        &upscale_document
+    ));
+    encode_seedvr2_stream(
+        &upscaled,
+        &frames,
+        2,
+        8,
+        Some(upscale_document.as_path()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(&upscaled)
+            .expect("readable")
+            .is_some(),
+        "the upscaled clip must be carrying an envelope too"
+    );
+    assert_no_person_track_strings(&upscaled, "the upscaled clip");
+    assert_no_person_track_strings(&upscaled.with_extension("poster.jpg"), "its poster");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

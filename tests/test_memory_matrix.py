@@ -123,6 +123,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
                     "geometry": {"width": 1024, "height": 1024, "batch": 1, "frames": 1},
                 },
                 "rung": "bounded_decode",
+                "engagedRungs": ["resident", "bounded_decode"],
                 "calibrationFingerprint": "fixture-formula-v2",
                 "fixture": "fixture-seed42",
                 "cases": [

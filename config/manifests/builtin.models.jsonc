@@ -4391,7 +4391,7 @@
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
+            "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",
@@ -4409,7 +4409,7 @@
             "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
             "sceneWorksRevision": "sc-16099-contract-v1",
             "matrixSourceRevision": "sc-16099-contract-v1",
-            "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
+            "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
             "provider": "krea_2_turbo_control",
             "tier": "q4",
             "mode": "text_to_image",
@@ -4511,6 +4511,12 @@
         "turboFit": {
           // sc-15449 shared memory-strategy selector provenance. The worker accepts these measured curves
           // only while both source revisions and the provider request ABI fingerprint match.
+          //
+          // sc-16211 replaces sc-15994's catalog-wide fingerprint tombstone with an exact
+          // measured-composition identity per rung. Three-stage and streamed-block captures remain
+          // eligible because their measured compositions still match the Krea provider contract;
+          // tiled-VAE and chunked-attention captures fail with CompositionMismatch until SC-15913
+          // recaptures those six q4/q8/bf16 rows without staged residency.
           "calibrationAbi": 1,
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
           "sceneWorksRevision": "sc-15449-contract-v1",
@@ -4571,6 +4577,12 @@
                 "chunkedAttention": 11.076,
                 "streamedBlocks": 4.736
               },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+              },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
@@ -4617,6 +4629,12 @@
                 "tiledVae": 15.405,
                 "chunkedAttention": 11.345,
                 "streamedBlocks": 5.676
+              },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
               },
               "parity": {
                 "contract": "golden",
@@ -4665,6 +4683,12 @@
                 "chunkedAttention": 18.156,
                 "streamedBlocks": 6.847
               },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+              },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
@@ -4712,6 +4736,12 @@
                 "chunkedAttention": 27.652,
                 "streamedBlocks": 8.526
               },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+              },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
@@ -4721,8 +4751,18 @@
               }
             }
           ],
-          // Exact parameter cells exercised by the curves below. Later rungs are cumulative because
-          // Krea keeps each cheaper bound active while adding the next constraint.
+          "engagedCompositions": {
+            "resident": ["resident"],
+            "threeStage": ["resident", "staged_residency"],
+            "tiledVae": ["resident", "bounded_decode"],
+            "chunkedAttention": ["resident", "bounded_decode", "bounded_attention"],
+            "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+          },
+          // Exact parameter cells exercised by the historical curves below. Capture was cumulative:
+          // Krea kept each cheaper bound active while adding the next constraint, including staged
+          // residency for tiledVae and chunkedAttention. That is no longer the composition selected
+          // by the shared contract, so the exact measured-composition check rejects those rows. They
+          // remain only as provenance until sc-15913 replaces them with non-staged captures.
           "strategyParameters": {
             "resident": {},
             "threeStage": {},

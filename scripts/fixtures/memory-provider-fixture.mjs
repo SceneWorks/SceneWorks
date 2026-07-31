@@ -24,6 +24,7 @@ const phase = (value) => ({
 });
 process.stdout.write(JSON.stringify({
   status: request.repositories.sceneWorks.dirty || request.repositories.inference.dirty ? "gated" : "complete",
+  strategy: request.planned.strategy,
   artifact: { repository: "SceneWorks/fixture", resolvedRevision: "cccccccccccccccccccccccccccccccccccccccc", variant: "q4" },
   sweep: {
     axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],

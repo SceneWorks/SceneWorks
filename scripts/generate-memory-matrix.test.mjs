@@ -99,6 +99,57 @@ test("a calibration-relevant manifest value rotates affected fallback fingerprin
   );
 });
 
+test("Krea cumulative bounded-decode and bounded-attention curves preserve their measured compositions", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = JSON.parse(stripJsoncComments(await readFile(manifestUrl, "utf8")));
+  const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
+  const expected = "krea-turbo-cuda-phase-curves-v1";
+  assert.equal(krea.candle.turboFit.calibrationFingerprint, expected);
+
+  for (const tier of ["q4", "q8", "bf16"]) {
+    for (const rung of ["tiledVae", "chunkedAttention"]) {
+      assert.deepEqual(
+        Object.keys(krea.candle.turboFit.phaseCurvesByTier[tier][rung]).sort(),
+        ["decode", "denoise", "text"],
+        `${tier}.${rung} remains only as historical curve provenance`,
+      );
+    }
+  }
+
+  const matrix = await buildMatrix();
+  const affected = matrix.cells.filter(
+    (cell) =>
+      cell.modelId === "krea_2_turbo" &&
+      cell.backend === "candle" &&
+      cell.mode === "text_to_image" &&
+      cell.overlay === "none" &&
+      ["q4", "q8", "bf16"].includes(cell.tier) &&
+      ["bounded_decode", "bounded_attention"].includes(cell.rung),
+  );
+  assert.equal(affected.length, 6);
+  assert.ok(
+    affected.every(
+      (cell) =>
+        cell.calibrationFingerprint === expected &&
+        cell.state === "Implemented/unverified" &&
+        !cell.engagedRungs.includes("staged_residency") &&
+        cell.engagedRungs.includes(cell.rung) &&
+        cell.evidence.currentEnvironmentVerification.length === 0 &&
+        cell.evidence.historicalVerification.every(
+          (verification) =>
+            verification.engagedRungs.includes("staged_residency") &&
+            verification.engagedRungs.includes(cell.rung),
+        ) &&
+        cell.evidence.strategyParameterVerification.every(
+          (verification) =>
+            verification.engagedRungs.includes("staged_residency") &&
+            verification.engagedRungs.includes(cell.rung),
+        ),
+    ),
+    "all six catalog cells must remain unverified while retaining the cumulative measured sets",
+  );
+});
+
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
   const record = {
     backend: "mlx",

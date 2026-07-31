@@ -984,6 +984,19 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
         );
     }
     let parameters = protocol::strategy_parameters(request)?;
+    let strategy = json!({
+        "rung": "bounded_decode",
+        "engagedRungs": ["resident", "bounded_decode"],
+        "parameters": parameters,
+    });
+    let planned_strategy = protocol::planned(request)?
+        .get("strategy")
+        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
+    if planned_strategy != &strategy {
+        return Err(format!(
+            "plan/provider strategy mismatch: plan={planned_strategy}, MLX adapter measured={strategy}"
+        ));
+    }
     let expected_failure = protocol::expected_failure(request);
     let comparison_output_bias = protocol::comparison_output_bias(parameters, expected_failure)?;
     let tile_edge = protocol::parameter(request, "decodeTileEdge")?;
@@ -1103,6 +1116,7 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
                 ],
             ),
         );
+        fragment["strategy"] = strategy;
         fragment["status"] = json!("negative_complete");
         return Ok(fragment);
     }
@@ -1112,7 +1126,7 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
         "quality, but does not expose synchronized conditioning/denoise device/wired/reclaimable phase ",
         "telemetry or the required warm/cancel/error lifecycle injections"
     );
-    Ok(protocol::gated_fragment(
+    let mut fragment = protocol::gated_fragment(
         artifact,
         sweep(parameters, actual_passed),
         blocker,
@@ -1141,7 +1155,9 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
                 ("postDecodeCache", "bytes", cache),
             ],
         ),
-    ))
+    );
+    fragment["strategy"] = strategy;
+    Ok(fragment)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
