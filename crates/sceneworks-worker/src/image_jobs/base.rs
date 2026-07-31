@@ -2836,10 +2836,7 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
 /// Whether Krea may use calibrated streamed blocks, plus the load-exact adapter bytes supporting
 /// that decision. A non-empty stack with unreadable metadata returns `None`; the caller refuses it
 /// rather than inheriting evidence from the adapter-free route.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn krea_streamed_blocks_adapter_evidence(adapters: &[AdapterSpec]) -> (bool, Option<u64>) {
     if adapters.is_empty() {
         return (true, Some(0));
@@ -2851,10 +2848,7 @@ fn krea_streamed_blocks_adapter_evidence(adapters: &[AdapterSpec]) -> (bool, Opt
     (false, bytes)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_adapter_resident_bytes(
     engine_id: &str,
     tier: &str,
