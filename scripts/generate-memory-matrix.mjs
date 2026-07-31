@@ -384,6 +384,11 @@ export function calibrationBinding(record, cell) {
   if (record.quality.result !== "passed") reasons.push("quality-not-passed");
   if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
   if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
+  if (!Array.isArray(cell.engagedRungs)) {
+    reasons.push("composition-unavailable");
+  } else if (JSON.stringify(record.strategy.engagedRungs) !== JSON.stringify(cell.engagedRungs)) {
+    reasons.push("composition-mismatch");
+  }
   if (
     JSON.stringify(record.strategy.parameters) !==
     JSON.stringify(runtimeStrategyParameters(cell.strategyParameters))
@@ -405,6 +410,38 @@ export function calibrationBinding(record, cell) {
     !record.loadability.resolvedPathFingerprint
   ) reasons.push("loadability-not-passed");
   return { eligible: reasons.length === 0, reasons };
+}
+
+function expectedEngagedRungs({
+  model,
+  provider,
+  backend,
+  tier,
+  mode,
+  overlay,
+  rung,
+  status,
+  calibrationPlan,
+}) {
+  if (Array.isArray(status.engagedRungs)) return status.engagedRungs;
+  if (rung === "resident") return ["resident"];
+  const matches = calibrationPlan.providers
+    .filter(
+      (candidate) =>
+        candidate.target.modelId === model.id &&
+        candidate.target.provider === provider &&
+        candidate.backend === backend &&
+        candidate.target.tier === tier &&
+        candidate.target.mode === mode &&
+        candidate.target.overlay === overlay &&
+        candidate.rung === rung,
+    )
+    .map((candidate) => candidate.engagedRungs);
+  if (matches.length === 0) return null;
+  if (matches.some((candidate) => JSON.stringify(candidate) !== JSON.stringify(matches[0]))) {
+    throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: conflicting planned compositions`);
+  }
+  return matches[0];
 }
 
 // Derive the exact additive host requirement used by the Rust MLX admission envelope.
@@ -712,6 +749,7 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, 
               : "max(text,denoise,decode)+cudaHeadroom",
           ...strategyParameters,
         },
+        engagedRungs: model.candle.turboFit.engagedCompositions?.[manifestRung],
         calibrationFingerprint: model.candle.turboFit.calibrationFingerprint,
         maxPixels: model.candle.turboFit.maxMeasuredPixels,
         historicalVerification: evidenceRecords.map((record) => ({
@@ -721,6 +759,7 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, 
           geometry: `${record.width}x${record.height}`,
           capturedAt: record.capturedAt,
           harnessVersion: record.harnessVersion,
+          engagedRungs: record.measuredCompositions?.[manifestRung],
           observedPeakGb: record.observedPeaksGb?.[manifestRung],
           parity: record.parity,
         })),
@@ -732,6 +771,7 @@ function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, 
             tier: record.tier,
             geometry: `${record.width}x${record.height}`,
             predictedPeakGb: record.predictedPeaksGb[manifestRung],
+            engagedRungs: record.measuredCompositions?.[manifestRung],
             exactParameters: strategyParameters,
           })),
       };
@@ -824,6 +864,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
     vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
     instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
     calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
+    calibrationPlan: "config/memory-calibration-plan.json",
     cargo: "Cargo.toml",
   };
   const sourceEntries = Object.entries(sourcePaths);
@@ -844,6 +885,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const mlxFitBody = bodies.mlxFitGate;
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
+  const calibrationPlan = JSON.parse(bodies.calibrationPlan);
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // JSONC comments and formatting are not part of the manifest contract. Hash the parsed value so
   // provenance embedded in generated artifacts is stable across semantically inert source edits.
@@ -942,6 +984,17 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   record.target.overlay === overlay &&
                   record.strategy.rung === rung,
               );
+              const engagedRungs = expectedEngagedRungs({
+                model,
+                provider: route.engine,
+                backend,
+                tier,
+                mode,
+                overlay,
+                rung,
+                status,
+                calibrationPlan,
+              });
               const runSummary = (record) => {
                 const overall = record.observedMemory?.overall?.deviceBytes;
                 const requiredHostBytes = mlxRequiredHostBytes(record);
@@ -952,6 +1005,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   geometry: `${record.target.geometry.width}x${record.target.geometry.height}`,
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
+                  engagedRungs: record.strategy.engagedRungs,
                   ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
                   ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
                   parity: {
@@ -967,6 +1021,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                 (record) => calibrationBinding(record, {
                   ...{
                     calibrationFingerprint: fingerprint,
+                    engagedRungs,
                     strategyParameters: status.parameters,
                     geometryEnvelope: status.maxPixels
                       ? geometryWithinPixels(model, backend, status.maxPixels)
@@ -1003,6 +1058,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   ? geometryWithinPixels(model, backend, status.maxPixels)
                   : geometryFor(model, backend),
                 strategyParameters: status.parameters,
+                engagedRungs,
                 state: status.state,
                 evidenceRevision: {
                   sceneWorks: sceneWorksRevision,

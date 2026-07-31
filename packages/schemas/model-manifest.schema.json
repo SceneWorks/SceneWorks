@@ -126,6 +126,21 @@
         "perMpxGb": { "type": "number", "minimum": 0 }
       }
     },
+    "memoryEngagedComposition": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ]
+      },
+      "description": "Canonical ordered set of memory-strategy rungs engaged in the same request."
+    },
     "memoryRungPhaseCurves": {
       "type": "object",
       "required": ["text", "denoise", "decode"],
@@ -168,6 +183,33 @@
         "streamedBlocks": { "$ref": "#/$defs/kreaTurboEvidencePhaseVector" }
       }
     },
+    "memoryStrategyRungSet": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ]
+      },
+      "description": "Exact canonical strategy-rung set engaged while the associated value was measured."
+    },
+    "kreaTurboMeasuredCompositions": {
+      "type": "object",
+      "required": ["threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+      "additionalProperties": false,
+      "properties": {
+        "threeStage": { "$ref": "#/$defs/memoryStrategyRungSet" },
+        "tiledVae": { "$ref": "#/$defs/memoryStrategyRungSet" },
+        "chunkedAttention": { "$ref": "#/$defs/memoryStrategyRungSet" },
+        "streamedBlocks": { "$ref": "#/$defs/memoryStrategyRungSet" }
+      }
+    },
     "kreaTurboEvidenceRecord": {
       "type": "object",
       "required": [
@@ -186,6 +228,7 @@
         "predictedPeaksGb",
         "predictedPhasesGb",
         "observedPeaksGb",
+        "measuredCompositions",
         "parity"
       ],
       "additionalProperties": false,
@@ -222,6 +265,10 @@
           "description": "Exact phase-curve outputs for this evidence cell. Every emitted text/denoise/decode value must match these values within the declared 0.01 GiB tolerance."
         },
         "observedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
+        "measuredCompositions": {
+          "$ref": "#/$defs/kreaTurboMeasuredCompositions",
+          "description": "Per-rung composition active during the historical capture. Runtime compares this exact set with the current provider contract."
+        },
         "parity": {
           "type": "object",
           "required": ["contract", "result", "metric", "maximumError", "fixture"],
@@ -246,6 +293,7 @@
         "measured",
         "verification",
         "evidenceRecords",
+        "engagedCompositions",
         "strategyParameters",
         "maxMeasuredPixels",
         "phaseCurvesByTier"
@@ -350,6 +398,19 @@
             }
           },
           "description": "Exact, cumulative provider parameters for each calibrated strategy. The worker validates these values against the provider contract before selection."
+        },
+        "engagedCompositions": {
+          "type": "object",
+          "required": ["resident", "threeStage", "tiledVae", "chunkedAttention", "streamedBlocks"],
+          "additionalProperties": false,
+          "properties": {
+            "resident": { "$ref": "#/$defs/memoryEngagedComposition" },
+            "threeStage": { "$ref": "#/$defs/memoryEngagedComposition" },
+            "tiledVae": { "$ref": "#/$defs/memoryEngagedComposition" },
+            "chunkedAttention": { "$ref": "#/$defs/memoryEngagedComposition" },
+            "streamedBlocks": { "$ref": "#/$defs/memoryEngagedComposition" }
+          },
+          "description": "Current exact provider-contract composition for each rung. Historical evidence remains separately keyed by its measuredCompositions and binds only when the two sets match."
         },
         "maxMeasuredPixels": {
           "type": "integer",

@@ -507,7 +507,7 @@ fn memory_for_selection(
 }
 
 fn resident_evidence(
-    route: &str,
+    contract: &MemoryProviderContract,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
@@ -522,13 +522,14 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            resolved_route: route.to_owned(),
+            resolved_route: contract.provider_id.clone(),
             backend: "mlx".to_owned(),
             tier,
             mode: mode.to_owned(),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
+            engaged_composition: contract.engaged_composition(selection.strategy),
             parameters: selection.parameters,
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -836,6 +837,13 @@ fn evidence_admission_route(
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
                         strategy: evidence_strategy(binding.rung),
+                        engaged_composition: record
+                            .strategy
+                            .engaged_rungs
+                            .iter()
+                            .copied()
+                            .map(evidence_strategy)
+                            .collect(),
                         parameters: binding.selection_parameters,
                     },
                     conformance: MemoryConformanceState::Verified,
@@ -1068,7 +1076,7 @@ fn evaluate_request_with_budget_using_bundle(
         total_peak_bytes - attributable_resident_bytes
     };
     let (resident_selection, resident) = resident_evidence(
-        plan.engine_id,
+        contract,
         plan.tier,
         mode_key,
         inputs.overlay.as_deref(),
@@ -2046,6 +2054,7 @@ fn generic_mlx_shared_observation(
             overlay: Some("resolved_load_spec".into()),
             geometry,
             strategy: MemoryStrategy::Resident,
+            engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -2505,6 +2514,56 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn resident_evidence_is_keyed_by_the_live_contract_composition() {
+        use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
+
+        let mut contract = MemoryProviderContract::compatibility_default(
+            "fixture_provider",
+            MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.additional_prerequisites.push((
+            MemoryStrategy::Resident,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::StagedResidency)
+            .expect("staged-residency capability")
+            .support = gen_core::MemoryStrategySupport::Implemented;
+        let (_, evidence) = resident_evidence(
+            &contract,
+            MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+            },
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            1,
+            None,
+        );
+        assert_eq!(
+            evidence.key.engaged_composition,
+            vec![MemoryStrategy::Resident, MemoryStrategy::StagedResidency,],
+            "the test must distinguish live derivation from the old hardcoded resident-only key"
+        );
+    }
+
     struct RequestGenerator {
         descriptor: gen_core::ModelDescriptor,
         contract: Option<MemoryProviderContract>,
@@ -2823,9 +2882,24 @@ mod tests {
 
         let mut bundle = fixture_bundle();
         let base = bundle.records.remove(0);
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
         let rung = |rung, parameters: JsonObject<String, Value>, peak_gib: f64| {
             let mut record = base.clone();
             record.strategy.rung = rung;
+            record.strategy.engaged_rungs = contract
+                .engaged_composition(evidence_strategy(rung))
+                .into_iter()
+                .map(|strategy| match strategy {
+                    MemoryStrategy::Resident => StrategyRung::Resident,
+                    MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
+                    MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
+                    MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        StrategyRung::BoundedTransformerResidency
+                    }
+                })
+                .collect();
             record.strategy.parameters = parameters.clone();
             record.sweep.cases[0].parameters = parameters;
             if let RequiredNullable::Value(predicted) = &mut record.predicted_peak_bytes {
@@ -4094,6 +4168,7 @@ mod tests {
                     frames: 1,
                 },
                 strategy: selection.strategy,
+                engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,
             },
             conformance: MemoryConformanceState::Verified,

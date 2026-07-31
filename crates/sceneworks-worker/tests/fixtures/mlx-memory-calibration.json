@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "harnessVersion": "sceneworks-memory-v3",
+  "schemaVersion": 3,
+  "harnessVersion": "sceneworks-memory-v4",
   "records": [
     {
       "id": "imc-aaaaaaaaaaaaaaaaaaaa",
@@ -50,6 +50,7 @@
       "fixture": "fixture-seed42",
       "strategy": {
         "rung": "bounded_decode",
+        "engagedRungs": ["resident", "bounded_decode"],
         "parameters": {
           "decodeTileEdge": 512,
           "decodeOverlap": 128
@@ -194,7 +195,7 @@
       },
       "calibrationFingerprint": "fixture-formula-v2",
       "capturedAt": "2026-07-28T12:00:00Z",
-      "harnessVersion": "sceneworks-memory-v3"
+      "harnessVersion": "sceneworks-memory-v4"
     }
   ]
 }

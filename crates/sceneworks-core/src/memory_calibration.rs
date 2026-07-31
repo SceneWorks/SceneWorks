@@ -11,8 +11,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 2;
-pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v3";
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 3;
+pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v4";
 /// ABI paired by the manifest/query side of the reader.
 ///
 /// The evidence schema deliberately stays at v2: callers must supply the manifest's ABI together
@@ -168,10 +168,11 @@ pub struct Geometry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Strategy {
     pub rung: StrategyRung,
+    pub engaged_rungs: Vec<StrategyRung>,
     pub parameters: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyRung {
     Resident,
@@ -179,6 +180,16 @@ pub enum StrategyRung {
     BoundedDecode,
     BoundedAttention,
     BoundedTransformerResidency,
+}
+
+impl StrategyRung {
+    pub const ALL: [Self; 5] = [
+        Self::Resident,
+        Self::StagedResidency,
+        Self::BoundedDecode,
+        Self::BoundedAttention,
+        Self::BoundedTransformerResidency,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -731,6 +742,26 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
     .contains(&0)
     {
         return Err(format!("{} target geometry must be positive", record.id));
+    }
+    let engaged = record
+        .strategy
+        .engaged_rungs
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let canonical = StrategyRung::ALL
+        .into_iter()
+        .filter(|rung| engaged.contains(rung))
+        .collect::<Vec<_>>();
+    if engaged.len() != record.strategy.engaged_rungs.len()
+        || canonical != record.strategy.engaged_rungs
+        || !engaged.contains(&StrategyRung::Resident)
+        || !engaged.contains(&record.strategy.rung)
+    {
+        return Err(format!(
+            "{} strategy.engagedRungs must be a unique canonical set containing resident and the selected rung",
+            record.id
+        ));
     }
     validate_sweep(&record.sweep, &record.id)?;
     if let Some(diagnostics) = &record.diagnostics {
@@ -1345,6 +1376,7 @@ mod tests {
             "fixture": "fixture-seed42",
             "strategy": {
                 "rung": "bounded_decode",
+                "engagedRungs": ["resident", "bounded_decode"],
                 "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }
             },
             "sweep": {
@@ -1421,14 +1453,14 @@ mod tests {
             },
             "calibrationFingerprint": "fixture-formula-v2",
             "capturedAt": "2026-07-28T12:00:00Z",
-            "harnessVersion": "sceneworks-memory-v3"
+            "harnessVersion": "sceneworks-memory-v4"
         })
     }
 
     fn bundle(record: Value) -> String {
         json!({
-            "schemaVersion": 2,
-            "harnessVersion": "sceneworks-memory-v3",
+            "schemaVersion": 3,
+            "harnessVersion": "sceneworks-memory-v4",
             "records": [record]
         })
         .to_string()
@@ -1554,13 +1586,13 @@ mod tests {
     fn schema_and_harness_drift_are_stale_but_bad_json_is_an_error() {
         assert_eq!(
             load_bundle(
-                r#"{"schemaVersion":3,"harnessVersion":"sceneworks-memory-v3","records":[]}"#
+                r#"{"schemaVersion":2,"harnessVersion":"sceneworks-memory-v3","records":[]}"#
             )
             .expect("version drift is not a parse failure"),
-            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(3) })
+            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
         );
         assert_eq!(
-            load_bundle(r#"{"schemaVersion":2,"harnessVersion":"old","records":[]}"#)
+            load_bundle(r#"{"schemaVersion":3,"harnessVersion":"old","records":[]}"#)
                 .expect("harness drift is not a parse failure"),
             BundleLoad::Stale(StaleBundleReason::HarnessVersion {
                 found: Some("old".to_owned())
@@ -1575,7 +1607,7 @@ mod tests {
             })
         );
         assert!(matches!(
-            load_bundle(r#"{"harnessVersion":"sceneworks-memory-v3","records":[]}"#),
+            load_bundle(r#"{"harnessVersion":"sceneworks-memory-v4","records":[]}"#),
             Err(BundleLoadError::Json(_))
         ));
         let mut missing_record_harness = complete_record();
@@ -1586,6 +1618,22 @@ mod tests {
         assert!(matches!(
             load_bundle(&bundle(missing_record_harness)),
             Err(BundleLoadError::Json(_))
+        ));
+        let mut legacy_without_composition = complete_record();
+        legacy_without_composition["strategy"]
+            .as_object_mut()
+            .expect("strategy object")
+            .remove("engagedRungs");
+        assert!(matches!(
+            load_bundle(&bundle(legacy_without_composition)),
+            Err(BundleLoadError::Json(_))
+        ));
+        let mut noncanonical_composition = complete_record();
+        noncanonical_composition["strategy"]["engagedRungs"] =
+            json!(["bounded_decode", "resident"]);
+        assert!(matches!(
+            load_bundle(&bundle(noncanonical_composition)),
+            Err(BundleLoadError::Invalid(message)) if message.contains("canonical set")
         ));
         let mut wrong_typed_record_harness = complete_record();
         wrong_typed_record_harness["harnessVersion"] = json!(3);

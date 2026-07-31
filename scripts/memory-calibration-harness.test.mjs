@@ -49,6 +49,7 @@ function complete(overrides = {}) {
     fixture: "fixture-seed42",
     strategy: {
       rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
       parameters: { decodeTileEdge: 512, decodeOverlap: 128 },
     },
     sweep: {
@@ -116,6 +117,7 @@ function qwenPositiveComplete() {
     fixture: "qwen-vae-encoded-latent-1024",
     strategy: {
       rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
       parameters: { decodeTileEdge: 512, decodeOverlap: 64 },
     },
     calibrationFingerprint: "qwen-vae-identical-latent-v3",
@@ -157,6 +159,7 @@ test("complete record validates and identity includes evidence scope plus resolv
     (r) => (r.repositories.inference.revision = "d".repeat(40)),
     (r) => (r.hardware.driverVersion = "different"),
     (r) => (r.artifact.resolvedRevision = "different"),
+    (r) => (r.strategy.engagedRungs = ["resident", "staged_residency", "bounded_decode"]),
   ]) {
     const changed = structuredClone(record);
     mutate(changed);
@@ -216,7 +219,7 @@ test("a singleton production parameter domain is valid complete evidence", () =>
   };
   record.id = recordId(record);
   assert.equal(validateBundle({
-    schemaVersion: 2,
+    schemaVersion: 3,
     harnessVersion: HARNESS_VERSION,
     records: [record],
   }).records[0], record);
@@ -230,13 +233,13 @@ test("merge is commutative and rejects conflicting exact-identity captures", () 
   });
   second.logicalCaseId = logicalCaseId(second);
   second.id = recordId(second);
-  const a = { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [first] };
-  const b = { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [second] };
+  const a = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [first] };
+  const b = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [second] };
   assert.equal(canonicalJson(mergeBundles(a, b)), canonicalJson(mergeBundles(b, a)));
   const conflict = structuredClone(first);
   conflict.capturedAt = "2026-07-28T14:00:00Z";
   assert.throws(
-    () => mergeBundles(a, { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [conflict] }),
+    () => mergeBundles(a, { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [conflict] }),
     /conflicting record/,
   );
 });
@@ -287,6 +290,7 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
   const record = complete({ evidenceScope: "authoritative" });
   const cell = {
     calibrationFingerprint: record.calibrationFingerprint,
+    engagedRungs: record.strategy.engagedRungs,
     strategyParameters: record.strategy.parameters,
     geometryEnvelope: { resolutions: ["1024x1024"] },
     evidence: {
@@ -304,6 +308,13 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
   const frames = structuredClone(record);
   frames.target.geometry.frames = 2;
   assert.ok(calibrationBinding(frames, cell).reasons.includes("frames-out-of-envelope"));
+  const composition = structuredClone(record);
+  composition.strategy.engagedRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+  ];
+  assert.ok(calibrationBinding(composition, cell).reasons.includes("composition-mismatch"));
 });
 
 test("plan separates seven identical-latent positives from a deterministic output-bias negative", async () => {
@@ -355,7 +366,7 @@ test("provider execution requires one backend-specific hardware probe", async ()
 test("positive Qwen completion never suppresses the separate 256/32 negative plan", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
-  validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [record] });
   const qwenRemaining = expandPlan(config, [record]).filter((item) => item.backend === "mlx");
   assert.equal(qwenRemaining.length, 1);
   assert.equal(qwenRemaining[0].negative, true);
@@ -367,7 +378,7 @@ test("positive Qwen completion never suppresses the separate 256/32 negative pla
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {
-  const valid = { schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [complete()] };
+  const valid = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [complete()] };
   validateBundle(valid);
   const mutations = [
     (bundle) => (bundle.unexpected = true),
@@ -410,7 +421,7 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
     const invalid = structuredClone(record);
     mutate(invalid);
     assert.throws(
-      () => validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+      () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [invalid] }),
       /schema validation failed/,
     );
   }
@@ -423,6 +434,7 @@ test("executable runner handles fragmented responses across probe and multiple c
       backend: "candle",
       target: complete().target,
       rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
       calibrationFingerprint: "fixture-formula-v2",
       fixture: "fixture-seed42",
       cases: [
@@ -452,6 +464,7 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
       backend: "candle",
       target: complete().target,
       rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
       calibrationFingerprint: "fixture-formula-v2",
       fixture: "fixture-seed42",
       cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
@@ -478,6 +491,7 @@ test("expected-failure plan case produces a resumable negative record, never a c
       backend: "candle",
       target: complete().target,
       rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
       calibrationFingerprint: "fixture-formula-v2",
       fixture: "fixture-seed42",
       cases: [{
@@ -500,16 +514,43 @@ test("expected-failure plan case produces a resumable negative record, never a c
   assert.equal(expandPlan(config, result.records).length, 0);
 });
 
-// SC-15804. The `harnessVersion` const is this epic's stale-evidence gate: it is asserted twice in
-// `packages/schemas/memory-calibration.schema.json` and embedded in every emitted record. Renaming
-// the contract to the lane-neutral vocabulary bumped it, and that bump MUST invalidate everything
-// captured under the prior `sceneworks-image-memory-v2` vocabulary. Asserted here rather than
-// assumed: the stale record below is well-formed and self-consistent in every other respect, and
-// the control case proves the same record passes once only its version is current.
-const PRIOR_HARNESS_VERSION = "sceneworks-image-memory-v2";
+test("provider execution rejects an adapter-attested composition that differs from the plan", async () => {
+  const config = {
+    providers: [{
+      evidenceScope: "fixture",
+      backend: "candle",
+      target: complete().target,
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "fixture-seed42",
+      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+    }],
+  };
+  await assert.rejects(
+    runProviderPlan({
+      config,
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL(
+          "./fixtures/memory-provider-composition-mismatch-fixture.mjs",
+          import.meta.url,
+        )),
+      ],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    }),
+    /adapter measured strategy does not match planned strategy/,
+  );
+});
 
-test("prior-vocabulary evidence is rejected as stale by the harnessVersion gate", () => {
-  assert.equal(HARNESS_VERSION, "sceneworks-memory-v3");
+// SC-16211. The `harnessVersion` const is asserted twice in the schema and embedded in every emitted
+// record. Adding the required engaged-composition identity bumps it and MUST invalidate every v3
+// record rather than treating a missing composition as composition-agnostic.
+const PRIOR_HARNESS_VERSION = "sceneworks-memory-v3";
+
+test("pre-composition evidence is rejected as stale by the schema and harness gates", () => {
+  assert.equal(HARNESS_VERSION, "sceneworks-memory-v4");
   assert.notEqual(HARNESS_VERSION, PRIOR_HARNESS_VERSION);
 
   // A genuine prior-vintage record: every field populated, and its deterministic id recomputed over
@@ -533,7 +574,7 @@ test("prior-vocabulary evidence is rejected as stale by the harnessVersion gate"
 
   // 3. a stale record cannot be smuggled in under a current envelope either.
   assert.throws(
-    () => validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [stale] }),
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [stale] }),
     /schema validation failed/,
   );
 
@@ -541,7 +582,7 @@ test("prior-vocabulary evidence is rejected as stale by the harnessVersion gate"
   //    above are caused by the version bump and by nothing else.
   const current = complete();
   assert.equal(validateRecord(current), current);
-  validateBundle({ schemaVersion: 2, harnessVersion: HARNESS_VERSION, records: [current] });
+  validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [current] });
 });
 
 test("the promoted evidence bundle carries the current harnessVersion", async () => {
