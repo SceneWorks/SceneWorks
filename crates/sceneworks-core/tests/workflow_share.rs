@@ -2007,7 +2007,7 @@ fn every_write_seam_embeds_through_the_gated_builder() {
 ///
 /// A list, but not one a human maintains silently: [`the_core_workflow_surface_is_classified`]
 /// asserts every name here still exists as a `pub fn` in the file it names, AND that every `pub fn`
-/// in those two modules whose signature mentions `WorkflowShare` is in this list or in
+/// in the four `workflow_*` modules whose signature mentions `WorkflowShare` is in this list or in
 /// [`WORKFLOW_READ_SURFACE`]. A new core entry point is therefore a decision, not an omission —
 /// which is the same property [`ADVANCED_BUILDERS`] has, applied to the Rust side.
 const WORKFLOW_WRITE_SURFACE: &[(&str, &str, &str)] = &[
@@ -2041,7 +2041,15 @@ const WORKFLOW_WRITE_SURFACE: &[(&str, &str, &str)] = &[
     (
         "crates/sceneworks-core/src/workflow_png.rs",
         "write_workflow_chunk",
-        "Writes the PNG, with the envelope in an iTXt chunk when one is handed in.",
+        "Writes the PNG, with the envelope in an iTXt chunk — and its A1111 `parameters` rendering \
+         beside it — when one is handed in.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_parameters.rs",
+        "parameters_text",
+        "Renders the envelope as the A1111 `parameters` text a third-party gallery displays \
+         (sc-15957). A second rendering of already-sanitized data, and the only thing that decides \
+         what the second chunk says.",
     ),
     (
         "crates/sceneworks-core/src/workflow_mp4.rs",
@@ -2094,6 +2102,12 @@ const WORKFLOW_READ_SURFACE: &[(&str, &str, &str)] = &[
         "Measures an envelope's encoded size for the recording ceiling.",
     ),
     (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "parameters_chunk_size",
+        "Measures the A1111 chunk's encoded size, so the per-image cost of sc-15957 is a measured \
+         number. Writes nothing (sc-15957).",
+    ),
+    (
         "crates/sceneworks-core/src/workflow_mp4.rs",
         "read_workflow_metadata",
         "Reads the envelope out of MP4 bytes (sc-15956).",
@@ -2131,20 +2145,33 @@ fn the_core_workflow_surface_is_classified() {
         );
     }
 
-    // The completeness half: nothing in those two modules handles a `WorkflowShare` in public
-    // without being classified as read or write. This is what stops a new core entry point from
-    // becoming a write seam nobody's discovery scan looks for.
+    // The completeness half: nothing in those modules handles a `WorkflowShare` in public without
+    // being classified as read or write. This is what stops a new core entry point from becoming a
+    // write seam nobody's discovery scan looks for.
+    //
+    // It found nothing at all until sc-15957, and the reason is worth recording rather than quietly
+    // fixing. `RustFn::signature_start` is the offset of the `fn` KEYWORD, so the slice below has
+    // never begun with a visibility modifier — `signature.contains("pub fn")` was false for every
+    // function in the tree, and the loop `continue`d on all of them. A lint that reads zero items
+    // and passes is the exact failure mode this file's own registry doctrine exists to prevent, and
+    // it was sitting inside the test that enforces it. Publicity is read off the text BEFORE the
+    // keyword now, which is where it lives.
+    let mut examined = 0usize;
     for path in [
         "crates/sceneworks-core/src/workflow_share.rs",
         "crates/sceneworks-core/src/workflow_png.rs",
         "crates/sceneworks-core/src/workflow_mp4.rs",
+        "crates/sceneworks-core/src/workflow_parameters.rs",
     ] {
         let stripped = rust_scannable(&read_repo_file(path));
         for item in rust_fn_spans(&stripped) {
             let signature = &stripped[item.signature_start..item.body_start];
-            if !signature.contains("pub fn") || !signature.contains("WorkflowShare") {
+            if !is_public_fn(&stripped, item.signature_start)
+                || !signature.contains("WorkflowShare")
+            {
                 continue;
             }
+            examined += 1;
             assert!(
                 declared.contains(&item.name),
                 "{path} exposes `{}`, whose signature handles a `WorkflowShare`, and neither \
@@ -2156,6 +2183,31 @@ fn the_core_workflow_surface_is_classified() {
             );
         }
     }
+    // The floor against the check going blind again. Every declared entry is a `pub fn` naming a
+    // `WorkflowShare`, so the scan must have found at least as many as are declared; anything less
+    // means it stopped recognizing them.
+    assert!(
+        examined >= declared.len(),
+        "the public-surface scan saw {examined} functions handling a `WorkflowShare` but \
+         {} are declared — the scan has gone blind, which is how this half of the test passed \
+         while checking nothing",
+        declared.len()
+    );
+}
+
+/// Whether the `fn` at `signature_start` is declared `pub` (and not `pub(crate)` / `pub(super)`).
+///
+/// Read from the text preceding the keyword on the same line, because that is where a visibility
+/// modifier is. Handles `pub fn`, `pub const fn`, `pub async fn` and `pub unsafe fn` — everything
+/// between `pub` and `fn` is a keyword, never an identifier, so the whole prefix is checked rather
+/// than only its first word.
+fn is_public_fn(stripped: &str, signature_start: usize) -> bool {
+    let line_start = stripped[..signature_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let prefix = stripped[line_start..signature_start].trim_start();
+    // `pub(crate)` is not public surface, and its prefix starts `pub(` rather than `pub `.
+    prefix.starts_with("pub ")
 }
 
 /// **The gate the deferral list only claimed to be** (sc-16113).

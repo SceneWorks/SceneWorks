@@ -41,6 +41,26 @@
 //! Parsing goes through [`parse_workflow_share_json`] and nothing else, so the sc-15946 allow-list
 //! sanitizer runs on the way in. There is deliberately no second, laxer parse path; a structural
 //! test in `tests/workflow_png.rs` fails the build if one appears.
+//!
+//! # Two chunks leave, one comes back (sc-15957)
+//!
+//! [`write_workflow_chunk`] writes a SECOND text chunk beside ours, under the A1111 `parameters`
+//! keyword, so a gallery that has never heard of SceneWorks can display the prompt and seed instead
+//! of showing opaque pixels. [`crate::workflow_parameters`] renders it — from the same already-
+//! sanitized envelope, so it is a second *rendering* and not a second, laxer channel.
+//!
+//! Three consequences live in this module rather than in that one:
+//!
+//! * **The reader ignores it.** [`read_workflow_chunk`] resolves [`WORKFLOW_CHUNK_KEYWORD`] and
+//!   nothing else. Reading foreign A1111 and ComfyUI PNGs is a genuinely useful and much larger
+//!   story — parsing a foreign format, mapping unknown samplers and model names onto our catalog,
+//!   degrading well when the mapping fails — and is deliberately not this one.
+//! * **The stripper removes both.** sc-15953 promises "Save a copy without the workflow" takes the
+//!   recipe out, and a `parameters` chunk it left behind would ship the prompt anyway. See
+//!   [`workflow_chunk_spans`] for the one narrow rule that separates ours from a stranger's.
+//! * **The encoding is not ours to choose.** `tEXt` when the text is ASCII, `iTXt` when it is not.
+//!   The private `parameters_chunk` below records why that boundary is drawn where it is, and how
+//!   it differs from PIL's.
 
 use std::fmt;
 use std::fs::File;
@@ -48,8 +68,9 @@ use std::io::{BufRead, BufReader, BufWriter, Cursor, Seek, Write};
 use std::path::Path;
 
 use image::{ImageFormat, RgbImage};
-use png::text_metadata::ITXtChunk;
+use png::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk};
 
+use crate::workflow_parameters::{parameters_text, PARAMETERS_CHUNK_KEYWORD};
 use crate::workflow_share::{
     parse_workflow_share_json, WorkflowShare, WorkflowShareError, WORKFLOW_KIND_IMAGE,
 };
@@ -225,26 +246,30 @@ fn io_error(error: &std::io::Error) -> WorkflowChunkError {
 // Write
 // ---------------------------------------------------------------------------
 
-/// Encode `rgb` to `path` as a PNG, embedding `share` as a compressed `iTXt` chunk when there is
-/// one.
+/// Encode `rgb` to `path` as a PNG, embedding `share` as a compressed `iTXt` chunk — and its
+/// A1111 `parameters` rendering beside it — when there is one.
 ///
 /// `None` is not a degenerate case, it is the opt-out: it writes the image through the *same*
 /// `save_with_format` call the worker uses today, so the bytes are identical to what SceneWorks
 /// produces now. `the_none_path_is_byte_identical_to_save_with_format` in `tests/workflow_png.rs`
-/// compares the two files byte for byte.
+/// compares the two files byte for byte. Both chunks hang off the same `Some`, so sc-15953's
+/// setting governs the pair: off means neither is written, and there is no arrangement in which the
+/// prompt rides out in one of them alone.
 ///
 /// `Some` cannot call `save_with_format` — `image`'s `PngEncoder` has no text-chunk API at all —
 /// so it goes through `png` directly. That makes it the arm that *could* change the encoder, and
-/// the guarantee is deliberately just as strong: its output is the `None` output plus the inserted
-/// `iTXt` chunk, byte for byte, with the encoder settings mirrored from `image` in
+/// the guarantee is deliberately just as strong: its output is the `None` output plus the two
+/// inserted text chunks, byte for byte, with the encoder settings mirrored from `image` in
 /// `encode_png_with_text` (not linked: it is private, and rustdoc warns on a public doc linking to
-/// one). `the_some_path_is_the_none_path_plus_the_chunk` proves it by stripping the chunk back out
-/// and comparing the remainder.
+/// one). `the_some_path_is_the_none_path_plus_the_chunks` proves it by stripping both chunks back
+/// out and comparing the remainder.
 ///
 /// Both halves matter to sc-15948: opting out changes nothing about a user's files, and opting *in*
-/// costs the chunk and nothing else — no encode-time or file-size change smuggled in alongside.
+/// costs the chunks and nothing else — no encode-time or file-size change smuggled in alongside.
 ///
-/// The chunk goes between IHDR and IDAT, where a reader finds it without decoding any pixels.
+/// The chunks go between IHDR and IDAT, where a reader finds them without decoding any pixels. Ours
+/// is written first, so a reader that stops at the first text chunk it recognizes sees the recipe
+/// that can actually be replayed.
 ///
 /// # Errors
 /// [`WorkflowChunkError::Io`] if the file cannot be written, [`WorkflowChunkError::Encode`] if
@@ -261,14 +286,65 @@ pub fn write_workflow_chunk(
                 detail: error.to_string(),
             });
     };
+    let chunks = embedded_chunks(share, (rgb.width(), rgb.height()))?;
+    let file = File::create(path).map_err(|error| io_error(&error))?;
+    let mut sink = BufWriter::new(file);
+    encode_png_with_text(rgb, &mut sink, &chunks)?;
+    sink.flush().map_err(|error| io_error(&error))?;
+    Ok(())
+}
+
+/// Both text chunks one envelope produces, in the order they are written.
+///
+/// One function so the writer and [`workflow_chunk_size`] / [`parameters_chunk_size`] cannot drift
+/// on either the contents or the order.
+fn embedded_chunks(
+    share: &WorkflowShare,
+    encoded: (u32, u32),
+) -> Result<Vec<TextChunk>, WorkflowChunkError> {
     let text = serde_json::to_string(share).map_err(|error| WorkflowChunkError::Encode {
         detail: error.to_string(),
     })?;
-    let file = File::create(path).map_err(|error| io_error(&error))?;
-    let mut sink = BufWriter::new(file);
-    encode_png_with_text(rgb, &mut sink, &[workflow_chunk(text)])?;
-    sink.flush().map_err(|error| io_error(&error))?;
-    Ok(())
+    Ok(vec![
+        TextChunk::Utf8(workflow_chunk(text)),
+        parameters_chunk(parameters_text(share, encoded)),
+    ])
+}
+
+/// A PNG text chunk in whichever of the two encodings its contents need.
+///
+/// `png` models `tEXt` and `iTXt` as unrelated types behind one `EncodableTextChunk` trait, and the
+/// writer has to hold a heterogeneous list of them.
+enum TextChunk {
+    /// `iTXt`: UTF-8, optionally deflated. What our own envelope always uses.
+    Utf8(ITXtChunk),
+    /// `tEXt`: Latin-1, never compressed. What A1111 emits for ASCII settings blocks.
+    Latin1(TEXtChunk),
+}
+
+impl TextChunk {
+    fn encode<W: Write>(&self, sink: &mut W) -> Result<(), png::EncodingError> {
+        match self {
+            Self::Utf8(chunk) => chunk.encode(sink),
+            Self::Latin1(chunk) => chunk.encode(sink),
+        }
+    }
+
+    /// The chunk as it appears on disk, framing included.
+    fn framed(&self) -> Result<Vec<u8>, WorkflowChunkError> {
+        let mut encoded = Vec::new();
+        self.encode(&mut encoded)
+            .map_err(|error| WorkflowChunkError::Encode {
+                detail: error.to_string(),
+            })?;
+        Ok(encoded)
+    }
+}
+
+impl From<ITXtChunk> for TextChunk {
+    fn from(chunk: ITXtChunk) -> Self {
+        Self::Utf8(chunk)
+    }
 }
 
 /// The compressed `iTXt` chunk for one envelope.
@@ -280,6 +356,70 @@ fn workflow_chunk(text: String) -> ITXtChunk {
     let mut chunk = ITXtChunk::new(WORKFLOW_CHUNK_KEYWORD, text);
     chunk.compressed = true;
     chunk
+}
+
+/// The A1111 `parameters` chunk: `tEXt` when the text is ASCII, uncompressed `iTXt` when it is not.
+///
+/// # The rule is deliberately narrower than PIL's, and that is the point
+///
+/// `PIL.PngImagePlugin.PngInfo.add_text` — which is what A1111 itself writes through, and what every
+/// third-party parser is tested against — tries `value.encode("latin-1", "strict")` and writes
+/// `tEXt` if that succeeds, falling back to an UNCOMPRESSED `iTXt` on `UnicodeError`. So PIL's
+/// boundary is **Latin-1**, not ASCII, and the story's description of it as ASCII is wrong about
+/// PIL. `pil_agrees_with_our_encoding_choice` in `tests/workflow_parameters.rs` runs the real
+/// library and records both facts.
+///
+/// We draw the line at ASCII anyway, which differs from PIL only in the U+00A0..U+00FF band:
+///
+/// * **Below it, we are byte-identical to PIL.** A plain English prompt produces exactly the `tEXt`
+///   chunk A1111 produces, which is the case the whole story exists for.
+/// * **Inside it, `iTXt` is strictly safer.** `café` in a `tEXt` chunk is the single byte 0xE9. A
+///   reader that decodes the chunk as Latin-1 (PIL, per the spec) gets `café`; one that assumes
+///   UTF-8 — which a great deal of JavaScript tooling does — gets a replacement character or throws.
+///   `iTXt` is UTF-8 *by specification*, so both classes of reader agree. PIL reads our `iTXt` back
+///   to the identical string, so nothing is lost with the reader the convention is defined by.
+/// * **Above it there is no choice at all.** A CJK or emoji prompt cannot be a `tEXt` chunk;
+///   `png` refuses to encode one rather than transliterating.
+///
+/// # Uncompressed in both arms, and what that actually costs
+///
+/// Matching PIL's `zip=False` default. Our own envelope is compressed because it is JSON that rides
+/// in every generated image; a `zTXt` or a compressed `iTXt` is the form third-party readers are
+/// least reliably tested against, and being findable is the entire value of this chunk.
+///
+/// The cost, measured rather than waved at — this used to say "a few hundred bytes of prose", which
+/// is the typical case stated as if it were the bound, and is off by two orders of magnitude at the
+/// ceiling:
+///
+/// | Envelope | `parameters`, framed | `sceneworks:workflow`, framed | File grows |
+/// | --- | --- | --- | --- |
+/// | the sc-15946 golden recipe (51 bytes of prose) | 186 B | 565 B | 751 B |
+/// | both prose fields at the sanitizer's 16 KiB `PROSE_MAX_BYTES` cap | **32,913 B** | 467 B | 33,380 B |
+///
+/// So the worst legitimate case is a ~33 KB text chunk restating prose the envelope beside it
+/// deflates into 467 bytes. `the_parameters_chunk_at_the_prose_cap_is_the_worst_case` and
+/// `the_chunks_stay_text_chunks_and_not_a_payload` in `tests/workflow_png.rs` measure both rows.
+///
+/// **Uncompressed is still the right call at 33 KB**, and the reason is that ratio rather than the
+/// absolute number. The file already carries a compact copy of every byte in this chunk — that is
+/// what the envelope beside it is — so compressing this one saves bytes the file has already spent,
+/// and spends the single property it exists for. A gallery that cannot find the block gets nothing;
+/// a gallery that finds a 33 KB block displays the prompt. The case is also nothing anyone meets:
+/// it takes a 16 KiB prompt AND a 16 KiB negative prompt, where a real one is the top row.
+///
+/// It is not unbounded either — `PROSE_MAX_BYTES` caps each prose field and no other field on the
+/// line is prose, so 2 x 16 KiB plus a settings line is the whole of it.
+fn parameters_chunk(text: String) -> TextChunk {
+    if text.is_ascii() {
+        TextChunk::Latin1(TEXtChunk::new(PARAMETERS_CHUNK_KEYWORD, text))
+    } else {
+        // `compressed` is already false from `new`; stated rather than relied on, because the
+        // neighbouring `workflow_chunk` flips exactly this field and a reader of one will read the
+        // other.
+        let mut chunk = ITXtChunk::new(PARAMETERS_CHUNK_KEYWORD, text);
+        chunk.compressed = false;
+        TextChunk::Utf8(chunk)
+    }
 }
 
 /// Encode an 8-bit RGB PNG with `chunks` written between IHDR and IDAT.
@@ -319,8 +459,8 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 /// writes 167,360 bytes where `Sub` writes 388,103 and `NoFilter` 3,147,060 — 2.3× and 18.8×.
 ///
 /// None of this is trusted to stay true by inspection:
-/// `the_some_path_is_the_none_path_plus_the_chunk` in `tests/workflow_png.rs` strips the `iTXt`
-/// chunk back out of this encoder's output at the byte level and compares what is left against a
+/// `the_some_path_is_the_none_path_plus_the_chunks` in `tests/workflow_png.rs` strips both text
+/// chunks back out of this encoder's output at the byte level and compares what is left against a
 /// real `save_with_format` write of the same pixels. It runs over TWO fixtures, because the two
 /// deflate regimes see different settings: an incompressible one, where `png` falls back to storing
 /// rows and the filter is not consulted at all, and a smooth one that actually deflates, which is
@@ -328,7 +468,7 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 fn encode_png_with_text<W: Write>(
     rgb: &RgbImage,
     sink: W,
-    chunks: &[ITXtChunk],
+    chunks: &[TextChunk],
 ) -> Result<(), WorkflowChunkError> {
     let encode_error = |error: png::EncodingError| WorkflowChunkError::Encode {
         detail: error.to_string(),
@@ -340,7 +480,10 @@ fn encode_png_with_text<W: Write>(
     encoder.set_filter(png::Filter::Adaptive);
     let mut writer = encoder.write_header().map_err(encode_error)?;
     for chunk in chunks {
-        writer.write_text_chunk(chunk).map_err(encode_error)?;
+        match chunk {
+            TextChunk::Utf8(chunk) => writer.write_text_chunk(chunk).map_err(encode_error)?,
+            TextChunk::Latin1(chunk) => writer.write_text_chunk(chunk).map_err(encode_error)?,
+        }
     }
     writer
         .write_image_data(rgb.as_raw())
@@ -355,24 +498,29 @@ fn encode_png_with_text<W: Write>(
 
 /// The three PNG text-chunk types a keyword can appear under.
 ///
-/// [`write_workflow_chunk`] only ever emits `iTXt`, and [`read_workflow_chunk`] only ever reads
-/// `iTXt` (`png` files a `tEXt` under `uncompressed_latin1_text` and a `zTXt` under
-/// `compressed_latin1_text`, neither of which the reader looks at). The stripper is broader than
-/// both on purpose: it is a privacy operation, and "we would not have read it back" is not a reason
-/// to hand a stranger a chunk with our keyword on it. Being broader can only ever remove more.
+/// [`write_workflow_chunk`] emits `iTXt` for the envelope and either type for the `parameters`
+/// rendering, and [`read_workflow_chunk`] only ever reads `iTXt` (`png` files a `tEXt` under
+/// `uncompressed_latin1_text` and a `zTXt` under `compressed_latin1_text`, neither of which the
+/// reader looks at). The stripper is broader than all of that on purpose: it is a privacy
+/// operation, and "we would not have read it back" is not a reason to hand a stranger a chunk we
+/// wrote. Being broader can only ever remove more.
 const TEXT_CHUNK_TYPES: [&[u8; 4]; 3] = [b"iTXt", b"tEXt", b"zTXt"];
 
 /// Bytes of PNG chunk framing that are not the payload: the 4-byte length, the 4-byte type and the
 /// 4-byte CRC.
 const CHUNK_OVERHEAD: usize = 12;
 
-/// Excise every [`WORKFLOW_CHUNK_KEYWORD`] text chunk from PNG `bytes`, without re-encoding
-/// anything (sc-15953).
+/// Excise every text chunk this app wrote from PNG `bytes` — the [`WORKFLOW_CHUNK_KEYWORD`]
+/// envelope and the [`PARAMETERS_CHUNK_KEYWORD`] rendering beside it — without re-encoding anything
+/// (sc-15953, sc-15957).
 ///
 /// `Ok(None)` means there was nothing to take out and the caller should use the source bytes
 /// unchanged — a PNG with no workflow chunk, or a file that is not a PNG at all. The second case is
 /// not a failure: [`write_workflow_chunk`] only ever writes into a PNG, so a JPEG or an MP4 cannot
 /// be carrying one, and a "save without the workflow" of a video has nothing to do.
+///
+/// [`workflow_chunk_spans`] documents the co-presence rule that tells our `parameters` chunk from a
+/// stranger's, and why an A1111 export the user imported keeps its own.
 ///
 /// # Why excise rather than decode and re-encode
 ///
@@ -473,13 +621,41 @@ impl Span {
 /// *text* merely mentions our keyword — a note, a ComfyUI graph naming it — is a file we must
 /// still be able to save. Only unaccounted-for bytes get the blunt instrument.
 ///
+/// # The `parameters` chunk, and the one narrow rule that separates ours from a stranger's
+///
+/// sc-15957 puts a second chunk in every embedded file, under the unprefixed A1111 keyword. A strip
+/// that left it behind would answer "here is your file without the workflow" with a file that still
+/// contains the prompt — the sc-15953 control would be a lie, and the user who deliberately stripped
+/// would be the one who shipped it. So it comes out.
+///
+/// But `parameters` is *the* generic keyword: an A1111 or ComfyUI export the user imported carries
+/// one too, and the neighbouring rule ("stripping ours is not a licence to scrub someone else's
+/// metadata out of their image") is not one to abandon. The two are separated by **co-presence**:
+/// a `parameters` chunk is treated as ours only when the file also carries a walkable
+/// [`WORKFLOW_CHUNK_KEYWORD`] chunk. That is exact rather than heuristic in both directions:
+///
+/// * [`write_workflow_chunk`] writes the pair or neither. There is no code path that produces one
+///   without the other, so every `parameters` chunk of ours has our envelope beside it.
+/// * We never write into a file we did not encode, so a foreign PNG never gains our keyword. A
+///   `parameters` chunk with no `sceneworks:workflow` beside it therefore came from another tool
+///   and is left alone — including on the copy this function has just produced, which is what makes
+///   the operation idempotent.
+///
+/// The honest limit: a SceneWorks image whose envelope chunk some *other* tool removed, leaving the
+/// `parameters` chunk in place, reads to us as a foreign A1111 file and keeps it. Nothing in the
+/// bytes distinguishes that case, our own strip never produces it, and treating every `parameters`
+/// chunk as ours would trade a hypothetical leak for a certain one — scrubbing a stranger's metadata
+/// out of their file on an operation that promised to remove *the workflow*.
+///
 /// # Errors
 /// [`WorkflowChunkError::Png`], with a detail naming which of the three it was.
 pub fn workflow_chunk_spans(bytes: &[u8]) -> Result<Vec<Span>, WorkflowChunkError> {
     if bytes.len() < PNG_SIGNATURE.len() || bytes[..PNG_SIGNATURE.len()] != PNG_SIGNATURE {
         return Ok(Vec::new());
     }
-    let mut spans: Vec<Span> = Vec::new();
+    // Candidates rather than spans: whether the `parameters` entries are ours is not known until
+    // the whole walkable region has been seen, so the decision is deferred to the end of the walk.
+    let mut candidates: Vec<(Span, ChunkOwner)> = Vec::new();
     let mut cursor = PNG_SIGNATURE.len();
     let mut past_iend = false;
 
@@ -491,25 +667,33 @@ pub fn workflow_chunk_spans(bytes: &[u8]) -> Result<Vec<Span>, WorkflowChunkErro
                 });
             }
             let tail = &bytes[cursor..];
-            if contains_workflow_keyword(tail) {
+            // A tail we cannot walk is only safe to copy through when there is nothing of ours in
+            // it. `parameters` is scanned for as `parameters\0` — the keyword AND its payload
+            // separator — because the bare word is ordinary English and would refuse benign tails,
+            // and only when the walk already found our envelope, which is the same co-presence rule
+            // the walkable region uses. Applying it differently in the two places would mean a file
+            // whose `parameters` chunk we would have LEFT alone could still refuse to copy.
+            let ours = candidates
+                .iter()
+                .any(|(_, owner)| *owner == ChunkOwner::Envelope);
+            if let Some(found) = hidden_keyword(tail, ours) {
                 return Err(WorkflowChunkError::Png {
                     detail: format!(
                         "{} bytes of trailing data at byte {cursor} are not chunk framing and \
-                         carry `{WORKFLOW_CHUNK_KEYWORD}`, so a copy of this file cannot be \
-                         vouched for",
+                         carry `{found}`, so a copy of this file cannot be vouched for",
                         tail.len()
                     ),
                 });
             }
             // Benign trailing bytes. Not walkable, nothing of ours in them, so they ride through.
-            return Ok(spans);
+            return Ok(resolve_spans(candidates));
         };
         let kind = &bytes[cursor + 4..cursor + 8];
         if kind == b"IEND" {
             past_iend = true;
         }
-        if is_workflow_text_chunk(kind, &bytes[cursor + 8..end - 4]) {
-            spans.push(Span { start: cursor, end });
+        if let Some(owner) = text_chunk_owner(kind, &bytes[cursor + 8..end - 4]) {
+            candidates.push((Span { start: cursor, end }, owner));
         }
         cursor = end;
     }
@@ -522,7 +706,28 @@ pub fn workflow_chunk_spans(bytes: &[u8]) -> Result<Vec<Span>, WorkflowChunkErro
             ),
         });
     }
-    Ok(spans)
+    Ok(resolve_spans(candidates))
+}
+
+/// Which of the two keywords a walked text chunk carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkOwner {
+    /// [`WORKFLOW_CHUNK_KEYWORD`]. Always ours, always removed.
+    Envelope,
+    /// [`PARAMETERS_CHUNK_KEYWORD`]. Ours only when an [`Self::Envelope`] chunk is beside it.
+    Parameters,
+}
+
+/// Apply the co-presence rule and drop the ownership tags.
+fn resolve_spans(candidates: Vec<(Span, ChunkOwner)>) -> Vec<Span> {
+    let ours = candidates
+        .iter()
+        .any(|(_, owner)| *owner == ChunkOwner::Envelope);
+    candidates
+        .into_iter()
+        .filter(|(_, owner)| ours || *owner == ChunkOwner::Envelope)
+        .map(|(span, _)| span)
+        .collect()
 }
 
 /// The complement of `removed` over `0..total`: the spans a strip keeps, ascending.
@@ -551,17 +756,26 @@ pub fn kept_spans(total: usize, removed: &[Span]) -> Vec<Span> {
     kept
 }
 
-/// Whether [`WORKFLOW_CHUNK_KEYWORD`] appears anywhere in `haystack`, as raw bytes.
+/// The keyword of ours that appears in `haystack`, if any, as a raw byte search.
 ///
-/// The same thing a `grep` for our keyword would find, which is the point: the guard it backs is
-/// about what a stranger's tooling can dig out of bytes we could not parse, not about what our own
-/// reader would load.
-fn contains_workflow_keyword(haystack: &[u8]) -> bool {
-    let needle = WORKFLOW_CHUNK_KEYWORD.as_bytes();
-    haystack.len() >= needle.len()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
+/// The same thing a `grep` would find, which is the point: the guard it backs is about what a
+/// stranger's tooling can dig out of bytes we could not parse, not about what our own reader would
+/// load.
+///
+/// `include_parameters` is the co-presence rule arriving out here. The A1111 keyword is searched for
+/// as `parameters\0` — the keyword plus the NUL that separates it from the payload in all three text
+/// chunk types — because `parameters` on its own is ordinary English and would refuse to copy a file
+/// whose benign trailing note happened to use the word.
+fn hidden_keyword(haystack: &[u8], include_parameters: bool) -> Option<&'static str> {
+    let contains = |needle: &[u8]| {
+        haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
+    };
+    if contains(WORKFLOW_CHUNK_KEYWORD.as_bytes()) {
+        return Some(WORKFLOW_CHUNK_KEYWORD);
+    }
+    let mut framed = PARAMETERS_CHUNK_KEYWORD.as_bytes().to_vec();
+    framed.push(0);
+    (include_parameters && contains(&framed)).then_some(PARAMETERS_CHUNK_KEYWORD)
 }
 
 /// One past the CRC of the chunk starting at `cursor`, or `None` when the header or the payload it
@@ -573,22 +787,25 @@ fn chunk_end(bytes: &[u8], cursor: usize) -> Option<usize> {
     (end <= bytes.len()).then_some(end)
 }
 
-/// Whether a chunk of type `kind` carrying `data` is a text chunk under our keyword.
+/// Which of our two keywords a chunk of type `kind` carrying `data` is under, if either.
 ///
 /// All three text types lay their payload out as `keyword NUL …`, so the keyword is the payload up
 /// to its first NUL in every case. Matched byte-exactly: PNG keywords are case-sensitive, and
 /// [`read_workflow_chunk`] resolves the keyword the same way, so `Sceneworks:Workflow` is a
 /// different keyword to both halves.
-fn is_workflow_text_chunk(kind: &[u8], data: &[u8]) -> bool {
+fn text_chunk_owner(kind: &[u8], data: &[u8]) -> Option<ChunkOwner> {
     if !TEXT_CHUNK_TYPES.iter().any(|text| *text == kind) {
-        return false;
+        return None;
     }
     let keyword = data.split(|byte| *byte == 0).next().unwrap_or_default();
-    keyword == WORKFLOW_CHUNK_KEYWORD.as_bytes()
+    if keyword == WORKFLOW_CHUNK_KEYWORD.as_bytes() {
+        return Some(ChunkOwner::Envelope);
+    }
+    (keyword == PARAMETERS_CHUNK_KEYWORD.as_bytes()).then_some(ChunkOwner::Parameters)
 }
 
-/// Copy `source` to `destination` with any [`WORKFLOW_CHUNK_KEYWORD`] chunk excised, and report
-/// whether one was there (sc-15953).
+/// Copy `source` to `destination` with every chunk this app wrote excised, and report whether any
+/// were there (sc-15953).
 ///
 /// The "Save As without the workflow" seam. A file with nothing to strip is copied through
 /// [`std::fs::copy`] — the same call the plain Save As makes — so the two paths produce the same
@@ -828,24 +1045,38 @@ fn workflow_chunk_after_image_data<R: BufRead + Seek>(
 /// as it appears on disk, including its 4-byte length, 4-byte type, keyword, separators and CRC.
 ///
 /// Exists so the per-image cost of sc-15948 is a measured number rather than an estimate; it is
-/// what `the_chunk_stays_a_text_chunk_and_not_a_payload` in `tests/workflow_png.rs` reports and
-/// bounds.
+/// what `the_chunks_stay_text_chunks_and_not_a_payload` in `tests/workflow_png.rs` reports and
+/// bounds. [`parameters_chunk_size`] is the other half of that cost.
 ///
 /// # Errors
 /// [`WorkflowChunkError::Encode`] if the envelope cannot be serialized or compressed.
 pub fn workflow_chunk_size(share: &WorkflowShare) -> Result<usize, WorkflowChunkError> {
-    use png::text_metadata::EncodableTextChunk;
-
     let text = serde_json::to_string(share).map_err(|error| WorkflowChunkError::Encode {
         detail: error.to_string(),
     })?;
-    let mut encoded = Vec::new();
-    workflow_chunk(text)
-        .encode(&mut encoded)
-        .map_err(|error| WorkflowChunkError::Encode {
-            detail: error.to_string(),
-        })?;
-    Ok(encoded.len())
+    TextChunk::Utf8(workflow_chunk(text))
+        .framed()
+        .map(|f| f.len())
+}
+
+/// Size of the A1111 `parameters` chunk `share` would occupy in a PNG of `encoded` pixels, in
+/// bytes, framing included (sc-15957).
+///
+/// Takes the encoded geometry for the same reason
+/// [`crate::workflow_parameters::parameters_text`] does: `Size` is emitted only when the envelope's
+/// requested geometry IS the file's, so the chunk's size is a fact about a particular write rather
+/// than about the envelope alone.
+///
+/// # Errors
+/// [`WorkflowChunkError::Encode`] if the chunk cannot be encoded — which for this chunk means a
+/// text `png` refuses, and is why the ASCII/UTF-8 choice is made in one place.
+pub fn parameters_chunk_size(
+    share: &WorkflowShare,
+    encoded: (u32, u32),
+) -> Result<usize, WorkflowChunkError> {
+    parameters_chunk(parameters_text(share, encoded))
+        .framed()
+        .map(|framed| framed.len())
 }
 
 #[cfg(test)]
@@ -865,7 +1096,16 @@ mod tests {
     }
 
     /// A PNG carrying exactly `chunks`, in memory.
+    ///
+    /// Takes `iTXt` chunks because that is what every adversarial fixture here needs; the mixed
+    /// list the real writer produces goes through [`png_with_chunks`].
     fn png_with(chunks: &[ITXtChunk]) -> Vec<u8> {
+        let owned: Vec<TextChunk> = chunks.iter().cloned().map(TextChunk::from).collect();
+        png_with_chunks(&owned)
+    }
+
+    /// A PNG carrying exactly `chunks` of either text type.
+    fn png_with_chunks(chunks: &[TextChunk]) -> Vec<u8> {
         let mut bytes = Vec::new();
         encode_png_with_text(&rgb_fixture(), &mut bytes, chunks).expect("fixture PNG encodes");
         bytes
@@ -1513,6 +1753,98 @@ mod tests {
             "the tail must survive byte for byte alongside the excision"
         );
         assert_eq!(read_workflow_chunk(&stripped), Ok(None));
+    }
+
+    #[test]
+    fn a_parameters_chunk_hiding_past_iend_refuses_only_when_the_file_is_ours() {
+        // The sc-15957 half of the unwalkable-tail guard, and the one place the co-presence rule
+        // had to be applied twice or the two halves would disagree with each other.
+        //
+        // The needle out here is `parameters\0` rather than the bare keyword, because `parameters`
+        // is ordinary English: scanning for the word alone would refuse to copy any file whose
+        // benign trailing note happened to contain it. The NUL is the payload separator every text
+        // chunk type puts after its keyword, so this is the chunk and not the word.
+        let mut hidden_parameters = PARAMETERS_CHUNK_KEYWORD.as_bytes().to_vec();
+        hidden_parameters.push(0);
+        hidden_parameters.extend_from_slice(b"the prompt that must not leave\nSeed: 1");
+        let hidden = framed_chunk(b"tEXt", &hidden_parameters, Some(0x7FFF_FFFF));
+
+        // (1) OURS: an envelope chunk pre-IDAT and a `parameters` chunk hidden in a tail we cannot
+        //     walk. Stripping would have removed the envelope and reported success while the prompt
+        //     rode out in the leftover, which is the exact failure the sc-15953 control exists to
+        //     prevent.
+        let mut ours = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        ours.extend_from_slice(&hidden);
+        let refused = strip_workflow_chunk(&ours);
+        assert!(
+            matches!(refused, Err(WorkflowChunkError::Png { .. })),
+            "a hidden `{PARAMETERS_CHUNK_KEYWORD}` chunk in OUR file must refuse: got {refused:?}"
+        );
+        let Err(WorkflowChunkError::Png { detail }) = refused else {
+            unreachable!("asserted above")
+        };
+        assert!(
+            detail.contains(PARAMETERS_CHUNK_KEYWORD) && detail.contains("trailing"),
+            "the refusal must name what it found and where: {detail:?}"
+        );
+
+        // (2) NOT OURS: the same tail on a file with no envelope chunk. We do not strip a foreign
+        //     A1111 block, walkable or not, so refusing to copy over one would be a refusal about
+        //     something we were never going to remove.
+        let mut foreign = png_with(&[]);
+        foreign.extend_from_slice(&hidden);
+        assert_eq!(
+            strip_workflow_chunk(&foreign),
+            Ok(None),
+            "a foreign file's hidden A1111 block is not ours to remove, so the copy is a no-op"
+        );
+
+        // (3) And the word on its own, in a file that IS ours, is still benign: an appended note
+        //     mentioning parameters must not make the file unsavable.
+        let mut noted = png_with_workflow_text(&minimal_envelope_json("a lighthouse"));
+        noted.extend_from_slice(b"\x00\x01a note about the parameters someone appended");
+        let stripped = strip_workflow_chunk(&noted)
+            .expect("a benign tail must not be an error")
+            .expect("the pre-IDAT chunk is still removed");
+        assert_eq!(read_workflow_chunk(&stripped), Ok(None));
+    }
+
+    #[test]
+    fn a_second_parameters_chunk_in_a_file_of_ours_comes_out_too() {
+        // Co-presence decides ownership per FILE, not per chunk, so a file carrying both our pair
+        // and a third-party `parameters` chunk is a case the rule cannot split — and it is worth
+        // knowing which way it falls. It falls toward removal: a `parameters` chunk in a file of
+        // ours is treated as ours. Recorded rather than hidden, because the alternative (keeping a
+        // duplicate keyword we cannot tell apart) would leave one of our own blocks behind.
+        //
+        // The name says which way, because this is the question a future reader greps for: the
+        // third-party chunk does NOT survive. `an_imported_a1111_image_keeps_its_own_parameters_
+        // block` in `tests/workflow_parameters.rs` is the case where one does — a foreign file with
+        // no envelope beside it, which the strip never touches at all.
+        //
+        // Our writer never produces this shape: it writes exactly one `parameters` chunk into a
+        // file it encoded from pixels, so a second one is something a third party appended
+        // afterwards.
+        let mut duplicate = PARAMETERS_CHUNK_KEYWORD.as_bytes().to_vec();
+        duplicate.push(0);
+        duplicate.extend_from_slice(b"appended by another tool");
+        let spliced = splice_after_ihdr(
+            &png_with_workflow_text(&minimal_envelope_json("a lighthouse")),
+            &framed_chunk(b"tEXt", &duplicate, None),
+        );
+        let stripped = strip_workflow_chunk(&spliced)
+            .expect("walks")
+            .expect("had something to take out");
+        assert!(
+            !contains_bytes(&stripped, PARAMETERS_CHUNK_KEYWORD.as_bytes()),
+            "no `{PARAMETERS_CHUNK_KEYWORD}` chunk may survive a strip of a file that is ours"
+        );
+        assert!(stripped == png_with(&[]));
+    }
+
+    /// Raw byte search, for assertions about what a stranger's tooling would find.
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

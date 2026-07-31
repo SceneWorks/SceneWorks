@@ -56,11 +56,15 @@ The block is a single JSON object written into the PNG as a compressed `iTXt` te
 identified by a marker key rather than by position, so a reader can tell our block from
 Automatic1111's `parameters` or ComfyUI's `prompt` / `workflow` without sniffing the body.
 
+A second, smaller block rides beside it in the A1111 convention, purely so third-party galleries can
+*display* something — see [The `parameters` chunk](#the-parameters-chunk-an-a1111-readable-trailer).
+
 <!-- PINNED: identity -->
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
 | `WORKFLOW_CHUNK_KEYWORD` | `sceneworks:workflow` | The PNG `iTXt` keyword the JSON lives under. |
+| `PARAMETERS_CHUNK_KEYWORD` | `parameters` | The PNG text keyword the A1111 trailer lives under. |
 | `WORKFLOW_SHARE_MARKER_KEY` | `sceneworksWorkflow` | The JSON key whose presence makes the blob ours. |
 | `WORKFLOW_KIND_IMAGE` | `image` | The marker's value for the image lane. |
 | `WORKFLOW_SHARE_SCHEMA_VERSION` | `1` | The contract version this build writes and reads. |
@@ -135,6 +139,116 @@ rule exists for.
 Adding a field does not need a version bump: an older reader drops what it does not recognize.
 Bump only when a field changes meaning or disappears — and a bump means every older build stops
 reading the file at all, rather than reading it partially.
+
+## The `parameters` chunk: an A1111-readable trailer
+
+Every embedded PNG carries a **second** text chunk, under the unprefixed keyword `parameters`, in
+the layout AUTOMATIC1111's WebUI popularised (sc-15957):
+
+```
+<prompt>
+Negative prompt: <negative>
+Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <producer.version>
+```
+
+Civitai and most galleries and viewers parse that block. They **display** generation settings; they
+do not execute them — which is what makes it worth writing for models those tools have never heard
+of. A Krea or FLUX.2 image posted to a gallery shows its prompt and seed instead of arriving as
+opaque pixels. Judge it on that: it is a display-legibility feature, not an execution-interop one,
+and `sceneworks:workflow` remains the only block a SceneWorks install reads back.
+
+**It is not ComfyUI's format.** ComfyUI embeds `workflow` / `prompt` chunks holding a serialized
+node graph. SceneWorks has no node graph and emitting a fake one would misrepresent the product.
+
+### It is a second rendering, not a second channel
+
+The trailer is written from the **already-sanitized envelope** above, never from the raw job payload.
+Everything on this page therefore applies to it unchanged: a key the allow-list withholds cannot
+appear in it, because the renderer never sees one. `Version:` is fed from `producer.version` off that
+same envelope, so the two blocks in one file cannot disagree about which build wrote it, and
+[the setting](#the-setting) governs both together — off means neither is written.
+
+### Omit rather than approximate
+
+A guessed mapping ships misleading data to a public gallery, and nobody downstream can tell a guess
+from a fact. So every field below is an exact restatement of something the envelope holds, and
+anything without a clean equivalent is **left out rather than approximated**.
+
+<!-- PINNED: a1111-fields -->
+
+| Field | What it is |
+| --- | --- |
+| `Steps` | `advanced.steps`, when it is a whole number of at least one and no multi-phase schedule overrides it. |
+| `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. |
+| `CFG scale` | `advanced.guidanceScale`, only when `advanced.guidanceMethod` is absent. The studio emits that key only for a method that is not plain CFG, so its presence means the number is not a CFG scale. |
+| `Seed` | `seed`, verbatim — the seed of this image, which is the only one the envelope carries. |
+| `Size` | `width` x `height`, only when they are the dimensions of the file being written. |
+| `Model` | `model`, the catalog slug, verbatim. A1111's companion `Model hash` is omitted: we have no checkpoint hash to give. |
+| `Version` | `producer.version` off the envelope's own producer block. |
+
+<!-- END PINNED: a1111-fields -->
+
+The prompt is always the first line, even when empty, because the layout is positional. The
+`Negative prompt:` line is omitted entirely when there is no negative prompt, which is what A1111
+itself does. Values containing a comma, a colon or a newline are JSON-quoted, mirroring A1111's own
+`quote()` — without that, a comma inside a model slug would split one field into two for every
+reader in the wild.
+
+**The settings line is withheld whole below three pairs.** A1111's parser puts a trailing line of
+fewer than three `Key: value` pairs back into the *prompt*, and every gallery modelled on it does the
+same — so a two-pair line is not a thin settings block, it is a wrong prompt. `SETTINGS_PAIR_FLOOR`
+in `workflow_parameters.rs` drops the line rather than emitting one below the threshold. Every
+shipping lane clears it unaided; the thinnest, a standalone upscale, emits exactly
+`Seed` + `Model` + `Version` and clears it by nothing at all, which is why the floor is a guard
+rather than an observation.
+
+What is deliberately **not** in the trailer, and why: the multi-phase Krea schedule (a list of
+`(steps, guidance)` pairs has no single-number form — and its presence suppresses `Steps` and `CFG
+scale` too, because a top-level number beside it would describe a run that did not happen);
+`textStyleGain`; `scheduler` / `schedulerShift` (A1111's `Schedule type` is a noise schedule, ours
+is closer to its *sampler* — two plausible mappings and no correct one); `strength` (the sense is
+lane-dependent, and the candle fork lane inverts it); `upscale.*` (A1111's hires fix is a specific
+latent second pass, ours is a post-pass on the decoded image); `loras[]` (A1111 carries them by
+rewriting the prompt, and editing the user's prompt to smuggle a resource list in is fabrication);
+`count`; the control-overlay fields; `faceRestore` (A1111's field names an engine and ours is a
+boolean); and the tier / kernel / GPU keys, which the allow-list withholds so this rendering could
+not see them if it wanted to.
+
+### `tEXt` when the text is ASCII, `iTXt` when it is not
+
+Deliberately different from the envelope chunk's compressed `iTXt`, because a different audience
+reads it. `PIL.PngImagePlugin.PngInfo.add_text` — what A1111 writes through, and what third-party
+parsers are tested against — writes an uncompressed `tEXt` when the value encodes as Latin-1 and
+falls back to an uncompressed `iTXt` when it does not. So **PIL's boundary is Latin-1, not ASCII**;
+ours is narrower on purpose, and differs only in the U+00A0..U+00FF band, where a `tEXt` chunk's raw
+0xE9 byte is `é` to a Latin-1 reader and a replacement character to the very common reader that
+assumes UTF-8. `iTXt` is UTF-8 by specification, so both classes of reader agree. Uncompressed in
+both arms, matching PIL's default: being findable is the entire value of the chunk.
+
+Uncompressed is not free, and the size is worth stating rather than waving at. On the representative
+recipe the trailer is **186 bytes** framed, beside a 565-byte compressed envelope chunk. With both
+prose fields at the sanitizer's 16 KiB `PROSE_MAX_BYTES` cap it is **32,913 bytes** — against a
+467-byte envelope chunk carrying the same prose deflated. That is the ceiling, not an estimate: no
+other field on the line is prose, so 2 x 16 KiB plus a settings line is the whole of it.
+
+It stays uncompressed at that size, and the ratio is the reason rather than the absolute number. The
+file already holds a compact copy of every byte in the trailer — that is what the envelope chunk
+beside it *is* — so compressing this one saves bytes the file has already spent and risks the single
+property it exists for. A gallery that cannot find the block gets nothing; one that finds a 33 KB
+block displays the prompt. `the_parameters_chunk_at_the_prose_cap_is_the_worst_case` in
+`crates/sceneworks-core/tests/workflow_png.rs` measures both rows.
+
+`pil_agrees_with_our_encoding_choice` in `crates/sceneworks-core/tests/workflow_parameters.rs` runs
+the real library, asserts it reads both of our chunks back verbatim, and asserts PIL's own boundary
+so a future Pillow that moved it fails here rather than leaving this paragraph describing a library
+that changed. It skips loudly when Python or Pillow is not installed.
+
+### Reading A1111 and ComfyUI PNGs is a different story
+
+This is a write-only convention here. The reader resolves `sceneworks:workflow` and nothing else, and
+a foreign `parameters` chunk is an absence. Parsing one — mapping unknown samplers and model names
+onto this install's catalog, and degrading well when the mapping fails — is genuinely useful and
+much larger, and is deliberately not part of this contract.
 
 ## What travels
 
@@ -801,10 +915,30 @@ the PNG write seam.
   than "not found" — a sharing violation, an ACL error — embedding is off. "Absent" and "unreadable"
   are different states, and collapsing them is how a deliberate opt-out silently inverts itself. A
   file that is present and readable but not parseable falls back to the default, which is on.
-- Turning it off changes nothing about images already written. The chunk is in those files. To
-  share one of those without the block, use **Save a copy without the workflow** on the asset —
-  which excises the chunk from the copied bytes and leaves the asset alone. The browser and LAN
-  download does the same server-side, through `?stripWorkflow=true` on the file route.
+- **It governs both chunks.** The envelope and the A1111 `parameters` trailer hang off the same
+  decision at the same seam, so off means neither is written. There is no arrangement in which the
+  prompt rides out in the trailer after the switch was turned off.
+- Turning it off changes nothing about images already written. The chunks are in those files. To
+  share one of those without them, use **Save a copy without the workflow** on the asset — which
+  excises **both** from the copied bytes and leaves the asset alone. The browser and LAN download
+  does the same server-side, through `?stripWorkflow=true` on the file route.
+
+### The strip has to take the `parameters` chunk too, and one rule decides whose it is
+
+A trailer left behind by "Save a copy without the workflow" would put the prompt in a file the user
+deliberately stripped, with no way for them to know. So it comes out.
+
+But `parameters` is *the* generic keyword — an A1111 or ComfyUI export the user imported carries one
+too, and stripping ours is not a licence to scrub someone else's metadata out of their image. The two
+are separated by **co-presence**: a `parameters` chunk is treated as ours only when the file also
+carries a `sceneworks:workflow` chunk. That is exact rather than heuristic in both directions,
+because the writer emits the pair or neither, and nothing writes our keyword into a file we did not
+encode. It also makes the operation idempotent — stripping an already-stripped copy is a clean no-op.
+
+The honest limit, recorded rather than left to be rediscovered: a SceneWorks image whose envelope
+chunk some *other* tool removed, leaving the trailer, reads to us as a foreign A1111 file and keeps
+it. Nothing in the bytes distinguishes that case, our own strip never produces it, and treating every
+`parameters` chunk as ours would trade a hypothetical leak for a certain one.
 
 That control is named by exactly one constant, `SAVE_WITHOUT_WORKFLOW_LABEL`, and it is reachable
 from three places rather than one: a button beside **Save As…** in the advanced preview, the
