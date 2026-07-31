@@ -1528,6 +1528,23 @@ fn resolved_steps_for_share(
         .and_then(|steps| u32::try_from(steps).ok())
 }
 
+/// Return a sampler name that the worker recorded after resolving the actual execution path.
+///
+/// `resolvedSampler` is deliberately separate from the request's `advanced.sampler`: some lanes
+/// ignore that request setting and choose their sampler inside the runtime. Promotion is bound to
+/// the worker-selected imported-Krea adapter, not to any field in the client payload; the Krea
+/// execution seam overwrites this raw fact before writing the asset. Keep both the route and value
+/// vocabularies narrow until another execution lane records a proven value of its own.
+fn resolved_sampler_for_share<'a>(adapter: &str, raw_settings: &'a JsonObject) -> Option<&'a str> {
+    if !matches!(adapter, "mlx_krea_imported" | "candle_krea_imported") {
+        return None;
+    }
+    raw_settings
+        .get("resolvedSampler")
+        .and_then(Value::as_str)
+        .filter(|sampler| matches!(*sampler, "euler"))
+}
+
 /// Save image `index` (its RGB8 `pixels`) under `assets/images/` and return the flat
 /// fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -1587,6 +1604,9 @@ pub(crate) fn write_image_asset(
             || share.omitted.iter().any(|field| field == OMITTED_PHASES);
         if let Some(steps) = resolved_steps_for_share(payload, &raw_settings, has_multi_phase) {
             share.advanced.insert("steps".to_owned(), json!(steps));
+        }
+        if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
+            share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
         // This function only ever writes a BASE render. The inline-upscale post-pass writes its
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
