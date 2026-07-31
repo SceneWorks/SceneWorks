@@ -12,6 +12,10 @@ import {
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  RUNG4_APPLICABILITIES,
+  RUNG4_IMPLEMENTATIONS,
+  RUNG4_REQUEST_PEAKS,
+  familyGroup,
   familyStory,
   mlxRequiredHostBytes,
   modelStory,
@@ -76,6 +80,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "manifest",
     "memoryStrategy",
     "mlxFitGate",
+    "rung4Survey",
     "vramGate",
   ]);
   assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
@@ -178,7 +183,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix();
-  assert.equal(matrix.schemaVersion, 3);
+  assert.equal(matrix.schemaVersion, 4);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -655,5 +660,540 @@ test("a shipping control lane is declared, not inferred from having been measure
     control.filter((cell) => cell.state === "Verified").length,
     0,
     "declaring a lane must not manufacture verification — no overlay cell has been measured",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// SC-15969 — the rung-4 applicability survey.
+// ---------------------------------------------------------------------------
+
+const SURVEY_URL = new URL("../config/rung4-applicability-survey.json", import.meta.url);
+
+async function surveyFixture() {
+  return JSON.parse(await readFile(SURVEY_URL, "utf8"));
+}
+
+test("every advertised family/backend has a rung-4 verdict, and it reaches its cells", async () => {
+  const matrix = await buildMatrix();
+  const rung4 = matrix.cells.filter(
+    (cell) => cell.rung === "bounded_transformer_residency",
+  );
+  assert.ok(rung4.length > 1000);
+
+  // The field rides exactly the rung-4 cells. Asserted in BOTH directions: a rung-4 cell that
+  // escaped the survey, and the field drifting onto another rung where a consumer would read a
+  // verdict that was never made about it.
+  assert.ok(rung4.every((cell) => cell.rung4Survey?.story === 15969));
+  assert.equal(
+    matrix.cells.filter(
+      (cell) => cell.rung !== "bounded_transformer_residency" && "rung4Survey" in cell,
+    ).length,
+    0,
+  );
+
+  // Coverage is over what the CATALOG advertises, not over what the survey happens to list, so a
+  // family added without a verdict fails here rather than reporting Missing as though surveyed.
+  const advertised = new Set(
+    matrix.models.flatMap((model) =>
+      model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`),
+    ),
+  );
+  const surveyed = new Set(
+    matrix.rung4SurveyRows.map((row) => `${row.familyStory}:${row.backend}`),
+  );
+  assert.deepEqual([...surveyed].sort(), [...advertised].sort());
+  assert.equal(matrix.summary.rung4Survey.surveyedFamilyBackends, advertised.size);
+});
+
+test("the two rung-4 findings stay separate: structural applicability never implies the peak moved", async () => {
+  // The epic's non-negotiable in test form. `partial`/`full` says the architecture CAN be windowed;
+  // it must never be readable as evidence that doing so is worth selecting. The only two families
+  // claiming `moves` are the two with measured request-peak evidence.
+  const matrix = await buildMatrix();
+  const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
+  assert.deepEqual(
+    moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
+    ["15510:mlx", "15517:candle"],
+  );
+  assert.ok(
+    matrix.rung4SurveyRows.every(
+      (row) => row.requestPeak === "unmeasured" || row.implementation !== "none",
+    ),
+    "a request-peak verdict can only come from a family that has something to measure",
+  );
+
+  // Applicable-but-unmeasured is the common case and must remain expressible: these families are
+  // structurally capable and still carry no peak claim at all.
+  const capableUnmeasured = matrix.rung4SurveyRows.filter(
+    (row) => row.structuralApplicability !== "none" && row.requestPeak === "unmeasured",
+  );
+  assert.ok(capableUnmeasured.length > 25);
+});
+
+test("partial applicability is recorded rather than rounded to Implemented or Structurally N/A", async () => {
+  const matrix = await buildMatrix();
+
+  // SDXL is the story's named trap: a U-Net whose lowest-resolution level is a genuine 10-deep
+  // transformer stack. Rounding it to Structurally N/A would exempt it from the ladder outright.
+  const sdxl = matrix.rung4SurveyRows.find(
+    (row) => row.familyStory === 15525 && row.backend === "mlx",
+  );
+  assert.equal(sdxl.structuralApplicability, "partial");
+  const sdxlCell = matrix.cells.find(
+    (cell) => cell.modelId === "sdxl" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.equal(sdxlCell.state, "Missing", "applicable-but-unimplemented is Missing, not N/A");
+  assert.ok(
+    sdxlCell.rung4Survey.blockStacks.some(
+      (stack) => stack.windowable && /10 per Transformer2D/.test(stack.blocks),
+    ),
+    "the windowable sub-stack must be named, since that is what makes it partial rather than N/A",
+  );
+  assert.ok(
+    sdxlCell.rung4Survey.blockStacks.some((stack) => !stack.windowable),
+    "and so must the remainder that stays resident",
+  );
+
+  // Kolors reuses the same U-Net module, so it must reach the same verdict rather than being
+  // classified from its family name.
+  const kolors = matrix.rung4SurveyRows.find(
+    (row) => row.familyStory === 15521 && row.backend === "mlx",
+  );
+  assert.equal(kolors.structuralApplicability, "partial");
+});
+
+test("an implemented family is Implemented/unverified only where the provider actually exposes it", async () => {
+  const matrix = await buildMatrix();
+  const implemented = matrix.cells.filter(
+    (cell) =>
+      cell.rung === "bounded_transformer_residency" &&
+      cell.state === "Implemented/unverified",
+  );
+  assert.ok(implemented.length > 0);
+
+  // MLX Z-Image ships rung 4 (SC-15754) and the matrix reported it Missing until this survey.
+  const zImage = implemented.filter((cell) => cell.backend === "mlx");
+  assert.deepEqual(
+    [...new Set(zImage.map((cell) => cell.modelId))].sort(),
+    ["z_image", "z_image_edit", "z_image_turbo"],
+  );
+  assert.ok(
+    zImage.every(
+      (cell) =>
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.strategyParameters.transformerWindowComponent === "Dit",
+    ),
+    "the published window size and default component scope travel with the cell",
+  );
+
+  // Candle Krea's contract is gated on the turbo descriptor id, and its edit modes route to
+  // descriptors that do not return it. A family- or entry-level claim alone would over-report both.
+  const krea = implemented.filter((cell) => cell.backend === "candle");
+  assert.ok(krea.every((cell) => cell.modelId === "krea_2_turbo"));
+  assert.ok(krea.every((cell) => cell.mode === "text_to_image"));
+  assert.equal(
+    matrix.cells.filter(
+      (cell) =>
+        cell.modelId === "krea_2_raw" &&
+        cell.rung === "bounded_transformer_residency" &&
+        cell.state === "Implemented/unverified",
+    ).length,
+    0,
+    "krea_2_raw does not get its sibling's contract",
+  );
+});
+
+test("rung 4 is not claimed where its declared rung-1 prerequisite is absent", async () => {
+  // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
+  // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and
+  // SenseNova are the epic's own uncovered-rung-1 families.
+  const matrix = await buildMatrix();
+  for (const modelId of ["mage_flow", "sensenova_u1_8b"]) {
+    const staged = matrix.cells.filter(
+      (cell) => cell.modelId === modelId && cell.rung === "staged_residency",
+    );
+    assert.ok(staged.length > 0);
+    assert.ok(
+      staged.every((cell) => cell.state === "Missing"),
+      `${modelId}: fixture assumes rung 1 is unavailable`,
+    );
+    const rung4 = matrix.cells.filter(
+      (cell) => cell.modelId === modelId && cell.rung === "bounded_transformer_residency",
+    );
+    assert.ok(
+      rung4.every((cell) => cell.state === "Missing"),
+      `${modelId}: rung 4 cannot be reachable without rung 1`,
+    );
+    assert.ok(
+      rung4.every((cell) => cell.rung4Survey.structuralApplicability !== "none"),
+      `${modelId}: the architecture is fine — the verdict must not read as Structurally N/A`,
+    );
+  }
+});
+
+test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing separating these two families", async () => {
+  // The mutation check for the prerequisite. Both fixtures below claim a rung-4 implementation the
+  // real providers do not have; the ONLY difference between them is whether the entry advertises
+  // rung 1. Mage-Flow does not (the epic's uncovered-rung-1 set), SANA does. If the rung-4 arm
+  // stopped consulting `stagedResidencyIsAvailable`, the Mage-Flow half would go green — which is
+  // exactly the false claim `gen_core::memory_strategy`'s prerequisite edge exists to prevent.
+  const claimImplemented = async (group, entry) => {
+    const survey = await surveyFixture();
+    const verdict = survey.families[group].backends.mlx;
+    verdict.implementation = "shared-primitive";
+    verdict.implementedEntries = [entry];
+    verdict.strategyParameters = { transformerWindowSize: 1 };
+    const matrix = await buildMatrix({
+      sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+    });
+    const of = (rung) =>
+      matrix.cells.filter(
+        (cell) => cell.modelId === entry && cell.backend === "mlx" && cell.rung === rung,
+      );
+    return { rung1: of("staged_residency"), rung4: of("bounded_transformer_residency") };
+  };
+
+  const withoutRung1 = await claimImplemented("15509", "mage_flow");
+  assert.ok(withoutRung1.rung1.length > 0 && withoutRung1.rung4.length > 0);
+  assert.ok(
+    withoutRung1.rung1.every((cell) => cell.state === "Missing"),
+    "fixture assumes Mage-Flow advertises no MLX rung 1",
+  );
+  assert.ok(
+    withoutRung1.rung4.every((cell) => cell.state === "Missing"),
+    "a rung-4 implementation claim must not survive an absent rung-1 prerequisite",
+  );
+
+  const withRung1 = await claimImplemented("15523", "sana_1600m");
+  assert.ok(
+    withRung1.rung1.every((cell) => cell.state === "Implemented/unverified"),
+    "fixture assumes SANA advertises MLX rung 1",
+  );
+  assert.ok(
+    withRung1.rung4.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.strategyParameters.transformerWindowSize === 1,
+    ),
+    "with the prerequisite present the same claim IS honoured — so the assertion above is not vacuous",
+  );
+});
+
+test("overlay incompatibility is a provider fact, applied where evidenced and nowhere else", async () => {
+  const matrix = await buildMatrix();
+  const na = matrix.cells.filter(
+    (cell) =>
+      cell.rung === "bounded_transformer_residency" && cell.state === "Structurally N/A",
+  );
+  assert.ok(na.length > 0);
+  assert.ok(
+    na.every((cell) => cell.backend === "candle" && cell.modelId === "krea_2_turbo"),
+    "only Krea's Candle loader folds adapters into the base weight at load",
+  );
+  assert.ok(na.every((cell) => cell.overlay !== "none"));
+  assert.ok(
+    na.every((cell) => cell.evidence.structural.length >= 2),
+    "a Structurally N/A verdict carries its static evidence, in both repos",
+  );
+
+  // The exemption reaches only cells whose entry AND mode actually have the streaming path. Without
+  // that scoping it spread to krea_2_raw, which has no streaming path at all, and to krea_2_turbo's
+  // edit modes — exempting cells from the calibration workload on the strength of a path that does
+  // not exist there.
+  assert.ok(na.every((cell) => cell.mode === "text_to_image"));
+  assert.equal(
+    matrix.cells.filter(
+      (cell) =>
+        cell.modelId === "krea_2_raw" &&
+        cell.rung === "bounded_transformer_residency" &&
+        cell.state === "Structurally N/A",
+    ).length,
+    0,
+    "krea_2_raw has no streaming path, so its overlay cells are Missing, not exempt",
+  );
+
+  // The flag is its own field. `structuralApplicability` keeps reporting the ARCHITECTURE, which for
+  // Krea is a windowable 28-block trunk however its adapters are installed.
+  assert.ok(na.every((cell) => cell.rung4Survey.overlayIncompatible === true));
+  assert.ok(na.every((cell) => cell.rung4Survey.structuralApplicability === "partial"));
+  assert.equal(
+    matrix.cells.filter((cell) => cell.rung4Survey?.structuralApplicability === "none").length,
+    0,
+    "no family in the catalog is architecturally inapplicable, so no cell may publish `none`",
+  );
+
+  // The contrast that makes this a provider fact rather than a rung fact: MLX Z-Image replays
+  // forward-time residuals onto each materialized block, so its overlay cells stream fine.
+  const zImageOverlay = matrix.cells.filter(
+    (cell) =>
+      cell.modelId === "z_image_turbo" &&
+      cell.backend === "mlx" &&
+      cell.rung === "bounded_transformer_residency" &&
+      cell.overlay === "lora",
+  );
+  assert.ok(zImageOverlay.length > 0);
+  assert.ok(zImageOverlay.every((cell) => cell.state === "Implemented/unverified"));
+});
+
+test("a Structurally N/A survey verdict without structural evidence is rejected", async () => {
+  // AC4: the epic accepts a static N/A verdict BECAUSE the evidence is present. An `applicability:
+  // "none"` with an empty `structural` array would turn that allowance into a bare assertion, so it
+  // must fail generation rather than emit an unevidenced exemption.
+  const survey = await surveyFixture();
+  survey.families["15525"].backends.mlx.structuralApplicability = "none";
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    /static provider evidence/,
+  );
+
+  // With evidence it is accepted, and it reaches the cell as Structurally N/A carrying that
+  // evidence — the positive control, so the rejection above is not passing for an unrelated reason.
+  survey.families["15525"].backends.mlx.structural = [
+    { source: "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs", reason: "fixture" },
+  ];
+  const matrix = await buildMatrix({
+    sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+  });
+  const cells = matrix.cells.filter(
+    (cell) => cell.modelId === "sdxl" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.ok(cells.length > 0);
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Structurally N/A" &&
+        cell.evidence.structural.some((entry) => entry.reason === "fixture") &&
+        cell.rung4Survey.structuralApplicability === "none",
+    ),
+  );
+});
+
+test("a survey that contradicts itself or misses a family fails generation", async () => {
+  const survey = await surveyFixture();
+
+  const missing = await surveyFixture();
+  delete missing.families["15525"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(missing) } }),
+    /no rung-4 survey verdict/,
+  );
+
+  const contradictory = await surveyFixture();
+  contradictory.families["15509"].backends.mlx.implementedEntries = ["mage_flow"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
+    /the two must agree/,
+  );
+
+  const foreign = await surveyFixture();
+  foreign.families["15510"].backends.mlx.implementedEntries.push("qwen_image");
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
+    /belongs to another family/,
+  );
+
+  const unknown = await surveyFixture();
+  unknown.families["15509"].backends.mlx.structuralApplicability = "probably";
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unknown) } }),
+    /unknown structuralApplicability/,
+  );
+
+  const unevidenced = await surveyFixture();
+  unevidenced.families["15509"].backends.mlx.evidence = [];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unevidenced) } }),
+    /cite at least one source/,
+  );
+
+  // The positive control for all five: the shipped survey builds.
+  await buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+});
+
+test("a survey edit rotates the source fingerprint", async () => {
+  // The survey is now a generated-matrix input, so it has to be inside the staleness tripwire.
+  // Without this, editing a verdict would leave `sceneWorksRevision` claiming the same provenance.
+  const baseline = await buildMatrix();
+  const survey = await surveyFixture();
+  survey.families["15523"].backends.mlx.summary = `${survey.families["15523"].backends.mlx.summary}.`;
+  const edited = await buildMatrix({
+    sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+  });
+  assert.notEqual(
+    edited.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.equal(edited.generatedFrom.sources.rung4Survey.path, SOURCE_PATHS.rung4Survey);
+});
+
+test("the survey vocabulary, the generator's enums and the published schema agree", async () => {
+  // Three copies of the same vocabulary — the survey file documents it, the generator validates
+  // against it, the schema constrains the artifact. Nothing connected them, so a value added to one
+  // could be silently rejected by another; the generator would then fail on a survey the schema
+  // considers valid, or vice versa.
+  const schema = JSON.parse(
+    await readFile(new URL("../packages/schemas/memory-matrix.schema.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(schema.$defs.rung4StructuralApplicability.enum, [...RUNG4_APPLICABILITIES]);
+  assert.deepEqual(schema.$defs.rung4Implementation.enum, [...RUNG4_IMPLEMENTATIONS]);
+  assert.deepEqual(schema.$defs.rung4RequestPeak.enum, [...RUNG4_REQUEST_PEAKS]);
+
+  // Both places the schema constrains these values must go through the SAME definition. A second
+  // inline copy is what the test above cannot see drifting.
+  for (const properties of [
+    schema.$defs.rung4SurveyVerdict.properties,
+    schema.properties.rung4SurveyRows.items.properties,
+  ]) {
+    assert.equal(properties.structuralApplicability.$ref, "#/$defs/rung4StructuralApplicability");
+    assert.equal(properties.implementation.$ref, "#/$defs/rung4Implementation");
+    assert.equal(properties.requestPeak.$ref, "#/$defs/rung4RequestPeak");
+  }
+
+  // The survey file documents the same vocabulary. Compared as SETS: the documentation order is
+  // presentational, and coupling it to the enum order would redden on a harmless reorder.
+  const survey = await surveyFixture();
+  const sorted = (values) => [...values].sort();
+  assert.deepEqual(
+    sorted(Object.keys(survey.vocabulary.structuralApplicability)),
+    sorted(RUNG4_APPLICABILITIES),
+  );
+  assert.deepEqual(sorted(Object.keys(survey.vocabulary.implementation)), sorted(RUNG4_IMPLEMENTATIONS));
+  assert.deepEqual(sorted(Object.keys(survey.vocabulary.requestPeak)), sorted(RUNG4_REQUEST_PEAKS));
+});
+
+test("a block stack may not name another family's catalog entry", async () => {
+  // `blockStacks[].entries` is published onto every rung-4 cell of the family, so a typo'd or foreign
+  // id becomes a per-entry "fact" about entries that are not in the family at all. `implementedEntries`
+  // was checked from the start; this field was added later and inherited nothing.
+  const foreign = await surveyFixture();
+  foreign.families["15522"].backends.mlx.blockStacks[0].entries = ["qwen_image"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
+    /blockStacks.*names qwen_image, which belongs to another family/,
+  );
+
+  const invented = await surveyFixture();
+  invented.families["15522"].backends.mlx.blockStacks[0].entries = ["totally_made_up_entry"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(invented) } }),
+    /names totally_made_up_entry/,
+  );
+});
+
+test("every control-advertising family inventories its control-branch stack", async () => {
+  // A control route holds a SECOND transformer resident alongside the trunk, which is exactly the
+  // quantity a partial verdict exists to state. z-image was inventoried first and the rest were not,
+  // so the inventory said different things about the same shape depending on the family.
+  const matrix = await buildMatrix();
+  const controlFamilies = new Set(
+    matrix.cells
+      .filter((cell) => cell.rung === "bounded_transformer_residency" && cell.overlay === "control")
+      .map((cell) => `${familyGroup(cell.modelId)}:${cell.backend}`),
+  );
+  assert.ok(controlFamilies.size >= 10);
+  for (const key of controlFamilies) {
+    const cell = matrix.cells.find(
+      (candidate) =>
+        candidate.rung === "bounded_transformer_residency" &&
+        candidate.overlay === "control" &&
+        `${familyGroup(candidate.modelId)}:${candidate.backend}` === key,
+    );
+    const controlStacks = cell.rung4Survey.blockStacks.filter((stack) =>
+      /control|ControlNet|IdentityNet/i.test(stack.name),
+    );
+    assert.ok(
+      controlStacks.length > 0,
+      `${key}: advertises a control overlay but its block-stack inventory names no control stack`,
+    );
+  }
+});
+
+test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {
+  // Coverage runs both ways. `rung4SurveyRows` is derived from the generated cells, so a verdict for
+  // a family or backend the catalog does not advertise appears nowhere at all — it would sit in the
+  // file being maintained, reviewed and trusted while having no effect.
+  const survey = await surveyFixture();
+  survey.families["15523"].backends.candle = {
+    ...survey.families["15523"].backends.mlx,
+    summary: "fixture: SANA advertises no candle entry",
+  };
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    /the verdict reaches no cell/,
+  );
+});
+
+test("`requires-different-primitive` is a finding, never an exemption or an implementation", async () => {
+  // AC5 as a machine check. This value exists so a family the primitive cannot express in its
+  // current SHAPE is recorded as a finding rather than rounded to Structurally N/A. Two ways that
+  // could rot: recording it with no finding (indistinguishable from a bare Missing), or recording it
+  // alongside an implementation claim (a contradiction). Both must fail generation.
+  const bare = await surveyFixture();
+  bare.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  bare.families["15511"].backends.mlx.findings = [];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(bare) } }),
+    /must state the shape gap as a finding/,
+  );
+
+  const contradictory = await surveyFixture();
+  contradictory.families["15510"].backends.mlx.structuralApplicability =
+    "requires-different-primitive";
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
+    /declaring the primitive's shape insufficient/,
+  );
+
+  // Stated as a finding, it builds — and the cell reports Missing with the verdict attached, NOT
+  // Structurally N/A. That distinction is the whole point of the value.
+  const stated = await surveyFixture();
+  stated.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
+  const matrix = await buildMatrix({
+    sourceOverrides: { rung4Survey: JSON.stringify(stated) },
+  });
+  const cells = matrix.cells.filter(
+    (cell) =>
+      cell.modelId === "qwen_image" &&
+      cell.backend === "mlx" &&
+      cell.rung === "bounded_transformer_residency",
+  );
+  assert.ok(cells.length > 0);
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Missing" &&
+        cell.rung4Survey.structuralApplicability === "requires-different-primitive" &&
+        cell.rung4Survey.findings.length > 0,
+    ),
+  );
+});
+
+test("`does-not-move` is carried through to the cell rather than collapsed into `unmeasured`", async () => {
+  // The epic's non-negotiable has a positive form: a family MEASURED not to move the request peak is
+  // a different fact from one nobody has measured, and the selector must be able to tell them apart.
+  // No shipped family records it yet, so this pins the path rather than the data.
+  const survey = await surveyFixture();
+  survey.families["15511"].backends.mlx.requestPeak = {
+    finding: "does-not-move",
+    reason: "fixture",
+  };
+  const matrix = await buildMatrix({
+    sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+  });
+  assert.ok(
+    matrix.cells
+      .filter(
+        (cell) =>
+          cell.modelId === "qwen_image" &&
+          cell.backend === "mlx" &&
+          cell.rung === "bounded_transformer_residency",
+      )
+      .every((cell) => cell.rung4Survey.requestPeak === "does-not-move"),
+  );
+  assert.equal(
+    matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
+      .requestPeak,
+    "does-not-move",
   );
 });

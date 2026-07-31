@@ -325,3 +325,104 @@ def test_matrix_schema_rejects_malformed_evidence_records():
     rejected(
         lambda evidence: evidence["loadability"][0].__setitem__("unchecked", True)
     )
+
+
+def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
+    """SC-15969: the per-family rung-4 applicability survey reaches the generated cells.
+
+    The survey exists so a rung-4 verdict is a generated cell rather than prose. Two things make it
+    real rather than decorative: it covers every (family, backend) the CATALOG advertises, and its
+    verdict is attached to exactly the rung-4 cells — a cell that escaped the survey, or a verdict
+    that drifted onto another rung, is a hole a consumer only finds at runtime.
+    """
+    matrix = load_matrix()
+    rung4 = [
+        cell
+        for cell in matrix["cells"]
+        if cell["rung"] == "bounded_transformer_residency"
+    ]
+    assert rung4
+    assert all(cell["rung4Survey"]["story"] == 15969 for cell in rung4)
+    assert not [
+        cell
+        for cell in matrix["cells"]
+        if cell["rung"] != "bounded_transformer_residency" and "rung4Survey" in cell
+    ]
+
+    rows = matrix["rung4SurveyRows"]
+    assert len(rows) == matrix["summary"]["rung4Survey"]["surveyedFamilyBackends"]
+    # `familyStory` is the family GROUP key, which is the family's MLX story id — the same key on
+    # both backends, unlike `cells[].owningFamilyStory`, which is the backend-scoped owner.
+    assert {(row["familyStory"], row["backend"]) for row in rows} == {
+        (model["owningFamilyStories"]["mlx"], backend)
+        for model in matrix["models"]
+        for backend in model["backends"]
+    }
+
+    # The two findings stay separate: an architecture that CAN be windowed is never, by itself,
+    # evidence that windowing it moves the request peak.
+    assert {row["requestPeak"] for row in rows} <= {"moves", "does-not-move", "unmeasured"}
+    assert [
+        (row["familyStory"], row["backend"])
+        for row in rows
+        if row["requestPeak"] == "moves"
+    ] == [(15510, "mlx"), (15517, "candle")]
+    assert all(
+        row["implementation"] != "none"
+        for row in rows
+        if row["requestPeak"] != "unmeasured"
+    )
+
+
+def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidence():
+    """Partial applicability is recorded, and a Structurally N/A cell always cites why."""
+    matrix = load_matrix()
+
+    # The story's named trap: a U-Net is not automatically Structurally N/A. SDXL's lowest level is
+    # a genuine 10-deep transformer stack, so the verdict is `partial` and the cell is Missing —
+    # applicable but unimplemented — rather than exempt from the ladder.
+    sdxl = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "sdxl"
+        and cell["rung"] == "bounded_transformer_residency"
+    ]
+    assert sdxl
+    assert {cell["rung4Survey"]["structuralApplicability"] for cell in sdxl} == {"partial"}
+    assert {cell["state"] for cell in sdxl} == {"Missing"}
+    stacks = sdxl[0]["rung4Survey"]["blockStacks"]
+    assert any(stack["windowable"] for stack in stacks)
+    assert any(not stack["windowable"] for stack in stacks)
+
+    for cell in matrix["cells"]:
+        if cell["rung"] != "bounded_transformer_residency":
+            continue
+        survey = cell["rung4Survey"]
+        if cell["state"] == "Structurally N/A":
+            assert cell["evidence"]["structural"], cell["id"]
+            # Exempt for exactly one of two reasons, and the cell says which: the ARCHITECTURE has
+            # nothing to window, or the provider's adapter mechanism cannot carry an overlay onto a
+            # rebuilt block. Conflating them would publish `none` for a family whose stack is
+            # perfectly windowable.
+            assert (
+                survey["structuralApplicability"] == "none"
+                or survey["overlayIncompatible"]
+            ), cell["id"]
+        else:
+            assert survey["structuralApplicability"] != "none", cell["id"]
+            assert not survey["overlayIncompatible"], cell["id"]
+
+    # An overlay exemption is only honest where the streaming path exists: on an entry with no such
+    # path the rung is Missing for the ordinary reason, and exempting it would presuppose a path
+    # that does not exist AND silently drop the cell from the calibration workload.
+    exempt_overlay = [
+        cell
+        for cell in matrix["cells"]
+        if cell["rung"] == "bounded_transformer_residency"
+        and cell["rung4Survey"]["overlayIncompatible"]
+    ]
+    assert exempt_overlay
+    assert all(cell["overlay"] != "none" for cell in exempt_overlay)
+    assert all(
+        cell["rung4Survey"]["implementation"] != "none" for cell in exempt_overlay
+    )

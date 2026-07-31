@@ -100,6 +100,63 @@
         "reason": { "type": "string", "minLength": 1 }
       }
     },
+    "rung4StructuralApplicability": {
+      "description": "How much of the family's transformer trunk `gen_core::block_window` can bound. `partial` is the value the five-state conformance vocabulary cannot express.",
+      "enum": ["full", "partial", "none", "requires-different-primitive"]
+    },
+    "rung4Implementation": {
+      "enum": ["shared-primitive", "provider-local", "none"]
+    },
+    "rung4RequestPeak": {
+      "description": "Whether bounding the trunk was MEASURED to move the request peak. Separate from applicability on purpose: a strategy that bounds a phase without moving the request peak is not a saving.",
+      "enum": ["moves", "does-not-move", "unmeasured"]
+    },
+    "rung4SurveyVerdict": {
+      "description": "SC-15969 per-family rung-4 applicability. `structuralApplicability` and `requestPeak` are two SEPARATE findings by design: a family can be structurally capable and still correctly default to not using the rung, because a strategy that bounds a phase without moving the request peak is not a saving. `partial` is the value the five-state conformance vocabulary cannot express — a trunk that is not one uniform stack. `overlayIncompatible` is deliberately NOT folded into `structuralApplicability`: it is a property of the provider's adapter mechanism, so a family whose stack is perfectly windowable would otherwise publish `none` on its overlay cells.",
+      "type": "object",
+      "required": [
+        "story",
+        "structuralApplicability",
+        "requestPeak",
+        "implementation",
+        "overlayIncompatible",
+        "summary",
+        "blockStacks",
+        "findings"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "story": { "const": 15969 },
+        "structuralApplicability": { "$ref": "#/$defs/rung4StructuralApplicability" },
+        "requestPeak": { "$ref": "#/$defs/rung4RequestPeak" },
+        "implementation": { "$ref": "#/$defs/rung4Implementation" },
+        "overlayIncompatible": {
+          "description": "True when THIS cell is exempt because the provider's adapter mechanism cannot carry an overlay onto a rebuilt block. Scoped to cells whose entry and mode actually have the streaming path: on a route with no such path the rung is Missing for the ordinary reason, so a sibling cell of the same provider can read `false` while the provider-level fact still holds.",
+          "type": "boolean"
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "blockStacks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "blocks", "windowable"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "blocks": { "type": "string", "minLength": 1 },
+              "windowable": { "type": "boolean" },
+              "entries": {
+                "description": "Present when the stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict. Every id is checked to belong to the owning family at generation time.",
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "findings": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
     "backendScopedStories": {
       "description": "Owning Shortcut story per advertised backend (SC-15812). An mlx-only entry carries only `mlx`; a Candle cell can never be covered by the MLX story.",
       "type": "object",
@@ -118,14 +175,15 @@
     "evidenceDimensions",
     "summary",
     "models",
+    "rung4SurveyRows",
     "cells",
     "calibrationRuns",
     "modelSlices"
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed — it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure.",
-      "const": 3
+      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed — it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure. 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were added, and both are REQUIRED — the first at the document root, the second on exactly the rung-4 cells. The fields are additive, so a version-3 READER is unaffected; but a version-3 DOCUMENT has neither and therefore no longer validates against this schema, which is what the version number identifies. Bumping is the honest call: leaving it at 3 would mean a schema that rejects documents legitimately stamped 3.",
+      "const": 4
     },
     "generatedFrom": { "type": "object" },
     "conformanceStates": {
@@ -148,8 +206,48 @@
         "cells",
         "mlxStagedStaticCoverage",
         "mlxStagedStaticCoverageDenominator",
-        "fullModels"
-      ]
+        "fullModels",
+        "rung4Survey"
+      ],
+      "properties": {
+        "rung4Survey": {
+          "type": "object",
+          "required": [
+            "story",
+            "surveyedFamilyBackends",
+            "structuralApplicability",
+            "requestPeak",
+            "implementation"
+          ],
+          "properties": {
+            "story": { "const": 15969 },
+            "surveyedFamilyBackends": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "rung4SurveyRows": {
+      "description": "One row per surveyed (family story, backend). Derived from the generated cells, not re-read from the survey file, so a verdict that never reached a cell cannot appear here as though it had.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "familyStory",
+          "backend",
+          "structuralApplicability",
+          "requestPeak",
+          "implementation"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "familyStory": { "type": "integer" },
+          "backend": { "enum": ["mlx", "candle"] },
+          "structuralApplicability": { "$ref": "#/$defs/rung4StructuralApplicability" },
+          "requestPeak": { "$ref": "#/$defs/rung4RequestPeak" },
+          "implementation": { "$ref": "#/$defs/rung4Implementation" }
+        }
+      }
     },
     "models": {
       "type": "array",
@@ -243,6 +341,7 @@
           "calibrationFingerprint": { "type": ["string", "null"] },
           "owningFamilyStory": { "type": "integer" },
           "owningModelStory": { "type": "integer" },
+          "rung4Survey": { "$ref": "#/$defs/rung4SurveyVerdict" },
           "evidence": {
             "type": "object",
             "additionalProperties": false,
@@ -286,7 +385,18 @@
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "description": "SC-15969: the survey verdict rides exactly the rung-4 cells. Required there so a cell cannot escape the survey; forbidden elsewhere so the field cannot drift onto another rung and be read as one.",
+            "if": {
+              "required": ["rung"],
+              "properties": { "rung": { "const": "bounded_transformer_residency" } }
+            },
+            "then": { "required": ["rung4Survey"] },
+            "else": { "not": { "required": ["rung4Survey"] } }
+          }
+        ]
       }
     },
     "calibrationRuns": {

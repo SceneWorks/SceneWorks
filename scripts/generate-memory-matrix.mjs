@@ -692,6 +692,201 @@ function artifactEvidence(model, route, tier) {
   ];
 }
 
+export const RUNG4_APPLICABILITIES = Object.freeze([
+  "full",
+  "partial",
+  "none",
+  "requires-different-primitive",
+]);
+export const RUNG4_IMPLEMENTATIONS = Object.freeze(["shared-primitive", "provider-local", "none"]);
+export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unmeasured"]);
+
+/**
+ * Parse and validate the SC-15969 rung-4 applicability survey.
+ *
+ * The survey is hand-curated evidence, so every way it could be WRONG has to fail here rather than
+ * generate a plausible matrix. The checks that matter:
+ *
+ * - **Total coverage.** Every (family, backend) pair the catalog advertises needs a verdict. A
+ *   family added to `familyGroup` without a survey entry fails generation instead of quietly
+ *   emitting `Missing` rung-4 cells that read as surveyed.
+ * - **`Structurally N/A` is never assumed.** An `applicability: "none"` verdict without structural
+ *   evidence is rejected — the epic allows a static verdict *because* the evidence is present, and
+ *   an empty array would turn that allowance into a bare assertion.
+ * - **Implementation claims are per entry and mutually consistent.** `implementation: "none"` with
+ *   a non-empty `implementedEntries` (or the reverse) is a contradiction, and every named entry has
+ *   to belong to the family that claims it.
+ */
+export function parseRung4Survey(body, { familyGroups } = {}) {
+  const parsed = JSON.parse(body);
+  const families = parsed.families;
+  if (!families || typeof families !== "object") {
+    throw new Error("rung-4 survey: missing `families`");
+  }
+  const survey = new Map();
+  for (const [group, family] of Object.entries(families)) {
+    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
+      const at = `rung-4 survey ${family.name ?? group} (${backend})`;
+      if (!RUNG4_APPLICABILITIES.includes(verdict.structuralApplicability)) {
+        throw new Error(`${at}: unknown structuralApplicability ${JSON.stringify(verdict.structuralApplicability)}`);
+      }
+      if (!RUNG4_IMPLEMENTATIONS.includes(verdict.implementation)) {
+        throw new Error(`${at}: unknown implementation ${JSON.stringify(verdict.implementation)}`);
+      }
+      if (!RUNG4_REQUEST_PEAKS.includes(verdict.requestPeak?.finding)) {
+        throw new Error(`${at}: unknown requestPeak finding ${JSON.stringify(verdict.requestPeak?.finding)}`);
+      }
+      if (!verdict.evidence?.length) {
+        throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
+      }
+      if (verdict.structuralApplicability === "none" && !verdict.structural?.length) {
+        throw new Error(
+          `${at}: applicability "none" becomes a Structurally N/A cell, which the epic accepts only with static provider evidence — none is cited`,
+        );
+      }
+      const implemented = verdict.implementedEntries ?? [];
+      if ((verdict.implementation === "none") !== (implemented.length === 0)) {
+        throw new Error(
+          `${at}: implementation is ${verdict.implementation} but names ${implemented.length} catalog entries — the two must agree`,
+        );
+      }
+      if (implemented.length && !Object.keys(verdict.strategyParameters ?? {}).length) {
+        throw new Error(`${at}: an implemented family must publish the rung's own strategy parameters`);
+      }
+      if (verdict.implementedModes && !implemented.length) {
+        throw new Error(`${at}: implementedModes narrows implementedEntries, which is empty`);
+      }
+      if (verdict.implementedModes?.length === 0) {
+        throw new Error(`${at}: implementedModes is empty — omit it to mean every mode`);
+      }
+      if (familyGroups) {
+        // Both fields name catalog entries, and both are published onto cells, so both are checked.
+        // Only `implementedEntries` was at first, and a typo'd or foreign id in `blockStacks[].entries`
+        // then rode onto every rung-4 cell of the family as though it were a real per-entry fact.
+        const named = [
+          ...implemented.map((id) => [id, "implementedEntries"]),
+          ...(verdict.blockStacks ?? []).flatMap((stack) =>
+            (stack.entries ?? []).map((id) => [id, `blockStacks[${JSON.stringify(stack.name)}].entries`]),
+          ),
+        ];
+        for (const [id, field] of named) {
+          // `familyGroups` throws on an id the catalog does not know at all; both that and a
+          // real-but-foreign id are the same defect from this field's point of view.
+          let owner = null;
+          try {
+            owner = familyGroups(id);
+          } catch {
+            owner = null;
+          }
+          if (owner !== Number(group)) {
+            throw new Error(`${at}: ${field} names ${id}, which belongs to another family`);
+          }
+        }
+      }
+      if (verdict.overlayIncompatible && !verdict.overlayIncompatible.structural?.length) {
+        throw new Error(`${at}: an overlay incompatibility is a Structurally N/A verdict and needs structural evidence`);
+      }
+      // AC5 as a machine check rather than a convention. A family the primitive cannot express in its
+      // current SHAPE is a finding, not an exemption — so it may not be recorded as implemented, and
+      // it may not be recorded silently either: without the finding the value degrades to a bare
+      // `Missing` cell indistinguishable from "nobody has written it yet".
+      if (verdict.structuralApplicability === "requires-different-primitive") {
+        if (implemented.length) {
+          throw new Error(
+            `${at}: names implemented entries while declaring the primitive's shape insufficient — one of the two is wrong`,
+          );
+        }
+        if (!verdict.findings?.length) {
+          throw new Error(
+            `${at}: "requires-different-primitive" must state the shape gap as a finding, which is what distinguishes it from an N/A`,
+          );
+        }
+      }
+      survey.set(`${group}:${backend}`, verdict);
+    }
+  }
+  return survey;
+}
+
+/**
+ * The survey verdict as it appears ON a rung-4 cell.
+ *
+ * Built here rather than inside `strategyStatus` so that EVERY rung-4 cell carries it, including
+ * Krea's turboFit cell, whose state is decided by measured phase curves several arms earlier. A
+ * field present on 6,000 rung-4 cells and absent on one is the kind of hole a consumer only finds
+ * at runtime.
+ *
+ * The two findings the story asks for stay SEPARATE and both travel with the cell: structural
+ * applicability (can this architecture be windowed) and the request-peak finding (does doing so move
+ * the number that matters). A cell can be `partial`/`unmeasured`, which is neither "implemented" nor
+ * "not applicable" — the state the five-value conformance vocabulary alone cannot express.
+ */
+function rung4SurveyCell(survey, modelId, backend, overlayIncompatible) {
+  const verdict = survey.get(`${familyGroup(modelId)}:${backend}`);
+  if (!verdict) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
+  return {
+    story: 15969,
+    // Always the family's OWN verdict. Overlay incompatibility is a property of the provider's
+    // adapter mechanism, not of the architecture — Krea's 28-block trunk is windowable whatever its
+    // adapters do — so it travels in its own field. Folding it into `structuralApplicability` would
+    // publish `none` for a family whose stack is perfectly windowable, and a consumer filtering that
+    // field for architecturally-inapplicable families would read those cells as false positives.
+    structuralApplicability: verdict.structuralApplicability,
+    requestPeak: verdict.requestPeak.finding,
+    implementation: verdict.implementation,
+    overlayIncompatible,
+    summary: verdict.summary,
+    blockStacks: verdict.blockStacks ?? [],
+    findings: verdict.findings ?? [],
+  };
+}
+
+/**
+ * Coverage runs BOTH ways.
+ *
+ * Catalog -> survey is the one that matters at generation time: an unsurveyed family would emit
+ * `Missing` rung-4 cells that read as having been surveyed and found wanting.
+ *
+ * Survey -> catalog matters for the survey's own upkeep. `rung4SurveyRows` is derived from the
+ * generated cells, so a verdict for a family or backend the catalog no longer advertises simply
+ * never appears anywhere — it would sit in the file being maintained, reviewed and trusted while
+ * having no effect at all.
+ */
+export function assertRung4SurveyCoversEveryFamily(survey, models) {
+  const advertised = new Set(
+    models.flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
+  );
+  for (const key of advertised) {
+    if (!survey.has(key)) {
+      const [group, backend] = key.split(":");
+      throw new Error(
+        `family SC-${group} has no ${backend} rung-4 survey verdict, so its bounded_transformer_residency cells would report Missing without ever having been surveyed (SC-15969)`,
+      );
+    }
+  }
+  for (const key of survey.keys()) {
+    if (!advertised.has(key)) {
+      const [group, backend] = key.split(":");
+      throw new Error(
+        `rung-4 survey: family SC-${group} carries a ${backend} verdict, but the catalog advertises no ${backend} entry in that family — the verdict reaches no cell (SC-15969)`,
+      );
+    }
+  }
+}
+
+/**
+ * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same
+ * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm
+ * below reads the prerequisite from the SAME predicate the rung-1 arm uses. Restating it would let
+ * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
+ * reporting rung 4 as unreachable.
+ */
+function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines }) {
+  return backend === "mlx"
+    ? sequentialEngines.has(route.engine)
+    : model.candle?.sequentialPeakGb !== undefined || model.candle?.turboFit !== undefined;
+}
+
 function declaredEvidence(model, backend, tier) {
   const scope = model[backend] ?? {};
   const keys = [
@@ -709,7 +904,18 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-function strategyStatus({ backend, rung, route, provider, sequentialEngines, model, tier, mode, overlay }) {
+function strategyStatus({
+  backend,
+  rung,
+  route,
+  provider,
+  sequentialEngines,
+  model,
+  tier,
+  mode,
+  overlay,
+  rung4Survey,
+}) {
   const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
       binding.provider === provider &&
@@ -748,9 +954,7 @@ function strategyStatus({ backend, rung, route, provider, sequentialEngines, mod
   if (
     rung === "staged_residency" &&
     !(model.id === "krea_2_turbo" && backend === "candle") &&
-    ((backend === "mlx" && sequentialEngines.has(route.engine)) ||
-      (backend === "candle" &&
-        (model.candle?.sequentialPeakGb !== undefined || model.candle?.turboFit !== undefined)))
+    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines })
   ) {
     return {
       state: "Implemented/unverified",
@@ -822,24 +1026,62 @@ function strategyStatus({ backend, rung, route, provider, sequentialEngines, mod
           })),
       };
     }
-    if (rung === "bounded_transformer_residency" && overlay !== "none") {
+  }
+  // SC-15969. Everything above answers a cell from measured or manifest-declared evidence; this arm
+  // answers the rung-4 cells none of it reaches, from the per-family applicability survey. It is
+  // LAST on purpose — Krea's turboFit rung-4 cell keeps its phase-curve parameters and measured
+  // evidence rather than being flattened to the survey's structural verdict.
+  //
+  // The overlay branch used to be a hardcoded Krea special case here. It now comes from the survey,
+  // because the fact it encodes is a property of a provider's ADAPTER MECHANISM (fold-at-load vs
+  // forward-time residual), not of rung 4: MLX Z-Image streams overlays fine, and generalising
+  // Krea's rule to every family would have been wrong in the other direction.
+  if (rung === "bounded_transformer_residency") {
+    const verdict = rung4Survey.get(`${familyGroup(model.id)}:${backend}`);
+    if (!verdict) {
+      throw new Error(`${model.id}:${backend}: no rung-4 survey verdict (SC-15969)`);
+    }
+    // Implementation is per ENTRY and per MODE — inference may route a catalog entry's modes to
+    // different descriptors than the one carrying the contract — and the rung is unreachable without
+    // its declared rung-1 prerequisite however good the architecture is.
+    const implementedHere =
+      (verdict.implementedEntries ?? []).includes(model.id) &&
+      (verdict.implementedModes ?? [mode]).includes(mode) &&
+      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines });
+    if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",
-        source: "crates/sceneworks-worker/src/vram_gate.rs#krea_turbo_fit",
+        source: verdict.structural[0].source,
         parameters: {},
-        structural: [
-          {
-            source: "crates/sceneworks-worker/src/image_jobs/base.rs#allow_streamed_blocks",
-            reason: "load-time adapters are incompatible with streamed transformer blocks",
-          },
-        ],
+        structural: verdict.structural,
       };
     }
+    // Overlay incompatibility exempts only where the streaming path actually EXISTS. On an entry or
+    // mode that has no such path, rung 4 is Missing for the ordinary reason, and marking it
+    // structurally exempt would presuppose a path that does not exist — and quietly remove the cell
+    // from the calibration plan's workload as "no run needed".
+    if (implementedHere && overlay !== "none" && verdict.overlayIncompatible) {
+      return {
+        state: "Structurally N/A",
+        source: verdict.overlayIncompatible.structural[0].source,
+        parameters: {},
+        structural: verdict.overlayIncompatible.structural,
+        overlayIncompatible: true,
+      };
+    }
+    if (implementedHere) {
+      return {
+        state: "Implemented/unverified",
+        source: verdict.evidence[0].source,
+        parameters: verdict.strategyParameters,
+      };
+    }
+    return { state: "Missing", source: null, parameters: {} };
   }
   return { state: "Missing", source: null, parameters: {} };
 }
 
-function validateMatrix(matrix, expectedIds, backendTierOverrides) {
+function validateMatrix(matrix, expectedIds, backendTierOverrides, rung4Survey) {
   const ids = matrix.models.map((model) => model.id);
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
     throw new Error(`expected exactly ${EXPECTED_IMAGE_COUNT} image entries, found ${ids.length}`);
@@ -875,6 +1117,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
   }
   assertTwinCoverage(matrix.models);
   assertCellOwnershipIsBackendScoped(matrix.cells);
+  assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
   for (const model of matrix.models) {
     for (const map of ["owningFamilyStories", "owningModelStories"]) {
       const owned = Object.keys(model[map]).sort();
@@ -891,6 +1134,13 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides) {
     }
     if (cell.state === "Structurally N/A" && cell.evidence.structural.length === 0) {
       throw new Error(`${cell.id}: Structurally N/A classification has no structural evidence`);
+    }
+    // SC-15969: the survey verdict rides the rung-4 cells and only those. A rung-4 cell without one
+    // has escaped the survey; any other rung carrying one means the field has drifted off its rung.
+    if ((cell.rung === "bounded_transformer_residency") !== Boolean(cell.rung4Survey)) {
+      throw new Error(
+        `${cell.id}: rung4Survey must be present on exactly the bounded_transformer_residency cells`,
+      );
     }
     if (cell.state === "Verified") {
       const dynamic = cell.evidence.currentEnvironmentVerification;
@@ -915,6 +1165,7 @@ export const SOURCE_PATHS = Object.freeze({
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
   calibrationPlan: "config/memory-calibration-plan.json",
+  rung4Survey: "config/rung4-applicability-survey.json",
   cargo: "Cargo.toml",
 });
 
@@ -939,6 +1190,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = JSON.parse(bodies.calibrationPlan);
+  const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
   // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and
@@ -1016,6 +1268,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                 tier,
                 mode,
                 overlay,
+                rung4Survey,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -1127,6 +1380,16 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                 calibrationFingerprint: fingerprint,
                 owningFamilyStory,
                 owningModelStory,
+                ...(rung === "bounded_transformer_residency"
+                  ? {
+                      rung4Survey: rung4SurveyCell(
+                        rung4Survey,
+                        model.id,
+                        backend,
+                        status.overlayIncompatible === true,
+                      ),
+                    }
+                  : {}),
                 evidence: {
                   staticImplementation: status.source ? [{ source: status.source }] : [],
                   declaredCalibration: declaredEvidence(model, backend, tier),
@@ -1179,6 +1442,33 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
       cells.filter((cell) => cell.modelId === model.id).map((cell) => cell.id),
     ]),
   );
+  // SC-15969. One row per surveyed (family, backend), derived from the cells rather than re-read from
+  // the survey file — so a verdict that never reached a cell cannot appear in the summary as if it had.
+  const rung4SurveyRows = [
+    ...new Map(
+      cells
+        .filter((cell) => cell.rung === "bounded_transformer_residency" && cell.overlay === "none")
+        .map((cell) => [
+          `${familyGroup(cell.modelId)}:${cell.backend}`,
+          {
+            familyStory: familyGroup(cell.modelId),
+            backend: cell.backend,
+            structuralApplicability: cell.rung4Survey.structuralApplicability,
+            requestPeak: cell.rung4Survey.requestPeak,
+            implementation: cell.rung4Survey.implementation,
+          },
+        ]),
+    ).values(),
+  ].sort((left, right) =>
+    `${left.familyStory}:${left.backend}`.localeCompare(`${right.familyStory}:${right.backend}`),
+  );
+  const tally = (rows, key) =>
+    Object.fromEntries(
+      sortedUnique(rows.map((row) => row[key])).map((value) => [
+        value,
+        rows.filter((row) => row[key] === value).length,
+      ]),
+    );
   const mlxStagedModels = new Set(
     cells
       .filter(
@@ -1194,6 +1484,12 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
     // both, so the two shapes cannot share a version number — that is the whole job of this field.
     //
+    // 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were ADDED, and both are REQUIRED —
+    // the first at the document root, the second on every rung-4 cell. A version-3 document has
+    // neither, so it no longer validates against the schema that describes this one. That is the
+    // test: not "does an old reader break" (it does not — the fields are additive), but "is a
+    // document of the old shape still a document of this shape".
+    //
     // 3 (sc-16268): `cells[].evidenceRevision` was REMOVED. It stamped the same two constants into
     // every one of the ~7,360 rows — one distinct value, never conditional on the row's evidence
     // despite the name — so a fingerprint rotation rewrote ~14,700 lines and made any two
@@ -1202,7 +1498,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
     // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
     // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
     // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -1239,13 +1535,21 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
       ),
+      rung4Survey: {
+        story: 15969,
+        surveyedFamilyBackends: rung4SurveyRows.length,
+        structuralApplicability: tally(rung4SurveyRows, "structuralApplicability"),
+        requestPeak: tally(rung4SurveyRows, "requestPeak"),
+        implementation: tally(rung4SurveyRows, "implementation"),
+      },
     },
     models,
+    rung4SurveyRows,
     cells,
     calibrationRuns,
     modelSlices,
   };
-  validateMatrix(matrix, expectedIds, backendTierOverrides);
+  validateMatrix(matrix, expectedIds, backendTierOverrides, rung4Survey);
   return matrix;
 }
 
@@ -1286,6 +1590,24 @@ function renderMarkdown(matrix) {
   lines.push(
     "",
     "Per-model consumers must use `modelSlices` in the JSON artifact. A cell is Full only when every applicable rung is Verified or Structurally N/A; this static baseline intentionally reports zero Full models.",
+    "",
+    "## Rung 4 — per-family applicability survey (SC-15969)",
+    "",
+    "Source: `config/rung4-applicability-survey.json`, derived from the pinned inference revision's provider code. The two findings are deliberately separate: **can** the architecture be windowed, and **does** doing so move the request peak. A family can be structurally capable and still correctly default to not using the rung.",
+    "",
+    "`partial` means windowable over a sub-stack but not the whole trunk — neither Implemented nor Structurally N/A, and recorded rather than rounded to either.",
+    "",
+    "| Family story | Backend | Structural applicability | Implementation | Request peak |",
+    "| --- | --- | --- | --- | --- |",
+  );
+  for (const row of matrix.rung4SurveyRows) {
+    lines.push(
+      `| SC-${row.familyStory} | ${row.backend} | ${row.structuralApplicability} | ${row.implementation} | ${row.requestPeak} |`,
+    );
+  }
+  lines.push(
+    "",
+    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}. Per-cell verdicts, block-stack inventories and findings are in \`cells[].rung4Survey\` in the JSON artifact.`,
     "",
   );
   return lines.join("\n");
