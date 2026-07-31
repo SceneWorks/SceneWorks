@@ -12,7 +12,7 @@ fn extend_capabilities_unique(
     }
 }
 
-pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
+pub(crate) async fn discover_gpu(settings: &Settings, health: &GpuHealth) -> DiscoveredGpu {
     let requested_gpu_id = settings.gpu_id.as_str();
     if requested_gpu_id == "cpu" {
         return cpu_gpu();
@@ -52,8 +52,19 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
     // startup (`lib.rs`) BEFORE the job-claim loop, so every generation resolves against a populated
     // value; a worker that somehow never probed reads `None` and is treated as NVFP4-INELIGIBLE
     // (fail-safe: the tier falls back rather than routing an FP4 load at hardware that can't run it).
-    cache_compute_cap(compute_cap);
-    with_candle_capabilities(gpu, settings, compute_cap)
+    //
+    // Skipped while the GPU is UNUSABLE (sc-16260). `cache_compute_cap` is first-call-wins by
+    // design, and sc-16260 gave `discover_gpu` a second caller: the recovery re-check. Caching an
+    // unhealthy startup's probe would therefore be permanent — and on a host whose driver stack
+    // was still coming up, `nvidia-smi` can be unready too, so that permanent value would be the
+    // fail-safe `None`. The worker would recover, re-advertise everything, and still hide the
+    // NVFP4/ConvRot tiers for the rest of the process. Deferring means the recovery pass makes the
+    // first (and correct) call. An unhealthy worker publishing no cap is right anyway: it routes
+    // nothing, so there is no tier decision for it to inform.
+    if health.is_usable() {
+        cache_compute_cap(compute_cap);
+    }
+    with_candle_capabilities(gpu, settings, compute_cap, health)
 }
 
 /// Light up the Windows/CUDA candle SDXL lane on the discovered nvidia GPU (epic 3672, sc-3678).
@@ -68,19 +79,65 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
 ///
 /// All-targets signature so `discover_gpu` is uniform; a no-op everywhere except the Windows candle
 /// build with `backend_candle_enabled`, so production routing is unchanged until the lane is on.
+///
+/// **A failed startup CUDA preflight withholds this entire block (sc-16260).** `health` is the
+/// verdict of `preflight::cuda_preflight`, run once at GPU-worker startup by
+/// `crate::cuda_startup_health`. When the driver stack is unusable, every capability advertised
+/// below is one this worker is *certain* to fail — the generation would die at the first model
+/// load with the same `DriverError` the probe already saw. Withholding them degrades the worker
+/// so `jobs_store::worker_supports_job` refuses every generation job and the work stays QUEUED for
+/// a host that gets fixed instead of being claimed and failed one job at a time.
+///
+/// **The `candle` LANE MARKER is kept even when unhealthy — that is load-bearing, not an
+/// oversight.** The marker says "this host serves the candle lane", not "this worker can run your
+/// job", and two things read it that way:
+///
+///   * `jobs_store::fail_stranded_candle_jobs` treats "no live worker advertising `candle`" as
+///     candle being *unavailable* and TERMINALLY FAILS every queued candle-eligible job after the
+///     grace window — with a `candle_unavailable: ... confirm the candle worker is running`
+///     message that is both wrong (it is running) and silent about the driver. Since
+///     `SCENEWORKS_CANDLE_REQUIRED=1` ships in `docker-compose.yml`, `docker/rust.Dockerfile` and
+///     the desktop, dropping the marker would convert this story's "jobs wait for a fixed host"
+///     into "jobs fail en masse with a misleading error" — the exact opposite of AC 2.
+///   * `appHelpers::isPlaceholderOnlyGpuWorker` matches the bare `[placeholder, gpu, nvidia]`
+///     triple, and `App.jsx` filters those workers out of `visibleWorkers` entirely. Without the
+///     marker the Queue screen would render "No GPU workers registered" for a worker that is
+///     registered, heartbeating and reporting exactly why it cannot work — hiding the remedy this
+///     story exists to surface.
+///
+/// The marker routes nothing on its own: every candle branch in `worker_supports_job` falls
+/// through to the advertised-capability check, which now fails for every job type, and the
+/// `WorkerStatus::Unhealthy` backstop refuses the claim before that. So the marker buys the two
+/// behaviours above at no routing cost.
+///
+/// The routing consequence is deliberately paired with the visible one: the same verdict puts the
+/// worker in `WorkerStatus::Unhealthy` with the remedy attached, because a worker that silently
+/// advertises nothing while reporting "Ready" would leave an operator staring at a stalled queue.
 #[cfg_attr(
     not(all(not(target_os = "macos"), feature = "backend-candle")),
     allow(unused_mut, unused_variables)
 )]
-fn with_candle_capabilities(
+pub(crate) fn with_candle_capabilities(
     mut gpu: DiscoveredGpu,
     settings: &Settings,
     compute_cap: Option<f32>,
+    health: &GpuHealth,
 ) -> DiscoveredGpu {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
         if !derived.is_empty() {
+            // sc-16260: an unusable GPU advertises the lane marker and NOTHING ELSE. Every
+            // capability below names work this worker would be certain to fail — the generation
+            // would die at the first model load with the same `DriverError` the probe already saw
+            // — so none of them may be claimed. Returning here rather than filtering afterwards
+            // means a capability added below is withheld by construction, with no second list to
+            // keep in sync. See the doc comment for why the marker itself stays.
+            if !health.is_usable() {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown("candle".to_owned()));
+                return gpu;
+            }
             extend_capabilities_unique(&mut gpu.capabilities, derived);
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes

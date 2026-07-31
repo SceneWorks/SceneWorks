@@ -15,8 +15,23 @@ import {
 } from "./sorters.js";
 import { DEFAULT_ACCENT, isAccentId } from "./accents.js";
 
+/// A worker that is PRESENT — i.e. still heartbeating. This drives what gets RENDERED
+/// (`visibleWorkers` in App.jsx), so an `unhealthy` worker deliberately counts as active
+/// (sc-16260): it is registered, alive, and carrying the one message that explains why the queue
+/// is stalled. Filtering it here would delete its card and leave the Queue screen claiming "No GPU
+/// workers registered" about a worker that is very much registered.
+///
+/// "Present" is NOT "can take work" — for that, see `canWorkerTakeWork`.
 export function isActiveWorker(worker) {
   return worker.status !== "offline";
+}
+
+/// A worker that can actually be given work: present AND not reporting an unusable accelerator
+/// (sc-16260). Capability-readiness gates use this rather than [`isActiveWorker`], so a workflow
+/// is never reported ready on a machine whose GPU cannot be initialized. Mirrors the API's
+/// `person_readiness_from_workers`, which excludes the same two statuses.
+export function canWorkerTakeWork(worker) {
+  return worker.status !== "offline" && worker.status !== "unhealthy";
 }
 
 export function hasCapability(worker, capability) {

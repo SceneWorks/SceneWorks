@@ -1933,6 +1933,7 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
             current_job_id: Some(created.id.clone()),
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("busy heartbeat succeeds");
 
@@ -1943,6 +1944,7 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
             current_job_id: None,
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("heartbeat succeeds");
     let job = store.get_job(&created.id).expect("job loads");
@@ -2208,6 +2210,7 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
             current_job_id: None,
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("heartbeat succeeds");
     let job = store.get_job(&created.id).expect("job loads");
@@ -2261,6 +2264,7 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
             current_job_id: Some(created.id.clone()),
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("owner heartbeat succeeds");
     let baseline = store.get_job(&created.id).expect("job loads");
@@ -2280,6 +2284,7 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
             current_job_id: Some(created.id.clone()),
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("non-owner heartbeat still returns the worker snapshot");
     let after_intruder = store.get_job(&created.id).expect("job loads");
@@ -2320,6 +2325,7 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
             current_job_id: Some(created.id.clone()),
             loaded_models: Vec::new(),
             utilization: None,
+            status_reason: None,
         })
         .expect("owner heartbeat succeeds");
     let owner_refreshed = store.get_job(&created.id).expect("job loads");
@@ -3428,6 +3434,73 @@ fn candle_required_does_not_fail_when_a_live_candle_worker_is_present() {
     assert_eq!(
         store.get_job(&job.id).expect("job loads").status,
         JobStatus::Queued
+    );
+}
+
+/// sc-16260: an UNHEALTHY candle worker must keep candle-eligible work QUEUED, not let the grace
+/// sweep terminally fail it.
+///
+/// This is the trap the capability-withholding design walks straight into. The withheld set drops
+/// every job capability, and if it dropped the `candle` LANE MARKER too, `fail_stranded_candle_jobs`
+/// would see no live candle worker, conclude candle is unavailable, and fail every queued
+/// candle-eligible job after the grace window with `candle_unavailable: ... confirm the candle
+/// worker is running` — a message that is both wrong (it IS running) and silent about the driver.
+/// `SCENEWORKS_CANDLE_REQUIRED=1` ships in docker-compose, the Dockerfile and the desktop, so that
+/// is the default path for exactly the lane this story targets: it would have converted "one job
+/// fails at a time with the real CUDA error" into "all of them fail at once with a misleading one".
+///
+/// Hence the marker survives the withholding, and this pins it from the store's side.
+#[test]
+fn an_unhealthy_candle_worker_keeps_stranded_jobs_queued() {
+    let store = store("candle-strand-unhealthy");
+    // Exactly what `with_candle_capabilities` advertises for an unusable GPU: the lane marker and
+    // no job capability at all.
+    register_gpu_worker(
+        &store,
+        "worker-candle",
+        "0",
+        vec![
+            WorkerCapability::Placeholder,
+            WorkerCapability::Gpu,
+            WorkerCapability::Unknown("nvidia".to_owned()),
+            WorkerCapability::Unknown("candle".to_owned()),
+        ],
+    );
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-candle".to_owned(),
+            status: WorkerStatus::Unhealthy,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: Some("reboot onto the staged driver".to_owned()),
+        })
+        .expect("unhealthy heartbeat succeeds");
+
+    let job = job_of(
+        &store,
+        JobType::ImageGenerate,
+        json!({ "model": "z_image_turbo", "prompt": "p" }),
+    );
+    backdate_job_created_at(&store, &job.id);
+
+    let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");
+    assert!(
+        failed.is_empty(),
+        "an unhealthy candle worker is still a candle host — its queued work must WAIT for the          driver to be fixed, not be failed as candle_unavailable: {failed:?}"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued,
+        "the job must remain queued for a host that gets fixed"
+    );
+    // And the worker still claims nothing, so "queued" does not quietly become "claimed and failed".
+    assert!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("claim query succeeds")
+            .is_none(),
+        "the unhealthy worker must not claim the job it is keeping queued"
     );
 }
 
@@ -7044,6 +7117,7 @@ fn long_lived_connection_survives_many_sequential_ops() {
                 current_job_id: Some(job.id.clone()),
                 loaded_models: Vec::new(),
                 utilization: None,
+                status_reason: None,
             })
             .expect("heartbeat ok");
 
@@ -7112,5 +7186,107 @@ fn long_lived_connection_survives_many_sequential_ops() {
     assert_eq!(
         journal_mode, "wal",
         "WAL journal mode persisted on the db file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sc-16260: `unhealthy` is a first-class worker state, persisted with its remedy.
+// ---------------------------------------------------------------------------
+
+/// The status half end-to-end through the store: an `unhealthy` heartbeat persists BOTH the status
+/// and the host-side reason, that worker is then routed nothing, and a later healthy heartbeat
+/// clears the reason so a repaired host stops advertising a fix it no longer needs (AC 4).
+///
+/// `register_image_worker` advertises `image_generate`, so the claim below is genuinely eligible on
+/// capability alone — which is what makes the refusal attributable to the status.
+#[test]
+fn an_unhealthy_heartbeat_persists_its_reason_stops_claims_and_clears_on_recovery() {
+    let store = store("unhealthy-worker");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+
+    const REASON: &str =
+        "The NVIDIA kernel driver and the CUDA driver library on this machine are \
+                          different versions — reboot, then reopen SceneWorks.";
+    let worker = store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Unhealthy,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: Some(REASON.to_owned()),
+        })
+        .expect("unhealthy heartbeat succeeds");
+    assert_eq!(worker.status, WorkerStatus::Unhealthy);
+    assert_eq!(
+        worker.status_reason.as_deref(),
+        Some(REASON),
+        "the remedy must reach the snapshot the Queue screen renders"
+    );
+
+    assert!(
+        store
+            .claim_next_job("worker-1")
+            .expect("claim query succeeds")
+            .is_none(),
+        "an unhealthy worker must not be handed a job it is certain to fail"
+    );
+    assert_eq!(
+        store.get_job(&created.id).expect("job loads").status,
+        JobStatus::Queued,
+        "the job must remain QUEUED for a host that gets fixed, not be claimed and failed"
+    );
+
+    // Recovery: a plain idle heartbeat retires the reason, and the same job becomes claimable.
+    let worker = store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Idle,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: None,
+        })
+        .expect("idle heartbeat succeeds");
+    assert_eq!(worker.status, WorkerStatus::Idle);
+    assert_eq!(
+        worker.status_reason, None,
+        "a recovered worker must not keep telling operators to fix an already-fixed host"
+    );
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("the recovered worker claims the still-queued job");
+    assert_eq!(claimed.id, created.id);
+}
+
+/// Re-registration is the recovery path the worker actually takes (`recheck_gpu_health` re-runs
+/// `discover_gpu` and re-registers with the full capability set), so it must retire the stored
+/// reason too — otherwise a worker that recovered across a restart would advertise everything while
+/// still displaying the old remedy.
+#[test]
+fn registering_retires_a_previous_unhealthy_reason() {
+    let store = store("unhealthy-reregister");
+    register_image_worker(&store);
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Unhealthy,
+            current_job_id: None,
+            loaded_models: Vec::new(),
+            utilization: None,
+            status_reason: Some("reboot onto the staged driver".to_owned()),
+        })
+        .expect("unhealthy heartbeat succeeds");
+
+    register_image_worker(&store);
+    let worker = store.get_worker("worker-1").expect("worker loads");
+    assert_eq!(worker.status, WorkerStatus::Idle);
+    assert_eq!(
+        worker.status_reason, None,
+        "re-registering re-advertises what the worker can serve, so the old remedy must be retired"
     );
 }

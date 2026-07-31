@@ -361,6 +361,8 @@ pub struct WorkerHeartbeat {
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
     pub utilization: Option<WorkerUtilizationSnapshot>,
+    /// Host-side remedy for a [`WorkerStatus::Unhealthy`] worker (sc-16260); `None` otherwise.
+    pub status_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +489,10 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // sc-16260: why an `unhealthy` worker withdrew its capabilities — the host-side remedy,
+        // so the Queue screen can explain a stalled queue instead of leaving an operator to read
+        // container logs. Nullable and absent on every healthy worker.
+        ensure_column(&transaction, "workers", "status_reason", "text")?;
         // sc-2086: per-job peak GPU memory % and load %, written by the worker
         // along with progress so a completed row shows the peak the run reached.
         ensure_column(&transaction, "jobs", "peak_gpu_memory_pct", "real")?;
@@ -724,7 +730,11 @@ impl JobsStore {
             params![now],
         )?;
         transaction.execute(
-            "update workers set status = 'offline', current_job_id = null where status != 'offline'",
+            // sc-16260: `status_reason` is cleared alongside the status everywhere `offline` is
+            // written. It describes why an ALIVE worker withdrew its capabilities; on a worker we
+            // have just declared gone it is stale by construction, and `GET /api/v1/workers` would
+            // otherwise keep handing clients a host remedy for a worker that is no longer there.
+            "update workers set status = 'offline', current_job_id = null, status_reason = null              where status != 'offline'",
             [],
         )?;
         let updated_ids = interrupted_ids
@@ -1436,6 +1446,13 @@ impl JobsStore {
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
               status = case when workers.current_job_id is null then 'idle' else workers.status end,
+              -- A registration is the worker re-advertising what it can serve, so it also
+              -- retires any previous unhealthy reason (sc-16260): the recovery path re-registers
+              -- with the full capability set, and leaving the old remedy behind would tell an
+              -- operator to fix a host that is already fixed. An unhealthy worker re-asserts its
+              -- reason on the very next heartbeat, and its capabilities are withheld at
+              -- registration either way, so nothing routes to it during the gap.
+              status_reason = null,
               capabilities_json = excluded.capabilities_json,
               loaded_models_json = excluded.loaded_models_json,
               utilization_json = excluded.utilization_json,
@@ -1498,14 +1515,19 @@ impl JobsStore {
                    current_job_id = ?2,
                    loaded_models_json = ?3,
                    utilization_json = ?4,
-                   last_seen_at = ?5
-             where id = ?6
+                   status_reason = ?5,
+                   last_seen_at = ?6
+             where id = ?7
             ",
             params![
                 request.status.as_str(),
                 request.current_job_id,
                 dumps(&request.loaded_models)?,
                 optional_dumps(request.utilization.as_ref())?,
+                // Written unconditionally, so a worker that recovers clears its own reason on the
+                // very next heartbeat rather than carrying a stale remedy for a fixed host
+                // (sc-16260 AC 4). `None` on every non-unhealthy heartbeat.
+                request.status_reason,
                 now,
                 request.worker_id,
             ],
@@ -1593,6 +1615,7 @@ impl JobsStore {
                 update workers
                    set status = 'offline',
                        current_job_id = null,
+                       status_reason = null,
                        last_seen_at = ?1
                  where id in ({placeholders})
                 "
@@ -1671,6 +1694,7 @@ impl JobsStore {
             update workers
                set status = 'offline',
                    current_job_id = null,
+                   status_reason = null,
                    last_seen_at = ?1
              where id = ?2
             ",
@@ -3061,6 +3085,7 @@ fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
                 .as_deref(),
         ),
         utilization: loads_optional(row.get::<_, Option<String>>("utilization_json")?.as_deref()),
+        status_reason: row.get("status_reason")?,
         registered_at: row.get("registered_at")?,
         last_seen_at: row.get("last_seen_at")?,
         extra: Default::default(),
@@ -3592,6 +3617,18 @@ fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
 }
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
+    // sc-16260: a worker that has declared itself unhealthy — its accelerator is unusable, so
+    // every job it claims is one it is certain to fail — is handed nothing at all. This is the
+    // BACKSTOP, not the primary gate: the worker also withholds the capabilities it can no
+    // longer serve (`with_candle_capabilities`), which is what keeps `image_generate` and
+    // friends queued for a host that gets fixed. Both exist because they fail differently — the
+    // capability half is what the web's queue explanation and tier pickers already read, while
+    // this half holds for any future unhealthy reason whose capability set we don't yet know to
+    // trim. Refuses EVERY job type, not just GPU ones: "I cannot run work" is the whole claim
+    // the status makes, and the CPU utility lane is a separate worker.
+    if worker.status == WorkerStatus::Unhealthy {
+        return false;
+    }
     if job_requires_gpu(&job.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu") {
         return false;
     }

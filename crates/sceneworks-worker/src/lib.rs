@@ -324,6 +324,12 @@ mod sensenova_gpu_smoke;
 // hardware evidence backing `macOnly: false` / `candle_routed = true`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
+// Hardware-gated evidence that a FAILED `cuda_preflight` does not poison the process (sc-16260 AC 4).
+// Test-only + candle-only; hides the devices with `CUDA_VISIBLE_DEVICES=-1`, probes (must fail),
+// restores visibility and probes again in the SAME process — the exact move `recheck_gpu_health`
+// makes. Without that property the recovery re-check would be dead code however correct its Rust.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod cuda_preflight_gpu_smoke;
 // Real-weight GPU smoke for the candle Qwen-Image-Edit lane (sc-13534). Test-only + candle-only; drives
 // the WORKER's `resolve_qwen_edit_candle_base` (the tier/gate reconciliation this story landed) + a
 // bespoke `runtime_cuda::providers::qwen_image::QwenEdit` load + render, proving the resolver lands on the
@@ -955,12 +961,16 @@ fn should_run_cuda_preflight(settings: &Settings) -> bool {
 /// level — so the container's logs name the host-side fix rather than leaving an operator to infer
 /// it from a stream of failed jobs.
 ///
-/// It deliberately does **not** abort the process. The worker's registration + capability
-/// advertisement is what the API routes on, and tearing the process down here would turn a
-/// diagnosable, self-healing state (reboot the host, the next probe passes) into a crash loop with
-/// its own message. Surfacing this as a first-class *unhealthy worker status* would be the better
-/// end state, but that needs a new `WorkerStatus` variant plus API and UI surface — genuinely
-/// separate work, recorded on sc-16247 rather than smuggled in here.
+/// **sc-16260 acts on the verdict instead of only logging it.** The returned [`GpuHealth`] is
+/// threaded into `discover_gpu`, which withholds every candle capability when the GPU is unusable,
+/// and into the worker loop, which reports `WorkerStatus::Unhealthy` carrying the same reason.
+/// Together those mean a driver-mismatch host leaves generation QUEUED with a visible explanation
+/// instead of claiming and failing every routed job forever.
+///
+/// It deliberately does **not** abort the process. Tearing the process down here would turn a
+/// diagnosable, recoverable state into a crash loop with its own message, and the worker still has
+/// a job to do while degraded: hold its registration, report why, and re-probe (see
+/// [`GPU_HEALTH_RECHECK`]) so a host fixed without restarting the container recovers on its own.
 ///
 /// Gated to the GPU worker by [`should_run_cuda_preflight`]: the CPU utility loops never touch
 /// CUDA, and probing from each of them would build a throwaway CUDA context per utility process.
@@ -980,24 +990,156 @@ fn should_run_cuda_preflight(settings: &Settings) -> bool {
 /// (`spawn_inprocess_utility_worker`). That pool is `cpu` by default and so skips the probe
 /// entirely, but `SCENEWORKS_RUST_WORKER_GPU_ID` can override it — and a GPU-id override there
 /// would otherwise stall the API's runtime thread during startup.
-async fn log_cuda_preflight_failure(settings: &Settings) {
+async fn cuda_startup_health(settings: &Settings) -> GpuHealth {
+    let health = probe_cuda_health(settings).await;
+    if let Some(reason) = health.reason() {
+        tracing::error!(
+            event = "cuda_preflight_failed",
+            gpuId = %settings.gpu_id,
+            reason = %reason,
+            "SceneWorks GPU worker cannot acquire a CUDA device; generation capabilities withheld"
+        );
+    }
+    health
+}
+
+/// Run the probe and classify the outcome, with no logging of its own — so the startup call
+/// ([`cuda_startup_health`]) can be loud exactly once while the recovery re-check
+/// ([`recheck_gpu_health`]) stays quiet about a failure it has already reported.
+///
+/// A lane that does not probe ([`should_run_cuda_preflight`]) reports [`GpuHealth::Usable`]: the
+/// CPU utility loops and the macOS `mlx` worker must behave precisely as they did before this
+/// existed, so "no probe ran" is deliberately indistinguishable from "the probe passed".
+///
+/// **Only a BLOCKING failure makes the worker unhealthy** — the severity split
+/// [`cuda_failure_is_blocking`] already draws for the desktop setup screen, applied here to the
+/// worker's own advertisement. That split exists because the two directions cost wildly different
+/// amounts, and this path is no different: over-reporting is the expensive one. A transient CUDA
+/// OOM — another process, or an orphaned worker from a crashed session, currently holding the GPU
+/// — is a real probe failure that says nothing about the driver stack. Treating it as unhealthy
+/// would strip every capability, hand the operator the GENERIC "check that nvidia-smi lists a
+/// supported GPU" text (no `CUDA_ERROR_*` token matches, so there is no specific remedy to give),
+/// and — with `SCENEWORKS_CANDLE_REQUIRED=1` — fail queued work over a condition that clears by
+/// itself. The desktop deliberately starts the app in that state; the worker must likewise stay
+/// advertising. A transient failure is logged and stepped over, and if a job does then run, the
+/// classified message from [`crate::classify_engine_error`] explains what happened.
+async fn probe_cuda_health(settings: &Settings) -> GpuHealth {
     if !should_run_cuda_preflight(settings) {
-        return;
+        return GpuHealth::Usable;
     }
     let probe = tokio::task::spawn_blocking(cuda_preflight).await;
     // A JoinError can only be a panic inside `cuda_preflight`, which already catches its own
-    // (see `preflight::cuda_preflight`) — report rather than propagate either way.
-    let reason = match probe {
-        Ok(Ok(())) => return,
-        Ok(Err(reason)) => reason,
-        Err(error) => format!("the CUDA preflight probe did not complete: {error}"),
+    // (see `preflight::cuda_preflight`) — report rather than propagate either way. It is NOT
+    // evidence of a driver-class fault, so it is folded into the same `Err` the classifier then
+    // routes down the advisory path.
+    let outcome = match probe {
+        Ok(result) => result,
+        Err(error) => Err(format!(
+            "the CUDA preflight probe did not complete: {error}"
+        )),
     };
-    tracing::error!(
-        event = "cuda_preflight_failed",
-        gpuId = %settings.gpu_id,
-        reason = %reason,
-        "SceneWorks GPU worker cannot acquire a CUDA device; generation jobs will fail"
-    );
+    classify_probe_outcome(outcome, &settings.gpu_id)
+}
+
+/// The probe outcome → health verdict decision, sync and GPU-free so the severity split is
+/// unit-testable on any machine (see `only_a_driver_class_probe_failure_makes_the_worker_unhealthy`).
+///
+/// Kept apart from [`probe_cuda_health`] deliberately: that function's only other job is running
+/// the probe, which needs real CUDA, and a rule this consequential — it decides whether a worker
+/// withdraws every capability it serves — must not be reachable only from hardware.
+fn classify_probe_outcome(probe: Result<(), String>, gpu_id: &str) -> GpuHealth {
+    let reason = match probe {
+        Ok(()) => return GpuHealth::Usable,
+        Err(reason) => reason,
+    };
+    if !cuda_failure_is_blocking(&reason) {
+        tracing::warn!(
+            event = "cuda_preflight_transient",
+            gpuId = %gpu_id,
+            reason = %reason,
+            "SceneWorks GPU probe failed for a reason that may clear on its own; keeping the \
+             worker's capabilities advertised"
+        );
+        return GpuHealth::Usable;
+    }
+    GpuHealth::Unusable { reason }
+}
+
+/// How often an UNHEALTHY worker re-runs the CUDA probe (sc-16260 AC 4).
+///
+/// The startup probe is a single sample, so without this a host repaired underneath a running
+/// container would stay stranded with its capabilities withheld until someone restarted it. Only
+/// an unhealthy worker re-probes; once the GPU is usable the loop stops entirely, so a healthy
+/// worker never pays for this and never builds a second CUDA context behind a running job.
+///
+/// **The transition is therefore ONE-WAY: unhealthy → healthy only.** A worker that starts healthy
+/// is never re-probed, so a driver that dies mid-life (an Xid, a device falling off the bus) leaves
+/// it reporting `idle` and claiming jobs, which then fail individually with the classified
+/// driver-error text from [`crate::classify_engine_error`] — i.e. exactly the pre-sc-16260
+/// behaviour, for that case only. Detecting mid-life GPU death is a different problem (it wants a
+/// signal from the failing job, not a poll) and is deliberately out of this story's scope.
+///
+/// A minute is chosen against what actually gets fixed on the other side. The dominant failure
+/// (`CUDA_ERROR_SYSTEM_DRIVER_MISMATCH`, GH #1966) needs a host reboot, which restarts the
+/// container anyway — the re-check cannot help there and is not meant to. What it does cover is
+/// the genuinely transient family: `CUDA_ERROR_SYSTEM_NOT_READY` while the driver/fabric is still
+/// initializing, a GPU briefly held by another process, or a device hot-attached to the container.
+/// Those clear on the order of seconds-to-minutes, so a minute recovers promptly without spinning
+/// `cuInit` against a wedged driver every poll turn.
+const GPU_HEALTH_RECHECK: Duration = Duration::from_secs(60);
+
+/// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
+/// (sc-16260 AC 4).
+///
+/// On recovery this RE-REGISTERS. That is the load-bearing half: the capability set is what the
+/// API routes on, and it was frozen at the withheld set when the worker started, so simply
+/// flipping the status back to `idle` would leave a healthy worker advertising nothing and the
+/// queue still stalled. `register_worker` is an upsert on `worker_id`, so this restores the full
+/// candle set on the existing row and clears the stored reason; the next heartbeat reports `idle`.
+///
+/// Logging is asymmetric on purpose. Recovery is an event worth an `info` line. A failure
+/// IDENTICAL to the one already reported at startup is not — repeating it every minute would bury
+/// the loud line it was meant to make findable. A failure whose reason CHANGED is new information
+/// (`SYSTEM_NOT_READY` resolving into `NO_DEVICE` says the driver came up but the GPU did not),
+/// so that gets its own `warn`.
+async fn recheck_gpu_health(
+    api: &ApiClient,
+    settings: &Settings,
+    health: &mut GpuHealth,
+) -> WorkerResult<()> {
+    let previous = health.reason().map(str::to_owned);
+    let next = probe_cuda_health(settings).await;
+    let reason = next.reason().map(str::to_owned);
+    *health = next;
+    match reason {
+        None => {
+            tracing::info!(
+                event = "cuda_preflight_recovered",
+                gpuId = %settings.gpu_id,
+                "SceneWorks GPU worker re-acquired a CUDA device; re-advertising generation capabilities"
+            );
+            let gpu = discover_gpu(settings, health).await;
+            // A `Canceled` here means shutdown arrived during the re-registration backoff, not a
+            // recovery failure. Swallow it: propagating would exit `run_worker_loop` with `Err`,
+            // skipping the terminal `Offline` heartbeat that both other shutdown paths post and
+            // leaving the row reading `unhealthy` for the full 90 s stale window. The loop's own
+            // `shutdown_signal()` arm handles it one turn later, cleanly.
+            match register_worker_with_retry(api, settings, &gpu).await {
+                Ok(()) | Err(WorkerError::Canceled(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Some(reason) if previous.as_deref() != Some(reason.as_str()) => {
+            tracing::warn!(
+                event = "cuda_preflight_changed",
+                gpuId = %settings.gpu_id,
+                reason = %reason,
+                "SceneWorks GPU worker still cannot acquire a CUDA device; the reason changed"
+            );
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
@@ -1022,14 +1164,26 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     if settings.gpu_id == "mlx" {
         generator_cache::spawn_gpu_telemetry(settings.config_dir.clone());
     }
-    log_cuda_preflight_failure(&settings).await;
-    let gpu = discover_gpu(&settings).await;
+    // sc-16247 / sc-16260: probe the CUDA device ONCE before advertising anything, and let the
+    // verdict shape what this worker claims to be able to do. `discover_gpu` withholds the whole
+    // candle capability block on an unusable GPU, so the registration below advertises only the
+    // placeholder set and no generation job can route here.
+    let mut health = cuda_startup_health(&settings).await;
+    let gpu = discover_gpu(&settings, &health).await;
     let api = ApiClient::new(&settings);
     let http_client = crate::downloads::streaming_download_client();
     register_worker_with_retry(&api, &settings, &gpu).await?;
     let mut lock_failures = 0_u32;
     let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
+    // sc-16260 AC 4: the startup probe is one sample, so an unhealthy worker re-probes on an
+    // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
+    // out — the startup probe just ran, and re-running it immediately would say nothing new.
+    let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
     loop {
+        if !health.is_usable() && Instant::now() >= next_gpu_recheck {
+            next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
+            recheck_gpu_health(&api, &settings, &mut health).await?;
+        }
         // sc-8845 (F-043): shutdown is observed ONLY here, around the claim / idle-sleep phase —
         // NOT around full job execution. `poll_once` does no long GPU work (memory-sync, idle
         // heartbeat, the transactional claim POST, and the idle sleep), so racing it against
@@ -1041,7 +1195,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         // work mid-write. Now a mid-job shutdown trips the job's cancel and posts a prompt terminal
         // `Canceled` (see `run_job_with_shutdown`).
         let claim = tokio::select! {
-            result = poll_once(&api, &settings, &mut idle_heartbeat) => result,
+            result = poll_once(&api, &settings, &mut idle_heartbeat, &health) => result,
             _ = shutdown_signal() => {
                 // Clean-idle shutdown: no job in flight, so the pre-existing Offline heartbeat +
                 // return is preserved exactly.
@@ -1236,6 +1390,7 @@ async fn poll_once(
     api: &ApiClient,
     settings: &Settings,
     idle_heartbeat: &mut IdleHeartbeat,
+    health: &GpuHealth,
 ) -> WorkerResult<Option<JobSnapshot>> {
     // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
     // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
@@ -1244,9 +1399,31 @@ async fn poll_once(
         generator_cache::sync_gpu_memory_limit(&settings.config_dir);
     }
     if idle_heartbeat.should_send() {
-        heartbeat(api, settings, WorkerStatus::Idle, None).await?;
+        // sc-16260: an unusable GPU reports `unhealthy` + the host-side remedy here instead of
+        // `idle`. It keeps heartbeating on the same cadence — the process IS alive, it must stay
+        // out of the API's stale sweep, and it has to be able to recover — but `idle` on a worker
+        // that has withdrawn every capability it serves is the misleading state this story exists
+        // to remove: an operator would read "Ready" off a worker that will never claim anything.
+        match health.reason() {
+            None => heartbeat(api, settings, WorkerStatus::Idle, None).await?,
+            Some(reason) => {
+                heartbeat_with_reason(
+                    api,
+                    settings,
+                    WorkerStatus::Unhealthy,
+                    None,
+                    Some(reason.to_owned()),
+                )
+                .await?;
+            }
+        }
         idle_heartbeat.mark_sent();
     }
+    // The claim POST still goes out while unhealthy, deliberately. The store refuses it twice
+    // over (no advertised capability, plus the `Unhealthy` backstop in `worker_supports_job`), so
+    // this costs one cheap request per poll and keeps the loop shape identical — which is what
+    // makes recovery instant: the moment the re-probe passes and re-registration lands, the very
+    // next claim is served with no extra transition to get right.
     let claim: ClaimResponse = api
         .post_json(
             "/api/v1/jobs/claim",
@@ -1321,6 +1498,22 @@ pub(crate) async fn heartbeat(
     status: WorkerStatus,
     current_job_id: Option<&str>,
 ) -> WorkerResult<()> {
+    heartbeat_with_reason(api, settings, status, current_job_id, None).await
+}
+
+/// [`heartbeat`] plus the `status_reason` a [`WorkerStatus::Unhealthy`] worker carries
+/// (sc-16260) — the host-side remedy, so the Queue screen can explain a stalled queue.
+///
+/// Separate from [`heartbeat`] rather than an extra parameter on it: `heartbeat` has ~50 call
+/// sites, every one of which reports `Idle`/`Busy`/`Offline` and would have to pass `None`.
+/// Only the idle-poll path in [`poll_once`] ever has a reason to send.
+pub(crate) async fn heartbeat_with_reason(
+    api: &ApiClient,
+    settings: &Settings,
+    status: WorkerStatus,
+    current_job_id: Option<&str>,
+    status_reason: Option<String>,
+) -> WorkerResult<()> {
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
     let outcome: WorkerResult<WorkerSnapshot> = api
@@ -1331,6 +1524,7 @@ pub(crate) async fn heartbeat(
                 current_job_id: current_job_id.map(str::to_owned),
                 loaded_models: Vec::new(),
                 utilization: gpu_utilization(&settings.gpu_id).await,
+                status_reason,
                 extra: BTreeMap::new(),
             },
         )

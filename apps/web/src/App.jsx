@@ -76,6 +76,7 @@ import {
 } from "./simple/uiMode.js";
 import {
   buildLocalJobStack,
+  canWorkerTakeWork,
   isActiveWorker,
   isAudioGenerationJob,
   isImageGenerationJob,
@@ -1322,7 +1323,11 @@ export function App() {
   // server's GET /api/v1/capabilities/person (person_readiness_from_workers); the
   // worker SSE handlers keep `workers` current, so this never goes stale.
   const personReadiness = useMemo(() => {
-    const live = workers.filter((worker) => worker.status !== "offline");
+    // sc-16260: `canWorkerTakeWork`, not a bare non-offline check — an unhealthy worker is alive
+    // but cannot run anything, and counting it here would ungate Replace Person on a host whose
+    // GPU failed its startup probe. Keeps this in step with the server's
+    // `person_readiness_from_workers`, which the comment above promises it mirrors.
+    const live = workers.filter(canWorkerTakeWork);
     const ready = (capability) => live.some((worker) => (worker.capabilities ?? []).includes(capability));
     return {
       detect: { capability: "person_detect", ready: ready("person_detect") },

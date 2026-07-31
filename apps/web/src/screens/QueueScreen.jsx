@@ -84,6 +84,28 @@ function jobWaitingMessage(job, workers, jobs) {
   }
   const candidates = workers.filter((worker) => workerCanClaim(job, worker));
   if (!candidates.length) {
+    // sc-16260: an unusable GPU is the most likely reason a candle host has NO eligible worker —
+    // the worker withheld its capabilities on purpose, so "no active worker supports image
+    // generate" is technically true and completely unhelpful. When an unhealthy worker is
+    // registered, lead with the host-side remedy it reported. Checked before the requested-GPU
+    // branch: a job pinned to the very GPU that failed its probe deserves the reason, not a
+    // restatement of the pin.
+    //
+    // Scoped twice, because a wrong remedy is worse than a vague one:
+    //   * NOT for utility work. A queued `model_download` does not need the GPU, so blaming the
+    //     driver for it would send an operator to fix something unrelated to why it is stuck.
+    //   * When the job pins a GPU, only THAT GPU's worker may explain it — on a multi-GPU host,
+    //     gpu 0 being unhealthy says nothing about a job pinned to gpu 1.
+    const pinned = job.requestedGpu && job.requestedGpu !== "auto" ? job.requestedGpu : null;
+    const unhealthy = NON_GPU_JOB_TYPES.has(job.type)
+      ? null
+      : workers
+          .filter((worker) => pinned === null || worker.gpuId === pinned)
+          .map(workerHealthReason)
+          .find(Boolean);
+    if (unhealthy) {
+      return `Blocked: this machine's GPU is unavailable, so ${formatJobType(job.type)} cannot run.\n\n${unhealthy}`;
+    }
     if (job.requestedGpu && job.requestedGpu !== "auto") {
       return `Blocked: no active worker can run ${formatJobType(job.type)} on GPU ${job.requestedGpu}.`;
     }
@@ -108,7 +130,24 @@ function workerStatusLine(worker) {
   if (worker.status === "busy") {
     return `Busy${worker.currentJobId ? ` with ${worker.currentJobId}` : ""}`;
   }
+  // sc-16260: a worker whose GPU failed its startup probe has withdrawn every capability it
+  // serves, so it will never claim anything. It still heartbeats, so without this it renders the
+  // raw enum next to a card that otherwise looks perfectly healthy.
+  if (worker.status === "unhealthy") {
+    return "GPU unavailable";
+  }
   return worker.status === "idle" ? "Ready" : worker.status;
+}
+
+/// sc-16260: the host-side remedy an `unhealthy` worker reports, or `null`. The API only sets
+/// `statusReason` alongside the unhealthy status, but this checks both so a stale reason left on a
+/// recovered worker can never surface as a live warning.
+function workerHealthReason(worker) {
+  if (worker?.status !== "unhealthy") {
+    return null;
+  }
+  const reason = typeof worker.statusReason === "string" ? worker.statusReason.trim() : "";
+  return reason || "This worker's GPU could not be initialized, so it cannot run jobs.";
 }
 
 function isGpuWorker(worker) {
@@ -153,12 +192,22 @@ function WorkerCard({ worker }) {
   const freeMb = Number(utilization.memoryFreeMb);
   const usedMb = Number(utilization.memoryUsedMb);
   const totalMb = Number(utilization.memoryTotalMb);
+  const healthReason = workerHealthReason(worker);
   return (
     <div className="worker-card">
       <div className="worker-card-header">
         <strong>{worker.gpuName ?? `GPU ${worker.gpuId}`}</strong>
         <span>{workerStatusLine(worker)}</span>
       </div>
+      {/* sc-16260: the host-side remedy, on the card for the worker it applies to. `pre-wrap`
+          because the reason is the probe's two-part message — remedy, blank line, raw CUDA error
+          — and collapsing that runs them together (the same fix sc-16247 made on the setup
+          screen and the queue card). */}
+      {healthReason === null ? null : (
+        <p className="worker-card-health" role="status" style={{ whiteSpace: "pre-wrap" }}>
+          {healthReason}
+        </p>
+      )}
       <div className="worker-stat-grid">
         <span>
           <small>Available</small>

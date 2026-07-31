@@ -709,6 +709,41 @@ fn person_readiness_reflects_live_worker_capabilities() {
     assert_eq!(readiness["segment"]["ready"], json!(false));
 }
 
+/// sc-16260: an `unhealthy` worker is heartbeating, so it is NOT offline — but it has withdrawn
+/// every capability it serves and will claim nothing. Readiness must exclude it, or the UI ungates
+/// Replace Person on a host whose GPU cannot be initialized.
+///
+/// Pinned against a worker that still advertises the capability, which is what makes this a real
+/// gate rather than a restatement of the capability check: the SAME advertisement reads ready when
+/// idle and not-ready when unhealthy.
+#[test]
+fn person_readiness_excludes_an_unhealthy_worker() {
+    let advertised = vec![
+        WorkerCapability::PersonDetect,
+        WorkerCapability::PersonTrack,
+    ];
+
+    let idle = vec![readiness_worker(
+        "gpu",
+        WorkerStatus::Idle,
+        advertised.clone(),
+    )];
+    assert_eq!(
+        person_readiness_from_workers(&idle)["detect"]["ready"],
+        json!(true),
+        "control: the identical advertisement must read ready while the worker is idle"
+    );
+
+    let unhealthy = vec![readiness_worker("gpu", WorkerStatus::Unhealthy, advertised)];
+    let readiness = person_readiness_from_workers(&unhealthy);
+    assert_eq!(
+        readiness["detect"]["ready"],
+        json!(false),
+        "an unhealthy worker cannot run person detection, whatever its registration still says"
+    );
+    assert_eq!(readiness["track"]["ready"], json!(false));
+}
+
 #[tokio::test]
 async fn create_image_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): negativePrompt now shares the prompt char cap.
