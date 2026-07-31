@@ -2583,3 +2583,47 @@ fn dense_te_declarations_only_appear_on_entries_with_packed_tiers() {
         );
     }
 }
+
+// sc-16247 (GH #1966): the startup CUDA probe must run on the candle GPU worker and NOWHERE else.
+// All three conditions are load-bearing and every one of them fails silently if inverted:
+//   * `cpu`  — the utility pool, INCLUDING the API's in-process loops (`spawn_inprocess_utility_worker`,
+//              2 by default), would each build and tear down a CUDA context on a lane that never
+//              touches CUDA;
+//   * `mlx`  — the macOS GPU worker, which has `metal_preflight` and no CUDA at all;
+//   * candle off — nothing to probe, and `cuda_preflight` is a compiled-out no-op anyway.
+// Inverting the whole predicate the other way makes the server-lane gate (AC5) dead code that
+// still compiles and still passes every other test.
+#[test]
+fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
+    let gated = |candle: bool, gpu_id: &str| {
+        let mut settings = crate::Settings::from_env();
+        settings.backend_candle_enabled = candle;
+        settings.gpu_id = gpu_id.to_owned();
+        crate::should_run_cuda_preflight(&settings)
+    };
+
+    // The one lane that must probe: a candle build on a real GPU id (`auto` never reaches
+    // `run_worker_loop`, so the ids seen here are the per-GPU children's).
+    for gpu_id in ["0", "1"] {
+        assert!(
+            gated(true, gpu_id),
+            "the candle GPU worker on gpu {gpu_id} must run the CUDA preflight"
+        );
+    }
+
+    // Every lane that must NOT.
+    assert!(
+        !gated(true, "cpu"),
+        "the CPU utility pool must never build a CUDA context"
+    );
+    assert!(
+        !gated(true, "mlx"),
+        "the macOS MLX worker has its own Metal probe and no CUDA"
+    );
+    for gpu_id in ["0", "cpu", "mlx"] {
+        assert!(
+            !gated(false, gpu_id),
+            "with the candle backend disabled there is nothing to probe (gpu {gpu_id})"
+        );
+    }
+}
