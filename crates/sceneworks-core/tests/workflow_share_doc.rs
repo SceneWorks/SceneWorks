@@ -602,13 +602,14 @@ fn the_doc_lists_exactly_the_write_seams() {
     let documented: BTreeSet<String> = rows
         .iter()
         .map(|row| {
-            let word = ["Embeds", "Conduit", "Declines"]
+            let word = ["Embeds", "Conduit", "Declines", "Inert"]
                 .into_iter()
                 .find(|word| row[2].contains(word))
                 .unwrap_or_else(|| {
                     panic!(
                         "{DOC_PATH}: the `write-seams` row for {} says nothing about what it does \
-                         with the chunk — it must open with `Embeds`, `Conduit` or `Declines`",
+                         with the chunk — it must open with `Embeds`, `Conduit`, `Declines` or \
+                         `Inert`",
                         row[1]
                     )
                 });
@@ -624,6 +625,7 @@ fn the_doc_lists_exactly_the_write_seams() {
                     SeamDisposition::Embeds(_) => "Embeds",
                     SeamDisposition::Conduit(_) => "Conduit",
                     SeamDisposition::Declines(_) => "Declines",
+                    SeamDisposition::Inert(_) => "Inert",
                 };
                 format!("{}::{} {word}", seam.path, seam.function)
             })

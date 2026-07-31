@@ -639,19 +639,27 @@ pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 /// What is enforced now, by `every_worker_write_seam_declares_the_lane_it_embeds_for` in
 /// `crates/sceneworks-core/tests/workflow_share.rs`:
 ///
-/// * every function in `crates/sceneworks-worker/src` that touches a `WorkflowShare` — discovered
-///   by scanning the crate, not by a file list — must have a [`WORKFLOW_WRITE_SEAMS`] entry, and
-///   an undeclared one fails the build;
+/// * every function in `crates/sceneworks-worker/src` that the scan can see an envelope reach —
+///   it calls a name on the core write surface, or names a `WorkflowShare` (or a worker struct
+///   holding one) in its own signature, or calls a worker function that does — must have a
+///   [`WORKFLOW_WRITE_SEAMS`] entry, and an undeclared one fails the build. The seams are found by
+///   walking the crate, not by a file list, and `use … as …` renames of those names are resolved
+///   before the walk;
 /// * a seam declared [`SeamDisposition::Embeds`] must name the web builders that feed it, and a
 ///   named builder that is in THIS list fails the build, naming the seam, the lane and the builder;
-/// * a seam cannot dodge that by declaring [`SeamDisposition::Declines`]: the disposition is
-///   checked against the source, and a seam that builds an envelope may not claim to decline.
+/// * a seam cannot dodge that by declaring [`SeamDisposition::Declines`]. A decline is checked
+///   POSITIVELY against the source: it may not call `write_workflow_chunk` with anything but a
+///   literal `None`, may not name `WorkflowShare` in its body at all, may not accept one through
+///   its signature, and must fill every share-carrying struct field with `None` — by initializer
+///   OR by later assignment. Where the envelope came from does not matter, so parsing one back out
+///   of another file and writing it on is an embed like any other.
 ///
-/// So making a video lane embed now requires moving its builder into [`ADVANCED_BUILDERS`] —
-/// which is what forces every key it emits to be classified. What the lint still cannot check is
-/// whether a seam's declared builder list is the WHOLE truth: an author who declares a video seam
-/// as embedding for an image builder has written a false statement in a registry, and only review
-/// catches that.
+/// So making a video lane embed now requires EITHER moving its builder into [`ADVANCED_BUILDERS`],
+/// which is what forces every key it emits to be classified, or writing a builder list into
+/// [`WORKFLOW_WRITE_SEAMS`] that is not true. The lint cannot tell those two apart — it has no way
+/// to know which web builder feeds a Rust seam — so what it guarantees is that the statement had
+/// to be written at all, and that the honest version of it fails the build. Review is what catches
+/// the dishonest one.
 pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
     DeferredAdvancedBuilder {
         path: "apps/web/src/screens/VideoStudio.jsx",
@@ -723,24 +731,46 @@ pub struct WebBuilderRef {
 
 /// What one worker seam does about the workflow chunk (sc-16113).
 ///
-/// Three states, not two, because "writes no chunk" and "writes whatever its caller decided" are
-/// different claims and only one of them ends the question. Each is checked against the seam's
-/// own source, so the disposition is a declaration the lint verifies rather than one it trusts.
+/// Four states, not two, because "writes no chunk", "writes whatever its caller decided" and
+/// "an envelope reaches it but it writes no file" are three different claims and only one of them
+/// ends the lane question. Each is checked against the seam's own source, so the disposition is a
+/// declaration the lint verifies rather than one it trusts.
 #[derive(Debug, Clone, Copy)]
 pub enum SeamDisposition {
-    /// Builds an envelope from a job payload and writes it. Must name at least one builder, and
-    /// every one of them must be in [`ADVANCED_BUILDERS`] — a reference to
+    /// An envelope leaves this function into a file or into a share-carrying field. Must name at
+    /// least one builder, and every one of them must be in [`ADVANCED_BUILDERS`] — a reference to
     /// [`DEFERRED_ADVANCED_BUILDERS`] is exactly the state this registry exists to refuse.
+    ///
+    /// Where the envelope came from is not part of the test: building one, parsing one back out of
+    /// another file, or cloning one held elsewhere are all embedding, because what reaches the
+    /// written file is the same either way.
     Embeds(&'static [WebBuilderRef]),
-    /// Writes an envelope its CALLER built, and builds none itself. The lane question belongs to
-    /// the callers, and they are seams in their own right: a function that hands a
+    /// Writes an envelope its CALLER built, and obtains none of its own. The lane question belongs
+    /// to the callers, and they are seams in their own right: a function that hands a
     /// `WorkflowShare` to this one names it, which is what the discovery scan reads. The reason
     /// says why the decision is not made here.
+    ///
+    /// Verified: it must accept a share through its signature, must reach the write surface (a
+    /// function that reaches no writer is [`SeamDisposition::Inert`], not a conduit), and must not
+    /// build, parse or name a `WorkflowShare` of its own — sourcing one is deciding a lane.
     Conduit(&'static str),
     /// Writes the file with no envelope at all, deliberately. The reason must say why that asset
-    /// has no generation recipe to record. Verified: a seam that builds an envelope may not
-    /// declare this, so declining is not a way to dodge classification.
+    /// has no generation recipe to record.
+    ///
+    /// Verified positively, not by the absence of a builder call: it may not call
+    /// `write_workflow_chunk` with anything but a literal `None`, may not name `WorkflowShare` in
+    /// its body, may not accept one through its signature, and must fill every share-carrying
+    /// struct field with `None` — by initializer or by later assignment. So declining is not a way
+    /// to embed without classifying a lane, whatever the envelope's provenance.
     Declines(&'static str),
+    /// A `WorkflowShare` reaches this function's signature and goes nowhere: it writes no file,
+    /// builds no envelope and calls nothing on the write surface. A logging or validation helper
+    /// that takes a spec is this, and calling it a [`SeamDisposition::Conduit`] would be a false
+    /// statement — a conduit writes.
+    ///
+    /// Verified: it must carry a share, and it must call nothing the scan can see reach a write.
+    /// The moment it calls a writer it stops being inert and owes a lane.
+    Inert(&'static str),
 }
 
 /// One place in `sceneworks-worker` where a [`WorkflowShare`] can reach a written file (sc-16113).
@@ -771,6 +801,19 @@ pub struct WorkflowWriteSeam {
 /// Kept honest in both directions by `every_worker_write_seam_declares_the_lane_it_embeds_for`: a
 /// discovered seam with no entry fails, and an entry whose function no longer touches an envelope
 /// fails too.
+///
+/// # Ordering, for whoever wires a new lane (sc-15956)
+///
+/// The back-check that every [`ADVANCED_BUILDERS`] entry is named by some embedding seam means the
+/// two halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on its
+/// own would leave `VideoStudio.jsx::submit` registered with no seam behind it, which fails. Move
+/// the builder up and add the seam entry in the SAME change. The failure is loud either way, but
+/// it is worth knowing before the split is attempted.
+///
+/// Likewise `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes
+/// `VideoStudio.jsx::submit` as its deferred example, so promoting that builder turns that
+/// mutation proof into a "did not panic" failure. Re-point it at whatever is still deferred then;
+/// the proof is that SOME deferred builder is refused, not that one particular one is.
 pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
     WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs.rs",
