@@ -66,6 +66,20 @@ fn poll_outage_exceeded(outage_started: tokio::time::Instant, now: tokio::time::
 const MAX_INLINE_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INLINE_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 
+/// MCP image egress is privacy-first by default (sc-16202). Unlike a person choosing Save As, an
+/// MCP recipient is commonly model-provider infrastructure, so silently forwarding authored
+/// prompts, model settings, LoRA repositories, and pose/face coordinates is the riskier default.
+/// Agents that deliberately need recipe inspection can opt in per result with `includeWorkflow`.
+const DEFAULT_INCLUDE_WORKFLOW: bool = false;
+
+fn workflow_policy(include_workflow: bool) -> &'static str {
+    if include_workflow {
+        "preserve-if-present"
+    } else {
+        "strip-requested"
+    }
+}
+
 /// How the blocking job tools (generate_image) wait for a terminal JobSnapshot:
 /// poll `GET /api/v1/jobs/:id` every `poll_interval` until terminal, and give up
 /// with a clear tool error after `timeout` so a stuck job can never hang the MCP
@@ -201,6 +215,10 @@ pub struct GenerateImageArgs {
         description = "Inpaint mask asset id (white = edit region; inpaint-capable models only)."
     )]
     pub mask_asset_id: Option<String>,
+    #[schemars(
+        description = "Include SceneWorks workflow metadata in returned images. Default false: MCP outputs often travel to model-provider infrastructure, so workflow metadata is stripped unless explicitly requested."
+    )]
+    pub include_workflow: Option<bool>,
 }
 
 /// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
@@ -274,6 +292,19 @@ pub struct JobIdArgs {
     pub job_id: String,
 }
 
+/// Arguments for `get_job_result`. Image links follow the same privacy-first workflow metadata
+/// policy as inline `generate_image` results; video and other non-PNG bytes are unchanged.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobResultArgs {
+    #[schemars(description = "The completed job id returned by a job-submitting call.")]
+    pub job_id: String,
+    #[schemars(
+        description = "Include SceneWorks workflow metadata in linked images. Default false: MCP outputs often travel to model-provider infrastructure, so workflow metadata is stripped unless explicitly requested."
+    )]
+    pub include_workflow: Option<bool>,
+}
+
 #[tool_router]
 impl SceneWorksMcp {
     #[tool(
@@ -322,7 +353,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "Generate images (or edit an existing image) and return them inline. Submits an image job, waits for it to finish (emitting progress notifications while it runs), and returns each generated image as base64 image content plus a JSON summary with the asset ids. Long-running: seconds to minutes depending on the model."
+        description = "Generate images (or edit an existing image) and return them inline. Submits an image job, waits for it to finish (emitting progress notifications while it runs), and returns each generated image as base64 image content plus a JSON summary with the asset ids. Workflow metadata is stripped by default because MCP outputs often travel to model-provider infrastructure; set includeWorkflow=true only when the recipient needs the embedded recipe. The same choice applies if an oversize result falls back to resource links. Long-running: seconds to minutes depending on the model."
     )]
     async fn generate_image(
         &self,
@@ -332,6 +363,7 @@ impl SceneWorksMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let body =
             image_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let include_workflow = args.include_workflow.unwrap_or(DEFAULT_INCLUDE_WORKFLOW);
         let submitted = self
             .api
             .post_json("/api/v1/image/jobs", &body)
@@ -470,20 +502,25 @@ impl SceneWorksMcp {
             };
             let remaining_total = MAX_INLINE_TOTAL_BYTES.saturating_sub(total_bytes);
             let body_limit = MAX_INLINE_IMAGE_BYTES.min(remaining_total);
+            let media_url = format!(
+                "/api/v1/projects/{project_id}/files/{}{}",
+                encode_media_path(&media_path),
+                if include_workflow {
+                    ""
+                } else {
+                    "?stripWorkflow=true"
+                }
+            );
             let (bytes, header_mime) = self
                 .api
-                .get_bytes_bounded(
-                    &format!(
-                        "/api/v1/projects/{project_id}/files/{}",
-                        encode_media_path(&media_path)
-                    ),
-                    body_limit,
-                )
+                .get_bytes_bounded(&media_url, body_limit)
                 .await
                 .map_err(api_error)?;
             let Some(bytes) = bytes else {
                 let link_base = self.request_link_base(&extensions);
-                return self.job_result_links(&job_id, &job, link_base).await;
+                return self
+                    .job_result_links(&job_id, &job, link_base, include_workflow)
+                    .await;
             };
             let mime_type = image_mime_type(
                 &media_path,
@@ -502,6 +539,7 @@ impl SceneWorksMcp {
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
                 "path": &media_path,
                 "mimeType": &mime_type,
+                "workflowPolicy": workflow_policy(include_workflow),
             }));
             blocks.push(ContentBlock::image(BASE64.encode(&bytes), mime_type));
         }
@@ -569,11 +607,11 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "Fetch the result of a COMPLETED job (video or image) as downloadable links. Mints a short-lived media ticket and returns one resource link per result asset — the URL works from any machine that can reach the SceneWorks API (no auth header needed while the ticket is valid). Video/image bytes are never inlined by this tool. If the job is still running it reports ready=false; if it failed, the job error."
+        description = "Fetch the result of a COMPLETED job (video or image) as downloadable links. Mints a short-lived media ticket and returns one resource link per result asset — the URL works from any machine that can reach the SceneWorks API (no auth header needed while the ticket is valid). Workflow metadata is stripped from linked images by default because MCP outputs often travel to model-provider infrastructure; set includeWorkflow=true only when the recipient needs the embedded recipe. Video/image bytes are never inlined by this tool. If the job is still running it reports ready=false; if it failed, the job error."
     )]
     async fn get_job_result(
         &self,
-        Parameters(args): Parameters<JobIdArgs>,
+        Parameters(args): Parameters<JobResultArgs>,
         extensions: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         let job_id = valid_job_id(&args.job_id)
@@ -616,7 +654,13 @@ impl SceneWorksMcp {
         }
 
         let link_base = self.request_link_base(&extensions);
-        self.job_result_links(job_id, &job, link_base).await
+        self.job_result_links(
+            job_id,
+            &job,
+            link_base,
+            args.include_workflow.unwrap_or(DEFAULT_INCLUDE_WORKFLOW),
+        )
+        .await
     }
 
     /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
@@ -646,6 +690,7 @@ impl SceneWorksMcp {
         job_id: &str,
         job: &Value,
         link_base: String,
+        include_workflow: bool,
     ) -> Result<CallToolResult, ErrorData> {
         let Some(project_id) = job
             .get("projectId")
@@ -702,8 +747,19 @@ impl SceneWorksMcp {
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
         for (asset, media_path) in assets {
+            let image_asset = is_image_asset(asset);
+            let asset_workflow_policy = if image_asset {
+                workflow_policy(include_workflow)
+            } else {
+                "not-applicable"
+            };
+            let workflow_query = if include_workflow || !image_asset {
+                ""
+            } else {
+                "stripWorkflow=true&"
+            };
             let relative_url = format!(
-                "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                "/api/v1/projects/{project_id}/files/{}?{workflow_query}ticket={ticket}",
                 encode_media_path(&media_path)
             );
             let url = format!("{link_base}{relative_url}");
@@ -732,6 +788,7 @@ impl SceneWorksMcp {
                 "mimeType": mime_type,
                 "url": url,
                 "relativeUrl": relative_url,
+                "workflowPolicy": asset_workflow_policy,
             }));
         }
         blocks.push(ContentBlock::json(json!({
@@ -746,7 +803,8 @@ impl SceneWorksMcp {
                  \"{link_base}\" (derived from the host you used to reach this MCP \
                  server, so they should be directly fetchable); if that base is not \
                  reachable, apply relativeUrl to the base you use to reach /mcp \
-                 (everything before /mcp)."
+                 (everything before /mcp). Each asset's workflowPolicy reports the \
+                 requested handling without claiming metadata was present."
             ),
         }))?);
         Ok(CallToolResult::success(blocks))
