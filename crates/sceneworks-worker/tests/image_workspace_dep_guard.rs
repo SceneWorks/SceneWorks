@@ -40,6 +40,7 @@ const EXPECTED_IMAGE_MEMBERS: &[&str] = &[
     "apps/rust-api",
     "crates/sceneworks-core",
     "crates/sceneworks-image-quality",
+    "crates/sceneworks-mcp",
     "crates/sceneworks-worker",
 ];
 

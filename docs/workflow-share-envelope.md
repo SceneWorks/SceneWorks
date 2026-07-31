@@ -923,6 +923,15 @@ the PNG write seam.
   share one of those without them, use **Save a copy without the workflow** on the asset — which
   excises **both** from the copied bytes and leaves the asset alone. The browser and LAN download
   does the same server-side, through `?stripWorkflow=true` on the file route.
+- **MCP image egress strips by default.** Both `generate_image`'s inline base64 response and its
+  oversize `resource_link` fallback request that same hardened server-side strip representation;
+  `get_job_result` follows the same link policy. This default is intentionally different from a
+  human Save As: MCP results commonly travel to model-provider infrastructure, so forwarding the
+  prompt, model settings, LoRA repositories and pose/face coordinates without a deliberate choice
+  is the riskier default. An agent that genuinely needs recipe inspection can opt in per call with
+  `includeWorkflow: true`. Each image result reports the requested policy as
+  `strip-requested` or `preserve-if-present`; it does not claim metadata existed when the source was
+  already clean or was not a PNG.
 
 ### The strip has to take the `parameters` chunk too, and one rule decides whose it is
 

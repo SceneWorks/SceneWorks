@@ -360,6 +360,9 @@ async fn get_job_result_returns_ticketed_video_link_without_inline_bytes() {
     assert_eq!(payload["projectId"], "p1");
     assert_eq!(payload["assets"][0]["id"], "vid_1");
     assert_eq!(payload["assets"][0]["type"], "video");
+    assert_eq!(payload["assets"][0]["workflowPolicy"], "not-applicable");
+    assert!(payload.get("workflowIncluded").is_none());
+    assert!(payload.get("workflowHandling").is_none());
     assert_eq!(payload["assets"][0]["url"], Value::String(expected_url));
     assert_eq!(
         payload["assets"][0]["relativeUrl"],
@@ -403,8 +406,79 @@ async fn get_job_result_is_generic_over_image_jobs() {
         .collect();
     assert_eq!(links.len(), 1, "one image link: {result:?}");
     assert!(links[0].uri.contains(IMAGE_PATH), "{}", links[0].uri);
-    assert!(links[0].uri.contains(TICKET), "{}", links[0].uri);
+    assert!(
+        links[0]
+            .uri
+            .contains(&format!("?stripWorkflow=true&ticket={TICKET}")),
+        "{}",
+        links[0].uri
+    );
     assert_eq!(links[0].mime_type.as_deref(), Some("image/png"));
+    let payload = result_json(&result);
+    assert_eq!(payload["assets"][0]["workflowPolicy"], "strip-requested");
+
+    let included = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("get_job_result").with_arguments(
+                json!({ "jobId": "job_v1", "includeWorkflow": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("get_job_result opt-in succeeds");
+    let included_link = included
+        .content
+        .iter()
+        .find_map(|block| block.as_resource_link())
+        .expect("image link");
+    assert!(included_link.uri.contains(&format!("?ticket={TICKET}")));
+    assert!(!included_link.uri.contains("stripWorkflow"));
+    assert_eq!(
+        result_json(&included)["assets"][0]["workflowPolicy"],
+        "preserve-if-present"
+    );
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn mixed_result_reports_workflow_policy_per_asset() {
+    let harness = harness(vec![snapshot(
+        "video_generate",
+        "completed",
+        1.0,
+        "completed",
+        json!({ "result": { "assets": [
+            media_asset("vid_1", "video", VIDEO_PATH, "video/mp4"),
+            media_asset("asset_1", "image", IMAGE_PATH, "image/png"),
+        ] } }),
+    )])
+    .await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("get_job_result")
+                .with_arguments(json!({ "jobId": "job_v1" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("get_job_result succeeds");
+    let payload = result_json(&result);
+    assert_eq!(payload["assets"][0]["type"], "video");
+    assert_eq!(payload["assets"][0]["workflowPolicy"], "not-applicable");
+    assert!(payload["assets"][0]["url"].as_str().is_some_and(|url| url
+        .contains(&format!("?ticket={TICKET}"))
+        && !url.contains("stripWorkflow")));
+    assert_eq!(payload["assets"][1]["type"], "image");
+    assert_eq!(payload["assets"][1]["workflowPolicy"], "strip-requested");
+    assert!(payload["assets"][1]["url"]
+        .as_str()
+        .is_some_and(|url| url.contains(&format!("?stripWorkflow=true&ticket={TICKET}"))));
+    assert!(payload.get("workflowIncluded").is_none());
+    assert!(payload.get("workflowHandling").is_none());
 
     let _ = harness.client.cancel().await;
 }
