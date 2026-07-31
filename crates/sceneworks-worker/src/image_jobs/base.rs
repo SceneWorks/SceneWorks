@@ -5367,6 +5367,50 @@ fn candle_tier_fit(
     }
 }
 
+/// Carry the legacy Candle fit gate's resident/staged choice into the request-scoped runtime
+/// contract. The load-time policy remains populated for compatibility with older and non-image
+/// providers, but current image providers use this bit as the sole lifecycle authority.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_request_scoped_candle_residency(
+    use_sequential: bool,
+    memory: &mut Option<gen_core::GenerationMemory>,
+) {
+    if use_sequential {
+        memory.get_or_insert_with(Default::default).stage_residency = true;
+    }
+}
+
+#[cfg(test)]
+mod candle_request_residency_tests {
+    use super::*;
+
+    #[test]
+    fn sequential_admission_sets_the_request_bit_without_erasing_other_rungs() {
+        let mut resident = None;
+        apply_request_scoped_candle_residency(false, &mut resident);
+        assert!(resident.is_none(), "resident admission leaves request memory absent");
+
+        let mut sequential = None;
+        apply_request_scoped_candle_residency(true, &mut sequential);
+        assert!(
+            sequential.is_some_and(|memory| memory.stage_residency),
+            "mutation guard: sequential admission must reach the request lifecycle bit"
+        );
+
+        let mut composed = Some(gen_core::GenerationMemory {
+            tile_vae_decode: true,
+            ..Default::default()
+        });
+        apply_request_scoped_candle_residency(true, &mut composed);
+        let composed = composed.expect("existing rung memory is preserved");
+        assert!(composed.stage_residency);
+        assert!(composed.tile_vae_decode);
+    }
+}
+
 /// Whether a candle job may use Krea Turbo's request-scoped, quality-preserving memory ladder.
 /// Keep every exclusion explicit: these surfaces have distinct component graphs or denoise contracts.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -6778,6 +6822,7 @@ async fn generate_candle_stream(
                 "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
         })
     });
+    apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if use_sequential {
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).

@@ -429,6 +429,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
         validate_raw_job_payload(state, &job_type, &merged)?;
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
+            validate_image_pose_count(advanced)?;
+        }
         crate::control_overlays::resolve_control_overlay_selection(
             state,
             project_id.as_deref(),

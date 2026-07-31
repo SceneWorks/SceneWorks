@@ -61,6 +61,9 @@ pub(crate) struct MlxRequestPlan {
     model_id: String,
     tier: MemoryNumericTier,
     asset_bytes: u64,
+    /// Control checkpoint bytes already folded into `asset_bytes` by the legacy on-disk estimator.
+    /// An adopting contract replaces this raw source size with its load-exact typed residency.
+    folded_control_bytes: u64,
     activation_headroom_bytes: u64,
     /// The resolution-INDEPENDENT slice of `activation_headroom_bytes` (sc-16195). Always
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.
@@ -77,6 +80,7 @@ impl MlxRequestPlan {
         resolved_artifact: Option<ResolvedArtifactProvenance>,
     ) -> Self {
         let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
+        let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
             quant: spec.quantize,
@@ -119,6 +123,7 @@ impl MlxRequestPlan {
             model_id: model_id.to_owned(),
             tier,
             asset_bytes,
+            folded_control_bytes,
             // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
             // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
             // the activation allowance here. Exact evidence supplies its own measured envelope.
@@ -201,6 +206,26 @@ impl MlxRequestPlan {
                     .round()
                     .clamp(0.0, u64::MAX as f64) as u64,
             )
+    }
+
+    /// Convert the legacy whole-spec estimate into the base-only scalar expected by the additive
+    /// component contract. Today `spec_component_bytes` folds only `LoadSpec::control` among the
+    /// typed auxiliary slots, so only a declared control branch needs normalization. Non-adopting
+    /// providers retain the legacy scalar byte-for-byte.
+    fn contract_base_peak_bytes(
+        &self,
+        legacy_total_peak_bytes: u64,
+        contract: &MemoryProviderContract,
+    ) -> u64 {
+        let declares_control_branch = contract
+            .resident_components()
+            .iter()
+            .any(|component| component.kind == gen_core::MemoryComponentKind::ControlBranch);
+        legacy_total_peak_bytes.saturating_sub(if declares_control_branch {
+            self.folded_control_bytes
+        } else {
+            0
+        })
     }
 }
 
@@ -1221,20 +1246,27 @@ fn evaluate_request_with_budget_using_bundle(
             MAGE_CALIBRATION_FINGERPRINT
         )));
     }
-    // The estimator is a complete-pipeline peak, while the live budget is incremental from the
-    // process's current state. Only bytes above the cache-recorded pre-load external baseline, and
-    // no more than the provider-declared resident envelope, may be credited as already present.
-    // Unrelated process allocations therefore remain charged on the available side.
-    let attributable_resident_bytes = budget
-        .committed_bytes
-        .saturating_sub(external_committed_bytes)
-        .min(contract.asset_facts.base_bytes);
+    // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
+    // any separately declared auxiliary networks before either fit selection or warm-cache credit.
+    // Exact evidence already describes the whole request peak and therefore remains authoritative.
+    let contract_base_peak_bytes = plan.contract_base_peak_bytes(total_peak_bytes, contract);
+    let base_prediction = generator.predicted_memory_peak_from_base(contract_base_peak_bytes);
     let evidence_peak_bytes = admission
         .evidence
         .iter()
         .map(|candidate| candidate.evidence.predicted_peak_bytes)
         .max();
-    let modeled_peak_bytes = evidence_peak_bytes.unwrap_or(total_peak_bytes);
+    let modeled_peak_bytes =
+        evidence_peak_bytes.unwrap_or_else(|| base_prediction.predicted_peak_bytes());
+
+    // The modeled peak is a complete-pipeline peak, while the live budget is incremental from the
+    // process's current state. Only bytes above the cache-recorded pre-load external baseline, and
+    // no more than the provider-declared total resident envelope, may be credited as already
+    // present. Unrelated process allocations therefore remain charged on the available side.
+    let attributable_resident_bytes = budget
+        .committed_bytes
+        .saturating_sub(external_committed_bytes)
+        .min(contract.total_resident_bytes());
     if attributable_resident_bytes > modeled_peak_bytes {
         return Err(WorkerError::InvalidPayload(format!(
             "{} live resident attribution {} exceeds modeled total peak {}; refusing an \
@@ -1251,7 +1283,7 @@ fn evaluate_request_with_budget_using_bundle(
             .saturating_sub(attributable_resident_bytes);
         modeled_peak_bytes
     } else {
-        total_peak_bytes - attributable_resident_bytes
+        modeled_peak_bytes.saturating_sub(attributable_resident_bytes)
     };
     let (resident_selection, resident) = resident_evidence(
         contract,
@@ -2882,6 +2914,7 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(6.0),
+            folded_control_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -3048,6 +3081,7 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(3.0),
+            folded_control_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -3151,6 +3185,7 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
             },
             asset_bytes: gib_to_bytes(30.0),
+            folded_control_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(2.0),
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
@@ -4682,6 +4717,7 @@ mod tests {
                 quant: None,
             },
             asset_bytes: 35_666_644_396,
+            folded_control_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -4734,6 +4770,7 @@ mod tests {
                 quant: None,
             },
             asset_bytes: gib_to_bytes(asset_gb),
+            folded_control_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -4803,6 +4840,7 @@ mod tests {
                 quant: None,
             },
             asset_bytes: gib_to_bytes(asset_gb),
+            folded_control_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(
                 headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
             ),
@@ -4900,6 +4938,7 @@ mod tests {
             model_id: "flux_dev".to_owned(),
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
+            folded_control_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -4930,6 +4969,149 @@ mod tests {
             gib_to_bytes(3.0),
             "five attributable GiB are already resident; the unrelated GiB stays charged"
         );
+    }
+
+    #[test]
+    fn production_control_spec_replaces_raw_checkpoint_with_one_typed_residency() {
+        use gen_core::{
+            MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+        };
+        use std::fs::File;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const BASE_SOURCE_BYTES: u64 = 4_000;
+        const CONTROL_SOURCE_BYTES: u64 = 2_000;
+        const CONTROL_RESIDENT_BYTES: u64 = 1_000;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sceneworks-mlx-fit-sc-16065-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        let base = root.join("base.safetensors");
+        let control = root.join("control.safetensors");
+        File::create(&base)
+            .expect("base fixture")
+            .set_len(BASE_SOURCE_BYTES)
+            .expect("base fixture size");
+        File::create(&control)
+            .expect("control fixture")
+            .set_len(CONTROL_SOURCE_BYTES)
+            .expect("control fixture size");
+        let spec =
+            LoadSpec::new(WeightsSource::File(base)).with_control(WeightsSource::File(control));
+        let mut plan = MlxRequestPlan::for_spec_and_manifest(
+            "fixture_provider",
+            "fixture_model",
+            &spec,
+            None,
+            None,
+        );
+        // Isolate asset accounting from the separately-tested activation allowance. Crucially, the
+        // plan itself still comes from the production LoadSpec path that folds control into total.
+        plan.activation_headroom_bytes = 0;
+        plan.fixed_reserve_bytes = 0;
+        assert_eq!(plan.asset_bytes, BASE_SOURCE_BYTES + CONTROL_SOURCE_BYTES);
+        assert_eq!(plan.folded_control_bytes, CONTROL_SOURCE_BYTES);
+
+        let mut generator = fixture_generator();
+        {
+            let contract = generator.contract.as_mut().expect("fixture contract");
+            let phases = contract.lifecycle.phases.clone();
+            contract.asset_facts.base_bytes = BASE_SOURCE_BYTES;
+            contract.asset_facts.overlay_bytes = CONTROL_RESIDENT_BYTES;
+            contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
+                phases,
+                variables: vec![
+                    MemoryFormulaVariable::AssetBytes,
+                    MemoryFormulaVariable::OverlayBytes,
+                ],
+                resident_components: vec![MemoryResidentComponent {
+                    id: "fixture.control".to_owned(),
+                    kind: MemoryComponentKind::ControlBranch,
+                    resident_bytes: CONTROL_RESIDENT_BYTES,
+                    bounded_by: None,
+                }],
+            };
+        }
+        let inputs = fixture_inputs(1024, 1024);
+        let legacy_total_peak = plan.generic_total_peak_bytes(request_geometry(&inputs));
+        assert_eq!(
+            legacy_total_peak,
+            BASE_SOURCE_BYTES + CONTROL_SOURCE_BYTES,
+            "the production legacy estimate includes the raw control checkpoint"
+        );
+
+        let cold = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(1.0),
+            legacy_total_peak,
+            0,
+            &[],
+        )
+        .expect("the normalized base plus one typed control branch fits");
+
+        assert_eq!(
+            cold.context.predicted_peak_bytes,
+            BASE_SOURCE_BYTES + CONTROL_RESIDENT_BYTES,
+            "the raw control source must be replaced, not double-counted"
+        );
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        let breakdown = cold.context.predicted_peak_breakdown(contract);
+        assert_eq!(
+            breakdown.predicted_peak_bytes(),
+            BASE_SOURCE_BYTES + CONTROL_RESIDENT_BYTES
+        );
+        assert_eq!(breakdown.unattributed_bytes, BASE_SOURCE_BYTES);
+        assert_eq!(breakdown.components.len(), 1);
+        assert_eq!(
+            breakdown.components[0].kind,
+            MemoryComponentKind::ControlBranch
+        );
+
+        let warm = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            MemoryBudget {
+                total_bytes: gib_to_bytes(1.0),
+                committed_bytes: contract.total_resident_bytes(),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            legacy_total_peak,
+            0,
+            &[],
+        )
+        .expect("a fully warm base and control branch require no duplicate incremental bytes");
+        assert_eq!(
+            warm.context.predicted_peak_bytes, 0,
+            "warm credit must remove the base and typed control exactly once"
+        );
+
+        let legacy = evaluate_request_with_budget(
+            &fixture_generator(),
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(1.0),
+            legacy_total_peak,
+            0,
+            &[],
+        )
+        .expect("a non-adopting provider preserves the legacy whole-spec estimate");
+        assert_eq!(legacy.context.predicted_peak_bytes, legacy_total_peak);
+        std::fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[test]

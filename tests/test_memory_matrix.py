@@ -89,7 +89,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert {record["id"] for record in calibration["records"]} == expected_ids
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == expected_ids
     assert all(run["binding"] == {"eligible": True, "reasons": []} for run in matrix["calibrationRuns"])
-    assert all(run["semantics"] == "current" for run in matrix["calibrationRuns"])
+    assert all(
+        run["semantics"] == "historical" for run in matrix["calibrationRuns"]
+    ), "a runtime pin change must not relabel prior-runtime hardware evidence as current"
 
 
 def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():

@@ -124,10 +124,10 @@ crates/media/candle-gen/candle-gen-face/src/iresnet.rs	8c73c1ab4efe48ed3883ff707
 crates/media/candle-gen/candle-gen-face/src/scrfd.rs	2dbfcc6eb76abc71b9f3bb7b80ec391e8c8165b5	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/candle-gen/candle-gen-face
 crates/media/candle-gen/candle-gen-flux/src/control.rs	0a19acfe7ad094ee4c1ce949f04e3325c006136b	1c498b7464a7a929acf611071a2872dbb58400dadfa586d54b314966800c30f5	architecture:crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux/src/ip_dit.rs	57f0c4271c196ac3117e6d873f964c6e4748835f	9ebfb2e522a52de3d16de072764c66a4dfc450931cb4a4edd5e03f646901106a	architecture:crates/media/candle-gen/candle-gen-flux
-crates/media/candle-gen/candle-gen-flux/src/lib.rs	1081636b4f168164e2d25e2df3b60fb517e4e11e	35e28b683d1d0e6ccdd194562ff2190e8946212dd3dd0b7d7b960fd992aa241a	architecture:crates/media/candle-gen/candle-gen-flux
+crates/media/candle-gen/candle-gen-flux/src/lib.rs	93d2bf706c5b22ecfdec11fa96a91e808cc9c197	35e28b683d1d0e6ccdd194562ff2190e8946212dd3dd0b7d7b960fd992aa241a	architecture:crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux/src/packed_dit.rs	9bd21d33d6d09e0014b6058351c40dbf18aa0ba8	3c78ce0ade2cb09fae7b94c2f62c3c937c045b190a34065ea2fddb71c9b5047b	architecture:crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux/src/packed_te.rs	04cf9f378b50c2933d5416299ee53feed1658326	7e7df337971b0aeb4a0b0f0758bd746d846e361f8a3a464c053ce23200281e1b	candle-transformers-source
-crates/media/candle-gen/candle-gen-flux/src/pipeline.rs	b2e5a8f223c4d7a087e4d2f8d843e0a725fef271	ffa30dee45c3c184272124a50c4201d7ac2f57105010a31fc85dc7a52f1b8a63	architecture:crates/media/candle-gen/candle-gen-flux
+crates/media/candle-gen/candle-gen-flux/src/pipeline.rs	cdb8ef5f7703202b7136dbffa8e475f61d4d58a1	ffa30dee45c3c184272124a50c4201d7ac2f57105010a31fc85dc7a52f1b8a63	architecture:crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux/src/quant.rs	9f2475c8ad38ea3e2f8115d0e9870efc147fd3e0	700d6a849b3d56e20af61c16e407b05bcd5e5065cbc1f695bb0b15e5a80c2b8d	architecture:crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs	8d69d70ae6e3ef04e62c98459667b29fa5fbb8a9	14e71fcde673b86d3ea8533dd01e30ac1965bfc1fb375abccfcf03feef636b72	candle-transformers-source
 crates/media/candle-gen/candle-gen-flux/src/vae/mod.rs	29954fbabd270f80c59c0d4da2998a9d40d3b0ed	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/candle-gen/candle-gen-flux
@@ -164,7 +164,7 @@ crates/media/candle-gen/candle-gen-kolors/src/tokenizer.rs	dbf9a9bd37b157ccbc9a8
 crates/media/candle-gen/candle-gen-kolors/src/unet.rs	bec2144544e01c9a7fa675d5e0bd15c0e97a9ed2	6404b184f67c39bb28587e5ee59231f1d0383249866ef933022511a49ec8da17	candle-transformers-source
 crates/media/candle-gen/candle-gen-krea/src/config.rs	91c7e0c0ca3f5b517ebf94d588bd6c3826f25af2	a83631b1ef5a994c1aae17088da719a69d9c474fcb974cf41c70d6af5e5f97fe	architecture:crates/media/candle-gen/candle-gen-krea
 crates/media/candle-gen/candle-gen-krea/src/convert.rs	2816e48f737045916b23e356f45e0850c87e067a	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/candle-gen/candle-gen-krea
-crates/media/candle-gen/candle-gen-krea/src/lib.rs	1855d627916362381e3f4480772deade9143b50b	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/candle-gen-krea
+crates/media/candle-gen/candle-gen-krea/src/lib.rs	4ce76cca09d507a398c1d004c361d07f7bf59d1d	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/candle-gen-krea
 crates/media/candle-gen/candle-gen-krea/src/loader.rs	8fc5cebddf2f704707c1f1ca67eee32b27b5cc0b	1e609366d1a3acd8bdc0d9c8dc5f523d88184ae730974dbb4d3933c5a14e5743	architecture:crates/media/candle-gen/candle-gen-krea
 crates/media/candle-gen/candle-gen-krea/src/nvfp4_dit.rs	9106775a4b4f52559ab3e494126eff6218889671	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/candle-gen/candle-gen-krea
 crates/media/candle-gen/candle-gen-krea/src/pipeline.rs	3353a0aafa0e6e1b7576d7db392c78965ca8eecd	6b5145202f5a97d0c4b205368bdc33c6a4529b5e1d0c6853169fac0d49a4fd7f	architecture:crates/media/candle-gen/candle-gen-krea
@@ -283,7 +283,7 @@ crates/media/candle-gen/candle-gen-svd/src/config.rs	1788360e0e195b58a5879e060d1
 crates/media/candle-gen/candle-gen-svd/src/conv3d.rs	67b57ad8ac90fb59b4692954a870bd4cd3f9c06a	a28439eb0298f408a26647e5803a372f77c570888d688f001b92ba16cfc92f46	architecture:crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-svd/src/embeddings.rs	f227ddf312cf7aab3754129626e9b5dd9b2175cb	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-svd/src/image_encoder.rs	68324f489e46d53425e7b03f5ea13e8be42019ff	a64f30b1b216a1985690b77103f10194108b8a7ae1a1a48df420b6fd4565e5c2	architecture:crates/media/candle-gen/candle-gen-svd
-crates/media/candle-gen/candle-gen-svd/src/lib.rs	c39ffbe99795596d88227dd0ebbf5639713d88df	fe76651ef79e086e2ec01efcac41ecc05bedd4a2e698c3821d6ffb451beda164	architecture:crates/media/candle-gen/candle-gen-svd
+crates/media/candle-gen/candle-gen-svd/src/lib.rs	62e399996211659104c0acb05a8491c363973ed3	fe76651ef79e086e2ec01efcac41ecc05bedd4a2e698c3821d6ffb451beda164	architecture:crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-svd/src/pipeline.rs	84979dbdf55601cf6bf88e360b97b072216eb8dd	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-svd/src/preprocess.rs	0f11eb8404191029639031d45381c80b0e4712e1	df37c0e6c3bf9ffef694a4f06b5eab01dcc413504cbbccda8c8d42503be27dec	architecture:crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-svd/src/scheduler.rs	7e5c375b7ffa596f590969df8f81bc04a84fc453	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/candle-gen/candle-gen-svd
@@ -302,7 +302,7 @@ crates/media/candle-gen/candle-gen-wan/src/vae.rs	8d3735d0407d562adbcfe1014dfcd4
 crates/media/candle-gen/candle-gen-wan/src/vae16.rs	113a6f22d391b09a41b42b5522a654802472691f	55e2ddf4a4bc15c67fdc3538da9e0c22debd9245677d22d3879f39a7670300db	architecture:crates/media/candle-gen/candle-gen-wan
 crates/media/candle-gen/candle-gen-z-image/src/control.rs	3b28cfcf83b63432f06738db0caafe64d4b0ba1b	14e71fcde673b86d3ea8533dd01e30ac1965bfc1fb375abccfcf03feef636b72	architecture:crates/media/candle-gen/candle-gen-z-image
 crates/media/candle-gen/candle-gen-z-image/src/dit.rs	c54284ce8999455ca66247ba3e6706db0cc18e21	b141bbedaf33987e39821ca85364de6d1e6b909f2a438d3bc39e3a3cd3c34cb0	architecture:crates/media/candle-gen/candle-gen-z-image
-crates/media/candle-gen/candle-gen-z-image/src/lib.rs	f2482b4bb7f2739820043dda16a66a978ac25665	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/candle-gen/candle-gen-z-image
+crates/media/candle-gen/candle-gen-z-image/src/lib.rs	d4396a9bbcde9eed6b5e9da182d2c21a6689ea74	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/candle-gen/candle-gen-z-image
 crates/media/candle-gen/candle-gen-z-image/src/packed_dit.rs	89f403ba98ca2b38cf9b084f151826b01611b0fe	11df86cbc08a883b96a8217862cf53e061236cbf4283695b8adfbdda74ea6bbf	architecture:crates/media/candle-gen/candle-gen-z-image
 crates/media/candle-gen/candle-gen-z-image/src/packed_te.rs	8570ff81de06c09555c4e1b455c16782b73e31eb	02dbabc70709e554eb53b5ca5361aff93c59786876e0ee52014e33201943bc6e	architecture:crates/media/candle-gen/candle-gen-z-image
 crates/media/candle-gen/candle-gen-z-image/src/pipeline.rs	68afb84e85bad4f515c7c1811517f6c1cb297645	e46fb657f783b4ba60c67fba62e74bffa2bfc6d5ebf7f79159eabb21845c5e4d	architecture:crates/media/candle-gen/candle-gen-z-image
@@ -313,7 +313,6 @@ crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs	2a28f9c9fe21b80c2e22298
 crates/media/candle-gen/candle-gen/src/quant/eight_bit_linear.rs	8fd156e230755be368bead25889bc60db021a4a4	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/quant/mod.rs	a7c6a1fea7c6b46d44f675194ab0534b61fdf527	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/quant/nvfp4.rs	580aca7d72bdf94b3f65b8044c914b287c00bcc7	dbaef6b9ce774cf1864e35d17a7aa1674787eea632e3e5a1766a6a5db2225c63	architecture:crates/media/candle-gen/candle-gen
-crates/media/candle-gen/candle-gen/src/residency.rs	14b5f1fd8f0bb938376de0ec65a52128e7c89193	70f427fc0619e543dce66011fd374852735fc48a6e9303d99965a50f9da8fca7	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/sampler.rs	748d1e26cd08af03bb82bf0ec895a66e689fce93	57520dadd77574972f3a310bb0a3e4fb7ab5abdbb7ae346cc5bd3ef4b415da73	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/seed.rs	cbed832cc349d0448da6ec6b34ff93b1c7beb0fe	b6d25a3c22c29b04cc4113f036f7ae77e9c70fc564ffbb9785ae0659bce562f3	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/train/dataset.rs	8b35d1cd1dccc88776d955dd7ca19321ca625815	4307d189474bbe675bd5b4b098720659c8ad0879e0f11d808d49b75e002ce414	architecture:crates/media/candle-gen/candle-gen
@@ -399,7 +398,7 @@ crates/media/mlx-gen/mlx-gen-krea-realtime/src/lib.rs	62ffff8bd71f076cb5d26111fc
 crates/media/mlx-gen/mlx-gen-krea-realtime/src/scheduler.rs	8f3403613f583cffc05faef39a93b4c087f914dd	d8d097b7f906c4b43b86fe300ed293c67ce8f25b86a7816ddac286ab20877e96	architecture:crates/media/mlx-gen/mlx-gen-krea-realtime
 crates/media/mlx-gen/mlx-gen-krea-realtime/src/t2v.rs	7c269032d7bd3fe90fd5456b6a543507be75af80	06faa6b1d48c53983547b8db49603bf8b2d47f2c29ebb5402ee0fe91b29504d2	architecture:crates/media/mlx-gen/mlx-gen-krea-realtime
 crates/media/mlx-gen/mlx-gen-krea/src/config.rs	f7114c05b02014fdcb08c21d36f74e497e288b10	fb07f7af085ff99d79e63de84403d1b49e237ad1b6a7c77044b6861650723363	architecture:crates/media/mlx-gen/mlx-gen-krea
-crates/media/mlx-gen/mlx-gen-krea/src/model.rs	03a0b6da58f5b51db5d5538e6caeb97bb281050b	9e5b1dac32e4de284db8dd1011b437e65137b9a329a35ad4697e66316b76aaec	architecture:crates/media/mlx-gen/mlx-gen-krea
+crates/media/mlx-gen/mlx-gen-krea/src/model.rs	6d5672d436aebdc26193b7da1ee00cb5a56757bb	9e5b1dac32e4de284db8dd1011b437e65137b9a329a35ad4697e66316b76aaec	architecture:crates/media/mlx-gen/mlx-gen-krea
 crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs	603a3b8a6f2929abe540bd6264313f126b329396	a1568fca8e764570c3bd72c58c6df9029d88bf00b1d3bf218f4728734e74daf5	architecture:crates/media/mlx-gen/mlx-gen-krea
 crates/media/mlx-gen/mlx-gen-krea/src/text_encoder/encoder.rs	03dcbb6c2d0cc6cb8d0598299dd73b47b16f7c22	70f427fc0619e543dce66011fd374852735fc48a6e9303d99965a50f9da8fca7	architecture:crates/media/mlx-gen/mlx-gen-krea
 crates/media/mlx-gen/mlx-gen-krea/src/training.rs	e39ac6c23da4f3614d8bf18875fe9ea90e1dfa03	7294eafc9437a5221982512bb13f41304314efd7b09946be9ef98bfe2d42d1b4	architecture:crates/media/mlx-gen/mlx-gen-krea
@@ -527,7 +526,7 @@ crates/media/mlx-gen/mlx-gen-sdxl/src/inpaint.rs	88810bb21cdedf8a39b9955b6367a53
 crates/media/mlx-gen/mlx-gen-sdxl/src/ip_adapter.rs	330afd9125f9ae0e7a9fe80057ba47c61212045c	a6883d9b84643003942411d7702ff6b039e58ea34bc42623db862b7308bb36d8	architecture:crates/media/mlx-gen/mlx-gen-sdxl
 crates/media/mlx-gen/mlx-gen-sdxl/src/lib.rs	b6cf6eca525302f2e41a44d85e0e82ab8a7c5a2c	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/mlx-gen/mlx-gen-sdxl
 crates/media/mlx-gen/mlx-gen-sdxl/src/loader.rs	be8dbff420b4f9a5b904cb56586c18b7736ae29e	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/mlx-gen/mlx-gen-sdxl
-crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs	0ffe4e0e29aa46c680e43f4f1833889b5eb6a56d	a0664ee2e272c8d5cee33ad82b5ff36d2be74e400d80e74d940f4c13fe4da687	architecture:crates/media/mlx-gen/mlx-gen-sdxl
+crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs	1c373e5438959f46b5529d38a7d2b511f7722c42	a0664ee2e272c8d5cee33ad82b5ff36d2be74e400d80e74d940f4c13fe4da687	architecture:crates/media/mlx-gen/mlx-gen-sdxl
 crates/media/mlx-gen/mlx-gen-sdxl/src/pipeline.rs	a5f7c7ecc0136b4cec14f02fc0d8c297d3c9f3c9	38b8803690c1eab0f60985a29832c8fd0efe643bc0451a6d12aefc1a60272c29	architecture:crates/media/mlx-gen/mlx-gen-sdxl
 crates/media/mlx-gen/mlx-gen-sdxl/src/sampler.rs	a704a37f6d300e795a8ba772fb16c29bf20758f9	006b05063e146e34efa5058fe6865fd887e5072b9e0b2c21efaa5c8e9516d616	architecture:crates/media/mlx-gen/mlx-gen-sdxl
 crates/media/mlx-gen/mlx-gen-sdxl/src/text_encoder.rs	28d2c965bb89214dda142253bb2518af9326ff21	88ec8f263a48b515867833683ac8e59c255d00ccea1dfce13c5c9bdffd210ab6	architecture:crates/media/mlx-gen/mlx-gen-sdxl
@@ -583,7 +582,7 @@ crates/media/mlx-gen/mlx-gen-wan/src/vae22.rs	e4ccd58754ae4e32683527f8053a0cbd66
 crates/media/mlx-gen/mlx-gen-z-image/src/attention.rs	c0a82c067ee6e05dca50035738673d22756fce2b	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/mlx-gen/mlx-gen-z-image
 crates/media/mlx-gen/mlx-gen-z-image/src/context_block.rs	8a861addaae7ada92ca41a570bde366483d4b726	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-z-image
 crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer_block.rs	43cfae2b53d7ca2e1130c5da68252780da339e85	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-z-image
-crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer.rs	4efcdb60703fafebf00be114e51336de2a077ade	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/mlx-gen/mlx-gen-z-image
+crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer.rs	577923c4b272384003df354d4c42d91477c8d5d2	bd0594847547d78405dbd19311b9087eaae9352c00b4def1ec6fe798216de5b1	architecture:crates/media/mlx-gen/mlx-gen-z-image
 crates/media/mlx-gen/mlx-gen-z-image/src/feed_forward.rs	d071ded4fb48794b20d54a4ce54ad9f2f9d34df4	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-z-image
 crates/media/mlx-gen/mlx-gen-z-image/src/final_layer.rs	cb2d5057a818ce1566da70affc0b80ad7e2da09e	b9feb93c33722d4c8b76f9967e6ab633761786e4d96ebb8ead98af2627697b3d	architecture:crates/media/mlx-gen/mlx-gen-z-image
 crates/media/mlx-gen/mlx-gen-z-image/src/pipeline.rs	63ac3bb926d3519cc8da7a53f5530abf0bf47a39	650bd7a8e095536ffb6da6c868a69541409c6f830378ad6cc6913310b0708944	architecture:crates/media/mlx-gen/mlx-gen-z-image

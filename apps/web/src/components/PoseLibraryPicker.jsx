@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { usePoseLibrary } from "../poseLibrary.js";
+import { MAX_JOB_POSES } from "../poseSelection.js";
 
 // Multi-select gallery of OpenPose poses, grouped by category. Controlled: the parent
 // owns `selectedIds` (array) and gets toggles via `onToggle(id)` / `onClear()`. Shared
@@ -16,6 +17,7 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
   // "standing" when present, else the first available category.
   const [activeCategory, setActiveCategory] = useState("standing");
   const selected = new Set(selectedIds);
+  const atPoseLimit = selected.size >= MAX_JOB_POSES;
 
   if (loading) {
     return <p className="muted">Loading pose library…</p>;
@@ -37,6 +39,11 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
           Clear
         </button>
       ) : null}
+      {atPoseLimit ? (
+        <span className="field-hint" role="status">
+          Maximum of {MAX_JOB_POSES} poses per job. Deselect one to choose another.
+        </span>
+      ) : null}
     </div>
   );
 
@@ -44,14 +51,20 @@ export function PoseLibraryPicker({ selectedIds = [], onToggle, onClear, loadUse
   // layout leaves the .pose-thumb markup untouched so the shared call sites are unchanged.
   const renderThumb = (pose, showCheck = false) => {
     const isSelected = selected.has(pose.id);
+    const selectionDisabled = atPoseLimit && !isSelected;
     return (
       <button
         aria-label={`${isSelected ? "Deselect" : "Select"} pose ${pose.label}`}
         aria-pressed={isSelected}
         className={isSelected ? "pose-thumb selected" : "pose-thumb"}
+        disabled={selectionDisabled}
         key={pose.id}
         onClick={() => onToggle?.(pose.id)}
-        title={pose.label}
+        title={
+          selectionDisabled
+            ? `Maximum of ${MAX_JOB_POSES} poses per job. Deselect one to choose another.`
+            : pose.label
+        }
         type="button"
       >
         <img alt={pose.label} loading="lazy" src={pose.previewUrl ?? `/${pose.preview}`} />

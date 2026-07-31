@@ -621,13 +621,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             let model = QwenEdit::load(&QwenEditPaths {
                 root: qwen_base,
                 adapters,
-                // sc-10968: the fit-gate above picks sequential residency when the resident peak won't
-                // fit; the provider then loads→encodes→drops the VL encoder before the DiT.
-                offload_policy: if use_sequential {
-                    gen_core::OffloadPolicy::Sequential
-                } else {
-                    gen_core::OffloadPolicy::Resident
-                },
+                // Compatibility-only load field. The fit gate's lifecycle decision is carried by
+                // each request below so one loaded provider can serve both residency modes.
+                offload_policy: gen_core::OffloadPolicy::Resident,
             })
             .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
             Ok((model, reference))
@@ -646,6 +642,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                     guidance,
                     seed: seed as u64,
                     lightning,
+                    stage_residency: use_sequential,
                     cancel: cancel.clone(),
                 };
                 let result =

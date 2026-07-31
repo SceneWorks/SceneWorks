@@ -4009,6 +4009,7 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(
             "loras must contain at most {} entries",
@@ -4048,6 +4049,25 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         if payload.upscale.engine.trim().is_empty() {
             return Err(ApiError::bad_request("upscale.engine is required"));
         }
+    }
+    Ok(())
+}
+
+/// Bound strict-pose fan-out at the image-job creation boundary. Each `advanced.poses` entry
+/// renders one image, so this is an output-count contract rather than a JSON-size guard.
+///
+/// Existing stored jobs are immutable and remain readable. Retry/duplicate pass their merged
+/// payload through this same helper in `jobs.rs`, so a legacy over-limit job must be reduced before
+/// it can create new work instead of silently reproducing the old unbounded behavior.
+fn validate_image_pose_count(advanced: &JsonObject) -> Result<(), ApiError> {
+    let Some(poses) = advanced.get("poses").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if poses.len() > sceneworks_core::image_request::MAX_JOB_POSES {
+        return Err(ApiError::bad_request(format!(
+            "advanced.poses must contain at most {} entries; each pose renders one image",
+            sceneworks_core::image_request::MAX_JOB_POSES
+        )));
     }
     Ok(())
 }

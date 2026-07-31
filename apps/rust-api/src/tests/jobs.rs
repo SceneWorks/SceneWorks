@@ -793,6 +793,128 @@ async fn create_image_job_rejects_oversized_advanced_object() {
 }
 
 #[tokio::test]
+async fn create_image_job_enforces_the_pose_output_ceiling() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let poses: Vec<Value> = (0..sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| json!({ "id": format!("pose-{index}"), "keypoints": [] }))
+        .collect();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "poses": poses },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let mut over = poses;
+    over.push(json!({ "id": "one-too-many", "keypoints": [] }));
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "poses": over },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(
+        error["detail"],
+        "advanced.poses must contain at most 64 entries; each pose renders one image"
+    );
+}
+
+/// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.
+/// Retry and duplicate therefore reject until the caller reduces `advanced.poses` to the current
+/// product ceiling. This makes the compatibility policy executable instead of an incidental side
+/// effect of which creation route happened to run.
+#[tokio::test]
+async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "legacy pose set",
+            "count": 1,
+            "advanced": { "poses": [{ "id": "pose-0", "keypoints": [] }] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let job_id = created["id"].as_str().expect("job id");
+    let mut legacy_payload = created["payload"]
+        .as_object()
+        .cloned()
+        .expect("stored payload object");
+    let legacy_poses: Vec<Value> = (0..=sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| json!({ "id": format!("legacy-pose-{index}"), "keypoints": [] }))
+        .collect();
+    legacy_payload.insert("advanced".to_owned(), json!({ "poses": legacy_poses }));
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let updated = connection
+        .execute(
+            "update jobs set payload_json = ?1 where id = ?2",
+            rusqlite::params![Value::Object(legacy_payload).to_string(), job_id],
+        )
+        .expect("legacy payload writes");
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let (status, stored) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(
+        stored["payload"]["advanced"]["poses"]
+            .as_array()
+            .map(Vec::len),
+        Some(65)
+    );
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert_eq!(
+            error["detail"],
+            "advanced.poses must contain at most 64 entries; each pose renders one image"
+        );
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
 async fn create_video_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): the negative-prompt cap is shared by the video validator too.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
