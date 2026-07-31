@@ -143,18 +143,23 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 | --- | --- | --- | --- |
 | Certifying records (1 per cell) | 7354 | 4620 | 2734 |
 | Warm sessions (model loads, 5 rungs each) | 1472 | 924 | 548 |
-| Warm sessions, overlays also amortised — **NOT AVAILABLE in the shipped load contract; a price tag, not a plan** | 552 | 346 | 206 |
 
 **Does the overlay axis evaporate? No — on either axis.** On the record axis, each of the 4600 non-`none` cells needs its own record, because `overlay` is in the cell key and `validateComplete` requires the overlay scenario to actually pass.
 
-On the model-load axis the answer is **unavailable in the shipped load contract**. Dropping overlay from the session key would take loads from 1472 to 552 — a further 2.67x — but that figure **prices a capability the shipped code does not offer**, and an earlier version of this document wrongly reported it as "mostly yes". Four findings, the last decisive:
+On the model-load axis the answer is **unavailable in the shipped load contract**. The counterfactual price tag says dropping overlay from the session key would take loads from 1472 to 552 — a further 2.67x — but that figure is structured metadata, not a campaign column, and it **prices a capability the shipped code does not offer**. An earlier version of this document wrongly reported it as "mostly yes". Four findings, the last decisive:
 
 1. **Adapters are load-time.** crates/sceneworks-worker/src/image_jobs/base.rs#resolve_adapters (base.rs:2585) feeds `LoadSpec::adapters` through `spec.with_adapters` (base.rs:2664-2666), so a generator's adapter set is fixed when it is constructed; crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs:74-81 documents per-phase adapter refs as INDICES into that load-time stack, and crates/sceneworks-worker/src/generator_cache.rs folds the adapter set into `GeneratorCacheKey` so changing it forces a cold reload by design.
 2. **No runtime swap API exists.** no detach / unload / remove / clear / disable / swap / unfuse API for an adapter on a loaded generator exists anywhere in `crates/`, and the `gen_core::Generator` trait exposes no such method, so the call is not expressible — the load-axis collapse assumes an operation that is not implemented (SceneWorks' only adapter-facing generator call is the read-only `adapter_apply_reports()`).
 3. **Adapters void the measured ladder.** carrying adapters voids the ENTIRE measured Krea ladder, not just the streamed-blocks rung: `allow_streamed_blocks = adapter_count == 0` (base.rs:5737) sets `overlay: Some("adapter")` on the request scope (vram_gate.rs:609) while every evidence cell carries `overlay: None` (vram_gate.rs:829-830), so memory_strategy.rs:194-200 marks every candidate OutOfEnvelope and the job drops to the older sequential gate. This is the origin of the 6 `Structurally N/A` cells here — all krea_2_turbo/candle x {q4,q8,bf16} x {lora,control} at bounded_transformer_residency, which scripts/generate-memory-matrix.mjs cites to `base.rs#allow_streamed_blocks`, reason "load-time adapters are incompatible with streamed transformer blocks".
 4. **The collapse perturbs the measurement.** DECISIVE: a toggleable LoRA still leaves its weights resident, so a `none` scenario measured on an adapter-loaded generator is inflated by the adapter's own bytes. The collapse perturbs the exact quantity this campaign exists to measure, so sharing the load and measuring an unperturbed `none` peak cannot both be done.
 
-> SC-16072 needs to know what the capability would be worth before deciding whether to build it. The overlay-amortised column is that price tag and nothing more — it is NOT an achievable campaign shape, and every surface that prints it says so.
+> SC-16072 needs to know what the capability would be worth before deciding whether to build it. The counterfactual count is retained as structured metadata, but the unavailable overlay-amortised COLUMN is dropped from campaign and wall-clock tables. It is not pursued as an achievable campaign shape.
+
+| Overlay | Warm attach/detach without base reload | None-baseline comparison | Tolerance (bytes) | Load sharing |
+| --- | --- | --- | --- | --- |
+| `lora` | false | not_applicable | 0 | false |
+| `identity` | false | not_applicable | 0 | false |
+| `control` | false | not_applicable | 0 | false |
 
 Excluded: 6 cells already classified `Structurally N/A`, which the epic exempts from measurement. Nothing else is excluded — `Missing` cells still need a run, they just need an implementation first.
 
@@ -200,16 +205,16 @@ Per-run seconds is an **input**, defaulting to 300 s. ASSUMPTION — nothing in 
 
 ### Sweep
 
-| s/run | Record-hours (total) | MLX | Candle | Rungs amortised | Rungs + overlays amortised |
-| --- | --- | --- | --- | --- | --- |
-| 30 | 61.3 | 38.5 | 22.8 | 12.3 | 4.6 |
-| 60 | 122.6 | 77 | 45.6 | 24.5 | 9.2 |
-| 120 | 245.1 | 154 | 91.1 | 49.1 | 18.4 |
-| 300 | 612.8 | 385 | 227.8 | 122.7 | 46 |
-| 600 | 1225.7 | 770 | 455.7 | 245.3 | 92 |
-| 1200 | 2451.3 | 1540 | 911.3 | 490.7 | 184 |
+| s/run | Record-hours (total) | MLX | Candle | Rungs amortised |
+| --- | --- | --- | --- | --- |
+| 30 | 61.3 | 38.5 | 22.8 | 12.3 |
+| 60 | 122.6 | 77 | 45.6 | 24.5 |
+| 120 | 245.1 | 154 | 91.1 | 49.1 |
+| 300 | 612.8 | 385 | 227.8 | 122.7 |
+| 600 | 1225.7 | 770 | 455.7 | 245.3 |
+| 1200 | 2451.3 | 1540 | 911.3 | 490.7 |
 
-Only the first three columns are achievable with the harness as written; the last two price collapses that do not exist yet. And per section 0, none of these hours can be spent today at all.
+Only the first three columns are achievable with the harness as written; the final column prices the unimplemented rung collapse. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.
 
 ## 6. Fit coefficients versus measure every cell
 

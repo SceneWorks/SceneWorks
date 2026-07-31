@@ -117,10 +117,55 @@ export const OVERLAY_LOAD_CONTRACT = {
     "an adapter-loaded generator is inflated by the adapter's own bytes. The collapse perturbs the " +
     "exact quantity this campaign exists to measure, so sharing the load and measuring an " +
     "unperturbed `none` peak cannot both be done",
-  whyTheColumnIsStillReported:
+  perOverlayKind: {
+    lora: {
+      warmAttachDetachWithoutBaseReload: false,
+      reason:
+        "LoRAs are fixed in LoadSpec::adapters, changing that set changes GeneratorCacheKey, and " +
+        "Generator exposes no detach or swap method",
+      noneBaselineComparison: {
+        status: "not_applicable",
+        toleranceBytes: 0,
+        reason:
+          "the required warm swap does not exist; even a hypothetical disabled LoRA leaves its " +
+          "weights resident and cannot establish a byte-identical no-adapter baseline",
+      },
+      loadSharingAvailable: false,
+    },
+    identity: {
+      warmAttachDetachWithoutBaseReload: false,
+      reason:
+        "InstantID and PuLID materialise an identity adapter plus face/identity encoder weights, " +
+        "and no loaded-generator API detaches that resident stack",
+      noneBaselineComparison: {
+        status: "not_applicable",
+        toleranceBytes: 0,
+        reason:
+          "the required warm swap does not exist; the extra resident encoder network makes an " +
+          "adapter-loaded process a different baseline population",
+      },
+      loadSharingAvailable: false,
+    },
+    control: {
+      warmAttachDetachWithoutBaseReload: false,
+      reason:
+        "control branches are supplied at construction through LoadSpec::with_control (including " +
+        "the measured Krea pose path), and no loaded-generator API replaces or clears them",
+      noneBaselineComparison: {
+        status: "not_applicable",
+        toleranceBytes: 0,
+        reason:
+          "the required warm swap does not exist; a loaded control branch remains a second " +
+          "resident network, so it cannot stand in for the base-only process",
+      },
+      loadSharingAvailable: false,
+    },
+  },
+  counterfactualPriceTagDisposition:
     "SC-16072 needs to know what the capability would be worth before deciding whether to build it. " +
-    "The overlay-amortised column is that price tag and nothing more — it is NOT an achievable " +
-    "campaign shape, and every surface that prints it says so.",
+    "The counterfactual count is retained as structured metadata, but the unavailable " +
+    "overlay-amortised COLUMN is dropped from campaign and wall-clock tables. It is not pursued as " +
+    "an achievable campaign shape.",
 };
 const FIT_GROUP_FIELDS = ["modelId", "backend", "mode", "overlay"];
 
@@ -364,7 +409,7 @@ function collapsingAxesFor(census, runs) {
     return {
       ...axis,
       factor:
-        `1 today (the current ${runs.overlayLoadCollapseFactor}x amortised load ratio prices ` +
+        `1 today (the current ${runs.unavailableOverlayLoadPriceTag.collapseFactor}x amortised load ratio prices ` +
         "a capability that does not exist)",
       rule:
         `${overlayCells} of the ${census.total} cells carry a non-\`none\` overlay, so this axis ` +
@@ -746,14 +791,15 @@ export function collapseToRuns(cells, parameters = DEFAULT_PARAMETERS) {
     certifyingRecords,
     // The unit that costs a model load, IF a provider amortises one across a target's rungs.
     warmSessions,
-    // The same unit if the provider ALSO swaps overlays without reloading base weights. Reported
-    // rather than chosen: legitimate for a LoRA, not for an identity overlay that materialises
-    // extra encoder weights.
-    overlayAmortisedSessions,
-    overlayLoadCollapseFactor:
-      overlayAmortisedSessions.total === 0
-        ? null
-        : round(warmSessions.total / overlayAmortisedSessions.total, 2),
+    unavailableOverlayLoadPriceTag: {
+      availability: "unavailable",
+      disposition: "counterfactual metadata only; excluded from campaign and wall-clock columns",
+      sessions: overlayAmortisedSessions,
+      collapseFactor:
+        overlayAmortisedSessions.total === 0
+          ? null
+          : round(warmSessions.total / overlayAmortisedSessions.total, 2),
+    },
     // Three places deliberately: the exempt cells make this NOT exactly the rung span, and a
     // two-place round would print a clean "5" that reads as an identity rather than a ratio.
     recordsPerWarmSession:
@@ -948,13 +994,6 @@ export function wallClock(runs, parameters = DEFAULT_PARAMETERS) {
         total: hours(runs.warmSessions.total, seconds),
         mlx: hours(runs.warmSessions.mlx, seconds),
         candle: hours(runs.warmSessions.candle, seconds),
-      },
-      // The cheapest shape that is even arguable: rungs AND overlays amortised into one load.
-      // Neither collapse exists in the harness today, so this column is a floor on a hypothetical.
-      overlayAmortisedSessionHours: {
-        total: hours(runs.overlayAmortisedSessions.total, seconds),
-        mlx: hours(runs.overlayAmortisedSessions.mlx, seconds),
-        candle: hours(runs.overlayAmortisedSessions.candle, seconds),
       },
     })),
   };
@@ -1737,25 +1776,30 @@ function renderMarkdown(model) {
           String(runs.warmSessions.mlx),
           String(runs.warmSessions.candle),
         ],
-        [
-          "Warm sessions, overlays also amortised — **NOT AVAILABLE in the shipped load contract; a price tag, not a plan**",
-          String(runs.overlayAmortisedSessions.total),
-          String(runs.overlayAmortisedSessions.mlx),
-          String(runs.overlayAmortisedSessions.candle),
-        ],
       ],
     ),
     "",
     `**Does the overlay axis evaporate? No — on either axis.** On the record axis, each of the ${cells.total - (cells.byOverlay.none ?? 0)} non-\`none\` cells needs its own record, because \`overlay\` is in the cell key and \`validateComplete\` requires the overlay scenario to actually pass.`,
     "",
-    `On the model-load axis the answer is **${model.overlayLoadContract.verdict}**. Dropping overlay from the session key would take loads from ${runs.warmSessions.total} to ${runs.overlayAmortisedSessions.total} — a further ${runs.overlayLoadCollapseFactor}x — but that figure **prices a capability the shipped code does not offer**, and an earlier version of this document wrongly reported it as "mostly yes". Four findings, the last decisive:`,
+    `On the model-load axis the answer is **${model.overlayLoadContract.verdict}**. The counterfactual price tag says dropping overlay from the session key would take loads from ${runs.warmSessions.total} to ${runs.unavailableOverlayLoadPriceTag.sessions.total} — a further ${runs.unavailableOverlayLoadPriceTag.collapseFactor}x — but that figure is structured metadata, not a campaign column, and it **prices a capability the shipped code does not offer**. An earlier version of this document wrongly reported it as "mostly yes". Four findings, the last decisive:`,
     "",
     `1. **Adapters are load-time.** ${model.overlayLoadContract.adaptersAreLoadTime}.`,
     `2. **No runtime swap API exists.** ${model.overlayLoadContract.noRuntimeSwapApi}.`,
     `3. **Adapters void the measured ladder.** ${model.overlayLoadContract.adaptersDisableARung}.`,
     `4. **The collapse perturbs the measurement.** ${model.overlayLoadContract.baselinePerturbation}.`,
     "",
-    `> ${model.overlayLoadContract.whyTheColumnIsStillReported}`,
+    `> ${model.overlayLoadContract.counterfactualPriceTagDisposition}`,
+    "",
+    ...markdownTable(
+      ["Overlay", "Warm attach/detach without base reload", "None-baseline comparison", "Tolerance (bytes)", "Load sharing"],
+      Object.entries(model.overlayLoadContract.perOverlayKind).map(([overlay, verdict]) => [
+        `\`${overlay}\``,
+        String(verdict.warmAttachDetachWithoutBaseReload),
+        verdict.noneBaselineComparison.status,
+        String(verdict.noneBaselineComparison.toleranceBytes),
+        String(verdict.loadSharingAvailable),
+      ]),
+    ),
     "",
     `Excluded: ${runs.exemptions.alreadyStructurallyNotApplicable} cells already classified \`Structurally N/A\`, which the epic exempts from measurement. Nothing else is excluded — \`Missing\` cells still need a run, they just need an implementation first.`,
     "",
@@ -1812,7 +1856,6 @@ function renderMarkdown(model) {
         "MLX",
         "Candle",
         "Rungs amortised",
-        "Rungs + overlays amortised",
       ],
       model.wallClock.sweep.map((row) => [
         String(row.perRunSeconds),
@@ -1820,11 +1863,10 @@ function renderMarkdown(model) {
         String(row.recordHours.mlx),
         String(row.recordHours.candle),
         String(row.warmSessionHours.total),
-        String(row.overlayAmortisedSessionHours.total),
       ]),
     ),
     "",
-    "Only the first three columns are achievable with the harness as written; the last two price collapses that do not exist yet. And per section 0, none of these hours can be spent today at all.",
+    "Only the first three columns are achievable with the harness as written; the final column prices the unimplemented rung collapse. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.",
     "",
     "## 6. Fit coefficients versus measure every cell",
     "",

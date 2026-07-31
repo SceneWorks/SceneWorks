@@ -139,7 +139,10 @@ test("published overlay prose derives its census and load ratio from the current
   );
 
   assert.match(overlayAxis.rule, new RegExp(`${overlayCells} of the ${model.cells.total} cells`));
-  assert.match(overlayAxis.factor, new RegExp(`${model.runs.overlayLoadCollapseFactor}x`));
+  assert.match(
+    overlayAxis.factor,
+    new RegExp(`${model.runs.unavailableOverlayLoadPriceTag.collapseFactor}x`),
+  );
   assert.match(
     overlayUncertainty.why,
     new RegExp(`${model.producibility.blockerRanking.overlayChargedByFirstMatch} cells`),
@@ -526,9 +529,10 @@ test("overlay multiplies records; the amortised load count is a price tag, not a
   assert.equal(withOverlays.warmSessions.total, 9);
 
   // ...but amortising overlay into one load collapses them back to the base count.
-  assert.equal(withOverlays.overlayAmortisedSessions.total, 3);
-  assert.equal(withOverlays.overlayLoadCollapseFactor, 3);
-  assert.equal(withoutOverlays.overlayLoadCollapseFactor, 1);
+  assert.equal(withOverlays.unavailableOverlayLoadPriceTag.sessions.total, 3);
+  assert.equal(withOverlays.unavailableOverlayLoadPriceTag.collapseFactor, 3);
+  assert.equal(withoutOverlays.unavailableOverlayLoadPriceTag.collapseFactor, 1);
+  assert.equal(withOverlays.unavailableOverlayLoadPriceTag.availability, "unavailable");
 
   const overlayAxis = COLLAPSING_AXES.find((axis) => axis.axis === "overlay");
   assert.equal(
@@ -564,7 +568,26 @@ test("the overlay load-axis collapse is recorded as unavailable in the shipped l
   assert.match(OVERLAY_LOAD_CONTRACT.baselinePerturbation, /inflated by the adapter's own bytes/);
 
   // The column is retained, so the artifact must say why it is retained.
-  assert.match(OVERLAY_LOAD_CONTRACT.whyTheColumnIsStillReported, /NOT an achievable/);
+  assert.match(OVERLAY_LOAD_CONTRACT.counterfactualPriceTagDisposition, /column is dropped/i);
+
+  assert.deepEqual(Object.keys(OVERLAY_LOAD_CONTRACT.perOverlayKind), [
+    "lora",
+    "identity",
+    "control",
+  ]);
+  for (const verdict of Object.values(OVERLAY_LOAD_CONTRACT.perOverlayKind)) {
+    assert.equal(verdict.warmAttachDetachWithoutBaseReload, false);
+    assert.equal(verdict.noneBaselineComparison.status, "not_applicable");
+    assert.equal(verdict.noneBaselineComparison.toleranceBytes, 0);
+    assert.equal(verdict.loadSharingAvailable, false);
+  }
+
+  const publishedMarkdown = readFileSync(
+    new URL("../docs/generated/calibration-cost-model.md", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(publishedMarkdown, /Warm sessions, overlays also amortised/);
+  assert.doesNotMatch(publishedMarkdown, /Rungs \+ overlays amortised/);
 
   // And the axis prose must not reintroduce the collapse claim.
   const overlayAxis = COLLAPSING_AXES.find((axis) => axis.axis === "overlay");

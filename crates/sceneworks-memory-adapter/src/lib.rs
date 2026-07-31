@@ -184,6 +184,65 @@ pub fn target_overlay(request: &Value) -> Result<String, String> {
         .ok_or_else(|| "planned.target.overlay must be a string".to_owned())
 }
 
+/// Reject a material overlay before a provider path that only loads its base model does work.
+///
+/// Keeping this check in the shared protocol crate prevents either backend from turning a static
+/// description of its usual workload into false `not_applicable` coverage for a requested overlay.
+pub fn validate_plain_overlay_target(request: &Value, execution_path: &str) -> Result<(), String> {
+    let overlay = target_overlay(request)?;
+    if overlay == "none" {
+        return Ok(());
+    }
+    Err(format!(
+        "calibration target declares overlay {overlay:?}, but {execution_path} only executes the \
+         base target; refusing rather than recording false overlay coverage"
+    ))
+}
+
+/// Require the exact material overlay a provider path actually loaded and exercised.
+pub fn validate_exact_overlay_target(
+    request: &Value,
+    expected_overlay: &str,
+    execution_path: &str,
+) -> Result<(), String> {
+    let overlay = target_overlay(request)?;
+    if overlay == expected_overlay {
+        return Ok(());
+    }
+    Err(format!(
+        "calibration target declares overlay {overlay:?}, but {execution_path} executes exactly \
+         {expected_overlay:?}; refusing to record the exercised overlay under a different target"
+    ))
+}
+
+/// Settle the required overlay scenario for a provider path that intentionally executes no overlay.
+///
+/// The target is validated before the fragment is mutated, so a `lora`, `identity`, or `control`
+/// request fails closed and can never acquire a `not_applicable` verdict.
+pub fn settle_plain_overlay_scenario(
+    request: &Value,
+    fragment: &mut Value,
+    execution_path: &str,
+) -> Result<(), String> {
+    validate_plain_overlay_target(request, execution_path)?;
+    let scenarios = fragment
+        .get_mut("scenarios")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "provider fragment.scenarios must be an array".to_owned())?;
+    let overlay_index = scenarios
+        .iter()
+        .position(|scenario| scenario.get("name").and_then(Value::as_str) == Some("overlay"))
+        .ok_or_else(|| "provider fragment is missing the required overlay scenario".to_owned())?;
+    scenarios[overlay_index] = json!({
+        "name": "overlay",
+        "result": "not_applicable",
+        "reason": format!(
+            "the calibration target declares overlay \"none\"; {execution_path} executes no overlay, so this record has no second resident network to measure"
+        ),
+    });
+    Ok(())
+}
+
 pub fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()
@@ -305,28 +364,39 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-pub fn gated_fragment(
-    artifact: Value,
-    sweep: Value,
-    blocker: &str,
-    quality: Value,
-    negative_mutation: Value,
-    loadability: Value,
-    diagnostics: Value,
-) -> Value {
-    json!({
+pub struct PlainGatedFragment<'a> {
+    pub artifact: Value,
+    pub sweep: Value,
+    pub blocker: &'a str,
+    pub quality: Value,
+    pub negative_mutation: Value,
+    pub loadability: Value,
+    pub diagnostics: Value,
+}
+
+/// Build a gated fragment for a base-only provider path without ever leaving `overlay` as
+/// `not_run`. Material overlay targets fail closed before a fragment is returned.
+pub fn plain_gated_fragment(
+    request: &Value,
+    execution_path: &str,
+    parts: PlainGatedFragment<'_>,
+) -> Result<Value, String> {
+    validate_plain_overlay_target(request, execution_path)?;
+    let mut fragment = json!({
         "status": "gated",
-        "artifact": artifact,
-        "sweep": sweep,
-        "scenarios": not_run_scenarios(blocker),
+        "artifact": parts.artifact,
+        "sweep": parts.sweep,
+        "scenarios": not_run_scenarios(parts.blocker),
         "predictedPeakBytes": null,
         "observedMemory": null,
-        "quality": quality,
-        "negativeMutation": negative_mutation,
-        "loadability": loadability,
-        "diagnostics": diagnostics,
+        "quality": parts.quality,
+        "negativeMutation": parts.negative_mutation,
+        "loadability": parts.loadability,
+        "diagnostics": parts.diagnostics,
         "capturedAt": captured_at(),
-    })
+    });
+    settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    Ok(fragment)
 }
 
 pub fn fail(message: impl AsRef<str>) -> ! {
@@ -352,6 +422,95 @@ mod tests {
         });
         assert_eq!(parameter(&request, "decodeTileEdge").unwrap(), 512);
         assert!(parameter(&request, "decodeOverlap").is_err());
+    }
+
+    #[test]
+    fn plain_adapter_settles_a_none_overlay_truthfully() {
+        let request = json!({ "planned": { "target": { "overlay": "none" } } });
+        let mut fragment = json!({
+            "scenarios": [
+                { "name": "loadability", "result": "passed" },
+                { "name": "overlay", "result": "not_run", "reason": "unsettled" }
+            ]
+        });
+
+        settle_plain_overlay_scenario(&request, &mut fragment, "the Qwen VAE-only path").unwrap();
+
+        assert_eq!(fragment["scenarios"][1]["result"], "not_applicable");
+        let reason = fragment["scenarios"][1]["reason"].as_str().unwrap();
+        assert!(reason.contains("target declares overlay \"none\""));
+        assert!(reason.contains("Qwen VAE-only path"));
+    }
+
+    #[test]
+    fn plain_adapter_fails_closed_for_every_material_overlay() {
+        for overlay in ["lora", "identity", "control", "control:1"] {
+            let request = json!({ "planned": { "target": { "overlay": overlay } } });
+            let mut fragment = json!({
+                "scenarios": [
+                    { "name": "overlay", "result": "not_run", "reason": "unsettled" }
+                ]
+            });
+            let before = fragment.clone();
+
+            let error =
+                settle_plain_overlay_scenario(&request, &mut fragment, "the Qwen VAE-only path")
+                    .unwrap_err();
+
+            assert!(error.contains(overlay));
+            assert!(error.contains("refusing"));
+            assert_eq!(fragment, before, "a refusal must not become false coverage");
+        }
+    }
+
+    #[test]
+    fn exact_overlay_guard_rejects_every_other_record_identity() {
+        for overlay in ["none", "lora", "identity", "control", "control:2"] {
+            let request = json!({ "planned": { "target": { "overlay": overlay } } });
+            let error = validate_exact_overlay_target(
+                &request,
+                "control:1",
+                "the MLX Krea pose-control path",
+            )
+            .unwrap_err();
+            assert!(error.contains(overlay));
+            assert!(error.contains("control:1"));
+            assert!(error.contains("refusing"));
+        }
+        let matching = json!({ "planned": { "target": { "overlay": "control:1" } } });
+        assert!(validate_exact_overlay_target(
+            &matching,
+            "control:1",
+            "the MLX Krea pose-control path"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn plain_gated_fragment_cannot_leave_overlay_not_run() {
+        let request = json!({ "planned": { "target": { "overlay": "none" } } });
+        let fragment = plain_gated_fragment(
+            &request,
+            "the Qwen VAE-only path",
+            PlainGatedFragment {
+                artifact: json!({}),
+                sweep: json!({}),
+                blocker: "another incomplete scenario",
+                quality: Value::Null,
+                negative_mutation: Value::Null,
+                loadability: Value::Null,
+                diagnostics: json!({}),
+            },
+        )
+        .unwrap();
+        let overlay = fragment["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|scenario| scenario["name"] == "overlay")
+            .unwrap();
+        assert_eq!(overlay["result"], "not_applicable");
+        assert_ne!(overlay["result"], "not_run");
     }
 
     #[test]

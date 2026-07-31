@@ -263,6 +263,26 @@ test("MLX calibration probe derives the production wired ceiling without guessin
   assert.match(adapter, /"wiredLimitBytes": wired_limit\.bytes/);
 });
 
+test("memory adapters bind every emitted overlay verdict to the requested target", async () => {
+  const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  const candle = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  const krea = mlx.slice(mlx.indexOf("fn run_krea_control("), mlx.indexOf("fn run_qwen("));
+  const qwen = mlx.slice(mlx.indexOf("fn run_qwen("), mlx.indexOf("fn run(request:"));
+
+  assert.match(
+    krea,
+    /validate_exact_overlay_target\(request, "control:1", KREA_CONTROL_EXECUTION_PATH\)\?/,
+  );
+  assert.ok(
+    krea.indexOf("validate_exact_overlay_target") < krea.indexOf("let parameters"),
+    "Krea must reject a mismatched target before provider work",
+  );
+  assert.equal(qwen.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
+  assert.doesNotMatch(qwen, /protocol::gated_fragment\(/);
+  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
+  assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
+});
+
 test("MLX parity control preserves the real comparison and applies only a planned output bias", async () => {
   const adapter = await source(
     "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
