@@ -11,7 +11,14 @@ import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, apiFetch: vi.fn(async () => ({})) };
+  return {
+    ...actual,
+    apiFetch: vi.fn(async (path) =>
+      path === "/api/v1/host-capabilities"
+        ? { memoryGb: 80, memoryKind: "unified", platform: "macos" }
+        : {},
+    ),
+  };
 });
 
 import { AppContext } from "../context/AppContext.js";
@@ -69,6 +76,29 @@ const PLAIN = {
   limits: { resolutions: ["1024x1024", "1536x1024"] },
   loraCompatibility: {},
   ui: {},
+};
+
+// Discriminating sc-16020 fixture: the blanket 80 GB floor would hide 2048² on this 80 GB host,
+// while the installed q4 tier's 22 GiB@1024² peak, correctly normalized to 1536², fits. Seeing the
+// bucket therefore proves ImageStudio passed the selected tier; treating 22 as already-1536² is pinned
+// separately by resolutionMemory.test.js on a 64 GB host.
+const TIERED_HIGHRES = {
+  ...MAGE_RL,
+  id: "tiered_highres",
+  name: "Tiered Highres",
+  mlx: { minMemoryGb: 80 },
+  hasVariantMatrix: true,
+  variants: [
+    {
+      variant: "q4",
+      installState: "installed",
+      footprint: {
+        diskSizeBytes: 8 * 1024 ** 3,
+        peakMemoryBytes: 22 * 1024 ** 3,
+        measuredPixels: 1024 * 1024,
+      },
+    },
+  ],
 };
 
 const MAC_CAPS = {
@@ -190,6 +220,14 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
     expect(optionValues(aspect)).toEqual(expect.arrayContaining(["2048x512", "512x2048", "2048x2048"]));
     // Default seeds to the native square.
     expect(aspect.value).toBe("1024x1024");
+  });
+
+  it("gates resolutions with the selected installed tier, not the blanket floor", async () => {
+    await render(
+      baseContext({ imageModels: [TIERED_HIGHRES], macCapabilities: MAC_CAPS }),
+    );
+    const aspect = field(container, "Aspect");
+    expect(optionValues(aspect)).toContain("2048x2048");
   });
 
   it("stamps the ÷16 native-resolution stride and 512–2048 range on the free Width/Height overrides", async () => {

@@ -208,6 +208,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -419,6 +420,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -638,6 +640,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -832,6 +835,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -1020,6 +1024,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -1216,6 +1221,7 @@
       "candle": {
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -1283,7 +1289,7 @@
           // That is REAL, not a "resident + fixed constant" artifact: the fixed 1024² VAE-decode +
           // attention working set dominates the MLX peak, so the transient is resolution-bound, not
           // weight-bound. Each row is a genuine distinct get_peak_memory() reading (resident & peak vary).
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600 }
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -1360,6 +1366,7 @@
       "candle": {
         "minMemoryGb": 40,
         "vramGbByTier": { "q4": 18.4, "q8": 24.2, "bf16": 32.2 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 5.7, "q8": 9.8, "bf16": 13.9 },
         "measured": true
       },
@@ -1438,7 +1445,7 @@
           // resident = steady-state weights (post-gen, transient released); peak = load+gen high-water.
           // peak−resident transient ~14.04 GiB (the fixed 1024² VAE-decode + attention working set —
           // see z_image_turbo q4 for the full spread analysis: ~4 MiB across all measured tiers).
-          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": 5774471944, "peakMemoryBytes": 20852069456 }
+          "footprint": { "diskSizeBytes": 5907321677, "residentMemoryBytes": 5774471944, "peakMemoryBytes": 20852069456, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -1506,6 +1513,7 @@
       "candle": {
         "minMemoryGb": 20,
         "vramGbByTier": { "q4": 17.9, "q8": 23.3, "bf16": 40.6 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -1574,7 +1582,7 @@
           "estimatedSizeBytes": 5909406487,
           // Footprint shared from z_image_turbo (same turnkey, sc-8670) — NOT independently measured;
           // z_image_edit runs the identical Turbo weights + VAE, so its per-tier memory is the same.
-          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600 }
+          "footprint": { "diskSizeBytes": 5909406487, "residentMemoryBytes": 5776463496, "peakMemoryBytes": 20854139600, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -1777,6 +1785,7 @@
       "candle": {
         "minMemoryGb": 56,
         "vramGbByTier": { "q4": 53.7, "q8": 65.3, "bf16": 82.5 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 30.3, "q8": 38.7, "bf16": 71.7 },
         "measured": true
       },
@@ -1928,6 +1937,7 @@
       "candle": {
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
         "measured": true
       },
@@ -2058,6 +2068,7 @@
       "candle": {
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 33.1, "q8": 39.3, "bf16": 53.2 },
         "measured": true
       },
@@ -2294,7 +2305,7 @@
           // (the fixed 1024² VAE-decode + attention working set — see z_image_turbo q4 for the full
           // spread analysis: ~4 MiB across all measured tiers). This is the heaviest measured tier: peak
           // 30.50 GiB → suggested only on ≥48 GB hosts (48×0.9=43.2 fits; 32×0.9=28.8 does not).
-          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": 17672647240, "peakMemoryBytes": 32749818036 }
+          "footprint": { "diskSizeBytes": 21830326407, "residentMemoryBytes": 17672647240, "peakMemoryBytes": 32749818036, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -2367,6 +2378,7 @@
       "candle": {
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
+        "vramMeasuredPixels": 1048576,
         "measured": false
       },
       "ui": {
@@ -2508,6 +2520,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -2651,6 +2664,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -2781,6 +2795,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -2919,6 +2934,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -3066,6 +3082,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -3205,6 +3222,7 @@
       "candle": {
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "mlx": {
@@ -3345,6 +3363,7 @@
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
         "measured": false
       },
@@ -3463,6 +3482,7 @@
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
         "measured": true
       },
@@ -3666,6 +3686,7 @@
       "candle": {
         "minMemoryGb": 46,
         "vramGbByTier": { "q4": 38.5, "q8": 55.3, "bf16": 74.1 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
@@ -3831,6 +3852,7 @@
       "candle": {
         "minMemoryGb": 30,
         "vramGbByTier": { "q4": 33.5, "q8": 43.9, "bf16": 56.3 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "gated": true,
@@ -3964,6 +3986,7 @@
       "candle": {
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.7, "q8": 42.0, "bf16": 54.4 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
@@ -4089,6 +4112,7 @@
       "candle": {
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.6, "q8": 42.1, "bf16": 54.5 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
@@ -4467,6 +4491,7 @@
         // byte-identical per tier. q4/q8 fall only 0.7 GB because their TEs are packed; the dense bf16
         // tier realizes the full win (55.6 → 47.2 GB). These are measured peaks, not derived shifts.
         "vramGbByTier": { "q4": 25.7, "q8": 35.2, "bf16": 47.2, "int8-convrot": 34.7 },
+        "vramMeasuredPixels": 1048576,
         // sc-12131 / sc-10856 second-stage gate: measured largest working set after the text phase has
         // been dropped. sc-13108 directly measured q4/q8/bf16 at 21.9/29.4/39.4 GB; sc-12425 measured
         // int8-convrot at 28.6 GB with resident/sequential byte-identical pixels. The int8 and q8 DiTs
@@ -5184,6 +5209,7 @@
       "candle": {
         "minMemoryGb": 32,
         "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
+        "vramMeasuredPixels": 1048576,
         "measured": false
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
@@ -5354,6 +5380,7 @@
       "candle": {
         "minMemoryGb": 25,
         "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 24.2, "q8": 28.7, "bf16": 53.3 },
         "measured": true
       },
@@ -5777,6 +5804,7 @@
       "candle": {
         "minMemoryGb": 56,
         "vramGbByTier": { "q4": 44.0, "q8": 70.7, "bf16": 128.0 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 35.6, "q8": 64.9, "bf16": 97.0 },
         "measured": true
       },
@@ -6217,6 +6245,7 @@
       "candle": {
         "minMemoryGb": 29,
         "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -6349,6 +6378,7 @@
       "candle": {
         "minMemoryGb": 48,
         "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "gated": false,
@@ -6477,6 +6507,7 @@
       "candle": {
         "minMemoryGb": 48,
         "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "vramMeasuredPixels": 1048576,
         "measured": false
       },
       "gated": false,
@@ -6600,6 +6631,7 @@
       "candle": {
         "minMemoryGb": 36,
         "vramGbByTier": { "q4": 28.5, "bf16": 33.0 },
+        "vramMeasuredPixels": 1048576,
         "measured": false
       },
       "gated": false,
@@ -7332,7 +7364,7 @@
           // resident 3.93 GiB > on-disk 3.89 GiB: the dense VAE + int8 weights up-cast slightly at load.
           // peak−resident transient ~14.04 GiB (the fixed 1024² VAE-decode + attention working set — see
           // z_image_turbo q4 for the full spread analysis: ~4 MiB across all measured tiers).
-          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": 4219172640, "peakMemoryBytes": 19292622120 }
+          "footprint": { "diskSizeBytes": 4177386896, "residentMemoryBytes": 4219172640, "peakMemoryBytes": 19292622120, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -7779,7 +7811,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461825,
-          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
+          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -7788,7 +7820,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646417,
-          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656 }
+          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -7797,7 +7829,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
-          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200, "measuredPixels": 1048576 }
         },
         // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
         // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
@@ -7910,7 +7942,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461501,
-          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
+          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -7919,7 +7951,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646137,
-          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968 }
+          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -7928,7 +7960,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
-          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200, "measuredPixels": 1048576 }
         },
         // Candle-SDXL shared components (epic 13657, sc-13682) — CLIP-L/bigG tokenizers + fp16-fix VAE the
         // candle `sdxl` engine stages as caller-provided components; platform-gated to candle so the macOS
@@ -8961,6 +8993,7 @@
       "candle": {
         "minMemoryGb": 14,
         "vramGbByTier": { "q4": 12.1, "q8": 12.1, "bf16": 14.5 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -9038,7 +9071,7 @@
           // Recorded at the 24.5 GiB worst case so the RAM suggestion budgets the realistic ceiling. It is
           // FAR below diskSizeBytes because A14B is MoE — only ONE 14B expert is resident at a time, not
           // both — which is exactly why the old model-level minMemoryGb 133 (both experts dense) over-warned.
-          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
+          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -9249,6 +9282,7 @@
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.13, "q8": 27.95, "bf16": 38.56 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -9320,7 +9354,7 @@
           // 22.71 GiB (get_peak_memory). Recorded at the 24.5 GiB shared-with-T2V worst case (identical
           // packed-additive MoE path, headroom for a user LoRA). Far below diskSizeBytes: A14B is MoE, one
           // 14B expert resident at a time — the reason the model-level minMemoryGb 133 over-warned.
-          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
+          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -9480,6 +9514,7 @@
       "candle": {
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.20, "q8": 28.02, "bf16": 38.62 },
+        "vramMeasuredPixels": 1048576,
         "measured": true
       },
       "ui": {
@@ -10175,7 +10210,7 @@
           // VAE decode sets (+10.5 GiB over the AR loop). Both are MLX **active** — the
           // allocator's reclaimable buffer cache took the same run to ~90 GiB and is deliberately
           // not counted (see mlx.minMemoryGb).
-          "footprint": { "diskSizeBytes": 20265258499, "residentMemoryBytes": 18694744473, "peakMemoryBytes": 29957689344 }
+          "footprint": { "diskSizeBytes": 20265258499, "residentMemoryBytes": 18694744473, "peakMemoryBytes": 29957689344, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -10196,7 +10231,7 @@
           // changes between tiers): the Q8 DiT is 15,404,443,762 B vs Q4's 8,378,982,809, i.e.
           // +6.54 GiB resident. The KV cache does NOT change — it holds bf16 activations, so it is
           // 7.14 GiB on every tier. Marked derived, not measured: only Q4 was run on-device.
-          "footprint": { "diskSizeBytes": 27290719452, "residentMemoryBytes": 25717886976, "peakMemoryBytes": 36980832256 }
+          "footprint": { "diskSizeBytes": 27290719452, "residentMemoryBytes": 25717886976, "peakMemoryBytes": 36980832256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -10228,7 +10263,7 @@
           // DERIVED the same way: the bf16 DiT is 28,577,095,227 B, i.e. +18.81 GiB over Q4.
           // This tier is what sets `mlx.minMemoryGb` — its ~47 GiB active peak is the largest any
           // installable tier reaches, and a single per-model floor has to admit it.
-          "footprint": { "diskSizeBytes": 40463370856, "residentMemoryBytes": 38891536384, "peakMemoryBytes": 50154536960 }
+          "footprint": { "diskSizeBytes": 40463370856, "residentMemoryBytes": 38891536384, "peakMemoryBytes": 50154536960, "measuredPixels": 1048576 }
         }
       ],
       "paths": {
