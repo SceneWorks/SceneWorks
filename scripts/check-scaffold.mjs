@@ -42,6 +42,7 @@ const requiredPaths = [
 const inferenceCargoWorkflows = [
   ".github/workflows/check.yml",
   ".github/workflows/desktop-linux.yml",
+  ".github/workflows/desktop-linux-check.yml",
   ".github/workflows/desktop-windows.yml",
   ".github/workflows/macos-mlx.yml",
   ".github/workflows/release.yml",
