@@ -437,7 +437,7 @@ function expectedEngagedRungs({
         candidate.backend === backend &&
         candidate.target.tier === tier &&
         candidate.target.mode === mode &&
-        candidate.target.overlay === overlay &&
+        matrixOverlayFor(candidate.target.overlay) === overlay &&
         candidate.rung === rung,
     )
     .map((candidate) => candidate.engagedRungs);
@@ -1033,7 +1033,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
               );
               const engagedRungs = expectedEngagedRungs({
                 model,
-                provider: route.engine,
+                provider,
                 backend,
                 tier,
                 mode,
