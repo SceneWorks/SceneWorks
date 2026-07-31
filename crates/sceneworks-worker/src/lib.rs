@@ -933,6 +933,73 @@ pub async fn run() -> WorkerResult<()> {
     run_worker_loop(settings).await
 }
 
+/// Which worker loops should run the startup CUDA probe: only a GPU worker on a candle-enabled
+/// build. Pure so the gate is testable without a GPU — every one of these three conditions is
+/// load-bearing, and inverting any of them is silent. `cpu` covers both the standalone utility
+/// pool and the API's in-process loops (`spawn_inprocess_utility_worker`); those must never build
+/// a CUDA context. `mlx` is the macOS GPU worker, which has its own Metal probe. And with the
+/// candle backend off there is nothing to probe for.
+fn should_run_cuda_preflight(settings: &Settings) -> bool {
+    settings.backend_candle_enabled && settings.gpu_id != "cpu" && settings.gpu_id != "mlx"
+}
+
+/// Server/Docker-lane CUDA preflight (sc-16247, GH #1966).
+///
+/// The desktop gets a real setup screen: `run_startup` runs `cuda_device_preflight` and refuses to
+/// start on an unusable GPU. The server/Docker lane has no such screen and, before this, no GPU
+/// preflight of ANY kind — `run_worker()` goes straight into the worker loop, so a driver-stack
+/// mismatch there surfaces exactly as GH #1966 described: first at the first model load, as a job
+/// failure, per job, forever.
+///
+/// This runs the same probe and logs the actionable reason ONCE at startup, loudly, at `error`
+/// level — so the container's logs name the host-side fix rather than leaving an operator to infer
+/// it from a stream of failed jobs.
+///
+/// It deliberately does **not** abort the process. The worker's registration + capability
+/// advertisement is what the API routes on, and tearing the process down here would turn a
+/// diagnosable, self-healing state (reboot the host, the next probe passes) into a crash loop with
+/// its own message. Surfacing this as a first-class *unhealthy worker status* would be the better
+/// end state, but that needs a new `WorkerStatus` variant plus API and UI surface — genuinely
+/// separate work, recorded on sc-16247 rather than smuggled in here.
+///
+/// Gated to the GPU worker by [`should_run_cuda_preflight`]: the CPU utility loops never touch
+/// CUDA, and probing from each of them would build a throwaway CUDA context per utility process.
+/// A no-op on every build without the candle lane linked, and on macOS.
+///
+/// The probe acquires device 0, which is faithful for the deployments that set
+/// `CUDA_VISIBLE_DEVICES`: under the `auto` supervisor each per-GPU child is spawned with
+/// `CUDA_VISIBLE_DEVICES=<its gpu id>` (`supervisor::child_environment`), so device 0 IS that
+/// child's own GPU. A server deployment that pins `SCENEWORKS_CANDLE_GPU_ID` without also setting
+/// `CUDA_VISIBLE_DEVICES` gets physical device 0 instead — but so does its generation, because
+/// `runtime_cuda::media::default_device()` is itself a hardcoded `new_cuda(0)`. The probe is
+/// therefore still testing the device that lane will use; it does not fix, and must not be read as
+/// endorsing, that pinning gap.
+///
+/// Runs on the blocking pool: `cuInit` plus the first kernel launch is ~0.25-0.5 s of synchronous
+/// driver work, and `run_worker_loop` is also called IN-PROCESS by the API's utility pool
+/// (`spawn_inprocess_utility_worker`). That pool is `cpu` by default and so skips the probe
+/// entirely, but `SCENEWORKS_RUST_WORKER_GPU_ID` can override it — and a GPU-id override there
+/// would otherwise stall the API's runtime thread during startup.
+async fn log_cuda_preflight_failure(settings: &Settings) {
+    if !should_run_cuda_preflight(settings) {
+        return;
+    }
+    let probe = tokio::task::spawn_blocking(cuda_preflight).await;
+    // A JoinError can only be a panic inside `cuda_preflight`, which already catches its own
+    // (see `preflight::cuda_preflight`) — report rather than propagate either way.
+    let reason = match probe {
+        Ok(Ok(())) => return,
+        Ok(Err(reason)) => reason,
+        Err(error) => format!("the CUDA preflight probe did not complete: {error}"),
+    };
+    tracing::error!(
+        event = "cuda_preflight_failed",
+        gpuId = %settings.gpu_id,
+        reason = %reason,
+        "SceneWorks GPU worker cannot acquire a CUDA device; generation jobs will fail"
+    );
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -955,6 +1022,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     if settings.gpu_id == "mlx" {
         generator_cache::spawn_gpu_telemetry(settings.config_dir.clone());
     }
+    log_cuda_preflight_failure(&settings).await;
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
     let http_client = crate::downloads::streaming_download_client();
@@ -1565,7 +1633,14 @@ async fn run_utility_job(
         match error {
             WorkerError::Canceled(_) => {}
             error => {
-                let _ = fail_job(api, &job.id, message, Some(error.to_string())).await;
+                // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
+                // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
+                // already annotates the lanes that route through it (the reported krea_2_turbo path),
+                // but ~35 other load seams build `WorkerError::Engine` directly — a host driver
+                // problem hits all of them identically. Annotating here catches every one, and is a
+                // no-op when the guidance is already present.
+                let detail = annotate_cuda_driver_failure(&error.to_string());
+                let _ = fail_job(api, &job.id, message, Some(detail)).await;
                 tracing::error!(
                     event = "utility_job_failed",
                     jobId = %job.id,

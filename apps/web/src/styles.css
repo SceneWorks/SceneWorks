@@ -14988,6 +14988,10 @@ details[open] > summary.lora-scope-group-heading::before,
   line-height: 1.45;
   color: var(--text-muted);
   overflow-wrap: anywhere;
+  /* A classified failure is an actionable remedy, a blank line, then the underlying engine
+     error (sc-16247). Without pre-wrap the paragraph break collapses and the remedy runs
+     straight into the raw `DriverError(...)` text. */
+  white-space: pre-wrap;
 }
 
 .worker-progress-card__message.error {

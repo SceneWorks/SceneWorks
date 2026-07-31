@@ -1254,18 +1254,11 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // CUDA runtime DLLs by name; prepend the bundled redist dir to the sidecar's
     // PATH so they resolve without a CUDA Toolkit on the machine (sc-5560). No-op on
     // a plain build — the resolver returns None when only the placeholder is staged.
-    #[cfg(target_os = "windows")]
-    if let Some(cuda_dir) = resolve_bundled_cuda_dir(app) {
-        let existing = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![cuda_dir];
-        paths.extend(std::env::split_paths(&existing));
-        if let Ok(joined) = std::env::join_paths(paths) {
-            command = command.env("PATH", joined);
-        }
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(runtime) = linux_candle_runtime() {
-        command = inject_linux_candle_runtime_env(command, &runtime);
+    // Shared with `cuda_device_preflight` so the probe's loader path can't drift from
+    // this one (sc-16247).
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        command = apply_candle_loader_env(app, command);
     }
     // LAN mode (epic 4484): hand the API the user's password as the access token so it
     // requires auth on the now-network-reachable bind. The server ALSO refuses any
@@ -2926,6 +2919,152 @@ async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
     Err(message)
 }
 
+/// How long to wait for the one-shot CUDA probe before giving up on it.
+///
+/// The probe is ~0.25-0.5 s on a healthy box (measured on a 2x RTX PRO 6000 / driver 596.36
+/// box: ~519 ms cold, ~235 ms warm), so this is ~40x headroom. It exists because `cuInit` on a
+/// wedged driver — a TDR-recovering GPU, a stalled persistence daemon, exactly the sort of
+/// broken driver stack this probe is here to catch — can block indefinitely rather than
+/// returning an error. Without a bound, `run_startup` would never return and the setup screen
+/// would spin forever with no message and no Retry button.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const CUDA_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Shown when the probe itself hangs — a distinct state from any CUDA error, because we never
+/// got one.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const CUDA_PREFLIGHT_TIMED_OUT: &str = "The NVIDIA driver on this machine did not respond when \
+    SceneWorks tried to initialize the GPU. This usually means the driver is wedged or still \
+    recovering. Reboot, then reopen SceneWorks. If it keeps happening, check that `nvidia-smi` \
+    returns promptly — if that hangs too, the driver stack needs attention before SceneWorks \
+    can use the GPU.";
+
+/// Apply the candle loader environment (the provisioned CUDA runtime) to a sidecar command.
+///
+/// The ONE seam for this. `spawn_api`, `supervise_candle_worker`, and `cuda_device_preflight`
+/// all need cudarc to resolve `cudart`/`cublas`/`cublasLt`/`curand`/`nvrtc` by name out of the
+/// first-run-provisioned `gpu-runtime` dir rather than a system CUDA Toolkit (sc-5560). Kept in
+/// one function because the probe MUST see the same loader path the worker will: if they drift,
+/// the probe fails for a reason that has nothing to do with the GPU and — before the severity
+/// split below — could have stranded users on the setup screen (the sc-10353 failure mode,
+/// where a Mac probe missing one env var blocked every fresh install).
+///
+/// Windows prepends the redist dir to `PATH` (the DLL search path); Linux uses the dynamic
+/// linker's `LD_LIBRARY_PATH` via [`inject_linux_candle_runtime_env`]. A no-op before
+/// provisioning completes, when the resolver returns `None`.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn apply_candle_loader_env(app: &AppHandle, command: Command) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(cuda_dir) = resolve_bundled_cuda_dir(app) {
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![cuda_dir];
+            paths.extend(std::env::split_paths(&existing));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                return command.env("PATH", joined);
+            }
+        }
+        command
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        match linux_candle_runtime() {
+            Some(runtime) => inject_linux_candle_runtime_env(command, &runtime),
+            None => command,
+        }
+    }
+}
+
+/// CUDA **device-acquisition** preflight (sc-16247, GH #1966): the off-Mac twin of
+/// [`metal_preflight`], and a strictly deeper gate than the `nvidia-smi`
+/// [`cuda_preflight`] / [`linux_cuda_preflight`] above.
+///
+/// Those probe NVML and check a driver-version floor + compute-capability range; they never
+/// call `cuInit`, so they cannot see a CUDA driver-API initialization failure —
+/// `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` (803) and friends, where `nvcuda.dll`/`libcuda.so`
+/// and the loaded kernel module are different versions. NVML and CUDA version-check
+/// separately, so a host passes the first and still fails the second, and the failure lands
+/// mid-generation as a raw `DriverError(...)` on the user's Queue screen (GH #1966). This
+/// spawns the bundled `sceneworks-api` sidecar in its one-shot `SCENEWORKS_GPU_CHECK=1` mode,
+/// which acquires a real device and runs a real kernel — the same spawn context, and the same
+/// `runtime_cuda::media::default_device()` seam, the worker will use.
+///
+/// Deliberately runs AFTER GPU-runtime provisioning: the probe needs the downloaded CUDA
+/// runtime DLLs on its loader path to get as far as `cuInit`, so probing before provisioning
+/// would fail for a reason that has nothing to do with the driver.
+///
+/// ## Only a DEFINITE host problem blocks startup
+///
+/// `Err` here stops the app on the setup screen, so it is reserved for exit code 2 — the
+/// sidecar's "this is a driver-class condition and generation cannot work" verdict (see
+/// `gpu_check` / `cuda_failure_is_blocking`). Every other non-zero exit, and a timeout, is
+/// logged and stepped over, because the alternative is locking a user out of Library,
+/// Settings, and everything else over a state that may be transient: a CUDA OOM because
+/// another process (or an orphaned worker from a crashed session) currently holds the GPU
+/// would otherwise make the whole app unopenable. Those users still get the classified,
+/// actionable message from `classify_engine_error` if they start a generation.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+async fn cuda_device_preflight(app: &AppHandle) -> Result<(), String> {
+    // Probe only the lane we are about to start. `candle_runtime_present` is the exact gate
+    // that decides whether `supervise_candle_worker` runs at all; when it is false the desktop
+    // keeps the candle lane dormant, there is no CUDA worker to protect, and a non-candle
+    // sidecar's `cuda_preflight` is a no-op anyway — so skip the spawn rather than pay for a
+    // process that cannot fail meaningfully.
+    if !candle_runtime_present(app) {
+        return Ok(());
+    }
+    let command = app
+        .shell()
+        .sidecar("sceneworks-api")
+        .map_err(|error| format!("locate api for GPU check: {error}"))?
+        .env("SCENEWORKS_GPU_CHECK", "1");
+    let command = apply_candle_loader_env(app, command);
+    let output = match tokio::time::timeout(CUDA_PREFLIGHT_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            // Couldn't even run the probe. Not evidence about the GPU — don't block on it.
+            log_candle_preflight_skip(&format!("GPU check could not be run: {error}"));
+            return Ok(());
+        }
+        Err(_elapsed) => {
+            // Dropping the future kills the child (tauri's Command owns it), so the wedged
+            // probe does not outlive this call. A hang IS strong evidence of a broken driver
+            // stack, and unlike a transient OOM it will not clear on its own — block on it.
+            return Err(CUDA_PREFLIGHT_TIMED_OUT.to_owned());
+        }
+    };
+    if output.status.code() == Some(0) {
+        return Ok(());
+    }
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.code() == Some(2) && !message.is_empty() {
+        return Err(message);
+    }
+    // Exit 1 (probe failed, but possibly transient), or any other code / a crash with no
+    // reason printed. Record it and let the app start.
+    let detail = if message.is_empty() {
+        format!(
+            "GPU check exited with {:?} and printed no reason",
+            output.status.code()
+        )
+    } else {
+        message
+    };
+    log_candle_preflight_skip(&detail);
+    Ok(())
+}
+
+/// Record a non-blocking GPU-preflight outcome next to the candle worker's own log, which is
+/// where anyone diagnosing "why did generation fail" already looks.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn log_candle_preflight_skip(detail: &str) {
+    append_log(
+        &logs_dir().join("candle-worker.log"),
+        &format!("[desktop] GPU preflight did not pass (continuing anyway): {detail}\n"),
+    );
+}
+
 async fn run_startup(app: AppHandle) {
     // Provide the builtin model catalog the rust-api/worker expect before they
     // start, so Model Manager is populated and native video resources resolve.
@@ -2994,6 +3133,20 @@ async fn run_startup(app: AppHandle) {
     // CI build path). The setup page renders this `error` event.
     #[cfg(target_os = "macos")]
     if let Err(error) = metal_preflight(&app).await {
+        emit(&app, "error", error, true);
+        return;
+    }
+    // CUDA device-acquisition preflight (sc-16247, GH #1966): the off-Mac sibling of the Metal
+    // probe above, and the second, deeper gate behind the `nvidia-smi` check near the top of this
+    // function. That check is NVML and stays exactly where it is — it catches no-GPU / too-old-
+    // driver / unsupported-architecture hosts before the multi-GB runtime download, which is its
+    // whole point. It cannot catch a `cuInit` failure, because NVML and the CUDA driver API
+    // version-check separately; GH #1966 was a host that passed the first and failed the second,
+    // and learned about it as a raw `DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, ...)` on the
+    // Queue screen mid-generation. Placed HERE, after provisioning, because the probe needs the
+    // downloaded CUDA runtime on its loader path to reach `cuInit` at all.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    if let Err(error) = cuda_device_preflight(&app).await {
         emit(&app, "error", error, true);
         return;
     }

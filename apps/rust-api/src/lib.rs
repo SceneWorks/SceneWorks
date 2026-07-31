@@ -537,15 +537,42 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
 }
 
 /// Run this binary as a standalone worker process instead of the HTTP API.
-/// Apple-Silicon Metal preflight (sc-8411). Dispatched from `main` when
-/// `SCENEWORKS_GPU_CHECK=1`: a one-shot probe that the desktop spawns at startup —
-/// the macOS counterpart of the Windows `nvidia-smi` `cuda_preflight`. Reuses this
-/// binary because it already links MLX (the desktop crate does not), and runs the
-/// probe in the SAME process/spawn context the real worker uses, so it faithfully
-/// predicts whether the worker can acquire a Metal GPU. `Ok(())` when usable;
+/// One-shot GPU preflight (sc-8411 Metal, sc-16247 CUDA). Dispatched from `main` when
+/// `SCENEWORKS_GPU_CHECK=1`: a probe that the desktop spawns at startup. Reuses this
+/// binary because it already links the GPU backends (the desktop crate does not), and
+/// runs the probe in the SAME process/spawn context the real worker uses, so it
+/// faithfully predicts whether the worker can acquire a GPU. `Ok(())` when usable;
 /// `Err(message)` is the user-facing reason the desktop relays onto the setup screen.
-pub fn gpu_check() -> Result<(), String> {
-    sceneworks_worker::metal_preflight()
+///
+/// Exactly one of the two probes is ever live in a given build: `metal_preflight` is a
+/// no-op off-Mac, and `cuda_preflight` is a no-op on macOS and on any off-Mac build
+/// without `backend-candle`. Calling both keeps this dispatch platform-agnostic — the
+/// desktop decides *whether* to spawn the probe, not which one runs.
+pub fn gpu_check() -> Result<(), GpuCheckFailure> {
+    if let Err(message) = sceneworks_worker::metal_preflight() {
+        // Metal's contract is unchanged from sc-8411: any failure blocks startup.
+        return Err(GpuCheckFailure {
+            message,
+            blocking: true,
+        });
+    }
+    sceneworks_worker::cuda_preflight().map_err(|message| GpuCheckFailure {
+        blocking: sceneworks_worker::cuda_failure_is_blocking(&message),
+        message,
+    })
+}
+
+/// A failed [`gpu_check`], plus whether it should stop the app from starting.
+///
+/// `blocking` is the whole reason this isn't a bare `String`. The desktop can't make the call
+/// itself — it doesn't link the worker crate and so has no access to the CUDA error table — and
+/// getting it wrong is asymmetric: over-blocking locks the user out of the entire application
+/// over what may be a transient GPU state, while under-blocking costs one failed job that now
+/// carries an actionable message anyway. See `sceneworks_worker::cuda_failure_is_blocking`.
+/// Crosses the process boundary as an exit code (see `main.rs`), the message on stdout.
+pub struct GpuCheckFailure {
+    pub message: String,
+    pub blocking: bool,
 }
 
 /// Spawns the in-process CPU utility worker pool ([`sceneworks_worker::run_worker_loop`])
