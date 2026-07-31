@@ -36,10 +36,10 @@ use sceneworks_core::workflow_png::{
 use sceneworks_core::workflow_share::{
     build_workflow_share, is_path_shaped, parse_workflow_share, AdvancedDisposition, AdvancedShape,
     WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
-    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
-    INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
-    WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
-    WORKFLOW_SHARE_SCHEMA_VERSION,
+    SeamDisposition, ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS,
+    INPUT_KINDS, INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME,
+    PRODUCER_URL, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_SHARE_SCHEMA_VERSION, WORKFLOW_WRITE_SEAMS,
 };
 use serde_json::{json, Value};
 
@@ -588,6 +588,78 @@ fn the_doc_lists_exactly_the_deferred_builders() {
         "deferred-builders",
         "`DEFERRED_ADVANCED_BUILDERS`",
     );
+}
+
+/// The write-seam table, and the disposition word each row claims (sc-16113).
+///
+/// The disposition is read out of the prose column rather than trusted, because the whole point of
+/// this story is that a lane can flip from declining to embedding: a row that goes on saying
+/// "Declines" about a seam that now embeds would be the document repeating the exact class of
+/// untrue claim the enforcement was built to end.
+#[test]
+fn the_doc_lists_exactly_the_write_seams() {
+    let rows = pinned_rows(&doc(), "write-seams");
+    let documented: BTreeSet<String> = rows
+        .iter()
+        .map(|row| {
+            let word = ["Embeds", "Conduit", "Declines"]
+                .into_iter()
+                .find(|word| row[2].contains(word))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{DOC_PATH}: the `write-seams` row for {} says nothing about what it does \
+                         with the chunk — it must open with `Embeds`, `Conduit` or `Declines`",
+                        row[1]
+                    )
+                });
+            format!("{}::{} {word}", code(&row[0]), code(&row[1]))
+        })
+        .collect();
+    assert_same_set(
+        &documented,
+        &WORKFLOW_WRITE_SEAMS
+            .iter()
+            .map(|seam| {
+                let word = match seam.disposition {
+                    SeamDisposition::Embeds(_) => "Embeds",
+                    SeamDisposition::Conduit(_) => "Conduit",
+                    SeamDisposition::Declines(_) => "Declines",
+                };
+                format!("{}::{} {word}", seam.path, seam.function)
+            })
+            .collect(),
+        "write-seams",
+        "`WORKFLOW_WRITE_SEAMS`",
+    );
+}
+
+/// Every builder a documented seam embeds for is a documented REGISTERED builder, never a deferred
+/// one — the enforcement, restated in the two tables a reader actually sees.
+#[test]
+fn no_documented_write_seam_embeds_for_a_documented_deferred_builder() {
+    let deferred = documented_builders(&doc(), "deferred-builders");
+    for seam in WORKFLOW_WRITE_SEAMS {
+        let SeamDisposition::Embeds(builders) = seam.disposition else {
+            continue;
+        };
+        for reference in builders {
+            let key = format!("{}::{}", reference.path, reference.function);
+            assert!(
+                !deferred.contains(&key),
+                "{DOC_PATH} lists {key} in the `deferred-builders` table while \
+                 `WORKFLOW_WRITE_SEAMS` has {}::{} embedding for it. The document would be telling \
+                 a reader that lane does not embed while the code says it does.",
+                seam.path,
+                seam.function
+            );
+            assert!(
+                documented_builders(&doc(), "builders").contains(&key),
+                "{DOC_PATH}: {}::{} embeds for {key}, which the `builders` table does not list",
+                seam.path,
+                seam.function
+            );
+        }
+    }
 }
 
 /// The document tells a contributor which test failed. A renamed test would send them looking for
