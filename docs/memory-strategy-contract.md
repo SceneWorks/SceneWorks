@@ -266,6 +266,30 @@ packing cannot fix it, so it needs a compute path or a different published dtype
 separately. A **structural** case has nothing quantizable at all. Reading them as one bucket is how a
 capability gap gets mistaken for a packing choice and "fixed" by repackaging that cannot help.
 
+### Lens MXFP4 resolution
+
+SC-16014 chose the **re-hosted dtype** option for the Lens and Lens-Turbo q4/q8 turnkeys. The upstream
+gpt-oss encoder identifies its expert matrices as MXFP4, which MLX cannot multiply directly, but the
+shipped `SceneWorks/lens[-turbo]-mlx` q4 and q8 artifacts already contain offline-converted MLX affine
+packs. Their provider footprint is therefore disk-derived and their experts run through the packed
+`gather_qmm` path; they are not a bf16 residency exception. The existing encoder parity gates bound the
+conversion's quality cost: Q8 must remain above 0.995 cosine to the bf16 golden and Q4 above 0.95.
+
+The other two options remain deliberately unselected. A native MXFP4 compute path would retain the
+upstream artifact and its source precision without a conversion/re-hosting pipeline, but adds a new MLX
+kernel, dispatch surface, and maintenance burden after the shipped tiers have already removed the
+production gap. Rung-4 block materialization would reduce simultaneous weight residency, but repeatedly
+materializes blocks and adds transfer/dispatch latency; more importantly, it would still run an
+above-tier encoder and cannot make that configuration tier-integral.
+
+The bf16 turnkey is a separate fit-gate case. Its source still carries MXFP4 experts and materializes
+them as bf16, so the gate retains the measured 17.24 GiB weight expansion and 29.88 GiB activation
+transient. A genuinely bf16-on-disk Lens encoder receives the same architecture-specific activation
+headroom but no invented weight expansion. The provider distinguishes packed affine, MXFP4, explicit
+bf16, and unknown storage; unknown remains conservative. The shared
+`sc-16014-resolution: rehosted-q4-q8` marker binds this decision to the ledger checker, which rejects
+both a stale Lens text-encoder exception and one-sided edits to the fit-gate contract.
+
 Two mechanisms are load-bearing today. `mlx.denseTextEncoderTier` is the only way an entry obtains a
 dense text encoder on a packed tier, and setting it requires a matching ledger row — the hardcoded
 worker registry it used to mirror is deleted, because ids living in Rust while the catalog declared

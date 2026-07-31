@@ -36,10 +36,10 @@
  *  5. The Krea control branch's declared `branchTierByBaseTier` agrees with the ledger: every base tier
  *     whose branch tier is ABOVE it must have a `controlBranch` exception row, and every base tier whose
  *     branch tier equals it must NOT.
- *  6. ANTI-DRIFT on the lens-turbo carve-out: the numbers the ledger cites (on-disk / resident / upcast)
- *     must still appear in `crates/sceneworks-worker/src/mlx_fit_gate.rs`, whose doc table and hardcoded
- *     test constants are the other two copies. A repack that moved one and not the others used to turn
- *     that lane red for a reason unrelated to the invariant.
+ *  6. ANTI-DRIFT on the resolved Lens carve-out: the ledger and MLX fit gate must carry the same
+ *     `sc-16014-resolution: rehosted-q4-q8` marker, and the ledger must contain no stale Lens text-
+ *     encoder exception. This preserves the cross-source binding after the q4/q8 rehost eliminated the
+ *     exception while the bf16-only MXFP4 expansion remained a fit-gate fact.
  *  7. `backends` is LOAD-BEARING, not a comment (sc-15799 review). The same declared tier can yield
  *     different residency on the two lanes — `sensenova_u1_8b::visionTower` is bf16 under mlx-gen and
  *     f32 under candle-gen, because the candle port widens the conv kernels — so the uniqueness key is
@@ -150,7 +150,6 @@ export const GRANDFATHERED_UNMEASURED = new Set([
   "kolors::vae",
   "krea_2_raw::vae",
   "krea_2_turbo::vae",
-  "lens::textEncoder",
   "lens::vae",
   "lens_turbo::vae",
   "qwen_image::textEncoder",
@@ -186,16 +185,17 @@ export const GRANDFATHERED_UNMEASURED = new Set([
  * else pinned the list's size before, which made "it may only ever SHRINK" advisory prose.
  *
  * 42 from sc-15799's own audit + 13 the sc-15799 review found it had MISSED (`krea_2_raw::vae` and the
- * twelve SenseNova-U1 rows) = 55. sc-16015 drives it to 0.
+ * twelve SenseNova-U1 rows) − the resolved `lens::textEncoder` row (sc-16014) = 54. sc-16015 drives it
+ * to 0.
  */
-export const GRANDFATHERED_UNMEASURED_COUNT = 55;
+export const GRANDFATHERED_UNMEASURED_COUNT = 54;
 
 /**
- * The lens-turbo backend-capability numbers, which exist in THREE places: this ledger, the
- * `HEADROOM_GB` doc table in `mlx_fit_gate.rs`, and that file's hardcoded test constants. Any repack or
- * re-measure has to move all three together (sc-16014 owns the re-measure).
+ * Shared marker for the resolved Lens q4/q8 tier-integrity exception. It appears in the ledger source
+ * and in `mlx_fit_gate.rs`; the checker requires both so removing the rows cannot silently erase the
+ * fit-gate's remaining bf16-only MXFP4 accounting, or let that accounting drift back into a q4/q8 row.
  */
-const LENS_TURBO_ANTI_DRIFT = ["28.43", "45.67", "17.24"];
+const LENS_REHOST_RESOLUTION = "sc-16014-resolution: rehosted-q4-q8";
 
 function parseJsonc(body) {
   return JSON.parse(stripJsoncComments(body));
@@ -279,7 +279,7 @@ function schemaErrors(schema, value, root = schema, at = "$") {
  * Validate the ledger against its schema, the catalog and the worker. Returns
  * `{ errors, rows, unverifiedTiers }`; pure so `--self-test` can drive it with mutated inputs.
  */
-export function validate({ ledger, manifest, mlxFitGate, schema }) {
+export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema }) {
   const errors = [];
   const rows = [];
   const unverifiedTiers = [];
@@ -556,13 +556,28 @@ export function validate({ ledger, manifest, mlxFitGate, schema }) {
     }
   }
 
-  // (6) Anti-drift: the lens-turbo numbers must still exist where the fit gate reads them.
-  for (const number of LENS_TURBO_ANTI_DRIFT) {
-    if (!mlxFitGate.includes(number)) {
+  // (6) Anti-drift: q4/q8 are re-hosted packed affine, so there is no Lens text-encoder exception.
+  // The shared source marker keeps that ledger decision bound to the fit gate, where the bf16-only
+  // MXFP4 expansion and architecture-specific activation transient still belong.
+  const staleLensRows = exceptions.filter(
+    (row) =>
+      ["lens", "lens_turbo"].includes(row.model) && row.component === "textEncoder",
+  );
+  if (staleLensRows.length > 0) {
+    errors.push(
+      `${LEDGER} still declares ${staleLensRows.length} Lens textEncoder exception row(s), but the ` +
+        `shipped q4/q8 turnkeys are re-hosted MLX affine packs resident at the selected tier. Remove ` +
+        `the stale row(s); bf16 MXFP4 materialization belongs only in ${MLX_FIT_GATE}.`,
+    );
+  }
+  for (const [file, source] of [
+    [LEDGER, ledgerSource],
+    [MLX_FIT_GATE, mlxFitGate],
+  ]) {
+    if (typeof source !== "string" || !source.includes(LENS_REHOST_RESOLUTION)) {
       errors.push(
-        `${MLX_FIT_GATE} no longer contains "${number}", which ${LEDGER} cites for the lens-turbo ` +
-          `mxfp4 upcast exception. That file holds the calibration doc table AND hardcoded test ` +
-          `constants for the same measurement; a re-measure must move every copy together (sc-16014).`,
+        `${file} no longer contains "${LENS_REHOST_RESOLUTION}". The resolved ledger state and the ` +
+          `bf16-only fit-gate accounting must move together (sc-16014).`,
       );
     }
   }
@@ -682,6 +697,7 @@ async function readInputs() {
   ]);
   return {
     ledger: parseJsonc(ledgerBody),
+    ledgerSource: ledgerBody,
     manifest: parseJsonc(manifestBody),
     mlxFitGate,
     schema: JSON.parse(schemaBody),
@@ -824,12 +840,12 @@ async function selfTest() {
     );
   }
 
-  // 6. The lens-turbo anti-drift binding.
+  // 6. The resolved Lens anti-drift binding.
   {
     expect(
-      "lens-turbo anti-drift",
-      validate({ ...inputs, mlxFitGate: "no numbers here" }).errors,
-      "no longer contains",
+      "Lens rehost anti-drift",
+      validate({ ...inputs, mlxFitGate: "no resolution marker here" }).errors,
+      LENS_REHOST_RESOLUTION,
     );
   }
 

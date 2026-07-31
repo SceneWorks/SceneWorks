@@ -33,6 +33,7 @@ async function realInputs() {
   ]);
   return {
     ledger: JSON.parse(stripJsoncComments(ledger)),
+    ledgerSource: ledger,
     manifest: JSON.parse(stripJsoncComments(manifest)),
     mlxFitGate,
     schema: JSON.parse(schema),
@@ -44,6 +45,68 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 test("the shipped ledger validates clean", async () => {
   const { errors } = validate(await realInputs());
   assert.deepEqual(errors, [], "the committed ledger must be conformant");
+});
+
+test("Lens q4/q8 use re-hosted packed turnkeys with no text-encoder exception", async () => {
+  const { ledger, ledgerSource, manifest, mlxFitGate } = await realInputs();
+  const resolution = "sc-16014-resolution: rehosted-q4-q8";
+  assert.ok(ledgerSource.includes(resolution));
+  assert.ok(mlxFitGate.includes(resolution));
+  assert.deepEqual(
+    ledger.exceptions.filter(
+      (row) => ["lens", "lens_turbo"].includes(row.model) && row.component === "textEncoder",
+    ),
+    [],
+  );
+  for (const modelId of ["lens", "lens_turbo"]) {
+    const model = manifest.models.find((entry) => entry.id === modelId);
+    const expectedRepo =
+      modelId === "lens" ? "SceneWorks/lens-mlx" : "SceneWorks/lens-turbo-mlx";
+    assert.equal(model.mlx.standardTierLayout, true);
+    assert.equal(model.mlx.denseTextEncoderTier, undefined);
+    assert.deepEqual(
+      model.downloads
+        .filter((download) => ["q4", "q8"].includes(download.variant))
+        .map(({ variant, repo }) => ({ variant, repo }))
+        .sort((left, right) => left.variant.localeCompare(right.variant)),
+      [
+        { variant: "q4", repo: expectedRepo },
+        { variant: "q8", repo: expectedRepo },
+      ],
+      `${modelId} must host both packed tiers instead of routing them through the bf16 encoder`,
+    );
+  }
+});
+
+test("the Lens resolution marker is required in both bound sources", async () => {
+  const inputs = await realInputs();
+  const resolution = "sc-16014-resolution: rehosted-q4-q8";
+  for (const field of ["ledgerSource", "mlxFitGate"]) {
+    const { errors } = validate({ ...inputs, [field]: "marker removed" });
+    assert.ok(
+      errors.some((error) => error.includes(resolution)),
+      `${field} lost the shared decision without tripping anti-drift: ${errors.join(" | ")}`,
+    );
+  }
+});
+
+test("a Lens text-encoder exception cannot be reintroduced after the q4/q8 rehost", async () => {
+  const inputs = await realInputs();
+  const ledger = clone(inputs.ledger);
+  ledger.exceptions.push({
+    model: "lens_turbo",
+    component: "textEncoder",
+    residentTier: "bf16",
+    appliesToTiers: ["q4", "q8"],
+    cause: "backend-capability",
+    reason: "A stale exception for the superseded MXFP4 source artifact.",
+    evidence: { state: "measured", costGb: 17.24, source: "superseded bf16 measurement" },
+  });
+  const { errors } = validate({ ...inputs, ledger });
+  assert.ok(
+    errors.some((error) => error.includes("still declares 1 Lens textEncoder exception row")),
+    `expected the resolved-row guard to fire, got: ${errors.join(" | ")}`,
+  );
 });
 
 test("the amnesty set is keyed per (model, component), not per model", () => {
