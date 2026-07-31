@@ -423,6 +423,11 @@ test("a shipping control lane is declared, not inferred from having been measure
     "krea_2_turbo_control",
     "Krea control evidence must bind to the distinct production provider",
   );
+  assert.equal(
+    kreaBounded?.evidence.currentEnvironmentVerification.length,
+    2,
+    "both current exact Krea control geometries must remain attached to the matrix cell",
+  );
 
   // Every declared lane is represented on every backend the entry advertises — the declaration is what
   // generates cells now, so a lane can be unmeasured without being invisible.

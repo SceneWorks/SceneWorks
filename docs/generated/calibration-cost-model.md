@@ -9,22 +9,23 @@
 
 ## 0. Read this first: the binding constraint is not GPU hours
 
-**ZERO cells are producible today. The binding constraint on this epic is provider-adapter code, not GPU hours: no adapter has ever emitted a `complete` record, and 2 of 53 entries have an adapter at all. Every hour in the wall-clock sweep below is hypothetical until that changes.**
+**30 of 7360 cells could be certified by a run started right now.**
 
-**7354** of 7360 cells (**99.9%**) are blocked by provider-adapter code that does not exist, not by machine time. **0** could be certified by a run started now.
+**7324** of 7360 cells (**99.5%**) are blocked by provider-adapter code that does not exist, not by machine time. **30** could be certified by a run started now.
 
 | Gate (first one that blocks the cell) | Cells | MLX | Candle | Blocked by |
 | --- | --- | --- | --- | --- |
 | `no-run-needed` — Structurally N/A — static architecture evidence is sufficient | 6 | 0 | 6 | nothing; the epic exempts these |
 | `overlay-declined` — Non-`none` overlay: no adapter can emit a truthful overlay scenario | 4594 | 2890 | 1704 | provider-adapter code |
 | `no-provider-adapter` — No provider adapter covers this (entry, backend) at all | 2670 | 1670 | 1000 | provider-adapter code |
-| `adapter-gated` — An adapter exists, but it has never emitted a `complete` record | 90 | 60 | 30 | provider-adapter code (phase telemetry and lifecycle injection) |
-| `producible-today` — A run executed right now could certify this cell | 0 | 0 | 0 | nothing — GPU hours only |
+| `adapter-gated` — An adapter exists, but it has never emitted a `complete` record | 60 | 30 | 30 | provider-adapter code (phase telemetry and lifecycle injection) |
+| `producible-today` — A run executed right now could certify this cell | 30 | 30 | 0 | nothing — GPU hours only |
 
 - `no-run-needed`: docs/generated/memory-matrix.json (cell.state) and the epic's conformance states
 - `overlay-declined`: crates/sceneworks-memory-adapter/src/bin/candle.rs hardcodes the overlay scenario to `not_applicable` with the fixed reason "ordinary Krea Turbo text-to-image calibration has no overlay", which is false for a lora/identity/control target; crates/sceneworks-memory-adapter/src/bin/mlx.rs contains no overlay handling at all, so its overlay scenario stays `not_run` (from lib.rs#not_run_scenarios), which scripts/memory-calibration-harness.mjs#validateComplete rejects outright
 - `no-provider-adapter`: config/memory-calibration-plan.json (the shipped plan's provider targets)
 - `adapter-gated`: docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); docs/memory-calibration-harness.md documents both adapters as returning `gated` records today
+- `producible-today`: the remainder after the gates above
 
 ### Blockers per cell — the partition above is ORDERED, so it hides co-blocking
 
@@ -34,26 +35,29 @@ A cell is charged to the FIRST gate that blocks it, which makes the table above 
 | --- | --- | --- | --- |
 | `no-provider-adapter` + `overlay-declined` | 4420 | 2770 | 1650 |
 | `no-provider-adapter` | 2670 | 1670 | 1000 |
-| `adapter-gated` + `overlay-declined` | 174 | 120 | 54 |
-| `adapter-gated` | 90 | 60 | 30 |
+| `adapter-gated` + `overlay-declined` | 114 | 60 | 54 |
+| `adapter-gated` | 60 | 30 | 30 |
+| `overlay-declined` | 60 | 60 | 0 |
+| (none — producible today) | 30 | 30 | 0 |
 | (exempt — no run needed) | 6 | 0 | 6 |
 
 | Blocker | Cells touched | Sole blocker (fixing it alone frees these) | Co-blocked |
 | --- | --- | --- | --- |
 | `no-provider-adapter` | 7090 | 2670 | 4420 |
-| `adapter-gated` | 264 | 90 | 174 |
-| `overlay-declined` | 4594 | 0 | 4594 |
+| `adapter-gated` | 174 | 60 | 114 |
+| `overlay-declined` | 4594 | 60 | 4534 |
 
-**`overlay-declined` is charged 4594 cells by the first-match partition, but it is the SOLE blocker on 0 of them. 4420 of them (96.2%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 174 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 174 while `no-provider-adapter` rises to 7090. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2670 cells and it touches 7090. Scoping overlay support in both adapters is still necessary, but on its own it moves 174 cells, not 4594.**
+**`overlay-declined` is charged 4594 cells by the first-match partition, but it is the SOLE blocker on 60 of them. 4420 of them (96.2%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 174 while `no-provider-adapter` rises to 7090. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2670 cells and it touches 7090. Scoping overlay support in both adapters is still necessary, but on its own it moves 174 cells, not 4594.**
 
 Gate order is load-bearing and is therefore reported both ways rather than only disclosed in prose:
 
 | Gate | Charged (shipped order: overlay first) | Charged (adapter coverage first) |
 | --- | --- | --- |
-| `adapter-gated` | 90 | 90 |
+| `adapter-gated` | 60 | 60 |
 | `no-provider-adapter` | 2670 | 7090 |
 | `no-run-needed` | 6 | 6 |
 | `overlay-declined` | 4594 | 174 |
+| `producible-today` | 30 | 30 |
 
 > The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'.
 
@@ -270,11 +274,11 @@ Ratios: exact-geometry / fit = **2.97x**; exact-geometry / per-cell = 6.09x; fit
 
 ## 7. Biggest uncertainties
 
-Ranked by **soleBlockerCells — cells this gate is the ONLY thing wrong with**, not by first-match bucket size. An earlier version of this document ranked the overlay gap #1 because it is the largest bucket in the ordered partition; 4594 of those cells are also blocked by having no adapter at all, so that ranking pointed remediation at work that moves 174 cells rather than 4594.
+Ranked by **soleBlockerCells — cells this gate is the ONLY thing wrong with**, not by first-match bucket size. An earlier version of this document ranked the overlay gap #1 because it is the largest bucket in the ordered partition; 4534 of those cells are also blocked by having no adapter at all, so that ranking pointed remediation at work that moves 174 cells rather than 4594.
 
 ### 1. how much provider-adapter work the CATALOG COVERAGE gap needs — gate `no-provider-adapter`, **2670** cells independently blocked (7090 touched)
 
-This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2670 cells and it touches 7090 — 4594 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 7090 cells.
+This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2670 cells and it touches 7090 — 4534 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 7090 cells.
 
 > Resolve by: Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.
 
@@ -284,17 +288,17 @@ It is a pure multiplier on every reported hour and it spans a 40x range in the s
 
 > Resolve by: NOT by 'capturing one `complete` record', which is how this was previously phrased. That is the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker string still lists predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is gated on the two code uncertainties above and cannot be scheduled ahead of them. THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX adapter, which already executes 8 real provider invocations today. That needs no new measurement campaign and no `complete` record — it converts an existing green CI step into a per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of a `complete` record that are already implemented. Do that first; treat the end-to-end `complete` record as the thing being scheduled, not the thing that unblocks scheduling.
 
-### 3. what a `complete` record actually requires from an existing adapter — gate `adapter-gated`, **90** cells independently blocked (264 touched)
+### 3. how much provider-adapter work the OVERLAY axis needs — gate `overlay-declined`, **60** cells independently blocked (4594 touched)
 
-90 cells are blocked ONLY by this, and 264 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.
-
-> Resolve by: Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.
-
-### 4. how much provider-adapter work the OVERLAY axis needs — gate `overlay-declined`, **0** cells independently blocked (4594 touched)
-
-DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4594 cells (62.4% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 0 of them: 4594 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 174 cells, not 4594. It remains necessary work — those 4594 cells cannot be certified without it — but it is not where the schedule is decided.
+DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4594 cells (62.4% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 60 of them: 4534 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support in both adapters therefore moves 174 cells, not 4594. It remains necessary work — those 4594 cells cannot be certified without it — but it is not where the schedule is decided.
 
 > Resolve by: Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.
+
+### 4. what a `complete` record actually requires from an existing adapter — gate `adapter-gated`, **60** cells independently blocked (174 touched)
+
+60 cells are blocked ONLY by this, and 174 in total. Both shipped adapters return `gated` records: the Candle adapter's own blocker string names predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as still missing. This is the smallest gate by cell count but it is the one that proves the pipeline can close at all.
+
+> Resolve by: Close the four items the Candle adapter's blocker string enumerates for one target, on one backend. That converts the first cells in the matrix from `adapter-gated` to `producible-today` and is the precondition for every hour in the wall-clock sweep.
 
 ### 5. whether the harness can amortise a model load across a target's rungs — not cell-gated
 

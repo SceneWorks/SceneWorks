@@ -3854,19 +3854,16 @@ mod tests {
     }
 
     #[test]
-    fn packaged_empty_bundle_is_a_normal_legacy_reason_not_drift() {
+    fn packaged_bundle_without_an_exact_record_is_a_normal_legacy_reason_not_drift() {
         let route = packaged_admission_route(
             &fixture_plan(),
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
         )
-        .expect("the promoted empty bundle is valid");
+        .expect("the promoted bundle is valid even when this fixture has no exact record");
         assert_eq!(route.path, AdmissionPath::Legacy);
-        assert_eq!(
-            route.fallback_reason,
-            Some(LegacyAdmissionReason::PackagedEmpty)
-        );
+        assert_eq!(route.fallback_reason, Some(LegacyAdmissionReason::NoRecord));
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
