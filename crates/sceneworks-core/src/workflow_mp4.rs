@@ -311,10 +311,7 @@ pub fn workflow_metadata_size(share: &WorkflowShare) -> Result<usize, WorkflowMp
 /// See [`WorkflowMp4Error`].
 pub fn read_workflow_metadata_file(path: &Path) -> Result<Option<WorkflowShare>, WorkflowMp4Error> {
     let file = File::open(path).map_err(|error| io_error(&error))?;
-    let length = file
-        .metadata()
-        .map_err(|error| io_error(&error))?
-        .len();
+    let length = file.metadata().map_err(|error| io_error(&error))?.len();
     let mut reader = BufReader::new(file);
     read_workflow_metadata_from(&mut reader, length)
 }
@@ -405,9 +402,11 @@ fn read_box_header<R: Read + Seek>(
         _ => (offset + BOX_HEADER, u64::from(declared)),
     };
 
-    let end = offset.checked_add(size).ok_or(WorkflowMp4Error::Malformed {
-        detail: "a box size overflows the file offset".to_owned(),
-    })?;
+    let end = offset
+        .checked_add(size)
+        .ok_or(WorkflowMp4Error::Malformed {
+            detail: "a box size overflows the file offset".to_owned(),
+        })?;
     if size < body_start - offset || end > limit {
         return Err(WorkflowMp4Error::Malformed {
             detail: format!(
@@ -553,12 +552,11 @@ fn read_comment_data<R: Read + Seek>(
             }
             let payload_len = header.end - payload_start;
             // OUR bound, not the file's: a header claiming 2 GiB costs this comparison.
-            let payload_len = usize::try_from(payload_len).map_err(|_| {
-                WorkflowMp4Error::TooLarge {
+            let payload_len =
+                usize::try_from(payload_len).map_err(|_| WorkflowMp4Error::TooLarge {
                     bytes: usize::MAX,
                     limit: MAX_WORKFLOW_TEXT_BYTES,
-                }
-            })?;
+                })?;
             if payload_len > MAX_WORKFLOW_TEXT_BYTES {
                 return Err(WorkflowMp4Error::TooLarge {
                     bytes: payload_len,

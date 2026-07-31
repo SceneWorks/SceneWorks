@@ -897,7 +897,8 @@ pub(crate) async fn run_video_generate_job(
     // off, the job carries no payload, or the envelope is over the recording ceiling — which is
     // the same three-reasons-one-`Option` shape the image seam's `workflow_source` has.
     let workflow_metadata = plan.media_path.with_extension("workflow.ffmeta");
-    let embedded = video_workflow_metadata(settings, job, &request, &plan, seed, &workflow_metadata);
+    let embedded =
+        video_workflow_metadata(settings, job, &request, &plan, seed, &workflow_metadata);
     encode_media(
         &plan.media_path,
         decoded,
@@ -990,10 +991,9 @@ fn video_workflow_metadata(
         width: Some(request.width),
         height: Some(request.height),
     };
-    let Some(share) = sceneworks_core::workflow_share::embeddable_video_workflow_share(
-        &facts,
-        &job.payload,
-    ) else {
+    let Some(share) =
+        sceneworks_core::workflow_share::embeddable_video_workflow_share(&facts, &job.payload)
+    else {
         tracing::debug!(
             reason = "over_recording_ceiling",
             "not embedding a workflow: the envelope is larger than the recording ceiling"
@@ -1266,7 +1266,7 @@ async fn encode_inner(
     // is part of the file from the moment it exists: there is no window in which a clip is on disk
     // without its recipe, and no extra pass over what can be gigabytes. It survives the two steps
     // below — measured, and pinned by `the_envelope_survives_the_whole_encode_chain` in
-    // `crates/sceneworks-worker/src/tests/workflow_video.rs`.
+    // `crates/sceneworks-worker/src/video_jobs/tests.rs`.
     let chunks = frames.into_iter().map(|frame| frame.pixels).collect();
     let mut args = vec![
         "ffmpeg".to_owned(),

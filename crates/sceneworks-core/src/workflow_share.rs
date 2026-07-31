@@ -829,11 +829,10 @@ pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 /// to know which web builder feeds a Rust seam — so what it guarantees is that the statement had
 /// to be written at all, and that the honest version of it fails the build. Review is what catches
 /// the dishonest one.
-pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/training/trainingConfig.js",
-        function: "trainingConfigSnapshot",
-        reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
+pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[DeferredAdvancedBuilder {
+    path: "apps/web/src/training/trainingConfig.js",
+    function: "trainingConfigSnapshot",
+    reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
                  from the image payload's — trainer hyperparameters (networkType, lrScheduler, \
                  sampleSteps, decomposeFactor) on a training job, not generation intent for an \
                  image. No training write seam EMBEDS a workflow, nothing sanitizes these keys \
@@ -842,8 +841,7 @@ pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
                  would have to change is a training write seam that embeds. Then, and only then, \
                  this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
                  allow/deny decision.",
-    },
-];
+}];
 
 /// A (file, function) reference to one entry in [`ADVANCED_BUILDERS`] or
 /// [`DEFERRED_ADVANCED_BUILDERS`] (sc-16113).

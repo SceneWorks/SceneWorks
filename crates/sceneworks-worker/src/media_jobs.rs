@@ -2082,8 +2082,8 @@ impl TimelineExport<'_> {
     /// multi-input command is to copy input 0's metadata to the output — so a crossfaded export
     /// would have published its first clip's recipe as its own. Both mux paths pass
     /// `-map_metadata -1` explicitly; `mux_with_crossfades_args` records the measurement, and
-    /// `a_crossfaded_export_does_not_inherit_a_clips_recipe` in
-    /// `crates/sceneworks-worker/src/tests/workflow_video.rs` fails if either regresses.
+    /// `a_crossfaded_export_does_not_inherit_a_clips_recipe` in this file
+    /// (`export_metadata_tests`) fails if either regresses.
     async fn finalize(
         &self,
         segments: &[TimelineSegment],
@@ -4524,5 +4524,121 @@ mod crossfade_mux_tests {
         // source_in preserved as -ss.
         let ss_idx = args.iter().position(|arg| arg == "-ss").unwrap() + 1;
         assert_eq!(args[ss_idx], "0.500");
+    }
+}
+
+/// The timeline export's relationship to the workflow envelope (sc-15956).
+///
+/// An export embeds nothing — see [`TimelineExport::finalize`] — but that is only half the job.
+/// The other half is that it must not INHERIT one, and inheritance is ffmpeg's default rather than
+/// something anyone wrote.
+#[cfg(test)]
+mod export_metadata_tests {
+    use super::*;
+
+    fn segment(path: &str, duration: f64, transition: Option<&str>) -> TimelineSegment {
+        TimelineSegment {
+            path: PathBuf::from(path),
+            duration,
+            transition: transition.map(str::to_owned),
+            transition_duration: 0.5,
+        }
+    }
+
+    /// The position of `-map_metadata`'s value in an argument list, if it is there at all.
+    fn map_metadata_value(args: &[String]) -> Option<&str> {
+        args.iter()
+            .position(|arg| arg == "-map_metadata")
+            .and_then(|at| args.get(at + 1))
+            .map(String::as_str)
+    }
+
+    /// **The measured surprise this guard exists for.**
+    ///
+    /// `mux_with_crossfades_args` passes every segment as its own `-i`. With several inputs and no
+    /// `-map_metadata`, ffmpeg copies input 0's container metadata to the output — so once
+    /// generated clips began carrying a workflow tag, a crossfaded export silently published THE
+    /// FIRST CLIP'S recipe as its own. Verified against a real ffmpeg before this was written: the
+    /// output carried clip 1's comment verbatim.
+    ///
+    /// An export is a mux of several clips and is not the output of any one of their recipes.
+    /// Presenting one of them as the recipe for the whole is precisely the writer-and-reader
+    /// disagreement the envelope contract exists to prevent.
+    #[test]
+    fn a_crossfaded_export_does_not_inherit_a_clips_recipe() {
+        let segments = [
+            segment("a.mp4", 2.0, None),
+            segment("b.mp4", 3.0, Some("crossfade")),
+            segment("c.mp4", 4.0, None),
+        ];
+        let args = mux_with_crossfades_args("ffmpeg", &segments, Path::new("out.mp4"))
+            .expect("three segments mux");
+        assert_eq!(
+            map_metadata_value(&args),
+            Some("-1"),
+            "the crossfade mux MUST strip metadata: ffmpeg's default on a multi-input command is \
+             to copy input 0's, which would publish the first clip's recipe as the export's own. \
+             Args: {args:?}"
+        );
+    }
+
+    /// The plain concat path says the same thing, though it did not have to.
+    ///
+    /// The concat demuxer drops per-segment metadata on its own, so this changes no behaviour — it
+    /// is here because its crossfade sibling proves the default is not reliable, and an asymmetry
+    /// between two paths that produce the same kind of file is how one of them regresses unnoticed.
+    #[test]
+    fn the_concat_export_strips_metadata_explicitly_too() {
+        // `mux_segments` builds its arguments inline around a concat list it has already written,
+        // so there is no pure args builder to call the way the crossfade path has one. Read the
+        // constant off the source instead — the same technique the seam lint uses, and it is the
+        // flag's PRESENCE that is the claim here, not a runtime behaviour.
+        let source = include_str!("media_jobs.rs");
+        let concat_body = source
+            .split("pub(crate) async fn mux_segments(")
+            .nth(1)
+            .expect("mux_segments is still here")
+            .split("pub(crate) async fn mux_with_crossfades(")
+            .next()
+            .expect("the function ends");
+        assert!(
+            concat_body.contains("\"-map_metadata\".to_owned()"),
+            "`mux_segments` must pass `-map_metadata` explicitly — see \
+             `a_crossfaded_export_does_not_inherit_a_clips_recipe` for why the default is not \
+             something to rely on"
+        );
+    }
+
+    /// The export writes no envelope of its own, and the lint's registry agrees.
+    ///
+    /// `TimelineExport::finalize` is deliberately NOT in `WORKFLOW_WRITE_SEAMS`: that registry
+    /// lists functions an envelope can reach, and an entry whose function touches none fails as a
+    /// stale claim. What keeps the decision honest is that the body must stay free of the envelope
+    /// surface, which is what this reads.
+    #[test]
+    fn the_timeline_export_builds_no_envelope() {
+        let source = include_str!("media_jobs.rs");
+        let finalize = source
+            .split("    async fn finalize(")
+            .nth(1)
+            .expect("finalize is still here")
+            .split("\n    }\n}")
+            .next()
+            .expect("the function ends");
+        for forbidden in [
+            "embeddable_workflow_share",
+            "embeddable_video_workflow_share",
+            "build_workflow_share",
+            "write_workflow_metadata_file",
+            "write_workflow_chunk",
+        ] {
+            assert!(
+                !finalize.contains(forbidden),
+                "`TimelineExport::finalize` calls `{forbidden}`, so it now EMBEDS. A timeline \
+                 export is a mux of several clips rather than the output of any one recipe, and \
+                 its sidecar `prompt` slot holds the user's own timeline name. If this is \
+                 deliberate, it needs a `WORKFLOW_WRITE_SEAMS` entry naming the builders behind it."
+            );
+        }
     }
 }

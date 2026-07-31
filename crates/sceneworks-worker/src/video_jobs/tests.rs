@@ -10167,7 +10167,9 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     let dir = std::env::temp_dir().join(format!("sw_vid_{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let media_path = dir.join("clip.mp4");
-    encode_media(&media_path, decoded, None, None).await.unwrap();
+    encode_media(&media_path, decoded, None, None)
+        .await
+        .unwrap();
     assert!(media_path.exists(), "mp4 must be written");
     assert!(media_path.metadata().unwrap().len() > 0);
     assert!(
@@ -10653,4 +10655,263 @@ mod candle_video_label_tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&flat).ok();
     }
+}
+
+// ---------------------------------------------------------------------------
+// The embedded workflow envelope (sc-15956)
+// ---------------------------------------------------------------------------
+
+/// Build the envelope a clip of `payload` would carry, and write it where the encoder reads it.
+fn workflow_document(directory: &Path, payload: serde_json::Map<String, Value>) -> PathBuf {
+    use sceneworks_core::workflow_share::{embeddable_video_workflow_share, WorkflowAssetFacts};
+    let facts = WorkflowAssetFacts {
+        mode: "text_to_video".to_owned(),
+        model: "ltx_2_3".to_owned(),
+        prompt: "a fox crossing a frozen river".to_owned(),
+        negative_prompt: String::new(),
+        seed: 4242,
+        width: Some(128),
+        height: Some(128),
+    };
+    let share = embeddable_video_workflow_share(&facts, &payload).expect("under the ceiling");
+    let path = directory.join("workflow.ffmeta");
+    sceneworks_core::workflow_mp4::write_workflow_metadata_file(&share, &path).expect("written");
+    path
+}
+
+fn video_workflow_payload() -> serde_json::Map<String, Value> {
+    json!({
+        "mode": "text_to_video",
+        "model": "ltx_2_3",
+        "prompt": "a fox crossing a frozen river",
+        "duration": 1.0,
+        "fps": 9,
+        "quality": "standard",
+        "width": 128,
+        "height": 128,
+        "personTrackId": "track_9f3c1b2a",
+        "replacementMode": "full_person_replace_outfit",
+        "advanced": {
+            "motion": "slow push-in",
+            "precision": "fp8",
+            "replacementModeLabel": "Full Person, Replace Outfit",
+            "selectedPersonTrack": { "name": "Sarah Whitfield" }
+        }
+    })
+    .as_object()
+    .expect("an object")
+    .clone()
+}
+
+/// **The end-to-end proof.** The envelope written before the encode is readable out of the
+/// finished mp4, after every step the encoder runs.
+///
+/// That chain is three ffmpeg invocations, not one — the libx264 encode, the AAC audio mux, and the
+/// `+faststart` remux — and the tag has to survive all three. The audio arm matters most: it is the
+/// only step with two inputs, and ffmpeg's multi-input metadata default is the exact behaviour that
+/// bites the timeline export (see `media_jobs::export_metadata_tests`).
+///
+/// Skips when no ffmpeg is reachable, like every other real-binary test in this file.
+#[tokio::test]
+async fn the_envelope_survives_the_whole_encode_chain() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping the_envelope_survives_the_whole_encode_chain: ffmpeg not found");
+        return;
+    }
+    // `ltx_2_3` makes the stub emit an audio track, so the two-input mux step runs.
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let decoded = generate_stub_video(&request, 11);
+    assert!(decoded.audio.is_some(), "the audio arm must actually run");
+
+    let dir = std::env::temp_dir().join(format!("sw_wf_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("clip.mp4");
+    let document = workflow_document(&dir, video_workflow_payload());
+
+    encode_media(&media_path, decoded, Some(document.as_path()), None)
+        .await
+        .unwrap();
+
+    let read = sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path)
+        .expect("the clip is readable")
+        .expect("the clip carries its recipe through encode + audio mux + faststart");
+    assert_eq!(
+        read.kind,
+        sceneworks_core::workflow_share::WORKFLOW_KIND_VIDEO
+    );
+    assert_eq!(read.prompt, "a fox crossing a frozen river");
+    assert_eq!(read.duration_seconds, Some(1.0));
+    assert_eq!(read.fps, Some(9));
+    assert_eq!(read.advanced.get("motion"), Some(&json!("slow push-in")));
+
+    // The clip still plays: the tag did not displace the moov or break the framing.
+    assert!(media_path.metadata().unwrap().len() > 0);
+    assert!(media_path.with_extension("poster.jpg").exists());
+
+    // And the withholding holds all the way to the bytes on disk — the acceptance criterion, read
+    // out of a real file rather than off a struct.
+    let bytes = std::fs::read(&media_path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    for secret in [
+        "track_9f3c1b2a",
+        "Sarah Whitfield",
+        "full_person_replace_outfit",
+        "Full Person, Replace Outfit",
+        "selectedPersonTrack",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "`{secret}` reached the mp4 on disk — a shared video must not disclose that it was \
+             made by replacing a specific person"
+        );
+    }
+    // A hardware-budget knob is dropped too, so this is the allow-list running and not a blanket.
+    assert!(
+        !text.contains("fp8"),
+        "`precision` is a hardware budget and must not travel"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `None` still writes exactly the file it wrote before — the setting-off / no-payload path.
+#[tokio::test]
+async fn no_document_means_no_tag_and_an_otherwise_identical_clip() {
+    if !ffmpeg_reachable() {
+        eprintln!("skipping no_document_means_no_tag_and_an_otherwise_identical_clip: no ffmpeg");
+        return;
+    }
+    let request = request(json!({
+        "projectId": "p", "model": "wan2_2_t2v_14b", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let dir = std::env::temp_dir().join(format!("sw_wf_off_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let media_path = dir.join("clip.mp4");
+    encode_media(&media_path, generate_stub_video(&request, 11), None, None)
+        .await
+        .unwrap();
+    assert!(media_path.exists());
+    assert_eq!(
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path).expect("readable"),
+        None,
+        "with the setting off there must be no recipe in the file at all"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The survival measurement, as a test.** The tag outlives a representative re-encode, and dies
+/// on a deliberate strip.
+///
+/// The negative case is asserted alongside the positive one on purpose: "it survives everything"
+/// would be a false claim about this container, and the story asks for the honest matrix. What is
+/// proved here is the boundary — a transcode that carries metadata forward keeps the recipe, and a
+/// pipeline that strips metadata removes it, which is what a platform re-encode does.
+#[tokio::test]
+async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip: no ffmpeg"
+        );
+        return;
+    }
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "fox",
+        "duration": 1.0, "fps": 9, "width": 128, "height": 128
+    }));
+    let dir = std::env::temp_dir().join(format!("sw_wf_re_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("clip.mp4");
+    let document = workflow_document(&dir, video_workflow_payload());
+    encode_media(
+        &source,
+        generate_stub_video(&request, 11),
+        Some(document.as_path()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let read_back = |path: &Path| {
+        sceneworks_core::workflow_mp4::read_workflow_metadata_file(path).expect("readable")
+    };
+    assert!(read_back(&source).is_some(), "the source must carry it");
+
+    // 1. A `-c copy` remux — a container rewrite, what a "fix this file" tool does.
+    let remux = dir.join("remux.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            remux.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_back(&remux).is_some(),
+        "a `-c copy` remux must keep it"
+    );
+
+    // 2. A scale + bitrate change — the shape of a delivery transcode.
+    let scaled = dir.join("scaled.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-vf".to_owned(),
+            "scale=64:64".to_owned(),
+            "-b:v".to_owned(),
+            "200k".to_owned(),
+            scaled.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let survived = read_back(&scaled).expect("a scale + bitrate re-encode must keep it");
+    assert_eq!(
+        survived.prompt, "a fox crossing a frozen river",
+        "and keep it INTACT, not truncated"
+    );
+
+    // 3. THE NEGATIVE CASE: a pipeline that strips metadata. This is what a platform re-encode
+    //    does, and it is why the sharing premise for video is weaker than for a PNG chunk.
+    let stripped = dir.join("stripped.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-map_metadata".to_owned(),
+            "-1".to_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            stripped.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_back(&stripped),
+        None,
+        "a deliberate strip removes it — stated as a fact of this container rather than hidden"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
