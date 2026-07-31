@@ -4565,10 +4565,9 @@
           // only while both source revisions and the provider request ABI fingerprint match.
           //
           // sc-16211 replaces sc-15994's catalog-wide fingerprint tombstone with an exact
-          // measured-composition identity per rung. Three-stage and streamed-block captures remain
-          // eligible because their measured compositions still match the Krea provider contract;
-          // tiled-VAE and chunked-attention captures fail with CompositionMismatch until SC-15913
-          // recaptures those six q4/q8/bf16 rows without staged residency.
+          // measured-composition identity per rung. SC-16402 corrects the provider contract to attest
+          // the physical staged-residency path already present in the tiled-VAE, chunked-attention,
+          // and streamed-block captures, so every measured row binds to its exact executed composition.
           "calibrationAbi": 1,
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
           "sceneWorksRevision": "sc-15449-contract-v1",
@@ -4806,15 +4805,14 @@
           "engagedCompositions": {
             "resident": ["resident"],
             "threeStage": ["resident", "staged_residency"],
-            "tiledVae": ["resident", "bounded_decode"],
-            "chunkedAttention": ["resident", "bounded_decode", "bounded_attention"],
+            "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+            "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
             "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
           },
           // Exact parameter cells exercised by the historical curves below. Capture was cumulative:
           // Krea kept each cheaper bound active while adding the next constraint, including staged
-          // residency for tiledVae and chunkedAttention. That is no longer the composition selected
-          // by the shared contract, so the exact measured-composition check rejects those rows. They
-          // remain only as provenance until sc-15913 replaces them with non-staged captures.
+          // residency for tiledVae and chunkedAttention. The SC-16402 shared contract correction now
+          // attests those physical compositions exactly, so all five identities agree end to end.
           "strategyParameters": {
             "resident": {},
             "threeStage": {},

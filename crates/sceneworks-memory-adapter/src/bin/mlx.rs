@@ -4,12 +4,12 @@ compile_error!("memory-mlx-adapter is supported only on macOS");
 use mlx_gen::gen_core::{
     MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryPhase,
     MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
-    MemoryStrategyParameters, MEMORY_CALIBRATION_ABI,
+    MemoryStrategyParameters, TransformerComponent, MEMORY_CALIBRATION_ABI,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
 use mlx_gen::{
-    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadSpec,
-    OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
+    LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
@@ -38,6 +38,8 @@ const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
+const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
+const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
 const MIB: u64 = 1024 * 1024;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -596,6 +598,255 @@ fn predicted_ceiling(bytes: u64) -> u64 {
         .saturating_add(64 * MIB - 1)
         .saturating_div(64 * MIB)
         .saturating_mul(64 * MIB)
+}
+
+fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
+    match protocol::planned_rung(request)? {
+        "resident" => Ok(MemoryStrategy::Resident),
+        "staged_residency" => Ok(MemoryStrategy::StagedResidency),
+        "bounded_decode" => Ok(MemoryStrategy::BoundedDecode),
+        "bounded_attention" => Ok(MemoryStrategy::BoundedAttention),
+        "bounded_transformer_residency" => Ok(MemoryStrategy::BoundedTransformerResidency),
+        other => Err(format!("unsupported MLX fresh-reference rung {other:?}")),
+    }
+}
+
+fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
+    let strategy = planned_memory_strategy(request)?;
+    let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    Ok(MemorySelection {
+        strategy,
+        parameters: MemoryStrategyParameters {
+            decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
+            decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
+            attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
+            transformer_window_size,
+            transformer_window_component: transformer_window_size
+                .map(|_| TransformerComponent::Dit),
+        },
+        tier: MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: Some(Quant::Q4),
+            component_precision_floors: &[],
+        },
+    })
+}
+
+fn strategy_name(strategy: MemoryStrategy) -> &'static str {
+    match strategy {
+        MemoryStrategy::Resident => "resident",
+        MemoryStrategy::StagedResidency => "staged_residency",
+        MemoryStrategy::BoundedDecode => "bounded_decode",
+        MemoryStrategy::BoundedAttention => "bounded_attention",
+        MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+fn attested_strategy(
+    request: &Value,
+    selection: &MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> Result<Value, String> {
+    let measured = json!({
+        "rung": strategy_name(selection.strategy),
+        "engagedRungs": engaged.iter().copied().map(strategy_name).collect::<Vec<_>>(),
+        "parameters": protocol::strategy_parameters(request)?,
+    });
+    let planned = protocol::planned(request)?
+        .get("strategy")
+        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
+    if planned != &measured {
+        return Err(format!(
+            "plan/provider strategy mismatch: plan={planned}, pinned provider measured={measured}"
+        ));
+    }
+    Ok(measured)
+}
+
+fn run_z_image_reference(request: &Value) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let repository = protocol::required_env("SCENEWORKS_Z_IMAGE_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_Z_IMAGE_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::Z_IMAGE_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_Z_IMAGE_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_Z_IMAGE_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        "q4",
+        protocol::Z_IMAGE_REPOSITORY,
+    )?;
+
+    let selection = planned_selection(request)?;
+    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
+        LoadShape::DeferredMaterialization
+    } else {
+        LoadShape::EagerMaterialization
+    };
+    let spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_quant(Quant::Q4)
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape);
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let contract = catalog
+        .media()
+        .memory_strategy_contract(Z_IMAGE_PROVIDER, &spec)
+        .map_err(|error| format!("read {Z_IMAGE_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| format!("{Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned Z-Image provider rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Z-Image provider has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes: hardware_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-16402@{}", protocol::INFERENCE_PIN),
+    };
+    let generator = catalog
+        .media()
+        .load(Z_IMAGE_PROVIDER, &spec)
+        .map_err(|error| format!("load real Z-Image Turbo q4 provider: {error}"))?;
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    one_image(scoped_generate(
+        generator.as_ref(),
+        GenerationRequest {
+            prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
+            width,
+            height,
+            count: 1,
+            seed: Some(16402),
+            // The first Step callback closes the conservative conditioning envelope; the second
+            // step then supplies a real denoise-only interval before Decoding.
+            steps: Some(2),
+            ..Default::default()
+        },
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Z-Image lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let blocker = concat!(
+        "fresh-process oracle capture measures exact per-rung memory and strategy identity for ",
+        "sc-16059; it intentionally remains gated because this run does not repeat the full ",
+        "promotion-quality, negative-mutation, and lifecycle scenario suite"
+    );
+    let artifact = json!({
+        "repository": repository,
+        "resolvedRevision": revision,
+        "variant": "q4",
+    });
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        Z_IMAGE_PLAIN_EXECUTION_PATH,
+        protocol::PlainGatedFragment {
+            artifact,
+            sweep: protocol::reference_sweep(request, "passed")?,
+            blocker,
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({
+                "result": "passed",
+                "resolvedPathFingerprint": format!("{repository}@{revision}:q4"),
+            }),
+            diagnostics: protocol::diagnostics(
+                "memory-mlx-adapter:z-image-five-rung-reference",
+                "executed",
+                [blocker.to_owned()],
+                [
+                    ("conditioningActivePeak", "bytes", conditioning.active),
+                    ("denoiseActivePeak", "bytes", denoise.active),
+                    ("decodeActivePeak", "bytes", decode.active),
+                    (
+                        "overallAllocatorEnvelope",
+                        "bytes",
+                        overall.allocator_bytes(),
+                    ),
+                ],
+            ),
+        },
+    )?;
+    fragment["strategy"] = strategy;
+    fragment["observedMemory"] = json!({
+        "conditioning": conditioning.json(),
+        "denoise": denoise.json(),
+        "decode": decode.json(),
+        "overall": overall.json(),
+    });
+    Ok(fragment)
 }
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
@@ -1192,7 +1443,9 @@ fn run(request: &Value) -> Result<Value, String> {
         .pointer("/target/provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider == KREA_PROVIDER {
+    if provider == Z_IMAGE_PROVIDER {
+        run_z_image_reference(request)
+    } else if provider == KREA_PROVIDER {
         run_krea_control(request)
     } else {
         run_qwen(request)

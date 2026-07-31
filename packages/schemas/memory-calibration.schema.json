@@ -161,7 +161,6 @@
           "properties": {
             "axes": {
               "type": "array",
-              "minItems": 1,
               "uniqueItems": true,
               "items": {
                 "type": "object", "additionalProperties": false, "required": ["parameter", "testedValues"],
@@ -286,6 +285,7 @@
               "observedMemory": { "$ref": "#/$defs/phaseMetrics" },
               "sweep": {
                 "properties": {
+                  "axes": { "minItems": 1 },
                   "rangeVerified": { "const": true },
                   "cases": { "minItems": 1 }
                 }
@@ -358,6 +358,9 @@
           "if": { "properties": { "status": { "const": "negative_complete" } }, "required": ["status"] },
           "then": {
             "properties": {
+              "sweep": {
+                "properties": { "axes": { "minItems": 1 } }
+              },
               "quality": {
                 "required": ["contract", "maximumErrorThreshold", "meanErrorThreshold"]
               },

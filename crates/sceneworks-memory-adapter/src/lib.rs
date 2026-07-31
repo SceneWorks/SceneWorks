@@ -12,7 +12,42 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const INFERENCE_PIN: &str = "f522fd1f646d147e513054cbb3abe8410a91c836";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferencePhase {
+    Conditioning,
+    Denoise,
+    Decode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceBoundary {
+    RendererLoad,
+    FirstDenoiseStep,
+    Decoding,
+}
+
+/// Return the next measurable Candle reference phase for provider progress paths that differ by
+/// strategy. Resident exposes only Step/Decoding; staged exposes Renderer/Decoding; higher rungs
+/// expose two Renderer boundaries. All three sequences must converge on the same phase lifecycle.
+pub fn next_reference_phase(
+    phase: ReferencePhase,
+    boundary: ReferenceBoundary,
+) -> Option<ReferencePhase> {
+    match (phase, boundary) {
+        (
+            ReferencePhase::Conditioning,
+            ReferenceBoundary::RendererLoad | ReferenceBoundary::FirstDenoiseStep,
+        ) => Some(ReferencePhase::Denoise),
+        (
+            ReferencePhase::Denoise,
+            ReferenceBoundary::RendererLoad | ReferenceBoundary::Decoding,
+        ) => Some(ReferencePhase::Decode),
+        _ => None,
+    }
+}
 
 pub fn request_from_stdin() -> Result<Value, String> {
     let mut input = String::new();
@@ -53,6 +88,62 @@ pub fn parameter(request: &Value, name: &str) -> Result<u32, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("planned.strategy.parameters.{name} must be an integer"))?;
     u32::try_from(value).map_err(|_| format!("planned.strategy.parameters.{name} exceeds u32"))
+}
+
+pub fn optional_parameter(request: &Value, name: &str) -> Result<Option<u32>, String> {
+    strategy_parameters(request)?
+        .get(name)
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| format!("planned.strategy.parameters.{name} must be an integer"))
+                .and_then(|value| {
+                    u32::try_from(value)
+                        .map_err(|_| format!("planned.strategy.parameters.{name} exceeds u32"))
+                })
+        })
+        .transpose()
+}
+
+pub fn planned_rung(request: &Value) -> Result<&str, String> {
+    planned(request)?
+        .pointer("/strategy/rung")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.strategy.rung must be a string".to_owned())
+}
+
+pub fn reference_sweep(request: &Value, result: &str) -> Result<Value, String> {
+    let parameters = strategy_parameters(request)?;
+    let numeric = parameters
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_u64()
+                .ok_or_else(|| {
+                    format!("fresh-reference strategy parameter {name} must be an unsigned integer")
+                })
+                .map(|value| (name, value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (axes, cases) = if numeric.is_empty() {
+        (
+            Vec::<Value>::new(),
+            vec![json!({ "parameters": {}, "result": result })],
+        )
+    } else {
+        (
+            numeric
+                .iter()
+                .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+                .collect(),
+            vec![json!({ "parameters": parameters, "result": result })],
+        )
+    };
+    Ok(json!({
+        "axes": axes,
+        "cases": cases,
+        "rangeVerified": false,
+    }))
 }
 
 pub fn comparison_output_bias(
@@ -460,6 +551,90 @@ mod tests {
             assert!(error.contains(overlay));
             assert!(error.contains("refusing"));
             assert_eq!(fragment, before, "a refusal must not become false coverage");
+        }
+    }
+
+    #[test]
+    fn fresh_reference_sweep_preserves_parameters_without_fabricating_empty_rungs() {
+        let bounded = json!({
+            "planned": {
+                "strategy": {
+                    "rung": "bounded_decode",
+                    "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+                }
+            }
+        });
+        let bounded_sweep = reference_sweep(&bounded, "passed").unwrap();
+        assert_eq!(
+            bounded_sweep.pointer("/cases/0/parameters"),
+            bounded.pointer("/planned/strategy/parameters")
+        );
+        assert_eq!(
+            optional_parameter(&bounded, "decodeTileEdge").unwrap(),
+            Some(512)
+        );
+        assert_eq!(
+            optional_parameter(&bounded, "attentionChunkSize").unwrap(),
+            None
+        );
+
+        let resident = json!({
+            "planned": { "strategy": { "rung": "resident", "parameters": {} } }
+        });
+        let resident_sweep = reference_sweep(&resident, "passed").unwrap();
+        assert_eq!(resident_sweep.pointer("/axes"), Some(&json!([])));
+        assert_eq!(
+            resident_sweep.pointer("/cases/0/parameters"),
+            Some(&json!({}))
+        );
+        assert_eq!(
+            resident_sweep.pointer("/rangeVerified"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn candle_reference_progress_sequences_cover_all_five_rungs() {
+        fn phases(boundaries: &[ReferenceBoundary]) -> Vec<ReferencePhase> {
+            let mut phase = ReferencePhase::Conditioning;
+            let mut visited = vec![phase];
+            for &boundary in boundaries {
+                if let Some(next) = next_reference_phase(phase, boundary) {
+                    phase = next;
+                    visited.push(phase);
+                }
+            }
+            visited
+        }
+
+        let complete = vec![
+            ReferencePhase::Conditioning,
+            ReferencePhase::Denoise,
+            ReferencePhase::Decode,
+        ];
+        assert_eq!(
+            phases(&[
+                ReferenceBoundary::FirstDenoiseStep,
+                ReferenceBoundary::Decoding,
+            ]),
+            complete,
+            "resident has no provider loading boundary"
+        );
+        assert_eq!(
+            phases(&[ReferenceBoundary::RendererLoad, ReferenceBoundary::Decoding,]),
+            complete,
+            "staged residency exposes one Renderer boundary"
+        );
+        for rung in ["bounded_decode", "bounded_attention", "bounded_transformer"] {
+            assert_eq!(
+                phases(&[
+                    ReferenceBoundary::RendererLoad,
+                    ReferenceBoundary::RendererLoad,
+                    ReferenceBoundary::Decoding,
+                ]),
+                complete,
+                "{rung} uses the three-stage provider path"
+            );
         }
     }
 

@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_five_rung_reference:
+        description: "Capture the SC-16402 Z-Image fresh-process five-rung reference"
+        required: false
+        type: boolean
+        default: false
       provision_qwen_snapshot:
         description: "Provision the exact public Qwen bf16 snapshot before calibration"
         required: false
@@ -68,6 +73,20 @@ on:
         default: "SceneWorks/qwen-image-mlx"
       qwen_revision:
         description: "Exact 40-hex Qwen artifact revision"
+        required: false
+        type: string
+      provision_z_image_snapshot:
+        description: "Provision the exact public Z-Image q4 snapshot before capture"
+        required: false
+        type: boolean
+        default: false
+      z_image_repository:
+        description: "Published Z-Image MLX artifact repository identity"
+        required: false
+        type: string
+        default: "SceneWorks/z-image-turbo-mlx"
+      z_image_revision:
+        description: "Exact 40-hex Z-Image artifact revision"
         required: false
         type: string
 
@@ -99,7 +118,7 @@ jobs:
     # the healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source
     # rebuild still fits. Only an explicit calibration+provisioning dispatch gets
     # four hours for the approximately 57 GiB public snapshot.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot && 240 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -131,6 +150,16 @@ jobs:
             echo "provision_qwen_snapshot requires run_memory_calibration=true" >&2
             exit 1
           fi
+      - name: Validate Z-Image provisioning mode
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
+        run: |
+          if [[ "$PROVISION_Z_IMAGE_SNAPSHOT" == "true" && "$RUN_FIVE_RUNG_REFERENCE" != "true" ]]; then
+            echo "provision_z_image_snapshot requires run_five_rung_reference=true" >&2
+            exit 1
+          fi
       - name: Validate memory-strategy calibration identities
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
@@ -155,6 +184,30 @@ jobs:
             echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
             exit 1
           fi
+      - name: Validate five-rung reference identities
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          Z_IMAGE_REPOSITORY: ${{ inputs.z_image_repository }}
+          Z_IMAGE_REVISION: ${{ inputs.z_image_revision }}
+        run: |
+          if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "inference_revision must be an exact lowercase 40-hex commit" >&2
+            exit 1
+          fi
+          if [[ ! "$Z_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2
+            exit 1
+          fi
+          if [[ "$Z_IMAGE_REPOSITORY" != "SceneWorks/z-image-turbo-mlx" ]]; then
+            echo "z_image_repository must be the fixed SceneWorks/z-image-turbo-mlx reference artifact" >&2
+            exit 1
+          fi
+          PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-memory-adapter/src/lib.rs)"
+          if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then
+            echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2
+            exit 1
+          fi
       - name: Set up runner Python 3.12 for Qwen provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
@@ -165,6 +218,17 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
           "$RUNNER_TEMP/qwen-provision-venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+      - name: Set up runner Python 3.12 for Z-Image provisioning
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
+        run: |
+          command -v python3.12 >/dev/null
+          python3.12 --version | grep -E '^Python 3\.12\.'
+          python3.12 -m venv "$RUNNER_TEMP/z-image-provision-venv"
+      - name: Install pinned Z-Image provisioning client
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
+        run: |
+          "$RUNNER_TEMP/z-image-provision-venv/bin/python" -m pip install \
             --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
       - name: Provision exact public Qwen calibration snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
@@ -215,6 +279,30 @@ jobs:
           )
           print("Exact public Qwen calibration snapshot provisioned")
           PY
+      - name: Provision exact public Z-Image reference snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
+        env:
+          Z_IMAGE_REVISION: ${{ inputs.z_image_revision }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          "$RUNNER_TEMP/z-image-provision-venv/bin/python" - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="SceneWorks/z-image-turbo-mlx",
+              repo_type="model",
+              revision=os.environ["Z_IMAGE_REVISION"],
+              allow_patterns=["q4/**"],
+              cache_dir=os.path.join(os.environ["HOME"], ".cache", "huggingface", "hub"),
+              token=False,
+              max_workers=4,
+          )
+          print("Exact public Z-Image reference snapshot provisioned")
+          PY
       - name: Resolve exact Qwen calibration snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
@@ -246,8 +334,35 @@ jobs:
             exit 1
           fi
           printf 'SCENEWORKS_QWEN_IMAGE_ROOT=%s\n' "$QWEN_ROOT" >> "$GITHUB_ENV"
+      - name: Resolve exact Z-Image reference snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        env:
+          Z_IMAGE_REVISION: ${{ inputs.z_image_revision }}
+          Z_IMAGE_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_Z_IMAGE_ROOT }}
+        run: |
+          if [[ -n "$Z_IMAGE_ROOT_OVERRIDE" ]]; then
+            Z_IMAGE_ROOT="$Z_IMAGE_ROOT_OVERRIDE"
+          else
+            Z_IMAGE_HF_ROOT="$HOME/.cache/huggingface/hub/models--SceneWorks--z-image-turbo-mlx/snapshots/$Z_IMAGE_REVISION/q4"
+            Z_IMAGE_APP_ROOT="$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--z-image-turbo-mlx/snapshots/$Z_IMAGE_REVISION/q4"
+            if [[ -d "$Z_IMAGE_HF_ROOT" ]]; then
+              Z_IMAGE_ROOT="$Z_IMAGE_HF_ROOT"
+            elif [[ -d "$Z_IMAGE_APP_ROOT" ]]; then
+              Z_IMAGE_ROOT="$Z_IMAGE_APP_ROOT"
+            else
+              echo "the exact Z-Image reference snapshot is not available on this runner" >&2
+              exit 1
+            fi
+          fi
+          Z_IMAGE_ROOT="$(cd "$Z_IMAGE_ROOT" && pwd -P)"
+          EXPECTED_SUFFIX="/models--SceneWorks--z-image-turbo-mlx/snapshots/$Z_IMAGE_REVISION/q4"
+          if [[ "$Z_IMAGE_ROOT" != *"$EXPECTED_SUFFIX" ]]; then
+            echo "the Z-Image reference root does not match the fixed repository and exact revision" >&2
+            exit 1
+          fi
+          printf 'SCENEWORKS_Z_IMAGE_ROOT=%s\n' "$Z_IMAGE_ROOT" >> "$GITHUB_ENV"
       - name: Check out the exact inference calibration source
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference) }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -280,4 +395,30 @@ jobs:
         with:
           name: memory-mlx-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/memory-mlx-evidence.json
+          if-no-files-found: error
+      - name: Build and run the authoritative MLX five-rung reference
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        env:
+          SCENEWORKS_Z_IMAGE_REPOSITORY: ${{ inputs.z_image_repository }}
+          SCENEWORKS_Z_IMAGE_REVISION: ${{ inputs.z_image_revision }}
+        run: |
+          printf '.calibration/\n' >> .git/info/exclude
+          cargo build --release --locked -p sceneworks-memory-adapter \
+            --features mlx --bin memory-mlx-adapter
+          node scripts/memory-calibration-harness.mjs run \
+            --config config/memory-calibration-plan.json \
+            --backend mlx \
+            --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
+            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --sceneworks-repo "$GITHUB_WORKSPACE" \
+            --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
+            --output "$RUNNER_TEMP/sc-16402-mlx-fresh.json"
+          node scripts/memory-calibration-harness.mjs check \
+            --input "$RUNNER_TEMP/sc-16402-mlx-fresh.json"
+      - name: Upload raw schema-checked MLX five-rung reference
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-16402-mlx-fresh-${{ github.run_id }}
+          path: ${{ runner.temp }}/sc-16402-mlx-fresh.json
           if-no-files-found: error
