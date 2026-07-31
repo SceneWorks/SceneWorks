@@ -61,7 +61,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::contracts::{Asset, JsonObject};
@@ -90,6 +90,24 @@ pub const WORKFLOW_KIND_IMAGE: &str = "image";
 /// the surrounding rule this follows: an older reader that would present a recipe it does not
 /// really understand is worse than one that refuses, so the refusal is arranged to happen.
 pub const WORKFLOW_KIND_VIDEO: &str = "video";
+
+/// Normalize a full SHA-256 digest without accepting filenames, short hashes, or prefixed values.
+/// Lowercase is canonical so byte-identical files serialize identically across producers.
+fn normalize_sha256(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+/// A malformed foreign attribution field must not make the rest of an otherwise useful recipe
+/// unreadable. Deserialize through `Value` so wrong JSON types degrade to `None` as well.
+fn deserialize_optional_sha256<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(normalize_sha256))
+}
 
 /// The workflow kinds this build understands, in the order a reader should think about them.
 ///
@@ -223,6 +241,14 @@ pub struct WorkflowShare {
     pub mode: String,
     /// The model catalog slug (`z_image_turbo`), never a resolved weights location.
     pub model: String,
+    /// SHA-256 of the exact checkpoint bytes used for this image, when the worker can prove it.
+    /// This is content identity for gallery attribution, never a local path or user-entered id.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_sha256"
+    )]
+    pub model_hash: Option<String>,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub negative_prompt: String,
@@ -2126,6 +2152,9 @@ fn build_share_of_kind(
         producer: WorkflowProducer::default(),
         mode,
         model,
+        // Only the worker write seam may add a trusted checkpoint digest. A client payload cannot
+        // claim one merely by spelling an internal-looking field.
+        model_hash: None,
         prompt,
         negative_prompt,
         seed,
@@ -2534,6 +2563,7 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         producer,
         mode,
         model,
+        model_hash,
         prompt,
         negative_prompt,
         seed,
@@ -2589,6 +2619,7 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         producer: reduce_producer(producer),
         mode: shareable_label(&mode).unwrap_or_default(),
         model: shareable_label(&model).unwrap_or_default(),
+        model_hash: model_hash.as_deref().and_then(normalize_sha256),
         // Authored prose: exempt from the PATH check on purpose (see `is_path_shaped`), but not
         // from the other two bounds — on the way IN this is a stranger's text, and sc-15952
         // renders it.

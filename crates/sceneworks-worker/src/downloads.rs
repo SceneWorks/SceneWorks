@@ -658,9 +658,9 @@ pub(crate) async fn verify_file_sha256(
     path: &Path,
     expected: &str,
     label: &str,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<String>> {
     let Some(expected) = normalize_sha256(expected) else {
-        return Ok(());
+        return Ok(None);
     };
     let actual = sha256_file(api, settings, job_id, path).await?;
     if actual != expected {
@@ -670,7 +670,7 @@ pub(crate) async fn verify_file_sha256(
              the download was corrupted. Re-download the file."
         )));
     }
-    Ok(())
+    Ok(Some(actual))
 }
 
 /// Stream `path` through SHA-256 on the blocking pool (weights are multi-GB; hashing on the async
@@ -680,7 +680,7 @@ pub(crate) async fn verify_file_sha256(
 /// `interrupted` the moment the byte-streaming loop's own heartbeats stop — the exact "No heartbeat
 /// from the worker for 90s" freeze the transfer-only sc-11939 watchdog left uncovered (sc-13856 /
 /// GitHub #1690).
-async fn sha256_file(
+pub(crate) async fn sha256_file(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,

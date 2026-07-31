@@ -674,13 +674,25 @@ fn child_died_abnormally_reports_signals_and_non_zero_exits_not_clean_exits() {
 #[tokio::test]
 async fn writes_model_install_marker_with_expected_keys() {
     let temp = tempdir().expect("tempdir creates");
+    let model_file = temp.path().join("renamed.safetensors");
+    tokio::fs::write(&model_file, b"checkpoint bytes")
+        .await
+        .unwrap();
+    let model_identity = model_file_identity(&model_file).unwrap();
     let mut payload = serde_json::Map::new();
     payload.insert("modelId".to_owned(), json!("base-model"));
     payload.insert("modelName".to_owned(), json!("Base Model"));
 
-    write_model_install_marker(temp.path(), &payload, "owner/model", "job-1")
-        .await
-        .expect("marker writes");
+    write_model_install_marker(
+        temp.path(),
+        &payload,
+        "owner/model",
+        "job-1",
+        Some(&model_identity),
+        Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"),
+    )
+    .await
+    .expect("marker writes");
 
     let marker_path = temp.path().join(INSTALL_MARKER);
     let marker: serde_json::Value =
@@ -688,8 +700,54 @@ async fn writes_model_install_marker_with_expected_keys() {
     assert_eq!(marker["repo"], "owner/model");
     assert_eq!(marker["modelId"], "base-model");
     assert_eq!(marker["modelName"], "Base Model");
+    assert_eq!(marker["modelFileName"], "renamed.safetensors");
+    assert_eq!(marker["modelFileBytes"], 16);
+    assert!(marker["modelFileModifiedNanos"].as_str().is_some());
+    assert_eq!(
+        marker["modelFileSha256"],
+        "312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"
+    );
     assert_eq!(marker["jobId"], "job-1");
     assert!(marker["completedAt"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn model_marker_uses_the_identity_verified_with_its_hash_not_later_file_state() {
+    let temp = tempdir().expect("tempdir creates");
+    let model_file = temp.path().join("checkpoint.safetensors");
+    tokio::fs::write(&model_file, b"checkpoint A")
+        .await
+        .unwrap();
+    let verified_identity = model_file_identity(&model_file).unwrap();
+    tokio::fs::write(&model_file, b"replacement checkpoint B")
+        .await
+        .unwrap();
+    let later_identity = model_file_identity(&model_file).unwrap();
+    assert_ne!(verified_identity, later_identity);
+
+    write_model_install_marker(
+        temp.path(),
+        &serde_json::Map::new(),
+        "",
+        "job-expected-sha",
+        Some(&verified_identity),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .await
+    .expect("marker writes");
+
+    let marker: Value = serde_json::from_slice(
+        &tokio::fs::read(temp.path().join(INSTALL_MARKER))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["modelFileBytes"], verified_identity.bytes);
+    assert_eq!(
+        marker["modelFileModifiedNanos"],
+        verified_identity.modified_nanos
+    );
+    assert_ne!(marker["modelFileBytes"], later_identity.bytes);
 }
 
 #[tokio::test]

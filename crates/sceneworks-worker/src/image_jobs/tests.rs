@@ -448,6 +448,141 @@ fn write_embed_preference(config_dir: &Path, enabled: bool) {
     .unwrap();
 }
 
+#[test]
+fn imported_checkpoint_attribution_requires_the_worker_route_and_one_exact_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let install = settings.data_dir.join("models").join("kreamania-v4");
+    std::fs::create_dir_all(&install).unwrap();
+    let checkpoint = install.join("renamed.safetensors");
+    std::fs::write(&checkpoint, b"exact checkpoint bytes").unwrap();
+    let req = request(json!({
+        "projectId": "p",
+        "model": "kreamania-v4",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": install }
+        }
+    }));
+
+    assert_eq!(
+        imported_checkpoint_file_for_share("stub", &req, &settings),
+        None,
+        "a client manifest path is not trusted without the worker's imported-model route"
+    );
+    assert_eq!(
+        imported_checkpoint_file_for_share("candle_krea_imported", &req, &settings),
+        Some(std::fs::canonicalize(&checkpoint).unwrap()),
+        "the worker-selected imported route identifies the exact lone checkpoint"
+    );
+
+    std::fs::write(install.join("another.safetensors"), b"different model").unwrap();
+    assert_eq!(
+        imported_checkpoint_file_for_share("candle_krea_imported", &req, &settings),
+        None,
+        "an ambiguous directory must not attribute an arbitrary checkpoint"
+    );
+}
+
+#[test]
+fn cached_checkpoint_hash_is_bound_to_the_file_that_will_execute() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = dir.path().join("selected.safetensors");
+    std::fs::write(&checkpoint, b"checkpoint A").unwrap();
+    let identity = model_file_identity(&checkpoint).unwrap();
+    let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let marker = json!({
+        "modelFileName": identity.name,
+        "modelFileBytes": identity.bytes,
+        "modelFileModifiedNanos": identity.modified_nanos,
+        "modelFileSha256": hash
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &marker).as_deref(),
+        Some(hash)
+    );
+
+    let mut sibling_marker = marker.clone();
+    sibling_marker.insert(
+        "modelFileName".to_owned(),
+        Value::String("different.safetensors".to_owned()),
+    );
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &sibling_marker),
+        None,
+        "a sibling checkpoint must never inherit the marker's cached digest"
+    );
+
+    std::fs::write(
+        &checkpoint,
+        b"replacement checkpoint B with different bytes",
+    )
+    .unwrap();
+    assert_eq!(
+        cached_model_hash_for_file(&checkpoint, &marker),
+        None,
+        "replacing the selected file must invalidate its old attribution digest"
+    );
+}
+
+#[test]
+fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "model": "kreamania-v4",
+        "modelHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "prompt": "resource attribution regression",
+        "width": 64,
+        "height": 64
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = ImageRequest::from_payload(&payload);
+    let mut plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+    assert_eq!(
+        plan.model_hash, None,
+        "the payload cannot populate trusted identity"
+    );
+    plan.model_hash =
+        Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
+
+    let fact = write_image_asset(
+        &plan,
+        0,
+        7,
+        64,
+        64,
+        stub_rgb8(64, 64, 7),
+        "candle_krea_imported",
+        JsonObject::new(),
+        &project_path,
+    )
+    .unwrap();
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("generated PNG carries the workflow");
+    assert_eq!(share.model_hash, plan.model_hash);
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (64, 64));
+    assert!(parameters
+        .contains("Model hash: 312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"));
+    assert!(!parameters.contains("ffffffffffffffff"));
+    assert!(!parameters.contains(project_path.to_string_lossy().as_ref()));
+    let bytes = std::fs::read(media).unwrap();
+    assert!(bytes
+        .windows(b"Model hash: 312f5ab8".len())
+        .any(|window| { window == b"Model hash: 312f5ab8" }));
+}
+
 /// A representative Image Studio payload: an edit with a reference and a mask, LoRAs, a style, an
 /// upscale pass, and `advanced` carrying both allow-listed knobs and denied ones.
 fn embed_payload() -> JsonObject {
@@ -587,11 +722,12 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
 }
 
 #[test]
-fn a_kreamania_generation_records_the_worker_resolved_steps_civitai_requires() {
+fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires() {
     // Regression for Civitai post 30111231. The uploaded PNG's request envelope carried only
     // `advanced.resolution`, while the imported-Krea worker actually ran its resolved 8-step default
-    // and recorded that fact in `raw_settings.numInferenceSteps`. Civitai requires a numeric `Steps:`
-    // value; a non-numeric placeholder passes its first gate but fails its schema and drops everything.
+    // and recorded that fact in `raw_settings.numInferenceSteps`. Its runtime also resolved Euler,
+    // but neither fact existed in the request. Civitai requires a numeric `Steps:` value; a
+    // non-numeric placeholder passes its first gate but fails its schema and drops everything.
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
@@ -619,6 +755,7 @@ fn a_kreamania_generation_records_the_worker_resolved_steps_civitai_requires() {
     let raw_settings = json!({
         "realModelInference": true,
         "numInferenceSteps": 8,
+        "resolvedSampler": "euler",
         "engine": "candle_krea_imported"
     })
     .as_object()
@@ -642,9 +779,11 @@ fn a_kreamania_generation_records_the_worker_resolved_steps_civitai_requires() {
         .unwrap()
         .expect("the generated PNG carries its workflow");
     assert_eq!(share.advanced.get("steps"), Some(&json!(8)));
+    assert_eq!(share.advanced.get("sampler"), Some(&json!("euler")));
 
     let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (1024, 1024));
     assert!(parameters.contains("Steps: 8"), "{parameters:?}");
+    assert!(parameters.contains("Sampler: euler"), "{parameters:?}");
     assert!(!parameters.contains("Steps: Unknown"), "{parameters:?}");
     assert_eq!(
         parameters
@@ -663,10 +802,16 @@ fn a_kreamania_generation_records_the_worker_resolved_steps_civitai_requires() {
             .any(|window| window == b"Steps: 8"),
         "the numeric value must reach the actual PNG parameters chunk"
     );
+    assert!(
+        bytes
+            .windows(b"Sampler: euler".len())
+            .any(|window| window == b"Sampler: euler"),
+        "the actual sampler must reach the physical PNG parameters chunk"
+    );
 }
 
 #[test]
-fn only_worker_resolved_steps_can_enrich_the_share_envelope() {
+fn only_worker_resolved_settings_can_enrich_the_share_envelope() {
     let forged = json!({
         "projectId": "p",
         "advanced": { "numInferenceSteps": 999 }
@@ -696,6 +841,89 @@ fn only_worker_resolved_steps_can_enrich_the_share_envelope() {
         None,
         "a multi-phase schedule must not be collapsed into one top-level step count"
     );
+
+    let resolved_sampler = json!({ "resolvedSampler": "euler" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        resolved_sampler_for_share("stub", &resolved_sampler),
+        None,
+        "an internal-looking field cannot promote a sampler outside the trusted execution route"
+    );
+    assert_eq!(
+        resolved_sampler_for_share("candle_krea_imported", &resolved_sampler),
+        Some("euler"),
+        "the worker-resolved sampler should enrich the imported-Krea route"
+    );
+}
+
+#[test]
+fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "mode": "text_to_image",
+        "model": "kreamania_v4_int8",
+        "prompt": "conflicting sampler regression",
+        "width": 64,
+        "height": 64,
+        "advanced": {
+            "sampler": "dpmpp_2m",
+            "resolvedSampler": "client-supplied"
+        }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
+    let raw_settings = json!({
+        "resolvedSampler": "euler",
+        "engine": "candle_krea_imported"
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let fact = write_image_asset(
+        &plan,
+        0,
+        7,
+        64,
+        64,
+        stub_rgb8(64, 64, 7),
+        "candle_krea_imported",
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("the generated PNG carries its workflow");
+    assert_eq!(share.advanced.get("sampler"), Some(&json!("euler")));
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (64, 64));
+    assert!(parameters.contains("Sampler: euler"), "{parameters:?}");
+    assert!(!parameters.contains("dpmpp_2m"), "{parameters:?}");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn imported_krea_records_the_sampler_it_explicitly_executes() {
+    let req = request(json!({
+        "projectId": "p",
+        "model": "kreamania_v4_int8",
+        "advanced": { "sampler": "not-the-runtime-sampler" }
+    }));
+    let raw = krea_imported_raw_settings(&req, 8, false, 0);
+    assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
 }
 
 /// Turning the setting off writes the file SceneWorks writes today, to the byte.

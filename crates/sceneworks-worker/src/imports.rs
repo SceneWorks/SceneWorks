@@ -101,17 +101,48 @@ pub(crate) async fn copy_dir_recursive(source: &Path, target: &Path) -> WorkerRe
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelFileIdentity {
+    pub(crate) name: String,
+    pub(crate) bytes: u64,
+    pub(crate) modified_nanos: String,
+}
+
+/// Cheap cache identity for a checkpoint digest. Renames and replacements deliberately miss this
+/// cache and trigger one fresh content hash; byte-identical renames still resolve after that hash.
+pub(crate) fn model_file_identity(path: &Path) -> Option<ModelFileIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .to_string();
+    Some(ModelFileIdentity {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        bytes: metadata.len(),
+        modified_nanos,
+    })
+}
+
 pub(crate) async fn write_model_install_marker(
     target_dir: &Path,
     payload: &JsonObject,
     repo: &str,
     job_id: &str,
+    model_file_identity: Option<&ModelFileIdentity>,
+    model_file_sha256: Option<&str>,
 ) -> WorkerResult<()> {
     tokio::fs::create_dir_all(target_dir).await?;
     let marker = json!({
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
         "modelName": payload.get("modelName").cloned().unwrap_or(Value::Null),
+        "modelFileName": model_file_identity.map(|identity| identity.name.as_str()),
+        "modelFileBytes": model_file_identity.map(|identity| identity.bytes),
+        "modelFileModifiedNanos": model_file_identity.map(|identity| identity.modified_nanos.as_str()),
+        "modelFileSha256": model_file_sha256,
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });

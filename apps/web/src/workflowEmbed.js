@@ -95,6 +95,8 @@ const L_MARKER = "a marker saying this is a SceneWorks recipe, and which version
 const L_PRODUCER = "the SceneWorks name, project URL and released version of the build that wrote the file";
 const L_MODE = "the generation mode";
 const L_NAMES = "the model and style names";
+const L_RESOURCE_HASHES =
+  "the exact checkpoint content hash, when available, so galleries can attribute the model version";
 const L_PROSE = "the prompt fields named above, verbatim";
 const L_SEED = "the seed for this image";
 const L_SIZE = "the image size the run asked for";
@@ -130,6 +132,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["producer.version", L_PRODUCER],
   ["mode", L_MODE],
   ["model", L_NAMES],
+  ["modelHash", L_RESOURCE_HASHES],
   ["stylePreset", L_NAMES],
   ["styleId", L_NAMES],
   ["advanced.styleId", L_NAMES],

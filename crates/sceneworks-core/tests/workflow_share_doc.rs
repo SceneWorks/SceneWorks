@@ -327,6 +327,9 @@ fn fully_populated_envelope() -> WorkflowShare {
         producer: WorkflowProducer::default(),
         mode: "text_to_image".to_owned(),
         model: "z_image_turbo".to_owned(),
+        model_hash: Some(
+            "312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned(),
+        ),
         prompt: "a lighthouse".to_owned(),
         negative_prompt: "blurry".to_owned(),
         seed: Some(7),

@@ -168,11 +168,12 @@ appear in it, because the renderer never sees one. `Version:` is fed from `produ
 same envelope, so the two blocks in one file cannot disagree about which build wrote it, and
 [the setting](#the-setting) governs both together — off means neither is written.
 
-For generated base images, the worker adds one post-resolution fact before the two blocks are
-written: when a generation lane chose the actual denoise count after request parsing, its trusted
-`numInferenceSteps` result becomes `advanced.steps`. This is the count that really ran, not a model
-default guessed later. A client-supplied `numInferenceSteps` is never promoted, and multi-phase
-schedules remain uncollapsed.
+For generated base images, the worker adds trusted post-resolution facts before the two blocks are
+written. When a generation lane chose the actual denoise count after request parsing, its trusted
+`numInferenceSteps` result becomes `advanced.steps`. The imported-Krea lane also records and exports
+the actual `euler` sampler it passes to the runtime. These are execution facts, not model defaults
+guessed later. Client-supplied internal telemetry is never promoted, and multi-phase schedules
+remain uncollapsed.
 
 ### Omit rather than approximate
 
@@ -185,11 +186,12 @@ anything without a clean equivalent is **left out rather than approximated**.
 | Field | What it is |
 | --- | --- |
 | `Steps` | `advanced.steps`, when it is a whole number of at least one and no multi-phase schedule overrides it. This includes the worker-resolved count above when the request omitted its own value. |
-| `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. |
+| `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. For imported Krea, the worker overwrites this with the actual `euler` sampler it executes. |
 | `CFG scale` | `advanced.guidanceScale`, only when `advanced.guidanceMethod` is absent. The studio emits that key only for a method that is not plain CFG, so its presence means the number is not a CFG scale. |
 | `Seed` | `seed`, verbatim — the seed of this image, which is the only one the envelope carries. |
 | `Size` | `width` x `height`, only when they are the dimensions of the file being written. |
-| `Model` | `model`, the catalog slug, verbatim. A1111's companion `Model hash` is omitted: we have no checkpoint hash to give. |
+| `Model` | `model`, the safe readable catalog slug, verbatim. |
+| `Model hash` | `modelHash`, only when the worker retained the exact SHA-256 of the imported checkpoint that the resolved route executed. Civitai uses it with `Model` to link the precise model version and author. |
 | `Version` | `producer.version` off the envelope's own producer block. |
 
 <!-- END PINNED: a1111-fields -->
@@ -272,6 +274,7 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `producer.version` | The released version of the build that wrote the file. |
 | `mode` | The generation mode (`text_to_image`, `edit_image`, `character_image`, …). |
 | `model` | The model catalog **slug** (`z_image_turbo`), never a weights location. |
+| `modelHash` | SHA-256 of the exact imported checkpoint bytes, when worker-proven. It is content identity for gallery attribution, never a local path or user-entered Civitai id. |
 | `prompt` | The prompt, verbatim. See the callout above. |
 | `negativePrompt` | The negative prompt, verbatim. |
 | `seed` | The seed of **this** image. The rest of the batch's seeds do not travel. |
