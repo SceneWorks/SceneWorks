@@ -1574,7 +1574,7 @@ mod tests {
                 .iter()
                 .map(|record| record.id.as_str())
                 .collect::<Vec<_>>(),
-            ["imc-ae60c3eb464c2133a553", "imc-ea17789b97699dcb0352"]
+            ["imc-265dafd26c0ad92ce367", "imc-2ca548230323b40eece3"]
         );
         assert_eq!(
             bundle.evidence_for(&exact_query()),
