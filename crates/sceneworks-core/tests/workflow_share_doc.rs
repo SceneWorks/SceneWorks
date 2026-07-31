@@ -30,6 +30,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use sceneworks_core::contracts::{Asset, JsonObject};
+use sceneworks_core::workflow_parameters::{
+    parameters_text, NEGATIVE_PROMPT_LABEL, PARAMETERS_CHUNK_KEYWORD, SETTINGS_FIELDS,
+};
 use sceneworks_core::workflow_png::{
     MAX_METADATA_BYTES, MAX_WORKFLOW_TEXT_BYTES, WORKFLOW_CHUNK_KEYWORD,
 };
@@ -355,7 +358,11 @@ fn fully_populated_envelope() -> WorkflowShare {
             count: 1,
             control_mode: Some("canny".to_owned()),
         }],
-        advanced: json!({ "steps": 8 })
+        // `advanced` is one field path to the envelope pin, so its CONTENTS are free to be the
+        // widest thing too. They carry the three keys the sc-15957 `parameters` trailer reads —
+        // `steps`, `sampler` and `guidanceScale` — so the tests that render this fixture measure a
+        // full settings line rather than a partial one.
+        advanced: json!({ "steps": 8, "sampler": "euler", "guidanceScale": 3.5 })
             .as_object()
             .cloned()
             .expect("advanced object"),
@@ -439,6 +446,45 @@ fn the_doc_lists_exactly_the_envelope_fields() {
 }
 
 #[test]
+fn the_doc_lists_exactly_the_a1111_fields_that_travel() {
+    // The `parameters` trailer's whole discipline is "omit rather than approximate", and the
+    // document is where a reviewer reads which way each field was decided. Pinned in both
+    // directions against `SETTINGS_FIELDS`, so a field added to the renderer without a decision
+    // written here fails, and a row here for a field nothing emits fails too.
+    let doc = doc();
+    let documented: BTreeSet<String> = pinned_set(&doc, "a1111-fields", 0);
+    let declared: BTreeSet<String> = SETTINGS_FIELDS
+        .iter()
+        .map(|(key, _)| (*key).to_owned())
+        .collect();
+    assert_same_set(
+        &documented,
+        &declared,
+        "a1111-fields",
+        "`SETTINGS_FIELDS` in `workflow_parameters.rs`",
+    );
+
+    // And the trailer really is written from the sanitized envelope: the fields a real one emits
+    // must be a subset of the documented list, measured rather than asserted from the same source
+    // the table was checked against.
+    let envelope = fully_populated_envelope();
+    let width = envelope.width.expect("the fixture has a width");
+    let height = envelope.height.expect("the fixture has a height");
+    let rendered = parameters_text(&envelope, (width, height));
+    let settings = rendered.lines().last().expect("a settings line");
+    for token in settings.split(", ") {
+        let Some((key, _)) = token.split_once(": ") else {
+            continue;
+        };
+        assert!(
+            declared.contains(key),
+            "a real envelope rendered `{key}`, which {DOC_PATH}'s `a1111-fields` table does not \
+             name. Every field in that trailer is a decision someone wrote down."
+        );
+    }
+}
+
+#[test]
 fn the_doc_quotes_the_contract_constants() {
     let doc = doc();
     let documented: BTreeMap<String, String> = pinned_rows(&doc, "identity")
@@ -447,6 +493,10 @@ fn the_doc_quotes_the_contract_constants() {
         .collect();
     let actual: BTreeMap<String, String> = [
         ("WORKFLOW_CHUNK_KEYWORD", WORKFLOW_CHUNK_KEYWORD.to_owned()),
+        (
+            "PARAMETERS_CHUNK_KEYWORD",
+            PARAMETERS_CHUNK_KEYWORD.to_owned(),
+        ),
         (
             "WORKFLOW_SHARE_MARKER_KEY",
             WORKFLOW_SHARE_MARKER_KEY.to_owned(),
@@ -1072,6 +1122,80 @@ fn the_settings_copy_accounts_for_every_shared_and_withheld_field() {
         "{SETTINGS_COPY_PATH} tells the user {contradicted:?} are NOT in the file, but {DOC_PATH} \
          lists them among the fields that travel. The copy is claiming a privacy the allow-list \
          does not deliver, which is the one direction this contract must never drift in."
+    );
+}
+
+/// The gallery-readable sentence says only what a real `parameters` trailer actually contains
+/// (sc-15957).
+///
+/// # Why this needs its own test
+///
+/// The same structural gap the person-replacement bullet fell into.
+/// `the_settings_copy_accounts_for_every_shared_and_withheld_field` joins the copy to the document
+/// on KEYS, and the second chunk introduces no key — it is a second rendering of fields the copy
+/// already declares. So the key-level pin is silent about it while the user-visible fact changes:
+/// what leaves in the file is no longer only a block SceneWorks understands, it is also a block
+/// Civitai and most galleries read and DISPLAY. A user who turns the switch on deserves to be told
+/// that, and a sentence claiming otherwise would claim more privacy than the file delivers.
+///
+/// So the sentence is asserted against a real rendered trailer: every field it names has to be one
+/// the trailer emits, and the two claims a reader would act on — that it is the same information,
+/// and that both blocks are removed together — have to be stated.
+#[test]
+fn the_settings_copy_says_the_file_is_also_gallery_readable() {
+    let copy = settings_copy_constant("GALLERY_READABLE_COPY");
+    let envelope = fully_populated_envelope();
+    let width = envelope.width.expect("the fixture has a width");
+    let height = envelope.height.expect("the fixture has a height");
+    let rendered = parameters_text(&envelope, (width, height));
+
+    // Every field the sentence names must be one a real trailer emits. The direction that matters:
+    // a sentence naming a field the block does not carry is a false description of the file.
+    for (phrase, evidence) in [
+        ("negative prompt", NEGATIVE_PROMPT_LABEL),
+        ("seed", "Seed: "),
+        ("size", "Size: "),
+        ("sampler", "Sampler: "),
+        ("steps", "Steps: "),
+        ("guidance", "CFG scale: "),
+    ] {
+        if !copy.contains(phrase) {
+            continue;
+        }
+        assert!(
+            rendered.contains(evidence),
+            "the settings copy tells the user the gallery-readable block carries the {phrase}, but \
+             a real trailer has no {evidence:?} in it: {rendered:?}"
+        );
+    }
+    assert!(
+        copy.contains("prompt") && rendered.starts_with(&envelope.prompt),
+        "the copy must name the prompt, which is the first thing in the block"
+    );
+
+    // It has to name the audience. "In the format image galleries read" is the fact a user acts on
+    // before posting the file somewhere; without it the sentence is a technical note.
+    assert!(
+        copy.contains("galleries read") && copy.contains("Civitai"),
+        "the copy must say who reads this block, not merely that it exists: {copy:?}"
+    );
+    // And the two claims that keep it from reading as a NEW disclosure: no extra information, and
+    // one strip takes both. Both are true of the code — `the_parameters_chunk_cannot_carry_a_
+    // withheld_field` and `save_a_copy_without_the_workflow_removes_the_parameters_chunk_too` in
+    // `crates/sceneworks-core/tests/workflow_parameters.rs` prove them against real bytes — and the
+    // document says the same thing, which is what this joins them to.
+    assert!(
+        copy.contains("nothing more") && copy.contains("removed together"),
+        "the copy must say the block adds no information and that one strip takes both: {copy:?}"
+    );
+    let doc = doc();
+    assert!(
+        doc.contains("excises **both** from the copied bytes"),
+        "{DOC_PATH} must state the both-chunks strip the settings copy promises"
+    );
+    assert!(
+        doc.contains(PARAMETERS_CHUNK_KEYWORD),
+        "{DOC_PATH} must name the keyword the copy is describing"
     );
 }
 

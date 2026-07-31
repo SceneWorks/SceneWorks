@@ -263,6 +263,26 @@ export const WORKFLOW_FIELDS_NOT_IN_FILE = Object.freeze([
 // beside the keyed list so the sentence reads as one thought.
 const UNKEYED_ABSENCES = Object.freeze([N_IDENTITY, N_TIME, N_IMAGES]);
 
+// The second block (sc-15957), and the reason it needs its own sentence rather than a row in the
+// list above.
+//
+// Both lists are pinned per KEY against the two doc tables, and every key in this block is already
+// in `WORKFLOW_FIELDS_IN_FILE` — it carries no field the envelope does not. So the key-level pin is
+// silent about it, exactly the way it was silent about the person-replacement bullet, and for the
+// same structural reason: the claim is about a FORMAT rather than about a field.
+//
+// And it is a claim a user acts on. Someone who reads "your recipe is in the file" pictures a block
+// only SceneWorks understands; what is actually written is a second copy of the prompt, seed and
+// settings in the format Civitai and most galleries read and DISPLAY. Those are different facts
+// about what happens when the image is posted somewhere, and the narrower one would be claiming more
+// privacy than the file delivers — the one direction this file's header forbids.
+//
+// Pinned as prose by `the_settings_copy_says_the_file_is_also_gallery_readable` in
+// `crates/sceneworks-core/tests/workflow_share_doc.rs`, which renders a real envelope's trailer and
+// checks this sentence against it.
+export const GALLERY_READABLE_COPY =
+  "A second copy of the prompt, negative prompt, seed, size, sampler, steps and guidance is written in the format image galleries read, so a site like Civitai displays them beside your image instead of showing it as plain pixels. It is the same information as the block above and nothing more; both are removed together.";
+
 // The bullets of the "Also in the file" list: every declared label, in order, repeats collapsed.
 //
 // A LIST rather than one comma-joined sentence, and not for taste. Several of these phrases carry

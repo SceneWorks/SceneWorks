@@ -1,6 +1,7 @@
 import React from "react";
 import { Icon } from "./Icons.jsx";
 import {
+  GALLERY_READABLE_COPY,
   SAVE_WITHOUT_WORKFLOW_LABEL,
   WORKFLOW_SHARE_DOC_URL,
   inFileItems,
@@ -48,6 +49,9 @@ export function WorkflowEmbedDetails() {
           <li key={item}>{item}</li>
         ))}
       </ul>
+      <p className="settings-note">
+        <strong>Readable by image galleries.</strong> {GALLERY_READABLE_COPY}
+      </p>
       <p className="settings-note">
         <strong>Not in the file:</strong>
       </p>

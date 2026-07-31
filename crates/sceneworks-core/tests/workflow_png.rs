@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 
 use image::{ImageFormat, Rgb, RgbImage};
 use sceneworks_core::contracts::{Asset, JsonObject};
+use sceneworks_core::workflow_parameters::PARAMETERS_CHUNK_KEYWORD;
 use sceneworks_core::workflow_png::{
-    copy_without_workflow_chunk, read_workflow_chunk, read_workflow_chunk_file,
-    strip_workflow_chunk, workflow_chunk_size, write_workflow_chunk, MAX_WORKFLOW_TEXT_BYTES,
-    WORKFLOW_CHUNK_KEYWORD,
+    copy_without_workflow_chunk, parameters_chunk_size, read_workflow_chunk,
+    read_workflow_chunk_file, strip_workflow_chunk, workflow_chunk_size, write_workflow_chunk,
+    MAX_WORKFLOW_TEXT_BYTES, WORKFLOW_CHUNK_KEYWORD,
 };
 use sceneworks_core::workflow_share::{
     build_workflow_share, WorkflowShare, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_SCHEMA_VERSION,
@@ -330,13 +331,21 @@ fn soft_render_rgb(width: u32, height: u32) -> RgbImage {
     })
 }
 
-/// Rebuild `png` with every `iTXt` chunk under [`WORKFLOW_CHUNK_KEYWORD`] removed, walking the
-/// chunk framing by hand. Returns the remaining bytes and how many were taken out.
+/// Rebuild `png` with every text chunk under one of OUR two keywords removed, walking the chunk
+/// framing by hand. Returns the remaining bytes and how many were taken out.
 ///
-/// Deliberately does not use the `png` crate: the point is to remove the chunk without re-encoding
-/// anything, so what is left is the original file's own bytes minus a slice.
+/// Deliberately does not use the `png` crate: the point is to remove the chunks without re-encoding
+/// anything, so what is left is the original file's own bytes minus two slices.
+///
+/// Both text types, because sc-15957's `parameters` chunk is a `tEXt` whenever its content is ASCII
+/// and an `iTXt` when it is not — a hand stripper that only knew `iTXt` would silently stop
+/// accounting for the whole file on the ordinary English case, which is most of them.
 fn strip_workflow_chunks(png: &[u8]) -> (Vec<u8>, usize) {
     assert!(png.len() > 8, "not a PNG");
+    let ours = [
+        WORKFLOW_CHUNK_KEYWORD.as_bytes(),
+        PARAMETERS_CHUNK_KEYWORD.as_bytes(),
+    ];
     let mut out = png[..8].to_vec();
     let mut removed = 0;
     let mut cursor = 8;
@@ -351,12 +360,13 @@ fn strip_workflow_chunks(png: &[u8]) -> (Vec<u8>, usize) {
         let end = cursor + 12 + length;
         assert!(end <= png.len(), "chunk at {cursor} runs past the end");
 
-        // The keyword is the `iTXt` payload up to its first NUL.
+        // The keyword is the text payload up to its first NUL, in all three text chunk types.
         let keyword = data
             .split(|byte| *byte == 0)
             .next()
             .expect("split yields one");
-        if kind == b"iTXt" && keyword == WORKFLOW_CHUNK_KEYWORD.as_bytes() {
+        let is_text = kind == b"iTXt" || kind == b"tEXt" || kind == b"zTXt";
+        if is_text && ours.contains(&keyword) {
             removed += end - cursor;
         } else {
             out.extend_from_slice(&png[cursor..end]);
@@ -366,8 +376,14 @@ fn strip_workflow_chunks(png: &[u8]) -> (Vec<u8>, usize) {
     (out, removed)
 }
 
+/// What one embedded write costs a file: both chunks, framing included.
+fn embedded_chunk_bytes(envelope: &WorkflowShare, encoded: (u32, u32)) -> usize {
+    workflow_chunk_size(envelope).expect("the workflow chunk encodes")
+        + parameters_chunk_size(envelope, encoded).expect("the parameters chunk encodes")
+}
+
 #[test]
-fn the_some_path_is_the_none_path_plus_the_chunk() {
+fn the_some_path_is_the_none_path_plus_the_chunks() {
     // The other half of the guarantee, and the half that is easy to assert too weakly. `None` going
     // through `save_with_format` makes the opt-out structurally identical, but `Some` CANNOT — no
     // `image` encoder writes a text chunk — so it drives `png` directly and could quietly encode
@@ -376,8 +392,15 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
     // cost ~8x the encode time.
     //
     // Asserting "the embedded file is bigger" cannot catch that, and neither can a small fixture. So
-    // this strips our chunk back out of the `Some` output at the byte level and requires what remains
-    // to be the `None` output exactly.
+    // this strips our chunks back out of the `Some` output at the byte level and requires what
+    // remains to be the `None` output exactly.
+    //
+    // sc-15957 made this TWO chunks rather than one, and the invariant is stated at exactly the same
+    // strength rather than relaxed: the difference between the two arms is still accounted for to
+    // the byte, and the accounting is still against independently MEASURED chunk sizes rather than
+    // against whatever the diff happens to be. What changed is only the number of slices removed.
+    // Weakening it to "the bytes match after removing everything under our keywords" would have
+    // stopped proving that embedding costs the chunks and nothing else.
     //
     // The FIXTURE is load-bearing too, which is why there are two. `noisy_rgb` is incompressible
     // enough that `png` stores its rows and never consults the filter, so on that fixture alone every
@@ -393,7 +416,6 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
 
     let directory = tempfile::tempdir().expect("temp dir");
     let envelope = golden_envelope();
-    let chunk_size = workflow_chunk_size(&envelope).expect("the chunk encodes");
 
     for (label, build, regime) in fixtures {
         // Several sizes, and at least one big enough for a compression difference to dominate the
@@ -401,6 +423,7 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
         for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
             let rgb = build(width, height);
             let name = format!("{label}-{width}x{height}");
+            let chunk_size = embedded_chunk_bytes(&envelope, (width, height));
             let embedded = directory.path().join(format!("some-{name}.png"));
             let plain = directory.path().join(format!("none-{name}.png"));
 
@@ -413,27 +436,28 @@ fn the_some_path_is_the_none_path_plus_the_chunk() {
 
             assert_eq!(
                 removed, chunk_size,
-                "on {name} the stripper removed {removed} bytes but the chunk measures {chunk_size}"
+                "on {name} the stripper removed {removed} bytes but the two chunks measure \
+                 {chunk_size}"
             );
             assert_eq!(
                 stripped.len(),
                 plain_bytes.len(),
-                "on {name} the two arms disagree on encoded size by {} bytes — the chunk is \
-                 {chunk_size} and was already removed, so this is an ENCODER difference \
-                 (compression level or row filter), not the chunk",
+                "on {name} the two arms disagree on encoded size by {} bytes — the chunks are \
+                 {chunk_size} and were already removed, so this is an ENCODER difference \
+                 (compression level or row filter), not the chunks",
                 stripped.len().abs_diff(plain_bytes.len())
             );
             assert!(
                 stripped == plain_bytes,
-                "on {name} the Some output is not the None output plus the chunk: the bytes differ \
-                 after stripping the {chunk_size}-byte chunk"
+                "on {name} the Some output is not the None output plus the chunks: the bytes differ \
+                 after stripping the {chunk_size} bytes of text chunk"
             );
             // Stated the other way round as well, because this is the number sc-15948 quotes: the
-            // file grows by the chunk and by nothing else.
+            // file grows by the chunks and by nothing else.
             assert_eq!(
                 embedded_bytes.len(),
                 plain_bytes.len() + chunk_size,
-                "on {name} embedding cost {} bytes, not the {chunk_size}-byte chunk",
+                "on {name} embedding cost {} bytes, not the {chunk_size} bytes of chunk",
                 embedded_bytes.len() - plain_bytes.len()
             );
 
@@ -475,19 +499,24 @@ fn strip_of_an_embedded_png_is_byte_identical_to_the_none_path() {
     // is the same compressed image data it always was.
     //
     // The same two DEFLATE regimes and the same four sizes as
-    // `the_some_path_is_the_none_path_plus_the_chunk`, for the same reason: a stripper tested only
+    // `the_some_path_is_the_none_path_plus_the_chunks`, for the same reason: a stripper tested only
     // on an incompressible 9x7 fixture would pass while silently re-encoding a real render.
+    //
+    // Since sc-15957 this is also the byte-level proof that the strip removes BOTH chunks: the
+    // stripped file being the `None`-path file exactly leaves nowhere for a `parameters` chunk to
+    // survive. A strip that took only the envelope out would land `parameters_chunk_size` bytes
+    // over and fail here, not merely leave a weaker guarantee.
     type Fixture = fn(u32, u32) -> RgbImage;
     let fixtures: [(&str, Fixture); 2] = [("noise", noisy_rgb), ("render", soft_render_rgb)];
 
     let directory = tempfile::tempdir().expect("temp dir");
     let envelope = golden_envelope();
-    let chunk_size = workflow_chunk_size(&envelope).expect("the chunk encodes");
 
     for (label, build) in fixtures {
         for (width, height) in [(9, 7), (67, 41), (512, 512), (1024, 1024)] {
             let rgb = build(width, height);
             let name = format!("{label}-{width}x{height}");
+            let chunk_size = embedded_chunk_bytes(&envelope, (width, height));
             let embedded = directory.path().join(format!("embedded-{name}.png"));
             let plain = directory.path().join(format!("plain-{name}.png"));
             write_workflow_chunk(&rgb, &embedded, Some(&envelope)).expect("writes with a chunk");
@@ -502,7 +531,7 @@ fn strip_of_an_embedded_png_is_byte_identical_to_the_none_path() {
             assert_eq!(
                 embedded_bytes.len() - stripped.len(),
                 chunk_size,
-                "on {name} the strip removed {} bytes but the chunk measures {chunk_size}",
+                "on {name} the strip removed {} bytes but the two chunks measure {chunk_size}",
                 embedded_bytes.len() - stripped.len()
             );
             assert!(
@@ -617,25 +646,29 @@ fn the_same_prompt_cannot_be_written_as_a_text_chunk_at_all() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_chunk_stays_a_text_chunk_and_not_a_payload() {
+fn the_chunks_stay_text_chunks_and_not_a_payload() {
     // Recorded on sc-15947 so sc-15948 can sanity-check what it is about to add to every generated
-    // image. Numbers as measured on the sc-15946 golden envelope (a full Krea edit: LoRAs, four
-    // input shapes, an upscale pass, twelve allow-listed `advanced` keys):
+    // image, and re-measured on sc-15957 now that there are two chunks. Numbers as measured on the
+    // sc-15946 golden envelope (a full Krea edit: LoRAs, four input shapes, an upscale pass, twelve
+    // allow-listed `advanced` keys) at 1024x1024:
     //
-    //   uncompressed envelope JSON  960 bytes
-    //   framed compressed iTXt      565 bytes  (length + type + keyword + separators + CRC)
+    //   uncompressed envelope JSON   960 bytes
+    //   framed compressed iTXt       565 bytes  (length + type + keyword + separators + CRC)
+    //   framed parameters chunk      ~380 bytes (uncompressed, by design — see `parameters_chunk`)
     //
-    // Both figures move by a few bytes between the two `serde_json` map backends, since key ORDER
+    // The first two move by a few bytes between the two `serde_json` map backends, since key ORDER
     // changes what deflate finds to share — which is exactly why the assertions below are bounds.
     //
-    // Against a 1024x1024 PNG of a few megabytes that is a rounding error, which is the point of
-    // compressing it. The bounds below are deliberately loose — this test exists to catch the
-    // chunk becoming a payload (a base64 image, an un-reduced `advanced` map), not to pin a size.
+    // Against a 1024x1024 PNG of a few megabytes both are a rounding error. The bounds are
+    // deliberately loose — this test exists to catch a chunk becoming a payload (a base64 image, an
+    // un-reduced `advanced` map, a serialized node graph), not to pin a size.
     let envelope = golden_envelope();
     let uncompressed = serde_json::to_string(&envelope).expect("serializes").len();
     let framed = workflow_chunk_size(&envelope).expect("the chunk encodes");
+    let parameters = parameters_chunk_size(&envelope, (1024, 1024)).expect("the chunk encodes");
 
     println!("workflow iTXt chunk: {framed} bytes framed and compressed, {uncompressed} bytes of uncompressed JSON");
+    println!("parameters chunk: {parameters} bytes framed and uncompressed");
 
     assert!(
         framed < uncompressed,
@@ -649,6 +682,13 @@ fn the_chunk_stays_a_text_chunk_and_not_a_payload() {
         uncompressed < MAX_WORKFLOW_TEXT_BYTES / 8,
         "a representative envelope at {uncompressed} bytes is uncomfortably close to the \
          {MAX_WORKFLOW_TEXT_BYTES}-byte read cap"
+    );
+    // The A1111 trailer is prose plus a handful of numbers. It is uncompressed on purpose, so its
+    // ceiling is the prompt's — but it must never approach the envelope's own recording ceiling,
+    // which is what it would do if someone started serializing structure into it.
+    assert!(
+        parameters < 8 * 1024,
+        "the parameters chunk grew to {parameters} bytes — that is a payload, not a settings line"
     );
 }
 
