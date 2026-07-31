@@ -41,10 +41,23 @@ the exact composition, so a prerequisite change invalidates only rows whose exec
 Bump a provider's entry in
 `CALIBRATION_ABI_VERSIONS` when its quantization floors, tensor layout, or execution structure
 invalidate measurements; bump the default only for an ecosystem-wide calibration contract change.
-`matrixSourceRevision`, `generatedFrom.sceneWorksRevision`, and cell `evidenceRevision.sceneWorks`
-carry semantic generated-source provenance: the JSONC manifest is hashed after parsing, so comments
-and formatting produce no generated artifact churn. Exact raw-source history remains available in
-version control and must not be used as evidence staleness.
+`matrixSourceRevision` and `generatedFrom.sceneWorksRevision` carry semantic generated-source
+provenance: every hashed source is normalised before hashing, so semantically inert edits produce no
+generated artifact churn. The JSONC manifest and the JSON plan and evidence bundles are hashed after
+parsing, which makes comments AND formatting inert for them. The Rust, TOML and generator-script
+sources are hashed with their blank lines and whole-line comments removed — and only those: a
+re-indent, a re-wrapped line or a block comment still rotates the fingerprint, because stripping
+them safely needs a tokenizer and noisy-but-safe is the correct side to err on. A whole-line comment
+containing `"` also stays hashed, since the generators' parsers read double-quoted literals (see
+`scripts/lib/source-revision.mjs`). Exact raw-source history remains available in version control
+and must not be used as evidence staleness.
+
+**Provenance is stamped once, not per row (sc-16268).** The revision pair belongs to the document,
+so it lives in `generatedFrom` and nowhere else. Cells carry no `evidenceRevision`: it held the same
+constant in all ~7,360 rows, which turned every fingerprint rotation into a ~14,700-line rewrite of a
+file that can only be regenerated, never hand-merged — so two concurrent PRs touching any
+fingerprinted source were guaranteed to conflict. `additionalProperties: false` on a cell keeps it
+gone. A generated artifact must not duplicate document-scoped provenance into its rows.
 
 Strategy changes never change precision. A lower precision tier is a separate candidate evaluated
 by the existing tier chooser before the memory selector.

@@ -6,25 +6,21 @@ import {
   CONTROL_LANE_MODELS,
   FAMILY_STORIES,
   MODEL_STORIES,
+  SOURCE_PATHS,
   assertCellOwnershipIsBackendScoped,
   assertTwinCoverage,
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
-  canonicalSourceText,
   familyStory,
   mlxRequiredHostBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { stripInertLines } from "./lib/source-revision.mjs";
 
-test("memory-strategy source hashing is independent of platform line endings", () => {
-  const canonical = "alpha\nbeta\ngamma\n";
-  assert.equal(canonicalSourceText(canonical), canonical);
-  assert.equal(canonicalSourceText("alpha\r\nbeta\r\ngamma\r\n"), canonical);
-  assert.equal(canonicalSourceText("alpha\rbeta\rgamma\r"), canonical);
-});
-
+// Line-ending and comment normalisation now lives in `scripts/lib/source-revision.mjs` and is unit
+// tested there; these tests cover the same rules end to end, through the real generator.
 test("a comment-only manifest edit produces no generated matrix change", async () => {
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = await readFile(manifestUrl, "utf8");
@@ -44,6 +40,156 @@ test("a comment-only manifest edit produces no generated matrix change", async (
 
   assert.deepEqual(commentOnly, baseline);
   assert.deepEqual(withoutAnyComments, baseline);
+});
+
+// The Rust/TOML half of the same principle (sc-16268). DERIVED from the generator's own
+// `SOURCE_PATHS` rather than mirrored, so dropping a source from the fingerprint cannot leave these
+// tests green — the tripwire's coverage is the thing under test.
+const RUST_SOURCE_PATHS = Object.freeze(
+  Object.fromEntries(
+    Object.entries(SOURCE_PATHS).filter(
+      ([, relative]) => relative.endsWith(".rs") || relative.endsWith(".toml"),
+    ),
+  ),
+);
+
+async function readRustSources() {
+  const entries = await Promise.all(
+    Object.entries(RUST_SOURCE_PATHS).map(async ([name, relative]) => [
+      name,
+      await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+    ]),
+  );
+  return Object.fromEntries(entries);
+}
+
+test("the fingerprint covers every declared source, and the artifact publishes that set", async () => {
+  // Pins the tripwire's COVERAGE. Deleting a hash-only source (say `memoryStrategy`) is otherwise
+  // invisible: every inertness test still passes while the fingerprint quietly stops watching a file
+  // the memory numbers depend on.
+  assert.deepEqual(Object.keys(SOURCE_PATHS).sort(), [
+    "calibrationEvidence",
+    "calibrationPlan",
+    "cargo",
+    "engines",
+    "instantId",
+    "manifest",
+    "memoryStrategy",
+    "mlxFitGate",
+    "vramGate",
+  ]);
+  assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
+    "cargo",
+    "engines",
+    "instantId",
+    "memoryStrategy",
+    "mlxFitGate",
+    "vramGate",
+  ]);
+
+  const matrix = await buildMatrix();
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(matrix.generatedFrom.sources).map(([name, entry]) => [name, entry.path]),
+    ),
+    { ...SOURCE_PATHS },
+  );
+});
+
+test("a comment-only Rust or Cargo edit produces no generated matrix change", async () => {
+  const sources = await readRustSources();
+  const baseline = await buildMatrix();
+
+  for (const [name, body] of Object.entries(sources)) {
+    const marker = name === "cargo" ? "#" : "//";
+    const appended = await buildMatrix({
+      sourceOverrides: {
+        [name]: `${body}\n${marker} sc-16268 regression: semantically inert comment\n`,
+      },
+    });
+    assert.deepEqual(appended, baseline, `${name}: an appended comment must be inert`);
+  }
+});
+
+test("the matrix regenerates identically from fully comment-stripped sources", async () => {
+  // The load-bearing invariant behind hashing stripped bodies: nothing the generator PARSES may
+  // live in a strippable comment. Feeding the stripped sources back in exercises the parsers, not
+  // just the hash, so a future comment-anchored regex (there was one — `parseMlxSequentialEngines`)
+  // fails here instead of silently letting a semantic change slip past the staleness tripwire.
+  const sources = await readRustSources();
+  const baseline = await buildMatrix();
+  const stripped = await buildMatrix({
+    sourceOverrides: Object.fromEntries(
+      Object.entries(sources).map(([name, body]) => [
+        name,
+        stripInertLines(body, name === "cargo" ? "#" : "//"),
+      ]),
+    ),
+  });
+
+  assert.deepEqual(stripped, baseline);
+});
+
+test("a Rust value the generator never parses still rotates the source fingerprint", async () => {
+  // The mutation check. `HEADROOM_GB` is not parsed by any of this generator's regexes, yet every
+  // MLX staged-residency number depends on it: the fingerprint is a whole-source tripwire, and
+  // narrowing it to only-parsed-values would trade noisy-but-safe for quiet-and-stale.
+  const sources = await readRustSources();
+  const baseline = await buildMatrix();
+  const headroom = sources.mlxFitGate.match(/const HEADROOM_GB: f64 = ([0-9.]+);/);
+  assert.ok(headroom, "fixture needs the HEADROOM_GB constant in mlx_fit_gate.rs");
+  const mutated = await buildMatrix({
+    sourceOverrides: {
+      mlxFitGate: sources.mlxFitGate.replace(
+        headroom[0],
+        `const HEADROOM_GB: f64 = ${Number(headroom[1]) + 0.25};`,
+      ),
+    },
+  });
+
+  assert.notEqual(
+    mutated.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    mutated.generatedFrom.sources.mlxFitGate.sha256,
+    baseline.generatedFrom.sources.mlxFitGate.sha256,
+  );
+});
+
+test("a commented-out line carrying a string literal still rotates the source fingerprint", async () => {
+  // The quote guard. A comment that could feed one of the generator's `"([^"]+)"` parsers is not
+  // inert, so it stays hashed even though it is a comment.
+  const sources = await readRustSources();
+  const baseline = await buildMatrix();
+  const quoted = await buildMatrix({
+    sourceOverrides: {
+      engines: `${sources.engines}\n// "some_commented_out_id",\n`,
+    },
+  });
+
+  assert.notEqual(
+    quoted.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+});
+
+test("provenance is stamped once on the document, never per row", async () => {
+  // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
+  // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
+  const matrix = await buildMatrix();
+  assert.equal(matrix.schemaVersion, 3);
+  assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
+  assert.ok(matrix.cells.length > 1000);
+  assert.equal(
+    matrix.cells.filter((cell) => "evidenceRevision" in cell).length,
+    0,
+    "document-scoped provenance must not be duplicated into cells",
+  );
+  assert.ok(
+    !JSON.stringify(matrix.cells).includes(matrix.generatedFrom.sceneWorksRevision),
+    "no cell may embed the source revision under any other key either",
+  );
 });
 
 test("a calibration-relevant manifest value rotates affected fallback fingerprints", async () => {

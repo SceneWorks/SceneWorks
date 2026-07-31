@@ -220,9 +220,9 @@ function verifyLicenseAudit() {
 }
 
 // `docs/generated/memory-matrix.{json,md}` is DERIVED from the inference pin: the generator stamps
-// `inferenceRevision` on the document and on every cell's `evidenceRevision`, and each cell's
-// derived `calibrationFingerprint` includes the inference pin alongside the provider ABI and semantic
-// cell identity. So a pin bump makes the checked-in artifact stale by construction, and
+// `inferenceRevision` on the document (`generatedFrom`; sc-16268 removed the per-cell copy that
+// used to duplicate it into every row), and each cell's derived `calibrationFingerprint` includes
+// the inference pin alongside the provider ABI and semantic cell identity. So a pin bump makes the checked-in artifact stale by construction, and
 // `tests/test_memory_matrix.py`
 // (parity CI) fails with "generated memory matrix is stale". Regenerating here keeps everything derived
 // from the pin moving in ONE commit, the same reason the lockfile regen lives in this script rather than

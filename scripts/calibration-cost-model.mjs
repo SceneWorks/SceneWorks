@@ -24,8 +24,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import { REQUIRED_SCENARIOS } from "./memory-calibration-harness.mjs";
-import { canonicalSourceText } from "./generate-memory-matrix.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/calibration-cost-model.json";
@@ -1363,18 +1363,27 @@ export function rankUncertainties(
   ];
 }
 
+// Every source this document is DERIVED from, exported for the tests that pin the tripwire's
+// coverage (sc-16268). `sourceRevision`/`jsonc` are in the list because they DEFINE how every other
+// entry is hashed: before sc-16268 that logic lived inside `generate-memory-matrix.mjs`, which is
+// hashed here, so leaving them out would have narrowed provenance as a side effect of extracting a
+// shared module.
+export const SOURCE_PATHS = Object.freeze({
+  matrix: "docs/generated/memory-matrix.json",
+  manifest: "config/manifests/builtin.models.jsonc",
+  harness: "scripts/memory-calibration-harness.mjs",
+  matrixGenerator: "scripts/generate-memory-matrix.mjs",
+  sourceRevision: "scripts/lib/source-revision.mjs",
+  jsonc: "scripts/lib/jsonc.mjs",
+  calibrationPlan: "config/memory-calibration-plan.json",
+  vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
+  calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
+  candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
+  mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+});
+
 export async function buildCostModel({ sourceOverrides = {} } = {}) {
-  const sourcePaths = {
-    matrix: "docs/generated/memory-matrix.json",
-    manifest: "config/manifests/builtin.models.jsonc",
-    harness: "scripts/memory-calibration-harness.mjs",
-    matrixGenerator: "scripts/generate-memory-matrix.mjs",
-    calibrationPlan: "config/memory-calibration-plan.json",
-    vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
-    calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
-    candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-    mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-  };
+  const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const bodies = Object.fromEntries(
     await Promise.all(
@@ -1391,10 +1400,13 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
 
   const matrix = JSON.parse(bodies.matrix);
   const manifest = JSON.parse(stripJsoncComments(bodies.manifest));
-  const revisionBodies = {
-    ...bodies,
-    manifest: JSON.stringify(manifest),
-  };
+  // sc-16268: same provenance rule as the matrix generator — hash each source's semantic body, so a
+  // comment-only edit to `vram_gate.rs` or to a generator script does not rotate this document's
+  // fingerprint. Without this, wiring `check:calibration-cost-model` into `rust:check` would just
+  // move the inert churn from CI to the pre-push gate.
+  const revisionBodies = Object.fromEntries(
+    sourceEntries.map(([name, relative]) => [name, semanticSourceBody(relative, bodies[name])]),
+  );
   const plan = JSON.parse(bodies.calibrationPlan);
   const evidence = JSON.parse(bodies.calibrationEvidence);
 
@@ -1497,8 +1509,10 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
   const model = {
     schemaVersion: 1,
     generatedFrom: {
+      // NUL-separated for the same reason as the matrix generator (sc-16268): normalised bodies no
+      // longer end in a newline, so a bare concatenation has ambiguous source boundaries.
       sceneWorksRevision: `source-tree:${sha256(
-        sourceEntries.map(([name]) => revisionBodies[name]).join(""),
+        sourceEntries.map(([name]) => revisionBodies[name]).join("\0"),
       )}`,
       matrixRevision: matrix.generatedFrom.sceneWorksRevision,
       inferenceRevision: matrix.generatedFrom.inferenceRevision,
