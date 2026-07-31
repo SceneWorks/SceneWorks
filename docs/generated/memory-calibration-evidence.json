@@ -9,237 +9,7 @@
       },
       "backend": "mlx",
       "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-      "capturedAt": "2026-07-31T11:31:08Z",
-      "diagnostics": {
-        "adapter": "memory-mlx-adapter:krea-control",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "conditioningActivePeak",
-            "unit": "bytes",
-            "value": 8314280
-          },
-          {
-            "name": "denoiseActivePeak",
-            "unit": "bytes",
-            "value": 16652881008
-          },
-          {
-            "name": "decodeActivePeak",
-            "unit": "bytes",
-            "value": 19400134504
-          },
-          {
-            "name": "overallAllocatorEnvelope",
-            "unit": "bytes",
-            "value": 34711693484
-          },
-          {
-            "name": "lifecycleWarmControlPeak",
-            "unit": "bytes",
-            "value": 19403168244
-          },
-          {
-            "name": "lifecycleMaximumRecoveryPeak",
-            "unit": "bytes",
-            "value": 19403168244
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "krea-pose-control-q4-seed16099",
-      "hardware": {
-        "chip": "Apple M5 Max",
-        "memoryBytes": 137438953472,
-        "metalDevice": "Apple M5 Max",
-        "mlxMemoryLimitBytes": 130567005798,
-        "model": "Mac17,6",
-        "osVersion": "26.5.2",
-        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
-        "wiredLimitBytes": 87044670532
-      },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-1f5c99e76d170df1327b",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-ed8c4cad207c3d34d8ca",
-      "negativeMutation": {
-        "maximumError": 0.0696078431372549,
-        "meanError": 0.05010499642565355,
-        "measured": true,
-        "parameters": {
-          "decodeOverlap": 64,
-          "decodeTileEdge": 512
-        },
-        "result": "failed_as_expected"
-      },
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 8314280,
-          "allocatorBytes": 8314480,
-          "deviceBytes": 8314480,
-          "reclaimableBytes": 200,
-          "wiredBytes": 8314480
-        },
-        "decode": {
-          "activeBytes": 19400134504,
-          "allocatorBytes": 19400134504,
-          "deviceBytes": 19400134504,
-          "reclaimableBytes": 0,
-          "wiredBytes": 19400134504
-        },
-        "denoise": {
-          "activeBytes": 16652881008,
-          "allocatorBytes": 31964439988,
-          "deviceBytes": 31964439988,
-          "reclaimableBytes": 15311558980,
-          "wiredBytes": 31964439988
-        },
-        "overall": {
-          "activeBytes": 19400134504,
-          "allocatorBytes": 34711693484,
-          "deviceBytes": 34711693484,
-          "reclaimableBytes": 15311558980,
-          "wiredBytes": 34711693484
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 67108864,
-        "decode": 20401094656,
-        "denoise": 33621540864,
-        "overall": 36507222016
-      },
-      "quality": {
-        "contract": "same seed and control latent, exact production 512/64 bounded decode versus single-pass Qwen-VAE decode",
-        "identicalLatents": true,
-        "maximumError": 0.0196078431372549,
-        "maximumErrorThreshold": 0.15,
-        "meanError": 0.00010499642565354848,
-        "meanErrorThreshold": 0.005,
-        "result": "passed"
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
-          "revision": "15bdd36231920d2705234cc2b432542b825a469f"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 36507222016,
-          "name": "exact_fit",
-          "predictedBytes": 36507222016,
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "provider rejected a zero/unknown budget before render",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "provider rejected a mutated calibration fingerprint before render",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "resident A/B/A output bytes were identical",
-          "result": "passed"
-        },
-        {
-          "cleanupVerified": true,
-          "name": "cancel",
-          "reason": "conditioning, denoise, and decode cancellation returned typed cancellation",
-          "result": "passed",
-          "warmFollowUpPassed": true
-        },
-        {
-          "cleanupVerified": true,
-          "name": "error",
-          "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries",
-          "result": "passed",
-          "warmFollowUpPassed": true
-        },
-        {
-          "name": "loadability",
-          "reason": "canonical q4 base and exact pose overlay loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "real pose-control overlay participated in every measured render",
-          "result": "passed"
-        }
-      ],
-      "status": "complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "bounded_decode"
-        ],
-        "parameters": {
-          "decodeOverlap": 64,
-          "decodeTileEdge": 512
-        },
-        "rung": "bounded_decode"
-      },
-      "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              64
-            ]
-          }
-        ],
-        "cases": [
-          {
-            "parameters": {
-              "decodeOverlap": 64,
-              "decodeTileEdge": 512
-            },
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 768,
-          "width": 768
-        },
-        "mode": "text_to_image",
-        "modelId": "krea_2_turbo",
-        "overlay": "control:1",
-        "provider": "krea_2_turbo_control",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
-        "repository": "SceneWorks/krea-2-turbo-mlx",
-        "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
-        "variant": "q4"
-      },
-      "backend": "mlx",
-      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-      "capturedAt": "2026-07-31T11:34:41Z",
+      "capturedAt": "2026-07-31T13:36:16Z",
       "diagnostics": {
         "adapter": "memory-mlx-adapter:krea-control",
         "blockers": [],
@@ -253,17 +23,17 @@
           {
             "name": "denoiseActivePeak",
             "unit": "bytes",
-            "value": 16968289452
+            "value": 16968273068
           },
           {
             "name": "decodeActivePeak",
             "unit": "bytes",
-            "value": 19432951656
+            "value": 19432935272
           },
           {
             "name": "overallAllocatorEnvelope",
             "unit": "bytes",
-            "value": 39401012396
+            "value": 39447876780
           },
           {
             "name": "lifecycleWarmControlPeak",
@@ -290,7 +60,7 @@
         "wiredLimitBytes": 87044670532
       },
       "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-cd9bbbac7df2f0ee3fbd",
+      "id": "imc-ae60c3eb464c2133a553",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
         "result": "passed"
@@ -315,32 +85,32 @@
           "wiredBytes": 11296368
         },
         "decode": {
-          "activeBytes": 19432951656,
-          "allocatorBytes": 19432951656,
-          "deviceBytes": 19432951656,
+          "activeBytes": 19432935272,
+          "allocatorBytes": 19432935272,
+          "deviceBytes": 19432935272,
           "reclaimableBytes": 0,
-          "wiredBytes": 19432951656
+          "wiredBytes": 19432935272
         },
         "denoise": {
-          "activeBytes": 16968289452,
-          "allocatorBytes": 36936350192,
-          "deviceBytes": 36936350192,
-          "reclaimableBytes": 19968060740,
-          "wiredBytes": 36936350192
+          "activeBytes": 16968273068,
+          "allocatorBytes": 36983214576,
+          "deviceBytes": 36983214576,
+          "reclaimableBytes": 20014941508,
+          "wiredBytes": 36983214576
         },
         "overall": {
-          "activeBytes": 19432951656,
-          "allocatorBytes": 39401012396,
-          "deviceBytes": 39401012396,
-          "reclaimableBytes": 19968060740,
-          "wiredBytes": 39401012396
+          "activeBytes": 19432935272,
+          "allocatorBytes": 39447876780,
+          "deviceBytes": 39447876780,
+          "reclaimableBytes": 20014941508,
+          "wiredBytes": 39447876780
         }
       },
       "predictedPeakBytes": {
         "conditioning": 67108864,
         "decode": 20468203520,
-        "denoise": 38788923392,
-        "overall": 41406169088
+        "denoise": 38856032256,
+        "overall": 41473277952
       },
       "quality": {
         "contract": "same seed and control latent, exact production 512/64 bounded decode versus single-pass Qwen-VAE decode",
@@ -354,19 +124,19 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab"
+          "revision": "ec588e081e56b8084b8b5d3ae7e4cd621dba869c"
         },
         "sceneWorks": {
           "dirty": false,
-          "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
-          "revision": "15bdd36231920d2705234cc2b432542b825a469f"
+          "matrixSourceRevision": "source-tree:dccec273f58df7770c9d1de7bee1036d6351ceaee36be045a8ba9a7fa5fffebc",
+          "revision": "5c78d627dd71b3f339c8c83a73358e266427f39d"
         }
       },
       "scenarios": [
         {
-          "effectiveBudgetBytes": 41406169088,
+          "effectiveBudgetBytes": 41473277952,
           "name": "exact_fit",
-          "predictedBytes": 41406169088,
+          "predictedBytes": 41473277952,
           "result": "passed"
         },
         {
@@ -453,6 +223,236 @@
           "frames": 1,
           "height": 896,
           "width": 896
+        },
+        "mode": "text_to_image",
+        "modelId": "krea_2_turbo",
+        "overlay": "control:1",
+        "provider": "krea_2_turbo_control",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/krea-2-turbo-mlx",
+        "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+      "capturedAt": "2026-07-31T13:32:39Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:krea-control",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 8314280
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 16652766312
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 19400036200
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 34386291884
+          },
+          {
+            "name": "lifecycleWarmControlPeak",
+            "unit": "bytes",
+            "value": 19403053556
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPeak",
+            "unit": "bytes",
+            "value": 19403053556
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "krea-pose-control-q4-seed16099",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v4",
+      "id": "imc-ea17789b97699dcb0352",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ed8c4cad207c3d34d8ca",
+      "negativeMutation": {
+        "maximumError": 0.0696078431372549,
+        "meanError": 0.05010499642565355,
+        "measured": true,
+        "parameters": {
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512
+        },
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 8314280,
+          "allocatorBytes": 8314480,
+          "deviceBytes": 8314480,
+          "reclaimableBytes": 200,
+          "wiredBytes": 8314480
+        },
+        "decode": {
+          "activeBytes": 19400036200,
+          "allocatorBytes": 19400036200,
+          "deviceBytes": 19400036200,
+          "reclaimableBytes": 0,
+          "wiredBytes": 19400036200
+        },
+        "denoise": {
+          "activeBytes": 16652766312,
+          "allocatorBytes": 31639021996,
+          "deviceBytes": 31639021996,
+          "reclaimableBytes": 14986255684,
+          "wiredBytes": 31639021996
+        },
+        "overall": {
+          "activeBytes": 19400036200,
+          "allocatorBytes": 34386291884,
+          "deviceBytes": 34386291884,
+          "reclaimableBytes": 14986255684,
+          "wiredBytes": 34386291884
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 20401094656,
+        "denoise": 33285996544,
+        "overall": 36171677696
+      },
+      "quality": {
+        "contract": "same seed and control latent, exact production 512/64 bounded decode versus single-pass Qwen-VAE decode",
+        "identicalLatents": true,
+        "maximumError": 0.0196078431372549,
+        "maximumErrorThreshold": 0.15,
+        "meanError": 0.00010499642565354848,
+        "meanErrorThreshold": 0.005,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "ec588e081e56b8084b8b5d3ae7e4cd621dba869c"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:dccec273f58df7770c9d1de7bee1036d6351ceaee36be045a8ba9a7fa5fffebc",
+          "revision": "5c78d627dd71b3f339c8c83a73358e266427f39d"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 36171677696,
+          "name": "exact_fit",
+          "predictedBytes": 36171677696,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "provider rejected a zero/unknown budget before render",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "provider rejected a mutated calibration fingerprint before render",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "resident A/B/A output bytes were identical",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "conditioning, denoise, and decode cancellation returned typed cancellation",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "reason": "canonical q4 base and exact pose overlay loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "real pose-control overlay participated in every measured render",
+          "result": "passed"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "bounded_decode"
+        ],
+        "parameters": {
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512
+        },
+        "rung": "bounded_decode"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              64
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "decodeOverlap": 64,
+              "decodeTileEdge": 512
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
         },
         "mode": "text_to_image",
         "modelId": "krea_2_turbo",

@@ -83,8 +83,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     expected_ids = {
-        "imc-1f5c99e76d170df1327b",
-        "imc-cd9bbbac7df2f0ee3fbd",
+        "imc-ae60c3eb464c2133a553",
+        "imc-ea17789b97699dcb0352",
     }
     assert {record["id"] for record in calibration["records"]} == expected_ids
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == expected_ids
