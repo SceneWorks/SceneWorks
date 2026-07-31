@@ -499,6 +499,57 @@ export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema })
     }
   }
 
+  // (4b) Structured component floors are a binding three-way declaration: manifest (shared tier
+  // decision + UI), provider descriptor (load path), and this measured ledger. This checker owns the
+  // manifest↔ledger half; compiled worker tests own descriptor↔manifest parity on each backend.
+  for (const entry of manifest.models ?? []) {
+    const floors = entry.precisionFloors ?? [];
+    for (const floor of floors) {
+      const where = `${entry.id}/${floor.component}`;
+      const selectedRank = FIDELITY[floor.selectedTier];
+      const residentRank = FIDELITY[floor.residentTier];
+      if (selectedRank !== undefined && residentRank !== undefined && residentRank <= selectedRank) {
+        errors.push(
+          `${where}: precisionFloors residentTier "${floor.residentTier}" is not above selectedTier ` +
+            `"${floor.selectedTier}". Remove a no-op declaration or correct the tiers.`,
+        );
+      }
+      const matching = exceptions.filter(
+        (row) =>
+          row.model === entry.id &&
+          row.component === floor.component &&
+          row.residentTier === floor.residentTier &&
+          (row.appliesToTiers ?? []).includes(floor.selectedTier),
+      );
+      const covered = new Set(matching.flatMap((row) => row.backends ?? BACKENDS));
+      for (const lane of BACKENDS.filter((lane) => entry[lane])) {
+        if (!covered.has(lane)) {
+          errors.push(
+            `${where}: manifest precisionFloors declares ${floor.selectedTier} → ` +
+              `${floor.residentTier}, but ${LEDGER} has no matching exception for backend "${lane}".`,
+          );
+        }
+      }
+    }
+  }
+  for (const row of exceptions) {
+    if (!new Set(["textEncoder", "transformerHead"]).has(row.component)) continue;
+    if (row.residentTier !== "q8" || !(row.appliesToTiers ?? []).includes("q4")) continue;
+    const entry = byId.get(row.model);
+    const declared = (entry?.precisionFloors ?? []).some(
+      (floor) =>
+        floor.component === row.component &&
+        floor.selectedTier === "q4" &&
+        floor.residentTier === "q8",
+    );
+    if (!declared) {
+      errors.push(
+        `${row.model}/${row.component}: ${LEDGER} records a q4 → q8 component floor, but the catalog ` +
+          `has no matching precisionFloors declaration for the shared tier decision.`,
+      );
+    }
+  }
+
   // (5) Krea's declared branch tiers must agree with the ledger, in both directions.
   for (const entry of manifest.models ?? []) {
     const map = entry.candle?.control?.branchTierByBaseTier;
@@ -881,6 +932,34 @@ async function selfTest() {
     expect("schema unknown key", validate({ ...inputs, ledger }).errors, 'unknown property "backend"');
   }
 
+  // 9. A provider-local floor cannot remain ledger-only: deleting the shared manifest declaration
+  //    must make the tier decision, worker label, and UI visibly incomplete.
+  {
+    const manifest = JSON.parse(JSON.stringify(inputs.manifest));
+    const victim = manifest.models.find((entry) => entry.id === "mage_flow_base");
+    delete victim.precisionFloors;
+    expect(
+      "ledger floor missing from manifest",
+      validate({ ...inputs, manifest }).errors,
+      "has no matching precisionFloors declaration",
+    );
+  }
+
+  // 10. A shared floor must cover every hosted backend. Regressing the transformer-head row to the
+  //     historical MLX-only declaration must fail because Mage also ships a Candle lane.
+  {
+    const ledger = clone();
+    const victim = ledger.exceptions.find(
+      (row) => row.model === "mage_flow_base" && row.component === "transformerHead",
+    );
+    victim.backends = ["mlx"];
+    expect(
+      "manifest floor missing backend lane",
+      validate({ ...inputs, ledger }).errors,
+      'no matching exception for backend "candle"',
+    );
+  }
+
   if (failures.length > 0) {
     console.error("check-tier-integrity self-test FAILED:");
     for (const failure of failures) console.error(`  - ${failure}`);
@@ -888,7 +967,7 @@ async function selfTest() {
     return;
   }
   console.log(
-    `check-tier-integrity self-test passed (12 mutations, ${baseline.rows.length} declared exceptions, ` +
+    `check-tier-integrity self-test passed (14 mutations, ${baseline.rows.length} declared exceptions, ` +
       `${GRANDFATHERED_UNMEASURED.size} grandfathered pairs).`,
   );
 }

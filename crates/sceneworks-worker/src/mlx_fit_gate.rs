@@ -81,16 +81,19 @@ impl MlxRequestPlan {
     ) -> Self {
         let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
+        let declared_floors = declared_component_floors(engine_id);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
             quant: spec.quantize,
+            component_precision_floors: active_component_floors(declared_floors, spec.quantize),
         };
         let (tier, calibration) = match manifest {
             Some(manifest) => match MlxCalibrationBinding::from_manifest(manifest) {
                 Ok(Some(bindings)) => match resolved_artifact {
                     Some(resolved) => match resolved.fixed_artifact_tier.as_deref() {
                         Some(fixed_tier) => {
-                            match numeric_tier_for_resolved(fixed_tier, spec_tier) {
+                            match numeric_tier_for_resolved(fixed_tier, spec_tier, declared_floors)
+                            {
                                 Ok(tier) => (
                                     tier,
                                     MlxCalibrationConfig::Valid(MlxCalibrationSet {
@@ -227,6 +230,23 @@ impl MlxRequestPlan {
             0
         })
     }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    crate::inference_runtime::media_descriptor(engine_id)
+        .map(|descriptor| descriptor.capabilities.component_precision_floors)
+        .unwrap_or(&[])
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    // The platform-neutral worker build has no active media registry. Its fit-gate decision remains
+    // usable for pure contract tests, but there is no provider declaration to attach to the tier.
+    &[]
 }
 
 #[derive(Clone, Debug)]
@@ -411,27 +431,36 @@ impl MlxCalibrationBinding {
 fn numeric_tier_for_resolved(
     tier: &str,
     fallback: MemoryNumericTier,
+    declared_floors: &'static [gen_core::ComponentPrecisionFloor],
 ) -> Result<MemoryNumericTier, String> {
     let resolved = match tier {
         "q4" => MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: Some(gen_core::Quant::Q4),
+            component_precision_floors: active_component_floors(
+                declared_floors,
+                Some(gen_core::Quant::Q4),
+            ),
         },
         "q8" => MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: Some(gen_core::Quant::Q8),
+            component_precision_floors: &[],
         },
         "nvfp4" => MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: Some(gen_core::Quant::Nvfp4),
+            component_precision_floors: &[],
         },
         "bf16" => MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: None,
+            component_precision_floors: &[],
         },
         "fp32" => MemoryNumericTier {
             precision: gen_core::Precision::Fp32,
             quant: None,
+            component_precision_floors: &[],
         },
         other => return Err(format!("unsupported resolver-supplied MLX tier {other:?}")),
     };
@@ -441,6 +470,16 @@ fn numeric_tier_for_resolved(
         ));
     }
     Ok(resolved)
+}
+
+fn active_component_floors(
+    declared: &'static [gen_core::ComponentPrecisionFloor],
+    selected: Option<gen_core::Quant>,
+) -> &'static [gen_core::ComponentPrecisionFloor] {
+    match selected {
+        Some(selected) if declared.iter().any(|floor| floor.applies_to(selected)) => declared,
+        _ => &[],
+    }
 }
 
 fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
@@ -2331,6 +2370,7 @@ fn generic_mlx_shared_observation(
     let tier = MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: None,
+        component_precision_floors: &[],
     };
     let geometry = MemoryGeometry {
         width: 1,
@@ -2850,6 +2890,7 @@ mod tests {
             MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
             },
             "text_to_image",
             None,
@@ -2917,6 +2958,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
             },
             asset_bytes: gib_to_bytes(6.0),
             folded_control_bytes: 0,
@@ -2927,6 +2969,27 @@ mod tests {
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_q4_memory_identity_includes_descriptor_component_floors() {
+        let source = WeightsSource::Dir(std::path::PathBuf::from("/nonexistent/mage-fixture"));
+        let q4 = LoadSpec::new(source.clone()).with_quant(gen_core::Quant::Q4);
+        let q4_plan =
+            MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &q4, None, None);
+        let advertised = crate::inference_runtime::media_descriptor("mage_flow")
+            .unwrap()
+            .capabilities
+            .component_precision_floors;
+        assert_eq!(q4_plan.tier.component_precision_floors, advertised);
+        assert_eq!(advertised.len(), 2);
+
+        let q8 = LoadSpec::new(source).with_quant(gen_core::Quant::Q8);
+        let q8_plan =
+            MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &q8, None, None);
+        assert!(q8_plan.tier.component_precision_floors.is_empty());
+        assert_ne!(q4_plan.tier, q8_plan.tier);
     }
 
     fn mage_request_contract() -> MemoryProviderContract {
@@ -3084,6 +3147,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
             },
             asset_bytes: gib_to_bytes(3.0),
             folded_control_bytes: 0,
@@ -3188,6 +3252,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
             },
             asset_bytes: gib_to_bytes(30.0),
             folded_control_bytes: 0,
@@ -4720,6 +4785,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: None,
+                component_precision_floors: &[],
             },
             asset_bytes: 35_666_644_396,
             folded_control_bytes: 0,
@@ -4773,6 +4839,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: None,
+                component_precision_floors: &[],
             },
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,
@@ -4843,6 +4910,7 @@ mod tests {
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: None,
+                component_precision_floors: &[],
             },
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,

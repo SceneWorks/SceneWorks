@@ -587,6 +587,7 @@ fn run(request: &Value) -> Result<Value, String> {
         tier: MemoryNumericTier {
             precision: Precision::Bf16,
             quant: Some(Quant::Q4),
+            component_precision_floors: &[],
         },
     };
     let strategy = measured_strategy(

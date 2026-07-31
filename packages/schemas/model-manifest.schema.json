@@ -484,6 +484,23 @@
           "family": { "type": "string" },
           "adapter": { "type": "string" },
           "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "precisionFloors": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "x-sceneworks-contract": "binding",
+            "description": "Worker-visible component precision substitutions. A provider may not hold a packable component above the selected tier unless the matching descriptor and tier-integrity row declare the same floor.",
+            "items": {
+              "type": "object",
+              "required": ["component", "selectedTier", "residentTier"],
+              "additionalProperties": false,
+              "properties": {
+                "component": { "enum": ["textEncoder", "transformerHead"] },
+                "selectedTier": { "enum": ["q4", "q8"] },
+                "residentTier": { "enum": ["q8", "bf16"] }
+              }
+            }
+          },
           "recommended": { "type": "boolean" },
           "autoDownload": { "type": "boolean" },
           "macOnly": { "type": "boolean" },

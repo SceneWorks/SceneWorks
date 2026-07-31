@@ -250,8 +250,8 @@ Four things follow, and they are not negotiable individually:
    independently, so "this entry is q4" does not fix what any given component is resident at until the
    lane is named. SenseNova-U1's vision conv kernels and `fm_head` are bf16 under `mlx-gen-sensenova` but
    **f32** under `candle-gen-sensenova`, which widens every dense leaf it multiplies against an f32
-   activation; the `mage_flow*` `transformerHead` q8 floor exists only in `mlx-gen-mage`, so a q4 candle
-   render there really is uniformly q4. It follows that `residentTier` is a per-lane quantity, that the
+   activation. Mage-Flow is the convergence case: both providers now advertise and apply the same q8
+   text-encoder-layer and transformer-head floors on q4. It follows that `residentTier` is a per-lane quantity, that the
    ledger's row identity is **(model, component, backend lane)** rather than (model, component), and that
    a component whose lanes disagree is declared as one row per lane — declaring a single value would
    either over-declare one lane or under-declare the other, and under-declaring is the direction that
@@ -290,14 +290,18 @@ bf16, and unknown storage; unknown remains conservative. The shared
 `sc-16014-resolution: rehosted-q4-q8` marker binds this decision to the ledger checker, which rejects
 both a stale Lens text-encoder exception and one-sided edits to the fit-gate contract.
 
-Two mechanisms are load-bearing today. `mlx.denseTextEncoderTier` is the only way an entry obtains a
+Three mechanisms are load-bearing today. `mlx.denseTextEncoderTier` is the only way an entry obtains a
 dense text encoder on a packed tier, and setting it requires a matching ledger row — the hardcoded
 worker registry it used to mirror is deleted, because ids living in Rust while the catalog declared
 nothing is exactly the invisible carve-out this rule exists to remove. `candle.control.branchTierByBaseTier`
 declares the Krea pose-control branch's tier per base tier: q8 follows the tier, bf16 is already at
 tier, and **q4 floors its branch at q8** — the one declared, measured exception, because a q4 control
 residual measures "pose-locked; non-pose details drift" and the residual is the thing the user asked
-for. That floor is the rule working, not a hole in it.
+for. `precisionFloors` is the backend-neutral component map for provider-local substitutions such as
+Mage-Flow's q4 → q8 LM layers and transformer head. The active provider descriptor must match the
+manifest map; the worker uses it in effective asset labels and `MemoryNumericTier`, so a mixed q4/q8
+run cannot share a plain-q4 evidence identity. The checker separately requires matching measured
+ledger rows for every hosted backend. Those floors are the rule working, not holes in it.
 
 ### What tier integrity gives up
 

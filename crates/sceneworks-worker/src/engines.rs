@@ -35,9 +35,8 @@ pub(crate) struct ModelRow {
 }
 
 pub(crate) const MODEL_TABLE: &[ModelRow] = &[
-    // Mage-Flow's three published generation variants use complete flat diffusers snapshots.
-    // q4/q8/bf16 are selected by the request's load-time quantization, so the worker deliberately
-    // passes the snapshot root rather than descending into a standard-tier subdirectory.
+    // Mage-Flow's six physical tiers carry the variant-specific transformer; the shared text
+    // encoder and VAE are caller-staged from the manifest's per-tier co-requisites.
     ModelRow {
         sceneworks_id: "mage_flow_base",
         engine_id: "mage_flow_base",
@@ -1410,6 +1409,108 @@ mod tests {
                     Some((samplers, schedulers))
                 }),
             _ => None,
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn manifest_component_precision_floors_match_active_provider_descriptors() {
+        let manifest = parse_builtin_models();
+        for model in manifest["models"].as_array().expect("models array") {
+            let id = model["id"].as_str().expect("model id");
+            let manifest_floors = model
+                .get("precisionFloors")
+                .and_then(serde_json::Value::as_array);
+            let Some(active) = mlx_model(id) else {
+                assert!(
+                    manifest_floors.map_or(true, Vec::is_empty),
+                    "{id}: precisionFloors require an active provider descriptor"
+                );
+                continue;
+            };
+            let descriptor = active.descriptor;
+            let declared = manifest_floors
+                .into_iter()
+                .flatten()
+                .map(|floor| {
+                    (
+                        floor["component"].as_str().unwrap(),
+                        floor["selectedTier"].as_str().unwrap(),
+                        floor["residentTier"].as_str().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let advertised = descriptor
+                .capabilities
+                .component_precision_floors
+                .iter()
+                .map(|floor| {
+                    let tier = |quant| match quant {
+                        gen_core::Quant::Q4 => "q4",
+                        gen_core::Quant::Q8 => "q8",
+                        gen_core::Quant::Nvfp4 => "nvfp4",
+                    };
+                    (
+                        floor.component.as_str(),
+                        tier(floor.selected_tier),
+                        tier(floor.resident_tier),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                advertised, declared,
+                "{id}: provider/manifest precision-floor drift"
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mage_split_tiers_stage_every_provider_required_component() {
+        let manifest = parse_builtin_models();
+        for model in manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| model["family"] == "mage-flow")
+        {
+            let id = model["id"].as_str().expect("Mage model id");
+            let descriptor = mlx_model(id)
+                .unwrap_or_else(|| panic!("{id}: Mage requires an active provider descriptor"))
+                .descriptor;
+            let required = descriptor
+                .required_components
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                required,
+                std::collections::BTreeSet::from(["text_encoder", "vae"]),
+                "{id}: split layout must advertise both shared components"
+            );
+
+            for tier in ["q4", "q8", "bf16"] {
+                let staged = model["downloads"]
+                    .as_array()
+                    .expect("Mage downloads")
+                    .iter()
+                    .filter(|download| {
+                        download["coRequisite"].as_bool() == Some(true)
+                            && download["variant"].as_str() == Some(tier)
+                    })
+                    .filter_map(|download| download["componentId"].as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    staged, required,
+                    "{id}/{tier}: manifest co-requisites must cover the provider load contract"
+                );
+            }
         }
     }
 

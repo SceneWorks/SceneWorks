@@ -4,6 +4,7 @@ import {
   GENERATION_QUALITY_TIERS,
   allPossibleTiers,
   defaultTierSelection,
+  effectiveTierLabel,
   installedTiers,
   isBelowFloor,
   tierPickerOptions,
@@ -622,6 +623,21 @@ describe("tierPickerOptions — show all, disable the un-downloaded", () => {
       (o) => o.disabled && installedTiers(model).includes(o.tier),
     );
     expect(disabledInstalled).toEqual([]);
+  });
+
+  it("labels a component-floored tier as a mixed effective profile", () => {
+    const model = matrixModel({ installed: ["q4"] });
+    model.precisionFloors = [
+      { component: "textEncoder", selectedTier: "q4", residentTier: "q8" },
+      { component: "transformerHead", selectedTier: "q4", residentTier: "q8" },
+    ];
+    expect(effectiveTierLabel("q4", model)).toBe(
+      "Q4 (smallest) — text encoder layers + transformer head at Q8",
+    );
+    expect(tierPickerOptions(model).find((option) => option.tier === "q4")?.label).not.toBe(
+      "Q4 (smallest)",
+    );
+    expect(effectiveTierLabel("q8", model)).toBe("Q8 (balanced)");
   });
 });
 

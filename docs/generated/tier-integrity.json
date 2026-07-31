@@ -684,15 +684,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry: it routes through the same MageTransformer, and `floor_bits` takes no model argument. Declared per entry because the DiT artifact is per entry, unlike the shared text encoder.",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through the same q4 → q8 declaration.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow",
@@ -741,15 +742,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "An 8-bit floor on the DiT's `norm_out.linear` (the final modulation projection), which q4 cannot serve without visible degradation — a uniformly-Q4 head is what made the Q4 tier render a repeating tiled texture (sc-15071).",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\". The manifest's per-tier DiT footprints record q4 2.317 → 2.326 GB.",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through that descriptor-visible q4 → q8 declaration. The MLX measurement records 18.9 MB at Q8 against 10.6 MB at Q4; the manifest footprints record the 0.009 GB delta.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow_base",
@@ -798,15 +800,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry.",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through the same q4 → q8 declaration.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow_edit",
@@ -855,15 +858,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry — the edit DiT is packed by the same seam.",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through the same q4 → q8 declaration.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow_edit_base",
@@ -912,15 +916,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry.",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through the same q4 → q8 declaration.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow_edit_turbo",
@@ -969,15 +974,16 @@
         "q4"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The same unconditional 8-bit `norm_out.linear` floor as the base entry — the distilled DiT is packed by the same seam.",
       "evidenceState": "measured",
       "costGb": 0.009,
-      "source": "crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as \"Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4\".",
+      "source": "mlx-gen-mage/src/quant.rs and candle-gen-mage/src/quant.rs `COMPONENT_PRECISION_FLOORS`; both final-head load seams resolve through the same q4 → q8 declaration.",
       "owedBy": null,
-      "note": "MLX LANE ONLY, and that is not an oversight: candle-gen-mage has no floor symbol at all — its transformer.rs passes the requested `quant` straight through to `final_mod` — so on the candle lane a q4 render really is uniformly q4 here. That asymmetry is a separate finding from this ledger's scope; SC-16025 owns the label reconciliation and should carry it."
+      "note": null
     },
     {
       "model": "mage_flow_turbo",
