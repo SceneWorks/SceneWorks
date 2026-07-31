@@ -148,7 +148,7 @@ the layout AUTOMATIC1111's WebUI popularised (sc-15957):
 ```
 <prompt>
 Negative prompt: <negative>
-Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <producer.version>
+Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <producer.version>, software: SceneWorks
 ```
 
 Civitai and most galleries and viewers parse that block. They **display** generation settings; they
@@ -193,6 +193,7 @@ anything without a clean equivalent is **left out rather than approximated**.
 | `Model` | `model`, the safe readable catalog slug, verbatim. |
 | `Model hash` | `modelHash`, only when the worker retained the exact SHA-256 of the imported checkpoint that the resolved route executed. Civitai uses it with `Model` to link the precise model version and author. |
 | `Version` | `producer.version` off the envelope's own producer block. |
+| `software` | `producer.name` from the trusted producer block. Civitai displays this canonical lowercase field as the generating-software badge. |
 
 <!-- END PINNED: a1111-fields -->
 
@@ -206,9 +207,9 @@ reader in the wild.
 fewer than three `Key: value` pairs back into the *prompt*, and every gallery modelled on it does the
 same — so a two-pair line is not a thin settings block, it is a wrong prompt. `SETTINGS_PAIR_FLOOR`
 in `workflow_parameters.rs` drops the line rather than emitting one below the threshold. Every
-shipping lane clears it unaided; the thinnest, a standalone upscale, emits exactly
-`Seed` + `Model` + `Version` and clears it by nothing at all, which is why the floor is a guard
-rather than an observation.
+shipping lane clears it unaided; the thinnest, a standalone upscale, emits
+`Seed` + `Model` + `Version` + `software`, one field above the floor. The floor remains a guard
+rather than an observation because malformed foreign producer/model labels can still be reduced.
 
 What is deliberately **not** in the trailer, and why: the multi-phase Krea schedule (a list of
 `(steps, guidance)` pairs has no single-number form — and its presence suppresses `Steps` and `CFG

@@ -139,6 +139,11 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
         "`producer.version` off the envelope's own producer block, so the two chunks in one file \
          cannot disagree about which build wrote it.",
     ),
+    (
+        "software",
+        "`producer.name` from the trusted envelope producer block. Civitai displays this canonical \
+         lowercase field as the generating-software badge.",
+    ),
 ];
 
 /// Render `share` as the A1111 `parameters` text for an image encoded at `encoded` pixels.
@@ -146,7 +151,7 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
 /// ```text
 /// <prompt>
 /// Negative prompt: <negative>
-/// Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <version>
+/// Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <version>, software: SceneWorks
 /// ```
 ///
 /// The prompt is always the first line, even when it is empty, because the layout is positional:
@@ -181,8 +186,8 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
 /// * **A settings line of fewer than three pairs is prompt text to A1111's parser.** Inherited, but
 ///   not left to chance: [`SETTINGS_PAIR_FLOOR`] omits the line entirely rather than emitting one a
 ///   gallery would append to the prompt. Every shipping lane clears the floor on its own — the
-///   thinnest, a standalone upscale, emits exactly `Seed` + `Model` + `Version` with no margin —
-///   and `the_settings_line_clears_the_pair_floor_a_gallery_parses_with` in
+///   thinnest, a standalone upscale, emits `Seed` + `Model` + `Version` + `software`, one field
+///   above the floor — and `the_settings_line_clears_the_pair_floor_a_gallery_parses_with` in
 ///   `crates/sceneworks-core/tests/workflow_parameters.rs` pins the lane SHAPES rather than assuming
 ///   a well-populated one.
 ///
@@ -264,6 +269,9 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     // therefore omits the field rather than substituting this build's.
     if !share.producer.version.is_empty() {
         push("Version", share.producer.version.clone());
+    }
+    if !share.producer.name.is_empty() {
+        push("software", share.producer.name.clone());
     }
 
     // Below the floor the line is not a settings line to anything that reads this chunk — it is a
@@ -377,7 +385,7 @@ mod tests {
             "a lighthouse in heavy fog\n\
              Negative prompt: text, watermark\n\
              Steps: 28, Sampler: euler, CFG scale: 3.5, Seed: 880412, Size: 1024x768, \
-             Model: z_image_turbo, Version: 0.8.1"
+             Model: z_image_turbo, Version: 0.8.1, software: SceneWorks"
         );
     }
 
@@ -389,7 +397,7 @@ mod tests {
         assert!(!text.contains(NEGATIVE_PROMPT_LABEL), "{text:?}");
         assert_eq!(
             text,
-            "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1"
+            "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1, software: SceneWorks"
         );
     }
 
@@ -509,32 +517,28 @@ mod tests {
     fn the_version_is_the_envelopes_own_producer_version() {
         // The AC: the two chunks cannot disagree about which build wrote the file.
         //
-        // Carries a seed so the line clears `SETTINGS_PAIR_FLOOR` — without one this envelope emits
-        // Model + Version and the floor guard withholds the whole line, which is the right answer
-        // and the wrong fixture for this question.
+        // Carries a seed so this also proves the version remains the envelope's value when ordinary
+        // numeric settings share the same gallery-readable line.
         let share = envelope(serde_json::json!({ "seed": 7 }));
         assert_eq!(share.producer.version, "0.8.1");
-        assert!(parameters_text(&share, (1, 1)).ends_with("Version: 0.8.1"));
+        assert!(parameters_text(&share, (1, 1)).contains("Version: 0.8.1, software: SceneWorks"));
     }
 
     #[test]
-    fn a_line_under_the_pair_floor_is_withheld_rather_than_emitted() {
-        // The cliff, and which way it falls. This envelope maps two fields exactly — Model and
-        // Version — and two pairs is PROMPT to every parser this chunk is written for. Emitting them
-        // would not give a reader a thin settings block, it would give them a wrong prompt.
-        let two = envelope(serde_json::json!({}));
+    fn the_resource_line_meets_the_pair_floor_without_numeric_settings() {
+        // Model + Version + software is exactly A1111's three-pair recognition floor. A sparse
+        // recipe can therefore identify its model and generator without becoming prompt text.
+        let resources = envelope(serde_json::json!({}));
         assert_eq!(
-            parameters_text(&two, (1, 1)),
-            "a lighthouse in heavy fog",
-            "a sub-floor line must be withheld whole, leaving the prompt correct"
+            parameters_text(&resources, (1, 1)),
+            "a lighthouse in heavy fog\nModel: z_image_turbo, Version: 0.8.1, software: SceneWorks"
         );
 
-        // One more mapped field and the line is legible, so it travels. The guard is a floor, not a
-        // preference for silence.
-        let three = envelope(serde_json::json!({ "seed": 7 }));
+        // Additional exact fields join the same line; the guard remains a floor, not a ceiling.
+        let with_seed = envelope(serde_json::json!({ "seed": 7 }));
         assert_eq!(
-            parameters_text(&three, (1, 1)),
-            "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1"
+            parameters_text(&with_seed, (1, 1)),
+            "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1, software: SceneWorks"
         );
         assert_eq!(SETTINGS_PAIR_FLOOR, 3, "A1111's threshold, not ours");
     }

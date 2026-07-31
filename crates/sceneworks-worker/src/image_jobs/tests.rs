@@ -737,6 +737,8 @@ fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires(
         "mode": "text_to_image",
         "model": "kreamania_v5",
         "prompt": "An expressive impasto oil painting of deep crimson roses",
+        "software": "Forged Generator",
+        "producer": { "name": "Forged Producer" },
         "count": 2,
         "width": 1024,
         "height": 1024,
@@ -784,6 +786,11 @@ fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires(
     let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (1024, 1024));
     assert!(parameters.contains("Steps: 8"), "{parameters:?}");
     assert!(parameters.contains("Sampler: euler"), "{parameters:?}");
+    assert!(
+        parameters.contains("software: SceneWorks"),
+        "{parameters:?}"
+    );
+    assert!(!parameters.contains("Forged"), "{parameters:?}");
     assert!(!parameters.contains("Steps: Unknown"), "{parameters:?}");
     assert_eq!(
         parameters
@@ -807,6 +814,12 @@ fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires(
             .windows(b"Sampler: euler".len())
             .any(|window| window == b"Sampler: euler"),
         "the actual sampler must reach the physical PNG parameters chunk"
+    );
+    assert!(
+        bytes
+            .windows(b"software: SceneWorks".len())
+            .any(|window| window == b"software: SceneWorks"),
+        "the trusted producer name must reach the physical PNG parameters chunk"
     );
 }
 
