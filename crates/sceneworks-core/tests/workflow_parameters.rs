@@ -107,6 +107,21 @@ fn parse_a1111(text: &str) -> Parsed {
     }
 }
 
+/// Civitai first requires a `Steps: ` marker, then validates the mapped `steps` field as a number.
+/// Both boundaries matter: a non-numeric placeholder passes format selection but makes Civitai's
+/// `imageMetaSchema.safeParse` discard the entire metadata object.
+///
+/// Source inspected 2026-07-31:
+/// https://github.com/civitai/civitai/blob/main/src/utils/metadata/automatic.metadata.ts
+fn civitai_accepts_automatic_metadata(text: &str) -> bool {
+    text.contains("Steps: ")
+        && parse_a1111(text)
+            .params
+            .get("Steps")
+            .and_then(|value| value.parse::<f64>().ok())
+            .is_some_and(f64::is_finite)
+}
+
 fn push_line(buffer: &mut String, line: &str) {
     if !buffer.is_empty() {
         buffer.push('\n');
@@ -409,6 +424,37 @@ fn a_generated_png_round_trips_through_a_gallery_parser() {
         contains(&bytes, WORKFLOW_CHUNK_KEYWORD.as_bytes()),
         "the envelope chunk must ride alongside"
     );
+}
+
+#[test]
+fn a_generated_kreamania_png_with_resolved_steps_is_recognized_by_civitai() {
+    // The worker regression covers the original missing-input field and copies the actually executed
+    // count into the sanitized envelope. This is the downstream PNG/parser half: the numeric count
+    // must survive both Civitai's format-selection marker and numeric schema validation.
+    let mut share = built(
+        "an expressive impasto oil painting of deep space",
+        "",
+        json!({
+            "model": "kreamania_v5",
+            "width": 1024,
+            "height": 1024,
+            "advanced": { "resolution": "1k", "steps": 8 }
+        }),
+    );
+    share.seed = Some(3_502_903_515);
+    let (_path, bytes, _dir) = embedded_png(&share, (1024, 1024));
+    let chunk = parameters_chunk_of(&bytes);
+
+    assert!(
+        civitai_accepts_automatic_metadata(&chunk.text),
+        "Civitai must accept the marker and the numeric schema value: {:?}",
+        chunk.text
+    );
+    let parsed = parse_a1111(&chunk.text);
+    assert_eq!(parsed.params["Steps"], "8");
+    assert_eq!(parsed.params["Seed"], "3502903515");
+    assert_eq!(parsed.params["Size"], "1024x1024");
+    assert_eq!(parsed.params["Model"], "kreamania_v5");
 }
 
 #[test]
