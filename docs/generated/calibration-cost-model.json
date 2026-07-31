@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:bb811069dce803f5cb6097af607666a9736a269a2d904a0de4a121e939dade28",
-    "matrixRevision": "source-tree:991a713aa140dc71f558eca17862f15638d4ce9dbe160901c15314dd031351ad",
+    "sceneWorksRevision": "source-tree:a6b20a30dd1b5b93b186190baa2b1dbc249f99df23498b86bee82e07ef2bde5a",
+    "matrixRevision": "source-tree:7abf6f3ebf3638a0153266dd58fa347bc9bc281dd8ff50b9d3c63e7fd25f7bd1",
     "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "1c212e11da560f1ceac21c98f070d80268ca03e9c46200dbbd304fa761a5cbb4"
+        "sha256": "d367a9dc877f9721f869d74bd0c176e578e6829a04c8fb33325b651cc212843a"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -1170,8 +1170,8 @@
     },
     {
       "input": "perRunSeconds",
-      "why": "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The only measured anchor covers a VAE decode seam producing `gated` records, so it does not bound a `complete` record from below in any useful way.",
-      "howToResolve": "NOT by 'capturing one `complete` record', which is how this was previously phrased. That is the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker string still lists predicted phase curves, bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is gated on the two code uncertainties above and cannot be scheduled ahead of them. THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX adapter, which already executes 8 real provider invocations today. That needs no new measurement campaign and no `complete` record — it converts an existing green CI step into a per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of a `complete` record that are already implemented. Do that first; treat the end-to-end `complete` record as the thing being scheduled, not the thing that unblocks scheduling."
+      "why": "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The current artifact has 2 complete record(s) and 60 producible cell(s), but the records do not carry per-scenario duration telemetry, so they do not narrow that multiplier yet.",
+      "howToResolve": "Add per-scenario timing instrumentation to the now-complete Krea MLX adapter path and retain the exact geometry/strategy identity on every duration. This reuses an already-green real campaign instead of extrapolating one end-to-end duration across unrelated providers, and it narrows the 40x sweep without inventing timing for still-gated pairs."
     },
     {
       "gate": "adapter-gated",

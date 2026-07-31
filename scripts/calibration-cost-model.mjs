@@ -606,9 +606,10 @@ export function producibility(
     headline:
       producible === 0
         ? "ZERO cells are producible today. The binding constraint on this epic is provider-adapter " +
-          "code, not GPU hours: no adapter has ever emitted a `complete` record, and 2 of 53 " +
-          "entries have an adapter at all. Every hour in the wall-clock sweep below is hypothetical " +
-          "until that changes."
+          `code, not GPU hours: ${complete.size} provider pair(s) have emitted a ` +
+          `\`complete\` record, while ${adapters.size} provider pair(s) have an adapter at all. ` +
+          "Every hour in the wall-clock sweep below is hypothetical until the remaining code gates " +
+          "change."
         : `${producible} of ${total} cells could be certified by a run started right now.`,
   };
 }
@@ -1227,7 +1228,10 @@ export function kreaFitPrecedent(manifestJson) {
  * count; it is placed directly after the top code gate because it scales everything the code gates
  * unlock.
  */
-export function rankUncertainties(prod) {
+export function rankUncertainties(
+  prod,
+  { completeRecords = 0, adapterModelCount = 0, catalogEntryCount = 0 } = {},
+) {
   const blocking = Object.fromEntries(prod.independentBlocking.map((entry) => [entry.id, entry]));
   const ranking = prod.blockerRanking;
   const partitionTotal = prod.partition.reduce((sum, entry) => sum + entry.cells, 0);
@@ -1244,7 +1248,8 @@ export function rankUncertainties(prod) {
         `This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with ` +
         `${blocking["no-provider-adapter"]?.soleBlockerCells ?? 0} cells and it touches ` +
         `${blocking["no-provider-adapter"]?.cellsTouched ?? 0} — ${ranking.overlayAlsoBlockedByAdapterCoverage} ` +
-        "of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter " +
+        `of them jointly with the overlay gap. Only ${adapterModelCount} of ${catalogEntryCount} ` +
+        "catalog entries have a provider adapter " +
         "at all, so most of the matrix cannot be measured by any code that exists, for any overlay. " +
         "Charge this gate before overlay and it accounts for " +
         `${prod.gateOrderSensitivity.adapterCoverageFirst["no-provider-adapter"] ?? 0} cells.`,
@@ -1310,26 +1315,14 @@ export function rankUncertainties(prod) {
     input: "perRunSeconds",
     why:
       "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The " +
-      "only measured anchor covers a VAE decode seam producing `gated` records, so it does not " +
-      "bound a `complete` record from below in any useful way.",
-    // MAJOR correction: the previous text said "capture one `complete` record end to end on either
-    // backend and time it. One run collapses this uncertainty entirely." That contradicts section 0
-    // of this same document, which establishes that ZERO cells are producible and no adapter has
-    // ever emitted a `complete` record. Presenting it as one cheap run mis-prices the epic's single
-    // most expensive item.
+      `current artifact has ${completeRecords} complete record(s) and ${prod.producibleToday} ` +
+      "producible cell(s), but the records do not carry per-scenario duration telemetry, so they " +
+      "do not narrow that multiplier yet.",
     howToResolve:
-      "NOT by 'capturing one `complete` record', which is how this was previously phrased. That is " +
-      "the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever " +
-      "emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker " +
-      "string still lists predicted phase curves, bounded-output tolerance approval, " +
-      "exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is " +
-      "gated on the two code uncertainties above and cannot be scheduled ahead of them. " +
-      "THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX " +
-      "adapter, which already executes 8 real provider invocations today. That needs no new " +
-      "measurement campaign and no `complete` record — it converts an existing green CI step into a " +
-      "per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of " +
-      "a `complete` record that are already implemented. Do that first; treat the end-to-end " +
-      "`complete` record as the thing being scheduled, not the thing that unblocks scheduling.",
+      "Add per-scenario timing instrumentation to the now-complete Krea MLX adapter path and retain " +
+      "the exact geometry/strategy identity on every duration. This reuses an already-green real " +
+      "campaign instead of extrapolating one end-to-end duration across unrelated providers, and " +
+      "it narrows the 40x sweep without inventing timing for still-gated pairs.",
   };
 
   return [
@@ -1562,7 +1555,11 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
       sensitivity: fitSensitivity(cells),
     },
     parameters: DEFAULT_PARAMETERS,
-    biggestUncertainties: rankUncertainties(producible),
+    biggestUncertainties: rankUncertainties(producible, {
+      completeRecords: completedBaseline.completeRecords,
+      adapterModelCount: new Set(plan.providers.map((provider) => provider.target.modelId)).size,
+      catalogEntryCount: new Set(cells.map((cell) => cell.modelId)).size,
+    }),
   };
 
   return model;

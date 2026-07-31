@@ -865,13 +865,15 @@ fn evidence_admission_route(
             lower_alternative: None,
         });
     }
+    let lower_alternative =
+        verified_lower_alternative(bundle, calibration, plan, inputs, mode_key, budget);
     Ok(AdmissionRoute {
         path: AdmissionPath::Evidence,
         fallback_reason: None,
         evidence,
         evidence_revision: None,
         process_limit_bytes: None,
-        lower_alternative: None,
+        lower_alternative,
     })
 }
 
@@ -948,6 +950,7 @@ fn verified_lower_alternative(
         })
 }
 
+#[cfg(test)]
 fn verified_lower_geometry(
     bundle: &EvidenceBundle,
     calibration: &MlxCalibrationSet,
@@ -1180,18 +1183,13 @@ fn evaluate_request_with_budget_using_bundle(
                 .map(|candidate| candidate.required_host_bytes)
                 .min()
                 .unwrap_or(0);
-            let alternative = evidence_bundle
-                .zip(match &plan.calibration {
-                    MlxCalibrationConfig::Valid(calibration) => Some(calibration),
-                    _ => None,
-                })
-                .and_then(|(bundle, calibration)| {
-                    verified_lower_geometry(bundle, calibration, plan, inputs, mode_key, budget)
-                })
-                .map(|geometry| {
+            let alternative = admission
+                .lower_alternative
+                .as_ref()
+                .map(|alternative| {
                     format!(
                         "; current verified alternative: {}x{}",
-                        geometry.width, geometry.height
+                        alternative.geometry.width, alternative.geometry.height
                     )
                 })
                 .unwrap_or_default();
@@ -3281,6 +3279,27 @@ mod tests {
                 "the largest exact current cell that fits {budget_gib} GiB must be named: {message}"
             );
         }
+
+        let mut exact_896 = inputs.clone();
+        exact_896.width = 896;
+        exact_896.height = 896;
+        let message = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &exact_896,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(83.0),
+            gib_to_bytes(130.0),
+            0,
+            &[],
+        )
+        .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
+        .to_string();
+        assert!(
+            message.contains("current verified alternative: 768x768"),
+            "a packaged exact-cell refusal must retain its fitting lower record: {message}"
+        );
 
         let mut mismatched = packaged_krea_generator();
         mismatched
