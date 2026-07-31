@@ -348,6 +348,163 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(checkbox("Restore face").checked).toBe(true);
   });
 
+  it("replays shared pose records through the visible strict-pose picker and exact submit path", async () => {
+    seedOpenDisclosures({ model: OTHER_MODEL.id, controlMode: "depth", count: 7 });
+    const createImageJob = vi.fn(async () => ({ id: "job-pose-replay" }));
+    const recipe = everyKnobRecipe({
+      poses: [
+        {
+          keypoints: [[0.1, 0.2, 0.9]],
+          hands: [[[0.3, 0.4]]],
+          face: [[0.5, 0.6]],
+        },
+        { keypoints: [[0.7, 0.8]] },
+      ],
+    });
+    delete recipe.rawAdapterSettings.controlMode;
+    const studioLaunch = launch(recipe, { id: "shared-launch" });
+
+    await render(baseContext({ createImageJob, studioLaunch }));
+
+    // The launch switches models, but the model-default reset must not erase its selection.
+    expect(modelSelect().value).toBe(EVERY_LANE.id);
+    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(activeControlModeLabel()).toBe("Pose");
+    expect(document.body.querySelector(".pose-category-name").textContent).toBe("Shared workflow");
+    expect(document.body.querySelectorAll(".pose-thumb-placeholder")).toHaveLength(2);
+    expect(document.body.textContent).toContain("2 poses selected");
+
+    // Duplicates are independent records; removing the second leaves exactly the first payload.
+    await click(document.body.querySelector('[aria-label="Deselect pose Shared workflow pose 2"]'));
+    expect(document.body.textContent).toContain("1 pose selected");
+    await click(buttonByText("Generate"));
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.count).toBe(1);
+    expect(payload.advanced.faceRestore).toBe(true);
+    expect(payload.advanced).not.toHaveProperty("controlMode");
+    expect(payload.advanced.poses).toEqual([
+      {
+        id: "workflow:shared-launch:0",
+        keypoints: [[0.1, 0.2, 0.9]],
+        hands: [[[0.3, 0.4]]],
+        face: [[0.5, 0.6]],
+      },
+    ]);
+
+    // A subsequent user model change owns a safe reset; transient records do not leak globally.
+    await act(async () => {
+      modelSelect().value = OTHER_MODEL.id;
+      modelSelect().dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {});
+    expect(document.body.querySelector(".pose-thumb-placeholder")).toBeNull();
+  });
+
+  it("clears a prior shared-pose launch when the next recipe omits advanced.poses", async () => {
+    const first = everyKnobRecipe({ poses: [{ keypoints: [[1, 2]] }] });
+    await render(baseContext({ studioLaunch: launch(first, { id: "with-poses" }) }));
+    expect(document.body.querySelector(".pose-thumb-placeholder")).not.toBeNull();
+
+    const second = everyKnobRecipe();
+    const context = baseContext({ studioLaunch: launch(second, { id: "without-poses" }) });
+    await render(context);
+    expect(document.body.querySelector(".pose-thumb-placeholder")).toBeNull();
+  });
+
+  it("clears shared poses and face restoration at a same-model non-recipe launch boundary", async () => {
+    const reference = {
+      id: "asset_boundary_face",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Boundary face",
+      status: {},
+      file: { path: "assets/images/boundary.png", mimeType: "image/png" },
+    };
+    const character = {
+      id: "char_boundary",
+      name: "Boundary",
+      looks: [],
+      approvedReferences: [{ assetId: reference.id, asset: reference }],
+    };
+    const poseModel = {
+      ...EVERY_LANE,
+      capabilities: ["text_to_image", "character_image"],
+      ui: { ...EVERY_LANE.ui, poseLibrary: true },
+    };
+    const recipe = everyKnobRecipe({
+      poses: [{ keypoints: [[0.2, 0.8]] }],
+      faceRestore: true,
+    });
+    recipe.mode = "character_image";
+    recipe.normalizedSettings = {
+      ...recipe.normalizedSettings,
+      characterId: character.id,
+    };
+    recipe.rawAdapterSettings.referenceAssetId = reference.id;
+    const createImageJob = vi.fn(async () => ({ id: "job-boundary" }));
+    const common = {
+      assets: [reference],
+      characters: [character],
+      createImageJob,
+      imageModels: [poseModel],
+      models: [poseModel, PID_CHECKPOINT],
+    };
+
+    await render(
+      baseContext({
+        ...common,
+        studioLaunch: launch(recipe, { id: "recipe-boundary" }),
+      }),
+    );
+    expect(document.body.querySelector(".pose-thumb-placeholder")).not.toBeNull();
+    expect(checkbox("Restore face").checked).toBe(true);
+
+    const characterLaunch = {
+      id: "character-boundary",
+      view: "Image",
+      mode: "character_image",
+      characterId: character.id,
+      referenceAssetId: reference.id,
+    };
+    await render(baseContext({ ...common, studioLaunch: characterLaunch }));
+
+    expect(document.body.querySelector(".pose-thumb-placeholder")).toBeNull();
+    expect(document.body.textContent).not.toContain("pose selected");
+    expect(checkbox("Restore face").checked).toBe(false);
+
+    // Re-rendering the same launch with a new context object is not a new boundary. A choice the
+    // user makes inside that launch must persist until a genuinely new launch id arrives.
+    await click(checkbox("Restore face"));
+    expect(checkbox("Restore face").checked).toBe(true);
+    await render(baseContext({ ...common, studioLaunch: { ...characterLaunch } }));
+    expect(checkbox("Restore face").checked).toBe(true);
+
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.advanced).not.toHaveProperty("poses");
+    expect(payload.advanced).not.toHaveProperty("faceRestore");
+  });
+
+  it("consumes no reset skip for a same-model recipe before a later manual model switch", async () => {
+    seedOpenDisclosures({ model: EVERY_LANE.id, controlMode: "pose" });
+    const recipe = everyKnobRecipe({ poses: [{ keypoints: [[0.4, 0.6]] }] });
+    await render(baseContext({ studioLaunch: launch(recipe, { id: "same-model-poses" }) }));
+
+    expect(document.body.querySelector(".pose-thumb-placeholder")).not.toBeNull();
+    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => {
+      modelSelect().value = OTHER_MODEL.id;
+      modelSelect().dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(document.body.querySelector(".pose-thumb-placeholder")).toBeNull();
+    expect(document.body.textContent).not.toContain("pose selected");
+    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("false");
+  });
+
   // Multi-phase denoise. A 3-phase schedule replaying as a single pass is a DIFFERENT image, not a
   // degraded one, so the schedule has to survive — including the `loras[].index` -> resolved-id
   // remap, which is the only genuinely new code on this path.

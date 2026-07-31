@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { PoseLibraryPicker } from "./PoseLibraryPicker.jsx";
 import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { ControlOverlayPicker } from "./ControlOverlayPicker.jsx";
@@ -35,6 +35,10 @@ export function ControlPanel({
   onTogglePose,
   onClearPoses,
   loadUserPoses,
+  extraPoses,
+  preferredPoseCategory,
+  revealPoseLibraryToken,
+  poseReplayOpen,
   poseBlockText,
   // Trained ControlNet overlay selection (sc-10165 B4). `controlOverlayBaseModel` is the backbone id
   // whose pose control rides a REGISTERED overlay (e.g. `krea_2_turbo`); `null` for the Fun-Union
@@ -63,6 +67,13 @@ export function ControlPanel({
   // the bespoke `.control-panel-toggle` header it used to draw is gone). Local-only state, matching
   // Advanced, which doesn't persist either.
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (revealPoseLibraryToken) {
+      setOpen(true);
+    } else if (poseReplayOpen === false) {
+      setOpen(false);
+    }
+  }, [revealPoseLibraryToken, poseReplayOpen]);
   if (!modes.length) {
     return null;
   }
@@ -117,10 +128,12 @@ export function ControlPanel({
             ) : null}
             <PoseLibraryPicker
               categoryFilter
+              extraPoses={extraPoses}
               loadUserPoses={loadUserPoses}
               onClear={onClearPoses}
               onToggle={onTogglePose}
               selectedIds={selectedPoseIds}
+              preferredCategory={preferredPoseCategory}
             />
             <p className="muted">
               Selecting poses generates one image per pose (overrides

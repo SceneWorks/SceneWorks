@@ -2982,6 +2982,7 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    macCapabilities,
     catalogRevision,
     failedInstallJobIds,
     installModel: createModelDownloadJob,

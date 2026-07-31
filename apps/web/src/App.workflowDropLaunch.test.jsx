@@ -26,7 +26,7 @@ const MODEL = {
   defaults: { resolution: "1024x1024" },
   limits: { resolutions: ["1024x1024"] },
   loraCompatibility: {},
-  ui: {},
+  ui: { controlModes: ["pose"] },
 };
 
 const INSPECT_BODY = {
@@ -43,7 +43,7 @@ const INSPECT_BODY = {
     width: 1024,
     height: 1024,
     count: 1,
-    advanced: { steps: 28 },
+    advanced: { steps: 28, poses: [{ keypoints: [[0.25, 0.75]], face: [[0.5, 0.5]] }] },
   },
   resolution: {
     model: {
@@ -161,6 +161,8 @@ describe("App — a dropped workflow launches from either shell", () => {
       node.value.includes("a lighthouse in heavy fog"),
     );
     expect(prompt).toBeTruthy();
+    expect(document.body.querySelector('[aria-label="Deselect pose Shared workflow pose 1"]')).toBeTruthy();
+    expect(document.body.querySelector(".pose-thumb-placeholder")).toBeTruthy();
     expect(document.body.querySelector(".workflow-drop-modal")).toBeNull();
   });
 

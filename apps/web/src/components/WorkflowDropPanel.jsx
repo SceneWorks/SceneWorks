@@ -60,15 +60,32 @@ export function WorkflowDropPanel({
   // The project's images, offered by the input pickers.
   assets = [],
 }) {
+  // `poseReplayIssue` is the live-catalog result. Keep the older missing-model inputs coherent for
+  // direct callers: before this field existed they expressed the same blocked state as required +
+  // no substitute + detail.
+  const poseReplayIssue =
+    missing.poseReplayIssue ??
+    (missing.poseSubstituteRequired && !missing.substituteModelId
+      ? (missing.poseSubstituteDetail ?? "")
+      : "");
   // Hooks run before the early returns below can skip them — a `return null` above a `useMemo` is
   // the hook-order violation React refuses at runtime.
   const draft = React.useMemo(
     () => ({
       report: offer?.share ? (offer.report ?? null) : null,
       substituteModelId: missing.substituteModelId ?? "",
+      substituteModelIssue: missing.poseSubstituteDetail ?? "",
+      poseReplayIssue,
       inputPicks: missing.inputPicks ?? {},
     }),
-    [offer?.share, offer?.report, missing.substituteModelId, missing.inputPicks],
+    [
+      offer?.share,
+      offer?.report,
+      missing.substituteModelId,
+      missing.poseSubstituteDetail,
+      poseReplayIssue,
+      missing.inputPicks,
+    ],
   );
   const validity = useValidation(workflowReplayValidation, draft, undefined);
   if (!offer) {
@@ -96,7 +113,15 @@ export function WorkflowDropPanel({
   }
 
   const resolutionLabel = workflowResolutionLabel(share);
-  const settings = workflowSettingRows(share, report);
+  const settings = workflowSettingRows(share, report).map((row) =>
+    row.key === "poses" && poseReplayIssue
+      ? {
+          ...row,
+          restored: false,
+          detail: poseReplayIssue,
+        }
+      : row,
+  );
   const batchCount = Number(share.count);
   const producer = share.producer ?? {};
   // A model this install cannot resolve is NOT prefilled — the studio keeps the model it is
@@ -160,7 +185,22 @@ export function WorkflowDropPanel({
         </div>
       ) : null}
 
-      <WorkflowResolutionReport report={report} share={share} />
+      <WorkflowResolutionReport
+        replayNotRestored={
+          poseReplayIssue
+            ? [
+                {
+                  kind: "advanced",
+                  key: "poses",
+                  title: "Setting — Poses",
+                  detail: poseReplayIssue,
+                },
+              ]
+            : []
+        }
+        report={report}
+        share={share}
+      />
 
       {/* The repairs, when there are any. Renders NOTHING for a fully-resolvable recipe with no
           input images — no empty container, no zero-state line — so a working case looks exactly
@@ -174,6 +214,8 @@ export function WorkflowDropPanel({
         onInstall={missing.onInstall}
         onPickInput={missing.onPickInput}
         onSubstituteModel={missing.onSubstituteModel}
+        poseSubstituteDetail={missing.poseSubstituteDetail}
+        poseSubstituteRequired={missing.poseSubstituteRequired}
         report={report}
         substituteModelId={missing.substituteModelId}
       />

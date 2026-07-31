@@ -4532,6 +4532,20 @@ label {
   border-radius: var(--r-sm);
 }
 
+.pose-thumb-placeholder {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  place-items: center;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
+}
+
 .pose-thumb-label {
   font-size: 10px;
   line-height: 1.2;

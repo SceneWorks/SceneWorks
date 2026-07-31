@@ -3,8 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAssetWorkflow, inspectWorkflowFile, isAbortError } from "../api.js";
 import {
   keptSubstituteModelId,
+  workflowPoseReplayCapability,
   pickedReferenceAssetIds,
   pickedSourceAssetId,
+  workflowHasPoseSelection,
+  workflowSubstituteModels,
 } from "../workflowReplayValidation.js";
 import {
   looksLikeWorkflowCandidate,
@@ -86,6 +89,8 @@ export function useWorkflowDrop({
   // sc-15952. The installed models the studio would actually offer, so a substitute the user picked
   // is re-checked against the live list on every render rather than trusted once at pick time.
   models = [],
+  // The same live Mac/MLX gate Image Studio applies to its model picker and pose controls.
+  macCapabilities = null,
   // A cheap identity for "what this install has on disk", derived by App from the model and LoRA
   // catalogs. It changes when a download completes, because `useJobEvents` refetches both catalogs
   // on a completed `model_download` / `lora_download` — so re-resolution rides the app's existing
@@ -123,6 +128,30 @@ export function useWorkflowDrop({
   // The open offer, readable from an effect that must not re-run when it changes.
   const offerRef = useRef(null);
   offerRef.current = offer;
+
+  const hasPoseSelection = workflowHasPoseSelection(offer?.share);
+  const substituteModels = useMemo(
+    () =>
+      workflowSubstituteModels(
+        hasPoseSelection ? offer?.share : null,
+        models,
+        macCapabilities,
+      ),
+    [hasPoseSelection, offer?.share, models, macCapabilities],
+  );
+  const poseReplay = useMemo(
+    () =>
+      workflowPoseReplayCapability({
+        share: offer?.share,
+        report: offer?.report,
+        substituteModelId: fixes.substituteModelId,
+        models,
+        macCapabilities,
+      }),
+    [offer?.share, offer?.report, fixes.substituteModelId, models, macCapabilities],
+  );
+  const poseSubstituteRequired = hasPoseSelection && !poseReplay.ready;
+  const poseSubstituteDetail = poseReplay.issue;
 
   // Abandon whatever is running and take the next ticket. Every supersede goes through here so
   // there is one place that can forget to abort.
@@ -458,10 +487,26 @@ export function useWorkflowDrop({
     if (!current?.share || typeof launchRecipe !== "function") {
       return;
     }
+    // Defense in depth for a catalog/capability change at the click boundary. The panel's CTA is
+    // driven by the same result on render, but an imperative caller or a click racing a catalog
+    // refresh must not launch a pose recipe through a model that can no longer consume it.
+    const clickPoseReplay = workflowPoseReplayCapability({
+      share: current.share,
+      report: current.report,
+      substituteModelId: fixes.substituteModelId,
+      models,
+      macCapabilities,
+    });
+    if (!clickPoseReplay.ready) {
+      setOffer((existing) =>
+        existing ? { ...existing, launchError: clickPoseReplay.issue } : existing,
+      );
+      return;
+    }
     const recipe = recipeFromWorkflowShare(current.share, current.report, {
       // Re-checked here as well as in the panel: the catalog can change between the pick and the
       // click, and a substitute the studio's list no longer offers would seed a blank control.
-      substituteModelId: keptSubstituteModelId(fixes.substituteModelId, models),
+      substituteModelId: keptSubstituteModelId(fixes.substituteModelId, substituteModels),
       referenceAssetIds: pickedReferenceAssetIds(current.report, fixes.inputPicks),
     });
     const outcome = await launchRecipe({
@@ -479,7 +524,16 @@ export function useWorkflowDrop({
       return;
     }
     dismiss();
-  }, [offer, launchRecipe, dismiss, fixes.substituteModelId, fixes.inputPicks, models]);
+  }, [
+    offer,
+    launchRecipe,
+    dismiss,
+    fixes.substituteModelId,
+    fixes.inputPicks,
+    substituteModels,
+    models,
+    macCapabilities,
+  ]);
 
   // "Import the image too" — the ordinary upload path, which is what records
   // `extra.importedWorkflow` on the asset (sc-15949). The panel stays open on success so the
@@ -502,24 +556,30 @@ export function useWorkflowDrop({
   // drift out of step with each other.
   const missing = useMemo(
     () => ({
-      models,
+      models: substituteModels,
       installing: fixes.installing,
       installed: queued,
       installFailed,
       onInstall: installRequirement,
-      substituteModelId: keptSubstituteModelId(fixes.substituteModelId, models),
+      substituteModelId: keptSubstituteModelId(fixes.substituteModelId, substituteModels),
+      poseSubstituteRequired,
+      poseSubstituteDetail,
+      poseReplayIssue: poseReplay.issue,
       onSubstituteModel: chooseSubstituteModel,
       inputPicks: fixes.inputPicks,
       onPickInput: pickInput,
     }),
     [
-      models,
+      substituteModels,
       fixes,
       queued,
       installFailed,
       installRequirement,
       chooseSubstituteModel,
       pickInput,
+      poseSubstituteRequired,
+      poseSubstituteDetail,
+      poseReplay.issue,
     ],
   );
 

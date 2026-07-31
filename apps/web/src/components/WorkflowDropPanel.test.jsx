@@ -292,10 +292,10 @@ describe("WorkflowDropPanel — what will not be restored", () => {
     expect(settingRow("PiD decoder").querySelector(".workflow-drop-setting-mark")).toBeNull();
     expect(settingRow("Tile ControlNet").textContent).toContain("not restored");
     expect(settingRow("Poses").textContent).toContain("3 poses");
-    expect(settingRow("Poses").textContent).toContain("not restored");
+    expect(settingRow("Poses").querySelector(".workflow-drop-setting-mark")).toBeNull();
   });
 
-  it("folds them into the verdict, so a fully installed recipe still reads as lossy", async () => {
+  it("treats replayable poses as restored in an otherwise complete recipe", async () => {
     await render({
       offer: {
         share: share({ advanced: { steps: 28, poses: [{ keypoints: [] }] } }),
@@ -304,12 +304,10 @@ describe("WorkflowDropPanel — what will not be restored", () => {
       },
     });
 
-    // The report itself is clean — the model is installed and nothing was omitted — so without
-    // this clause the panel would say "Everything this recipe names is installed here." over a
-    // pose selection that is about to be dropped on the floor.
-    expect(document.body.textContent).toContain("1 setting will not be restored");
-    expect(document.querySelector(".workflow-req-verdict.ok")).toBeNull();
-    expect(document.body.textContent).toContain("Poses — 1 pose");
+    expect(document.body.textContent).toContain("Everything this recipe names is installed here.");
+    expect(document.querySelector(".workflow-req-verdict.ok")).not.toBeNull();
+    expect(settingRow("Poses").textContent).toContain("1 pose");
+    expect(settingRow("Poses").textContent).not.toContain("not restored");
   });
 
   it("says nothing extra when every setting in the file lands somewhere", async () => {
@@ -472,6 +470,106 @@ describe("WorkflowDropPanel — what it needs from the user", () => {
     // The "keeps the model it is already on" warning is now false, and must not be shown.
     expect(document.body.textContent).not.toContain("keeps the model it is already on");
   });
+
+  it("does not call poses restored when an unknown model has no pose-capable substitute", async () => {
+    const poseConstraint =
+      "This workflow includes poses, but no installed model can run pose control for it.";
+    await render({
+      offer: {
+        share: share({
+          model: "someones_private_model",
+          advanced: { poses: [{ keypoints: [[0.2, 0.8]] }] },
+        }),
+        report: report({
+          runnable: false,
+          model: { slug: "someones_private_model", state: "missing", detail: "Not installed." },
+        }),
+        error: "",
+      },
+      missing: {
+        models: [],
+        poseSubstituteRequired: true,
+        poseSubstituteDetail: poseConstraint,
+        substituteModelId: "",
+      },
+    });
+
+    const poseRow = [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+      node.textContent.startsWith("Poses"),
+    );
+    expect(poseRow.textContent).toContain("not restored");
+    expect(poseRow.querySelector(".workflow-drop-setting-mark").title).toBe(poseConstraint);
+    const picker = document.querySelector("#workflow-substitute-model");
+    expect(picker.disabled).toBe(true);
+    expect([...picker.options].map((option) => option.textContent)).toEqual([
+      "No pose-capable model available",
+    ]);
+    expect(document.body.textContent).toContain(poseConstraint);
+    expect(cta().disabled).toBe(true);
+  });
+
+  it("calls poses restored only after the user chooses an offered pose-capable substitute", async () => {
+    await render({
+      offer: {
+        share: share({
+          model: "private_pose_model",
+          advanced: { poses: [{ keypoints: [[0.2, 0.8]] }] },
+        }),
+        report: report({
+          runnable: false,
+          model: { slug: "private_pose_model", state: "missing", detail: "Not installed." },
+        }),
+        error: "",
+      },
+      missing: {
+        models: [{ id: "fun_union", name: "Fun Union" }],
+        poseSubstituteRequired: true,
+        poseSubstituteDetail:
+          "This workflow includes poses. Only installed models with pose control for this workflow are offered.",
+        substituteModelId: "fun_union",
+      },
+    });
+
+    const poseRow = [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+      node.textContent.startsWith("Poses"),
+    );
+    expect(poseRow.querySelector(".workflow-drop-setting-mark")).toBeNull();
+    expect(document.querySelector("#workflow-substitute-model").value).toBe("fun_union");
+    expect(cta().disabled).toBe(false);
+  });
+
+  it.each(["text_to_image", "character_image"])(
+    "marks poses unrestored and makes no everything-restored claim for an incompatible resolved %s model",
+    async (mode) => {
+      const capabilityError =
+        "Krea 2 Turbo is installed, but it cannot replay poses for this workflow mode.";
+      await render({
+        offer: {
+          share: share({
+            mode,
+            advanced: { poses: [{ keypoints: [[0.2, 0.8]] }] },
+          }),
+          report: report(),
+          error: "",
+        },
+        missing: {
+          poseReplayIssue: capabilityError,
+          poseSubstituteRequired: true,
+          poseSubstituteDetail: capabilityError,
+        },
+      });
+
+      const poseRow = [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+        node.textContent.startsWith("Poses"),
+      );
+      expect(poseRow.textContent).toContain("not restored");
+      expect(document.body.textContent).toContain(capabilityError);
+      expect(document.body.textContent).not.toContain(
+        "Everything this recipe names is installed here.",
+      );
+      expect(cta().disabled).toBe(true);
+    },
+  );
 
   it("blocks until every input image the recipe needs has been picked", async () => {
     const inputs = report({

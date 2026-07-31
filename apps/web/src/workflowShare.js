@@ -287,10 +287,7 @@ export const ADVANCED_PREFILL = {
   // reason reads like a bug.
   poses: {
     label: "Poses",
-    prefill: PREFILL_NONE,
-    detail:
-      "The coordinates travelled, but the pose-library ids that named them deliberately do not — " +
-      "so there is nothing for the pose picker to select. Tracked by sc-16132.",
+    prefill: PREFILL_CONTROL,
   },
   cnScale: {
     label: "Tile ControlNet",

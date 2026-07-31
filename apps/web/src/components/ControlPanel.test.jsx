@@ -127,6 +127,17 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
     expect(tabLabels()).toEqual([]);
   });
 
+  it("auto-opens for a shared-workflow pose launch", async () => {
+    await render(
+      <ControlPanel
+        {...baseProps({ revealPoseLibraryToken: "launch-poses" })}
+      />,
+    );
+    const head = container.querySelector(".control-panel .advanced-section-toggle");
+    expect(head.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".pose-library")).not.toBeNull();
+  });
+
   it("shows all three tabs when the backbone supports pose+canny+depth", async () => {
     await renderExpanded(<ControlPanel {...baseProps()} />);
     expect(tabLabels()).toEqual(["Pose", "Canny", "Depth"]);

@@ -46,7 +46,13 @@ import {
   validateCaption,
 } from "../ideogramCaption.js";
 import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
-import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
+import {
+  usePoseLibrary,
+  useUserPoseLoader,
+  workflowPoseRecords,
+  poseRecordToPayload,
+  WORKFLOW_POSE_CATEGORY,
+} from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
   "Barista pouring espresso, morning light",
@@ -386,6 +392,7 @@ export function ImageStudio() {
   // assets, the worker disappears").
   const latestAssets = recentImageAssets ?? latestImageAssets;
   const launchRequest = studioLaunch;
+  const nonRecipeLaunchIdRef = useRef(null);
   const trackedLocalJobs = imageLocalJobs;
   const onCancelJob = (job) => jobAction(job, "cancel");
   const onLocalJobCreated = (job) => rememberLocalGenerationJob("image", job);
@@ -498,6 +505,8 @@ export function ImageStudio() {
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
   // (one image per pose) instead of the normal variations count. Transient (not saved).
   const [selectedPoseIds, setSelectedPoseIds] = useState([]);
+  const [workflowPoses, setWorkflowPoses] = useState([]);
+  const [poseLibraryReplayOpen, setPoseLibraryReplayOpen] = useState(false);
   // Strict-control panel (epic 8236, sc-8245). The selected control type (pose / canny / depth),
   // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
   // control-image asset + a preprocess-vs-passthrough toggle. `controlScale` (advanced.controlScale)
@@ -567,7 +576,7 @@ export function ImageStudio() {
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
-  const { byId: poseById } = usePoseLibrary({ loadUserPoses });
+  const { byId: poseById } = usePoseLibrary({ loadUserPoses, extraPoses: workflowPoses });
   const [upscaleEnabled, setUpscaleEnabled] = useState(saved.upscaleEnabled ?? false);
   const [upscaleFactor, setUpscaleFactor] = useState(saved.upscaleFactor ?? 2);
   const [upscaleEngine, setUpscaleEngine] = useState(saved.upscaleEngine ?? "real-esrgan");
@@ -668,6 +677,19 @@ export function ImageStudio() {
     }
     if (launchRequest.recipe) {
       return;
+    }
+    const freshLaunch = nonRecipeLaunchIdRef.current !== launchRequest.id;
+    nonRecipeLaunchIdRef.current = launchRequest.id;
+    if (freshLaunch) {
+      // A fresh non-recipe launch is a new intent entering this keep-alive studio. Workflow pose
+      // records belong to the recipe launch that created them; carrying them into a character/edit
+      // launch would silently submit advanced.poses (and its face-restoration opt-in) from the last
+      // workflow. The id guard prevents an equivalent context-object rerender from clearing poses
+      // the user picked while editing this same launch.
+      setSelectedPoseIds([]);
+      setWorkflowPoses([]);
+      setPoseLibraryReplayOpen(false);
+      setFaceRestore(false);
     }
     if (launchRequest.characterId) {
       setMode(launchRequest.mode ?? "character_image");
@@ -829,7 +851,7 @@ export function ImageStudio() {
       ? selectedPoseIds
           .map((id) => poseById[id])
           .filter(Boolean)
-          .map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
+          .map(poseRecordToPayload)
       : [];
   const controlActive = showControlPanel && Boolean(activeControlMode);
   const controlIsImageMode = controlActive && activeControlMode !== "pose";
@@ -1034,6 +1056,8 @@ export function ImageStudio() {
     setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
     setViewAngle("");
     setSelectedPoseIds([]);
+    setWorkflowPoses([]);
+    setPoseLibraryReplayOpen(false);
     // Re-gate the strict-control panel to the new backbone: snap the control type to a supported mode
     // (an unsupported pick — e.g. canny on a pose-only backbone — resets to the first supported one),
     // reset the control-scale to the model's manifest default, and clear a stale control image.
@@ -1554,7 +1578,10 @@ export function ImageStudio() {
     const resolutionFromRecipe = recipeResolution(recipe);
     const { loraIds, loraWeights: loraWeightMap } = recipeLoraSelection(recipe);
 
-    skipReferenceTuningReset.current = true;
+    // Arm the model-change reset skip only when this recipe actually changes the model. A
+    // same-model recipe never triggers that effect; leaving `true` behind would make the NEXT
+    // manual model switch consume a stale skip and retain this recipe's transient pose records.
+    skipReferenceTuningReset.current = Boolean(recipe.model && recipe.model !== model);
     // A recipe injects its own reference tuning below (setIpAdapterScale/…), so disarm the
     // fresh-mount declared-defaults resolver (sc-12034) — it must not overwrite the recipe values
     // once the catalog resolves, even on a late-catalog mount where `skip*` was already consumed.
@@ -1672,7 +1699,15 @@ export function ImageStudio() {
     setFaceRestore(rawSettings.faceRestore === true);
     setImg2imgStrength(replayNumber(rawSettings.strength, img2imgStrength));
     setTextStyleGain(replayNumber(rawSettings.textStyleGain, textStyleGain));
-    if (rawSettings.controlMode) {
+    const replayPoses = workflowPoseRecords(rawSettings.poses, launchRequest.id);
+    setWorkflowPoses(replayPoses);
+    setSelectedPoseIds(replayPoses.map((pose) => pose.id));
+    setPoseLibraryReplayOpen(replayPoses.length > 0);
+    if (replayPoses.length) {
+      // A shared pose selection is strict pose conditioning even when controlMode was omitted
+      // (pose is the worker default). Never strand replayed poses behind canny or depth.
+      setControlMode("pose");
+    } else if (rawSettings.controlMode) {
       setControlMode(rawSettings.controlMode);
     }
     setControlScale(replayNumber(rawSettings.controlScale, controlScale));
@@ -1683,7 +1718,6 @@ export function ImageStudio() {
     const restoredPhases = deserializePhases(rawSettings.phases ?? [], loraIds);
     setMultiPhasePhases(restoredPhases);
     setMultiPhaseEnabled(restoredPhases.length > 0);
-    setSelectedPoseIds([]);
     if (nextMode === "edit_image") {
       setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
       setFitMode(rawSettings.fitMode ?? settings.fitMode ?? "crop");
@@ -3201,11 +3235,16 @@ export function ImageStudio() {
                       {poseLibrary && macPoseBlock ? (
                         <p className="mac-gating-note">{macPoseBlock.text}</p>
                       ) : poseLibrary ? (
-                        <details className="pose-library-details">
+                        <details
+                          className="pose-library-details"
+                          onToggle={(event) => setPoseLibraryReplayOpen(event.currentTarget.open)}
+                          open={poseLibraryReplayOpen || undefined}
+                        >
                           <summary>
                             Pose library{selectedPoseIds.length ? ` · ${selectedPoseIds.length} selected` : ""}
                           </summary>
                           <PoseLibraryPicker
+                            extraPoses={workflowPoses}
                             loadUserPoses={loadUserPoses}
                             onClear={() => setSelectedPoseIds([])}
                             onToggle={(id) =>
@@ -3214,6 +3253,7 @@ export function ImageStudio() {
                               )
                             }
                             selectedIds={selectedPoseIds}
+                            preferredCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
                           />
                           <label className="checkline">
                             <input checked={faceRestore} onChange={(event) => setFaceRestore(event.target.checked)} type="checkbox" />
@@ -3405,6 +3445,10 @@ export function ImageStudio() {
               }
               onClearPoses={() => setSelectedPoseIds([])}
               loadUserPoses={loadUserPoses}
+              extraPoses={workflowPoses}
+              preferredPoseCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
+              revealPoseLibraryToken={workflowPoses.length ? launchRequest?.id : null}
+              poseReplayOpen={poseLibraryReplayOpen}
               poseBlockText={macPoseBlock ? macPoseBlock.text : null}
               controlImageAssetId={controlImageAssetId}
               onControlImageChange={setControlImageAssetId}

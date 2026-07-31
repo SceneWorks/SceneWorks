@@ -10,9 +10,11 @@ import { describe, expect, it } from "vitest";
 import { summarize } from "./validation/issues.js";
 import {
   keptSubstituteModelId,
+  modelSupportsWorkflowPoseReplay,
   pickedReferenceAssetIds,
   pickedSourceAssetId,
   workflowReplayValidation,
+  workflowSubstituteModels,
 } from "./workflowReplayValidation.js";
 
 function report(overrides = {}) {
@@ -204,6 +206,83 @@ describe("workflowReplayValidation", () => {
 });
 
 describe("carrying the user's own answers to the launch", () => {
+  it("filters pose-bearing substitutes to the visible pose lane for that workflow mode", () => {
+    const models = [
+      { id: "plain", capabilities: ["text_to_image"], ui: {} },
+      { id: "strict", capabilities: ["text_to_image"], ui: { controlModes: ["pose"] } },
+      { id: "edit_pose", capabilities: ["edit_image"], ui: { controlModes: ["pose"] } },
+      {
+        id: "character",
+        capabilities: ["character_image"],
+        ui: { poseLibrary: true },
+      },
+      { id: "library_only", capabilities: ["text_to_image"], ui: { poseLibrary: true } },
+    ];
+    const poses = [{ keypoints: [[0.2, 0.8]] }];
+
+    expect(
+      workflowSubstituteModels({ mode: "text_to_image", advanced: { poses } }, models).map(
+        (model) => model.id,
+      ),
+    ).toEqual(["strict"]);
+    expect(
+      workflowSubstituteModels({ mode: "character_image", advanced: { poses } }, models).map(
+        (model) => model.id,
+      ),
+    ).toEqual(["character"]);
+    expect(workflowSubstituteModels({ mode: "text_to_image", advanced: {} }, models)).toBe(models);
+  });
+
+  it("applies Image Studio's whole-model, reference, and pose-feature Mac gates", () => {
+    const macCapabilities = { macGatingActive: true };
+    const textPose = {
+      id: "text_pose",
+      capabilities: ["text_to_image"],
+      ui: { controlModes: ["pose"] },
+      macSupport: { supported: true, features: { pose: true } },
+    };
+    const characterPose = {
+      id: "character_pose",
+      capabilities: ["character_image"],
+      ui: { poseLibrary: true },
+      macSupport: { supported: true, features: { pose: true, reference: true } },
+    };
+
+    expect(modelSupportsWorkflowPoseReplay(textPose, "text_to_image", macCapabilities)).toBe(true);
+    expect(
+      modelSupportsWorkflowPoseReplay(
+        { ...textPose, macSupport: { supported: false, features: { pose: true } } },
+        "text_to_image",
+        macCapabilities,
+      ),
+    ).toBe(false);
+    expect(
+      modelSupportsWorkflowPoseReplay(
+        { ...textPose, macSupport: { supported: true, features: { pose: false } } },
+        "text_to_image",
+        macCapabilities,
+      ),
+    ).toBe(false);
+    expect(
+      modelSupportsWorkflowPoseReplay(
+        {
+          ...characterPose,
+          macSupport: { supported: true, features: { pose: true, reference: false } },
+        },
+        "character_image",
+        macCapabilities,
+      ),
+    ).toBe(false);
+    // The same declarations are inert when Mac gating is off.
+    expect(
+      modelSupportsWorkflowPoseReplay(
+        { ...textPose, macSupport: { supported: true, features: { pose: false } } },
+        "text_to_image",
+        { macGatingActive: false },
+      ),
+    ).toBe(true);
+  });
+
   it("drops a substitute model the catalog no longer offers", () => {
     // The panel can sit open across a catalog refetch: a model deleted (or a row that vanished)
     // must not stay selected, or the recipe seeds an id the studio's picker will drop on the next

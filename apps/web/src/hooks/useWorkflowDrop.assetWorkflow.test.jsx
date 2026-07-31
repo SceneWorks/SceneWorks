@@ -22,6 +22,7 @@ vi.mock("../api.js", async () => {
 });
 
 import { ApiError } from "../api.js";
+import { WorkflowDropPanel } from "../components/WorkflowDropPanel.jsx";
 import { useWorkflowDrop } from "./useWorkflowDrop.js";
 
 const IMPORTED_ASSET = { id: "asset_1", extra: { importedWorkflow: { sceneworksWorkflow: "image" } } };
@@ -79,9 +80,30 @@ describe("useWorkflowDrop — the imported-asset offer", () => {
     return null;
   }
 
+  function PanelHarness(props) {
+    hook = useWorkflowDrop(props);
+    return (
+      <WorkflowDropPanel
+        canImport
+        importState={hook.importState}
+        missing={hook.missing}
+        offer={hook.offer}
+        onDismiss={hook.dismiss}
+        onImport={hook.importImage}
+        onUse={hook.useWorkflow}
+      />
+    );
+  }
+
   const render = async (props) => {
     await act(async () =>
       root.render(<Harness enabled projectId="project_1" token="t" {...props} />),
+    );
+  };
+
+  const renderPanel = async (props) => {
+    await act(async () =>
+      root.render(<PanelHarness enabled projectId="project_1" token="t" {...props} />),
     );
   };
 
@@ -258,6 +280,244 @@ describe("useWorkflowDrop — the imported-asset offer", () => {
     await render({ launchRecipe, models: [] });
     await act(async () => hook.useWorkflow());
     expect(launchRecipe.mock.calls[0][0].recipe.model).toBeUndefined();
+  });
+
+  it("offers and keeps only pose-capable substitutes for a pose-bearing workflow", async () => {
+    const body = workflowBody({
+      model: { slug: "private_pose_model", state: "missing", detail: "Not installed." },
+    });
+    body.workflow.model = "private_pose_model";
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const nonPose = { id: "z_image_turbo", name: "Z-Image Turbo", ui: {} };
+    const poseCapable = {
+      id: "fun_union",
+      name: "Fun Union",
+      ui: { controlModes: ["pose", "canny"] },
+    };
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await render({ launchRecipe, models: [nonPose, poseCapable] });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    expect(hook.missing.models.map((model) => model.id)).toEqual(["fun_union"]);
+    expect(hook.missing.poseSubstituteRequired).toBe(true);
+    expect(hook.missing.poseSubstituteDetail).toContain("pose control");
+
+    await act(async () => hook.missing.onSubstituteModel("z_image_turbo"));
+    expect(hook.missing.substituteModelId).toBe("");
+    await act(async () => hook.missing.onSubstituteModel("fun_union"));
+    expect(hook.missing.substituteModelId).toBe("fun_union");
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe.mock.calls[0][0].recipe.model).toBe("fun_union");
+  });
+
+  it.each([
+    {
+      label: "text",
+      mode: "text_to_image",
+      model: {
+        id: "krea_2_turbo",
+        name: "Krea 2 Turbo",
+        capabilities: ["text_to_image"],
+        ui: { controlModes: ["canny"] },
+      },
+    },
+    {
+      label: "character",
+      mode: "character_image",
+      model: {
+        id: "krea_2_turbo",
+        name: "Krea 2 Turbo",
+        capabilities: ["character_image"],
+        ui: { poseLibrary: false },
+      },
+    },
+  ])(
+    "blocks a resolved $label model whose live catalog row cannot replay poses",
+    async ({ mode, model }) => {
+      const body = workflowBody({ model: RESOLVED_MODEL, runnable: true });
+      body.workflow.mode = mode;
+      body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+      fetchAssetWorkflow.mockResolvedValue(body);
+      const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+      await render({ launchRecipe, models: [model] });
+      await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+      expect(hook.missing.poseReplayIssue).toMatch(/cannot replay poses/i);
+      expect(hook.missing.poseSubstituteRequired).toBe(true);
+      await act(async () => hook.useWorkflow());
+      expect(launchRecipe).not.toHaveBeenCalled();
+    },
+  );
+
+  it("blocks a resolved edit-only model even when it advertises strict pose control", async () => {
+    const body = workflowBody({ model: RESOLVED_MODEL, runnable: true });
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await render({
+      launchRecipe,
+      models: [
+        {
+          id: "krea_2_turbo",
+          name: "Krea 2 Turbo",
+          capabilities: ["edit_image"],
+          ui: { controlModes: ["pose"] },
+        },
+      ],
+    });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    expect(hook.missing.poseReplayIssue).toMatch(/cannot replay poses/i);
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+  });
+
+  it("does not offer an edit-only pose-control model as a text pose substitute", async () => {
+    const body = workflowBody({
+      model: { slug: "private_pose_model", state: "missing", detail: "Not installed." },
+    });
+    body.workflow.model = "private_pose_model";
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    await render({
+      models: [
+        {
+          id: "edit_pose",
+          capabilities: ["edit_image"],
+          ui: { controlModes: ["pose"] },
+        },
+      ],
+    });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    expect(hook.missing.models).toEqual([]);
+    expect(hook.missing.poseReplayIssue).toMatch(/no installed model/i);
+  });
+
+  it("marks poses unrestored and refuses a resolved model whose pose feature is Mac-blocked", async () => {
+    const body = workflowBody({ model: RESOLVED_MODEL, runnable: true });
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await renderPanel({
+      launchRecipe,
+      macCapabilities: { macGatingActive: true },
+      models: [
+        {
+          id: "krea_2_turbo",
+          capabilities: ["text_to_image"],
+          ui: { controlModes: ["pose"] },
+          macSupport: { supported: true, features: { pose: false } },
+        },
+      ],
+    });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    const poseRow = [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+      node.textContent.startsWith("Poses"),
+    );
+    expect(poseRow.textContent).toContain("not restored");
+    expect(document.querySelector(".workflow-drop-actions .primary").disabled).toBe(true);
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+  });
+
+  it("excludes a Mac-blocked pose substitute and refuses the unresolved replay", async () => {
+    const body = workflowBody({
+      model: { slug: "private_pose_model", state: "missing", detail: "Not installed." },
+    });
+    body.workflow.model = "private_pose_model";
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await renderPanel({
+      launchRecipe,
+      macCapabilities: { macGatingActive: true },
+      models: [
+        {
+          id: "strict_pose",
+          capabilities: ["text_to_image"],
+          ui: { controlModes: ["pose"] },
+          macSupport: { supported: true, features: { pose: false } },
+        },
+      ],
+    });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    expect(hook.missing.models).toEqual([]);
+    expect(document.querySelector("#workflow-substitute-model").disabled).toBe(true);
+    expect(document.querySelector(".workflow-drop-actions .primary").disabled).toBe(true);
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+  });
+
+  it("blocks a resolved pose model that is absent from the live studio catalog", async () => {
+    const body = workflowBody({ model: RESOLVED_MODEL, runnable: true });
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await render({ launchRecipe, models: [] });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    expect(hook.missing.poseReplayIssue).toMatch(/no longer available.*live model catalog/i);
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+  });
+
+  it("rechecks an explicit pose substitute against the live catalog at click time", async () => {
+    const body = workflowBody({
+      model: { slug: "private_pose_model", state: "missing", detail: "Not installed." },
+    });
+    body.workflow.model = "private_pose_model";
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    const compatible = {
+      id: "fun_union",
+      name: "Fun Union",
+      capabilities: ["text_to_image"],
+      ui: { controlModes: ["pose"] },
+    };
+    await render({ launchRecipe, models: [compatible] });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+    await act(async () => hook.missing.onSubstituteModel("fun_union"));
+    expect(hook.missing.poseReplayIssue).toBe("");
+
+    // The catalog keeps the id but withdraws the capability before the user clicks. The original
+    // remains missing, so neither silently falling back nor trusting the stale pick is safe.
+    await render({
+      launchRecipe,
+      models: [{ ...compatible, ui: { controlModes: ["depth"] } }],
+    });
+    await act(async () => hook.useWorkflow());
+    expect(hook.offer.launchError).toMatch(/no longer available with pose control/i);
+    expect(launchRecipe).not.toHaveBeenCalled();
+  });
+
+  it("rechecks pose capability when an installable model resolves to an incompatible live row", async () => {
+    const body = workflowBody();
+    body.workflow.advanced = { poses: [{ keypoints: [[0.3, 0.7]] }] };
+    fetchAssetWorkflow.mockResolvedValueOnce(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    const incompatible = {
+      id: "krea_2_turbo",
+      name: "Krea 2 Turbo",
+      capabilities: ["text_to_image"],
+      ui: { controlModes: ["depth"] },
+    };
+    await render({ catalogRevision: "missing", launchRecipe, models: [] });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+
+    fetchAssetWorkflow.mockResolvedValueOnce(
+      workflowBody({ model: RESOLVED_MODEL, runnable: true }),
+    );
+    await render({ catalogRevision: "resolved", launchRecipe, models: [incompatible] });
+
+    expect(hook.offer.report.model.state).toBe("resolved");
+    expect(hook.missing.poseReplayIssue).toMatch(/cannot replay poses/i);
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
   });
 
   it("carries the picked images to the launch, source and references apart", async () => {
