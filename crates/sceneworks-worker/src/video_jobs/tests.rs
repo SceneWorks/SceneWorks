@@ -10913,6 +10913,58 @@ async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
         "a deliberate strip removes it — stated as a fact of this container rather than hidden"
     );
 
+    // 4. THE SECOND NEGATIVE (sc-15956 review): HLS segmentation, at `-c copy` throughout. Nothing
+    //    is re-encoded and the streams are untouched, so this is the case a reader would predict
+    //    survives — and it does not, because MPEG-TS has no `ilst` to carry the tag through and the
+    //    mp4 is rebuilt from segments that never held it. Named rather than inferred, because
+    //    "I only re-packaged it" is exactly the reasoning that gets this wrong.
+    let segments = dir.join("hls");
+    std::fs::create_dir_all(&segments).unwrap();
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source.to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            "-f".to_owned(),
+            "hls".to_owned(),
+            "-hls_time".to_owned(),
+            "1".to_owned(),
+            "-hls_list_size".to_owned(),
+            "0".to_owned(),
+            "-hls_segment_filename".to_owned(),
+            segments.join("seg%03d.ts").to_string_lossy().into_owned(),
+            segments.join("out.m3u8").to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let reassembled = dir.join("reassembled.mp4");
+    run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            segments.join("out.m3u8").to_string_lossy().into_owned(),
+            "-c".to_owned(),
+            "copy".to_owned(),
+            reassembled.to_string_lossy().into_owned(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_back(&reassembled),
+        None,
+        "an HLS round trip loses the tag even at `-c copy` — MPEG-TS has no `ilst`, so the mp4 is          rebuilt from segments that never carried it. Recorded as a measured limit of this          container, not hidden behind \"it survives a remux\"."
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

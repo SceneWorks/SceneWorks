@@ -35,9 +35,26 @@
 //! container from streams alone. A platform that re-encodes an upload is such a pipeline. So the
 //! sharing premise that holds for a PNG chunk (the bytes travel intact) holds for MP4 only where
 //! the *file* travels: a copy, a download, a pass-through upload. sc-15956 records the measured
-//! matrix in full. What that leaves is still the larger half of the feature — every generated clip
-//! carries its own recipe, locally and through any file-preserving hop — and it is why the marker
-//! kind exists, so a reader can tell a video envelope from an image one.
+//! matrix in full.
+//!
+//! Two more measurements the sc-15956 review added, both worth stating here because they are the
+//! ones a user would guess wrong about:
+//!
+//! * **HLS segmentation loses it.** mp4 → TS segments → mp4 comes back with no tag, even at
+//!   `-c copy` throughout. MPEG-TS has no `ilst`, so the container really is rebuilt from streams
+//!   — the class above — but "I only re-packaged it, I did not re-encode" is exactly the reasoning
+//!   that would predict it survives, so it is named rather than left to be inferred. Measured, and
+//!   pinned by `the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip` in
+//!   `crates/sceneworks-worker/src/video_jobs/tests.rs`;
+//! * **a partial download keeps it.** The `+faststart` remux moves `moov` to the head, directly
+//!   behind `ftyp`, so the whole envelope is in the first few kilobytes and a transfer that stopped
+//!   inside `mdat` still reads back a complete recipe. `a_truncated_container_is_refused` in
+//!   `crates/sceneworks-core/tests/workflow_mp4.rs` pins both halves: a cut inside the header is a
+//!   typed error, a cut inside `mdat` is a readable file.
+//!
+//! What that leaves is still the larger half of the feature — every generated clip carries its own
+//! recipe, locally and through any file-preserving hop — and it is why the marker kind exists, so a
+//! reader can tell a video envelope from an image one.
 //!
 //! # The read side is a trust boundary, and MP4s are large
 //!
