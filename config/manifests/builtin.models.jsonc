@@ -17,6 +17,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": [
         "edit_image"
       ],
@@ -209,7 +213,10 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        // sc-16025 changes the q4/q8 numeric profile (Q8 LM layers + transformer head). Preserve the
+        // historical figures for comparison, but do not authorize them as current evidence until
+        // the CUDA real-weight lane remeasures the converged provider.
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit-Base",
@@ -232,6 +239,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": [
         "edit_image"
       ],
@@ -421,7 +432,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit",
@@ -452,6 +463,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": [
         "edit_image"
       ],
@@ -641,7 +656,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
@@ -668,6 +683,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
@@ -836,7 +855,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Base",
@@ -857,6 +876,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
@@ -1025,7 +1048,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow RL",
@@ -1054,6 +1077,10 @@
       "family": "mage-flow",
       "type": "image",
       "adapter": "mlx_mage",
+      "precisionFloors": [
+        { "component": "textEncoder", "selectedTier": "q4", "residentTier": "q8" },
+        { "component": "transformerHead", "selectedTier": "q4", "residentTier": "q8" }
+      ],
       "capabilities": ["text_to_image"],
       "macOnly": false,
       "downloads": [
@@ -1222,7 +1249,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": false
       },
       "ui": {
         "label": "Mage-Flow Turbo",

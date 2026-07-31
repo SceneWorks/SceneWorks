@@ -604,6 +604,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             "bf16" => None,
             _ => return None,
         },
+        component_precision_floors: &[],
     };
     let request = RequestScope {
         resolved_route: "krea_2_turbo",

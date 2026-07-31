@@ -2891,10 +2891,9 @@ fn load_spec(
 /// a missing co-requisite fails the job with an actionable error BEFORE the engine load), then stages
 /// each in `LoadSpec::components` for the engine's own load-time `require_component` gate.
 ///
-/// DORMANT at this pin: every current image/video descriptor advertises `required_components: &[]`, so
-/// the early return keeps this a no-op (no manifest clone, no cache probe). It is a REAL generic path,
-/// not a stub — the first image provider to advertise components (SDXL, sc-13682) is provisioned
-/// through it with no new plumbing.
+/// Providers with a split artifact layout (Mage-Flow and Candle SDXL at this pin) advertise their
+/// component ids here; self-contained providers take the early no-op path without a manifest clone
+/// or cache probe.
 fn attach_required_components(
     spec: LoadSpec,
     model_id: &str,
@@ -5617,6 +5616,7 @@ mod candle_request_residency_tests {
                 tier: gen_core::MemoryNumericTier {
                     precision: gen_core::Precision::Bf16,
                     quant: Some(gen_core::Quant::Q8),
+                    component_precision_floors: &[],
                 },
             },
         };
@@ -7346,14 +7346,53 @@ fn effective_quant_label_gated(
             _ => (Some("bf16".to_owned()), None),
         };
     }
-    match resolve_quant_gated(request, nvfp4_host, tier_dir) {
+    let (selected_quant, selected_bits) = resolve_quant_gated(request, nvfp4_host, tier_dir);
+    let resolved = match (selected_quant, selected_bits) {
         // The distinct NVFP4 tier, matched on the VARIANT (see the note above): its bit count is
         // `None`, so a bits-only match would silently label it "bf16".
         (Some(Quant::Nvfp4), _) => (Some(NVFP4_TIER.to_owned()), None),
         (_, Some(8)) => (Some("q8".to_owned()), Some(8)),
         (_, Some(4)) => (Some("q4".to_owned()), Some(4)),
         _ => (Some("bf16".to_owned()), None),
+    };
+    let Some(selected) = selected_quant else {
+        return resolved;
+    };
+    let Some(model) = mlx_model(&request.model) else {
+        return resolved;
+    };
+    let active = model
+        .descriptor
+        .capabilities
+        .component_precision_floors
+        .iter()
+        .copied()
+        .filter(|floor| floor.applies_to(selected))
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return resolved;
     }
+    let selected_label = match selected {
+        Quant::Q4 => "q4",
+        Quant::Q8 => "q8",
+        Quant::Nvfp4 => NVFP4_TIER,
+    };
+    let floors = active
+        .iter()
+        .map(|floor| {
+            let resident = match floor.resident_tier {
+                Quant::Q4 => "q4",
+                Quant::Q8 => "q8",
+                Quant::Nvfp4 => NVFP4_TIER,
+            };
+            format!("{}:{resident}", floor.component.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        Some(format!("{selected_label}+[{floors}]")),
+        None, // A mixed component profile has no honest single bit width.
+    )
 }
 
 /// Resolve quant + guidance with the generation's own rules and assemble the
@@ -8751,6 +8790,29 @@ mod standard_tier_tests {
                 (Some("int8-convrot".to_owned()), None)
             );
         }
+    }
+
+    /// sc-16025: provider-local floors are part of the effective numeric identity. The label stored
+    /// on the asset/effective-settings record must not collapse Mage's mixed q4/q8 load to plain q4.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mage_q4_label_includes_every_descriptor_declared_component_floor() {
+        let request = ImageRequest::from_payload(
+            json!({ "model": "mage_flow", "advanced": { "mlxQuantize": 4 } })
+                .as_object()
+                .unwrap(),
+        );
+        let q4_dir = PathBuf::from("/models/mage_flow/q4");
+        let (label, bits) = effective_quant_label_gated(&request, false, Some(&q4_dir));
+        assert_eq!(
+            label.as_deref(),
+            Some("q4+[textEncoder:q8,transformerHead:q8]")
+        );
+        assert_ne!(label.as_deref(), Some("q4"));
+        assert_eq!(bits, None, "a mixed-width profile has no single bit count");
     }
 
     /// sc-11042 / epic 11037 SC#5 — **the recorded label must describe the tier that RAN.**

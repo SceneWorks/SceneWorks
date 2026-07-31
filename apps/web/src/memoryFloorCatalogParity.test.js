@@ -1037,16 +1037,30 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
   });
 
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 13; five
-    // of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers pinned so the
-    // prose cannot drift from the catalog again.
+    // MINOR 4. The header said `candle.measured` is false on "five shipped entries". It is false on 19;
+    // eleven of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
+    // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
+    // this set because their q4/q8 numeric identity changed and the historical samples are no longer
+    // valid current measurements.
     const estimatedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(estimatedLane.length).toBe(13);
+    expect(estimatedLane.length).toBe(19);
     const withPerTier = estimatedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
     expect(withPerTier.map((model) => model.id).sort()).toEqual(
-      ["flux_schnell", "krea_2_raw", "lens_turbo", "sd3_5_large_turbo", "sd3_5_medium"].sort(),
+      [
+        "flux_schnell",
+        "krea_2_raw",
+        "lens_turbo",
+        "mage_flow",
+        "mage_flow_base",
+        "mage_flow_edit",
+        "mage_flow_edit_base",
+        "mage_flow_edit_turbo",
+        "mage_flow_turbo",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+      ].sort(),
     );
     // The other eight are blanket-only, so the flag has nothing per-tier to qualify on them.
     expect(estimatedLane.length - withPerTier.length).toBe(8);

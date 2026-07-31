@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cbc88bb016710e576b68f634db3f9621093a74cf02c268aa7b1df762207f61b5",
-    "matrixRevision": "source-tree:672e2ca50beaed962a913c96638fe6870cfbd64d447239d8fbb6ca314a126072",
-    "inferenceRevision": "50dbce1bc1574ba7dd20104069f1fd9c2a6e52d9",
+    "sceneWorksRevision": "source-tree:96183b3f9773c89328f406f356c691d723f0ca7f494b24ec3804ea977bc6c167",
+    "matrixRevision": "source-tree:a33d3e8851dbf1f7d8244dd14d3f9f4276ea452989aca0d9d8bf9016bc0b10ac",
+    "inferenceRevision": "5d85af44576c8312c3b2cf1f40f487119351e4bc",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "0248b5bad2c27e1facd57f5f952fab49f78edff99485ebfcca8b37d4008b1d08"
+        "sha256": "e7e35d3c209ebf503ef637c3c0cccb85dc59b8fbe22b840ad710f3c86f0eefc6"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2ea451bf06dd1547f70cbb58ef9f3a2e91c31bb4d0d777099283546c62567505"
+        "sha256": "9904be10035d022a2cce6542ecad8aa2e5156f225a075b8710c4a8f9d50edef2"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "1aa9785e009fd53ea3de0912791d8a7a571d20399b4228cbe48ad78922399c55"
+        "sha256": "695811f2a12f83e8995065966ab5831d68700e02a8eec8772ce889c8d2ea9121"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "951bbee1109902afb5a6d7b57c4ee67b460fc4d60b05e8c9f83ce872c18f946e"
+        "sha256": "43d4b52af2a33e765b3e9eb01a5ea5b3a9979d051c375978423de5394dc93a37"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "2c167f1ea70e383f91d8aa2ba8b35ef496d1ca1d1d12b51c4391e31df83fd52d"
+        "sha256": "2b3a3b279d461eb5b1223e34316fa378975cc731fc0f2ad3182867097d9e5134"
       }
     }
   },

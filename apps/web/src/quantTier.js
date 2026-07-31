@@ -119,6 +119,31 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
+const PRECISION_FLOOR_COMPONENT_LABELS = {
+  textEncoder: "text encoder layers",
+  transformerHead: "transformer head",
+};
+
+/// User-facing label for the effective component profile, not merely the selected base tier.
+/// A q4 Mage tier is mixed-width by design, so presenting it as plain Q4 would hide the same
+/// substitution the worker records in asset telemetry and memory evidence.
+export function effectiveTierLabel(tier, model) {
+  const floors = (model?.precisionFloors ?? []).filter(
+    (floor) => floor?.selectedTier === tier && floor?.residentTier,
+  );
+  if (floors.length === 0) return tierLabel(tier);
+  const grouped = new Map();
+  for (const floor of floors) {
+    const components = grouped.get(floor.residentTier) ?? [];
+    components.push(PRECISION_FLOOR_COMPONENT_LABELS[floor.component] ?? floor.component);
+    grouped.set(floor.residentTier, components);
+  }
+  const suffix = [...grouped.entries()]
+    .map(([residentTier, components]) => `${components.join(" + ")} at ${residentTier.toUpperCase()}`)
+    .join("; ");
+  return `${tierLabel(tier)} — ${suffix}`;
+}
+
 // Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR one
 // of the candle-only non-bits tiers (INT8-ConvRot, NVFP4). Excludes the "default" pseudo-variant of a
 // single-variant model and non-generation pseudo-tiers like "training". Distinct from `tierQuantize`
@@ -287,14 +312,14 @@ export function tierPickerOptions(model, options = {}) {
   const stateFor = tierStateLookup(model);
   return allPossibleTiers(model, options).map((tier) => {
     if (installed.has(tier)) {
-      return { tier, label: tierLabel(tier), disabled: false };
+      return { tier, label: effectiveTierLabel(tier, model), disabled: false };
     }
     // A tier present-but-torn reports cacheState "incomplete" (never "installed"); a cleanly-absent one
     // reports "missing"/undefined. Distinguish so a torn tier reads as "re-download", not "not
     // downloaded" — the torn case is exactly the crash this whole change exists to prevent.
     const suffix =
       stateFor(tier)?.cacheState === "incomplete" ? "download incomplete" : "not downloaded";
-    return { tier, label: `${tierLabel(tier)} — ${suffix}`, disabled: true };
+    return { tier, label: `${effectiveTierLabel(tier, model)} — ${suffix}`, disabled: true };
   });
 }
 

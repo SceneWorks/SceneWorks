@@ -459,6 +459,7 @@ fn krea_context(
             tier: MemoryNumericTier {
                 precision: Precision::Bf16,
                 quant: Some(Quant::Q4),
+                component_precision_floors: &[],
             },
         },
         calibration_abi: MEMORY_CALIBRATION_ABI,

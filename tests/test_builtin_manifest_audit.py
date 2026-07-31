@@ -254,7 +254,7 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
             "minMemoryGb": 17,
             "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
             "vramMeasuredPixels": 1024 * 1024,
-            "measured": True,
+            "measured": False,
         }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
@@ -279,7 +279,7 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
             "minMemoryGb": 17,
             "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
             "vramMeasuredPixels": 1024 * 1024,
-            "measured": True,
+            "measured": False,
         }
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
