@@ -50,7 +50,9 @@ use std::path::Path;
 use image::{ImageFormat, RgbImage};
 use png::text_metadata::ITXtChunk;
 
-use crate::workflow_share::{parse_workflow_share_json, WorkflowShare, WorkflowShareError};
+use crate::workflow_share::{
+    parse_workflow_share_json, WorkflowShare, WorkflowShareError, WORKFLOW_KIND_IMAGE,
+};
 
 /// The `iTXt` keyword the envelope is published under.
 ///
@@ -737,7 +739,29 @@ fn read_workflow_chunk_from<R: BufRead + Seek>(
     // The ONLY parse path, so the sc-15946 allow-list sanitizer runs on every envelope that
     // arrives from outside. A second `serde_json::from_str::<WorkflowShare>` here would read the
     // same JSON without the value-level guards.
-    Ok(Some(parse_workflow_share_json(&text)?))
+    let share = parse_workflow_share_json(&text)?;
+    // A PNG carries an IMAGE workflow. Nothing else (sc-15956).
+    //
+    // `parse_workflow_share` validates the ENVELOPE and, since the video lane shipped, accepts
+    // either kind — which is right for the contract and wrong for a consumer. Without this the
+    // widened gate would have quietly changed THIS module's behaviour: a PNG carrying a video
+    // envelope used to be refused, and would have started parsing, so every reader downstream
+    // (`/workflows/inspect`, the Image Editor's header, the drag-to-load import) would have offered
+    // a video recipe as an image prefill.
+    //
+    // So the container asserts its own kind, and `workflow_mp4::read_workflow_metadata` does the
+    // symmetrical thing. Our writers only ever pair a PNG with an image envelope and an MP4 with a
+    // video one, so a mismatch is a hand-made file or a future build's, and refusing is what the
+    // `UnsupportedKind` sentence already says to a user.
+    if share.kind != WORKFLOW_KIND_IMAGE {
+        return Err(WorkflowChunkError::Envelope(
+            WorkflowShareError::UnsupportedKind {
+                found: share.kind,
+                supported: WORKFLOW_KIND_IMAGE.to_owned(),
+            },
+        ));
+    }
+    Ok(Some(share))
 }
 
 /// Pick our chunk out of the `iTXt` chunks the decoder has parsed so far.

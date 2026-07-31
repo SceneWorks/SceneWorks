@@ -62,7 +62,8 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::workflow_share::{
-    parse_workflow_share_json, WorkflowShare, WorkflowShareError, WORKFLOW_SHARE_MARKER_KEY,
+    parse_workflow_share_json, WorkflowShare, WorkflowShareError, WORKFLOW_KIND_VIDEO,
+    WORKFLOW_SHARE_MARKER_KEY,
 };
 
 /// The MP4 tag the envelope is published under: the standard `comment`, which ffmpeg maps to the
@@ -352,7 +353,22 @@ fn read_workflow_metadata_from<R: Read + Seek>(
     if !comment.contains(WORKFLOW_SHARE_MARKER_KEY) {
         return Ok(None);
     }
-    Ok(Some(parse_workflow_share_json(&comment)?))
+    let share = parse_workflow_share_json(&comment)?;
+    // An MP4 carries a VIDEO workflow. Nothing else — the symmetrical half of the assertion
+    // `workflow_png::read_workflow_chunk_from` makes, and for the same reason: the contract's kind
+    // gate accepts every kind this build knows, which is right for an envelope and wrong for a
+    // CONSUMER. Our writers only ever pair an MP4 with a video envelope, so a mismatch is a
+    // hand-made file or a future build's, and a reader that surfaced an image recipe out of a clip
+    // would be offering something no video studio can run.
+    if share.kind != WORKFLOW_KIND_VIDEO {
+        return Err(WorkflowMp4Error::Share(
+            WorkflowShareError::UnsupportedKind {
+                found: share.kind,
+                supported: WORKFLOW_KIND_VIDEO.to_owned(),
+            },
+        ));
+    }
+    Ok(Some(share))
 }
 
 /// One box header, read at the reader's current position.

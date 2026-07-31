@@ -735,3 +735,51 @@ fn the_reader_applies_the_recording_ceiling_to_a_container() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+/// **Each container asserts its own kind.** An MP4 carrying an IMAGE envelope is refused.
+///
+/// The contract's kind gate accepts every kind this build knows, which is right for an envelope and
+/// wrong for a consumer: our writers only ever pair an MP4 with a video envelope, so a mismatch is
+/// a hand-made file or a future build's. Surfacing an image recipe out of a clip would offer
+/// something no video studio can run.
+///
+/// The PNG side makes the symmetrical assertion — and there it is a REGRESSION guard rather than a
+/// new rule: a PNG carrying a video envelope was refused before the video lane widened the shared
+/// gate, and had to keep being refused after.
+#[test]
+fn an_mp4_carrying_an_image_envelope_is_refused() {
+    let mut value = serde_json::to_value(video_share()).expect("serializable");
+    value[WORKFLOW_SHARE_MARKER_KEY] = json!(WORKFLOW_KIND_IMAGE);
+    let bytes = mp4_with_json(&value);
+    match read_workflow_metadata(&bytes) {
+        Err(WorkflowMp4Error::Share(WorkflowShareError::UnsupportedKind { found, supported })) => {
+            assert_eq!(found, WORKFLOW_KIND_IMAGE);
+            assert_eq!(supported, WORKFLOW_KIND_VIDEO);
+        }
+        other => panic!("an image envelope in an mp4 must be refused, got {other:?}"),
+    }
+}
+
+/// …and the PNG reader still refuses a VIDEO envelope, which is the behaviour the widened kind
+/// gate would otherwise have silently changed.
+#[test]
+fn a_png_carrying_a_video_envelope_is_still_refused() {
+    let share = video_share();
+    let png = {
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]));
+        let directory = tempfile::tempdir().expect("a temp dir");
+        let path = directory.path().join("clip.png");
+        sceneworks_core::workflow_png::write_workflow_chunk(&image, &path, Some(&share))
+            .expect("written");
+        std::fs::read(&path).expect("readable")
+    };
+    match sceneworks_core::workflow_png::read_workflow_chunk(&png) {
+        Err(sceneworks_core::workflow_png::WorkflowChunkError::Envelope(
+            WorkflowShareError::UnsupportedKind { found, supported },
+        )) => {
+            assert_eq!(found, WORKFLOW_KIND_VIDEO);
+            assert_eq!(supported, WORKFLOW_KIND_IMAGE);
+        }
+        other => panic!("a video envelope in a png must be refused, got {other:?}"),
+    }
+}
