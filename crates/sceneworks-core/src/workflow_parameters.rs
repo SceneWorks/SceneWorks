@@ -78,6 +78,21 @@ pub const PARAMETERS_CHUNK_KEYWORD: &str = "parameters";
 /// constant rather than against a copy of the string.
 pub const NEGATIVE_PROMPT_LABEL: &str = "Negative prompt: ";
 
+/// The fewest `Key: value` pairs a trailing line may carry and still be read as one.
+///
+/// A1111's `parse_generation_parameters` pops the last line, counts the pairs its `re_param_code`
+/// finds, and puts the line back into the PROMPT when there are fewer than three. Civitai and the
+/// rest of the ecosystem's parsers inherit the rule. So this is not our threshold and not a style
+/// choice: it is the boundary between a settings line and a line of prompt text, for every reader
+/// this chunk is written for.
+///
+/// [`settings_line`] treats it as a floor and withholds the whole line below it — see the reasoning
+/// there. Public so the corpus in `crates/sceneworks-core/tests/workflow_parameters.rs` can pin the
+/// lanes against it; that file's `parse_a1111` keeps its own literal threshold, because a parser
+/// that took its rule from the renderer it is measuring would agree with it by construction.
+/// `the_local_parser_reads_a_real_a1111_block` joins the two.
+pub const SETTINGS_PAIR_FLOOR: usize = 3;
+
 /// Every key that may appear on the trailing settings line, in emission order.
 ///
 /// The decision record for "omit rather than approximate": a key is here because the envelope holds
@@ -159,10 +174,13 @@ pub const SETTINGS_FIELDS: &[(&str, &str)] = &[
 ///
 /// * **A prompt containing a line that begins `Negative prompt:` will mis-split.** A1111 has the
 ///   same behaviour on its own output; the boundary is positional and there is no escape for it.
-/// * **A settings line of fewer than three pairs is prompt text to A1111's parser.** Our floor is
-///   `Seed` + `Model` + `Version`, which every generated image clears —
-///   `the_settings_line_clears_the_pair_floor_a_gallery_parses_with` in
-///   `crates/sceneworks-core/tests/workflow_parameters.rs` pins that rather than assuming it.
+/// * **A settings line of fewer than three pairs is prompt text to A1111's parser.** Inherited, but
+///   not left to chance: [`SETTINGS_PAIR_FLOOR`] omits the line entirely rather than emitting one a
+///   gallery would append to the prompt. Every shipping lane clears the floor on its own — the
+///   thinnest, a standalone upscale, emits exactly `Seed` + `Model` + `Version` with no margin —
+///   and `the_settings_line_clears_the_pair_floor_a_gallery_parses_with` in
+///   `crates/sceneworks-core/tests/workflow_parameters.rs` pins the lane SHAPES rather than assuming
+///   a well-populated one.
 ///
 /// The authoritative recipe is unaffected by either: it is the `sceneworks:workflow` chunk, and this
 /// block is for display.
@@ -182,7 +200,8 @@ pub fn parameters_text(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     out
 }
 
-/// The trailing `Key: value, Key: value` line, or empty when nothing maps exactly.
+/// The trailing `Key: value, Key: value` line, or empty when nothing maps exactly — or when what
+/// maps is too little for a gallery to recognize as a settings line at all.
 fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
     let advanced = &share.advanced;
     // A multi-phase run has no single step count and no single guidance value. Emitting the
@@ -240,6 +259,19 @@ fn settings_line(share: &WorkflowShare, encoded: (u32, u32)) -> String {
         push("Version", share.producer.version.clone());
     }
 
+    // Below the floor the line is not a settings line to anything that reads this chunk — it is a
+    // trailing line of the PROMPT. Emitting it anyway would not "give the reader two fields": it
+    // would make a gallery display `a lighthouse\nSeed: 880412, Version: 0.8.1` as the prompt, which
+    // is a wrong prompt rather than a thin settings block. Omitting the whole line leaves the prompt
+    // correct and the settings absent, and the absent settings were never legible in the first place.
+    //
+    // This is the same "omit rather than approximate" rule the module is built on, applied one level
+    // up: the fields are individually exact and the LINE is still not a statement a reader can act
+    // on, so the line goes. `sceneworks:workflow` is unaffected — the authoritative recipe rides in
+    // the other chunk and carries every one of these fields regardless.
+    if pairs.len() < SETTINGS_PAIR_FLOOR {
+        return String::new();
+    }
     pairs
         .into_iter()
         .map(|(key, value)| format!("{key}: {}", quote(&value)))
@@ -469,8 +501,34 @@ mod tests {
     #[test]
     fn the_version_is_the_envelopes_own_producer_version() {
         // The AC: the two chunks cannot disagree about which build wrote the file.
-        let share = envelope(serde_json::json!({}));
+        //
+        // Carries a seed so the line clears `SETTINGS_PAIR_FLOOR` — without one this envelope emits
+        // Model + Version and the floor guard withholds the whole line, which is the right answer
+        // and the wrong fixture for this question.
+        let share = envelope(serde_json::json!({ "seed": 7 }));
         assert_eq!(share.producer.version, "0.8.1");
         assert!(parameters_text(&share, (1, 1)).ends_with("Version: 0.8.1"));
+    }
+
+    #[test]
+    fn a_line_under_the_pair_floor_is_withheld_rather_than_emitted() {
+        // The cliff, and which way it falls. This envelope maps two fields exactly — Model and
+        // Version — and two pairs is PROMPT to every parser this chunk is written for. Emitting them
+        // would not give a reader a thin settings block, it would give them a wrong prompt.
+        let two = envelope(serde_json::json!({}));
+        assert_eq!(
+            parameters_text(&two, (1, 1)),
+            "a lighthouse in heavy fog",
+            "a sub-floor line must be withheld whole, leaving the prompt correct"
+        );
+
+        // One more mapped field and the line is legible, so it travels. The guard is a floor, not a
+        // preference for silence.
+        let three = envelope(serde_json::json!({ "seed": 7 }));
+        assert_eq!(
+            parameters_text(&three, (1, 1)),
+            "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1"
+        );
+        assert_eq!(SETTINGS_PAIR_FLOOR, 3, "A1111's threshold, not ours");
     }
 }

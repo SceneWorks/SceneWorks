@@ -381,10 +381,34 @@ fn workflow_chunk(text: String) -> ITXtChunk {
 /// * **Above it there is no choice at all.** A CJK or emoji prompt cannot be a `tEXt` chunk;
 ///   `png` refuses to encode one rather than transliterating.
 ///
-/// Uncompressed in both arms, matching PIL's `zip=False` default. Our own envelope is compressed
-/// because it is JSON that rides in every generated image; this is a few hundred bytes of prose, and
-/// a `zTXt` or a compressed `iTXt` is the form third-party readers are least reliably tested
-/// against. Being findable is the entire value of the chunk.
+/// # Uncompressed in both arms, and what that actually costs
+///
+/// Matching PIL's `zip=False` default. Our own envelope is compressed because it is JSON that rides
+/// in every generated image; a `zTXt` or a compressed `iTXt` is the form third-party readers are
+/// least reliably tested against, and being findable is the entire value of this chunk.
+///
+/// The cost, measured rather than waved at — this used to say "a few hundred bytes of prose", which
+/// is the typical case stated as if it were the bound, and is off by two orders of magnitude at the
+/// ceiling:
+///
+/// | Envelope | `parameters`, framed | `sceneworks:workflow`, framed | File grows |
+/// | --- | --- | --- | --- |
+/// | the sc-15946 golden recipe (51 bytes of prose) | 186 B | 565 B | 751 B |
+/// | both prose fields at the sanitizer's 16 KiB `PROSE_MAX_BYTES` cap | **32,913 B** | 467 B | 33,380 B |
+///
+/// So the worst legitimate case is a ~33 KB text chunk restating prose the envelope beside it
+/// deflates into 467 bytes. `the_parameters_chunk_at_the_prose_cap_is_the_worst_case` and
+/// `the_chunks_stay_text_chunks_and_not_a_payload` in `tests/workflow_png.rs` measure both rows.
+///
+/// **Uncompressed is still the right call at 33 KB**, and the reason is that ratio rather than the
+/// absolute number. The file already carries a compact copy of every byte in this chunk — that is
+/// what the envelope beside it is — so compressing this one saves bytes the file has already spent,
+/// and spends the single property it exists for. A gallery that cannot find the block gets nothing;
+/// a gallery that finds a 33 KB block displays the prompt. The case is also nothing anyone meets:
+/// it takes a 16 KiB prompt AND a 16 KiB negative prompt, where a real one is the top row.
+///
+/// It is not unbounded either — `PROSE_MAX_BYTES` caps each prose field and no other field on the
+/// line is prose, so 2 x 16 KiB plus a settings line is the whole of it.
 fn parameters_chunk(text: String) -> TextChunk {
     if text.is_ascii() {
         TextChunk::Latin1(TEXtChunk::new(PARAMETERS_CHUNK_KEYWORD, text))
@@ -1786,12 +1810,17 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_parameters_chunk_survives_a_strip_of_our_own() {
+    fn a_second_parameters_chunk_in_a_file_of_ours_comes_out_too() {
         // Co-presence decides ownership per FILE, not per chunk, so a file carrying both our pair
         // and a third-party `parameters` chunk is a case the rule cannot split — and it is worth
         // knowing which way it falls. It falls toward removal: a `parameters` chunk in a file of
         // ours is treated as ours. Recorded rather than hidden, because the alternative (keeping a
         // duplicate keyword we cannot tell apart) would leave one of our own blocks behind.
+        //
+        // The name says which way, because this is the question a future reader greps for: the
+        // third-party chunk does NOT survive. `an_imported_a1111_image_keeps_its_own_parameters_
+        // block` in `tests/workflow_parameters.rs` is the case where one does — a foreign file with
+        // no envelope beside it, which the strip never touches at all.
         //
         // Our writer never produces this shape: it writes exactly one `parameters` chunk into a
         // file it encoded from pixels, so a second one is something a third party appended

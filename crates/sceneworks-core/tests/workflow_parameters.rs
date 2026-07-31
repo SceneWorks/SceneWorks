@@ -40,11 +40,15 @@ use image::{Rgb, RgbImage};
 use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::workflow_parameters::{
     parameters_text, NEGATIVE_PROMPT_LABEL, PARAMETERS_CHUNK_KEYWORD, SETTINGS_FIELDS,
+    SETTINGS_PAIR_FLOOR,
 };
 use sceneworks_core::workflow_png::{
     read_workflow_chunk_file, strip_workflow_chunk, write_workflow_chunk, WORKFLOW_CHUNK_KEYWORD,
 };
-use sceneworks_core::workflow_share::{build_workflow_share, WorkflowShare, PRODUCER_VERSION};
+use sceneworks_core::workflow_share::{
+    build_workflow_share, build_workflow_share_from, WorkflowAssetFacts, WorkflowShare,
+    PRODUCER_VERSION,
+};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -200,6 +204,15 @@ fn the_local_parser_reads_a_real_a1111_block() {
     let thin = parse_a1111("just a prompt\nModel: z_image_turbo, Version: 0.8.1");
     assert!(thin.params.is_empty(), "{thin:?}");
     assert!(thin.prompt.ends_with("Version: 0.8.1"));
+
+    // The renderer's `SETTINGS_PAIR_FLOOR` is that same threshold, and this is where the two are
+    // joined. The parser above keeps its own literal on purpose — one that read the renderer's
+    // constant would agree with it whatever it was set to, which is the opposite of a measurement.
+    assert_eq!(
+        SETTINGS_PAIR_FLOOR, 3,
+        "the renderer's floor and the reader's threshold have diverged; one of them is now wrong \
+         about what a gallery does with a thin line"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -413,28 +426,181 @@ fn the_version_is_the_producer_version_exactly() {
     assert_eq!(parsed.params["Version"], PRODUCER_VERSION);
 }
 
+/// The envelope shape one of the worker's derived-pass write seams produces.
+///
+/// Built through the public `build_workflow_share_from` rather than through the worker's own
+/// helpers, because those are `pub(crate)` in a crate this one does not depend on — and because what
+/// is under test is the SHAPE (which facts are present, which are empty, whether the geometry is the
+/// encoded file's), which is exactly what the facts struct carries.
+fn lane_share(facts: WorkflowAssetFacts, payload: Value) -> WorkflowShare {
+    build_workflow_share_from(&facts, payload.as_object().expect("a payload object"))
+}
+
 #[test]
 fn the_settings_line_clears_the_pair_floor_a_gallery_parses_with() {
-    // A1111 treats a trailing line of fewer than three `Key: value` pairs as PROMPT text. Our
-    // minimum emission is Seed + Model + Version, so an ordinary generation always clears it — but
-    // that is a property worth pinning rather than assuming, because dropping any one of those
-    // three would silently turn the settings line into a line of prompt for every reader.
-    for (label, extra) in [
-        ("a full recipe", json!({})),
+    // A1111 treats a trailing line of fewer than three `Key: value` pairs as PROMPT text, and
+    // `SETTINGS_PAIR_FLOOR` withholds the line rather than emitting one below it. So there are two
+    // things to pin, and the version of this test that shipped first pinned neither well: it
+    // measured two `text_to_image` fixtures that both emit SIX pairs, which is not where the cliff
+    // is.
+    //
+    // The lanes below are the ones that actually sit at or near the floor — the derived passes,
+    // whose envelopes are deliberately thin. `standalone_upscale_workflow_share` is the extreme: no
+    // prompt, no `advanced`, source geometry that is not the encoded file's, and the engine id
+    // standing in for the model. It clears the floor by exactly nothing.
+    //
+    // Each lane is checked through `parse_a1111` — the gallery's own reader — rather than by
+    // counting pairs on `lines().last()`, because when the floor guard withholds a line there may be
+    // no last line at all, and "the settings fell into the prompt" is precisely the failure worth
+    // catching.
+    let lanes: [(&str, WorkflowShare, (u32, u32), &str); 4] = [
         (
-            "no advanced settings at all",
-            json!({ "advanced": Value::Object(serde_json::Map::new()) }),
+            "an ordinary text_to_image generation",
+            built("a lighthouse", "", json!({})),
+            (64, 48),
+            "a lighthouse",
         ),
-    ] {
-        let share = built("a lighthouse", "", extra);
-        let text = parameters_text(&share, (64, 48));
-        let last = text.lines().last().expect("there is a line");
+        (
+            "a generation with no advanced settings at all",
+            built(
+                "a lighthouse",
+                "",
+                json!({ "advanced": Value::Object(serde_json::Map::new()) }),
+            ),
+            (64, 48),
+            "a lighthouse",
+        ),
+        (
+            // `standalone_upscale_workflow_share` in the worker: mode `image_upscale`, the engine
+            // as the model, no prompt at all, and the SOURCE geometry — so `Size` is correctly
+            // withheld from a file twice that size. Seed + Model + Version and nothing else.
+            "the standalone upscale lane",
+            lane_share(
+                WorkflowAssetFacts {
+                    mode: "image_upscale".to_owned(),
+                    model: "seedvr2".to_owned(),
+                    prompt: String::new(),
+                    negative_prompt: String::new(),
+                    seed: 880_412,
+                    width: Some(1024),
+                    height: Some(1024),
+                },
+                json!({ "projectId": "project_7a10", "sourceAssetId": "asset_9f2c",
+                        "upscale": { "enabled": true, "engine": "seedvr2", "factor": 2 } }),
+            ),
+            (2048, 2048),
+            "",
+        ),
+        (
+            // `detail_workflow_share`: its own job, its own payload, and the Detail UI exposes only
+            // `strength` and `cnScale` — neither of which maps to an A1111 field. So `advanced`
+            // travels full and contributes nothing to the line.
+            "the detail lane",
+            lane_share(
+                WorkflowAssetFacts {
+                    mode: "image_detail".to_owned(),
+                    model: "sdxl_base".to_owned(),
+                    prompt: "sharper rigging".to_owned(),
+                    negative_prompt: String::new(),
+                    seed: 4,
+                    width: Some(1536),
+                    height: Some(1536),
+                },
+                json!({ "projectId": "project_7a10", "sourceAssetId": "asset_9f2c",
+                        "advanced": { "strength": 0.4, "cnScale": 0.8 } }),
+            ),
+            (1536, 1536),
+            "sharper rigging",
+        ),
+    ];
+
+    // The two derived lanes have to be thin or this pins the wrong thing: the upscale lane carries
+    // no prompt and no `advanced` at all, and the detail lane's two knobs both travel and both map
+    // to nothing on the line. Checked, because a fixture that quietly grew a mapped field would
+    // leave the floor untested again while still passing.
+    assert!(
+        lanes[2].1.prompt.is_empty() && lanes[2].1.advanced.is_empty(),
+        "the upscale fixture is no longer the thin shape the seam produces: {:?}",
+        lanes[2].1.advanced
+    );
+    assert_eq!(
+        lanes[3].1.advanced.len(),
+        2,
+        "the detail fixture must carry both allow-listed knobs and nothing that maps: {:?}",
+        lanes[3].1.advanced
+    );
+    // And the sharpest statement of where the cliff is: the upscale lane clears the floor by
+    // NOTHING. Stated as an equality so a change that removes a mapped field fails here rather than
+    // silently reducing the margin from zero to negative.
+    assert_eq!(
+        parse_a1111(&parameters_text(&lanes[2].1, lanes[2].2))
+            .params
+            .len(),
+        SETTINGS_PAIR_FLOOR,
+        "the standalone upscale lane is the one that sits ON the floor; if it no longer does, the \
+         lane that does is the one this test should be pinning"
+    );
+
+    for (label, share, encoded, prompt) in lanes {
+        let text = parameters_text(&share, encoded);
+        let parsed = parse_a1111(&text);
         assert!(
-            parse_params(last).len() >= 3,
-            "on {label} the settings line {last:?} has fewer than the three pairs A1111 needs to \
-             recognize it as settings — it would be displayed as part of the prompt"
+            parsed.params.len() >= SETTINGS_PAIR_FLOOR,
+            "on {label} a gallery reads {} pairs off {text:?} — fewer than the \
+             {SETTINGS_PAIR_FLOOR} A1111 needs, so the whole line is displayed as part of the prompt",
+            parsed.params.len()
+        );
+        assert_eq!(
+            parsed.prompt, prompt,
+            "on {label} the settings line fell into the prompt: {text:?}"
         );
     }
+}
+
+#[test]
+fn a_lane_that_cannot_reach_the_floor_withholds_the_line_instead_of_leaking_it_into_the_prompt() {
+    // The other half, and the reason the pin above is worth extending rather than just widening.
+    // The upscale lane clears the floor by ZERO margin, so any envelope that loses one of its three
+    // fields falls off the cliff — and the renderer used to emit the two-pair remainder, which every
+    // gallery displays as prompt text.
+    //
+    // Reachable? Not through today's catalog: `model` here is an upscaler engine id, and no id in it
+    // is empty, over 200 characters or path-shaped, which are the three ways the sanitizer drops a
+    // label. So this is latent rather than live — which is exactly the kind of thing that becomes
+    // live when someone adds an engine whose id happens to look like a path.
+    let stripped = lane_share(
+        WorkflowAssetFacts {
+            mode: "image_upscale".to_owned(),
+            // Three segments, so `is_path_shaped` catches it and `shareable_label` withholds it —
+            // two would be a Hugging Face repo id and would survive.
+            model: "engines/upscalers/seedvr2".to_owned(),
+            prompt: "a lighthouse".to_owned(),
+            negative_prompt: String::new(),
+            seed: 880_412,
+            width: Some(1024),
+            height: Some(1024),
+        },
+        json!({ "projectId": "project_7a10" }),
+    );
+    assert!(
+        stripped.model.is_empty(),
+        "the fixture must actually lose its model or it proves nothing: {:?}",
+        stripped.model
+    );
+
+    let text = parameters_text(&stripped, (2048, 2048));
+    assert_eq!(
+        text, "a lighthouse",
+        "two mapped fields is a line a gallery reads as prompt, so the line must be withheld whole \
+         — the prompt stays correct and the settings are simply absent"
+    );
+    let parsed = parse_a1111(&text);
+    assert_eq!(parsed.prompt, "a lighthouse");
+    assert!(parsed.params.is_empty());
+    // And nothing was lost that mattered: the authoritative recipe is the other chunk, which still
+    // carries the seed and the producer version this line could not state legibly.
+    assert_eq!(stripped.seed, Some(880_412));
+    assert_eq!(stripped.producer.version, PRODUCER_VERSION);
 }
 
 // ---------------------------------------------------------------------------

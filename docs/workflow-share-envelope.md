@@ -194,6 +194,14 @@ itself does. Values containing a comma, a colon or a newline are JSON-quoted, mi
 `quote()` — without that, a comma inside a model slug would split one field into two for every
 reader in the wild.
 
+**The settings line is withheld whole below three pairs.** A1111's parser puts a trailing line of
+fewer than three `Key: value` pairs back into the *prompt*, and every gallery modelled on it does the
+same — so a two-pair line is not a thin settings block, it is a wrong prompt. `SETTINGS_PAIR_FLOOR`
+in `workflow_parameters.rs` drops the line rather than emitting one below the threshold. Every
+shipping lane clears it unaided; the thinnest, a standalone upscale, emits exactly
+`Seed` + `Model` + `Version` and clears it by nothing at all, which is why the floor is a guard
+rather than an observation.
+
 What is deliberately **not** in the trailer, and why: the multi-phase Krea schedule (a list of
 `(steps, guidance)` pairs has no single-number form — and its presence suppresses `Steps` and `CFG
 scale` too, because a top-level number beside it would describe a run that did not happen);
@@ -216,6 +224,19 @@ ours is narrower on purpose, and differs only in the U+00A0..U+00FF band, where 
 0xE9 byte is `é` to a Latin-1 reader and a replacement character to the very common reader that
 assumes UTF-8. `iTXt` is UTF-8 by specification, so both classes of reader agree. Uncompressed in
 both arms, matching PIL's default: being findable is the entire value of the chunk.
+
+Uncompressed is not free, and the size is worth stating rather than waving at. On the representative
+recipe the trailer is **186 bytes** framed, beside a 565-byte compressed envelope chunk. With both
+prose fields at the sanitizer's 16 KiB `PROSE_MAX_BYTES` cap it is **32,913 bytes** — against a
+467-byte envelope chunk carrying the same prose deflated. That is the ceiling, not an estimate: no
+other field on the line is prose, so 2 x 16 KiB plus a settings line is the whole of it.
+
+It stays uncompressed at that size, and the ratio is the reason rather than the absolute number. The
+file already holds a compact copy of every byte in the trailer — that is what the envelope chunk
+beside it *is* — so compressing this one saves bytes the file has already spent and risks the single
+property it exists for. A gallery that cannot find the block gets nothing; one that finds a 33 KB
+block displays the prompt. `the_parameters_chunk_at_the_prose_cap_is_the_worst_case` in
+`crates/sceneworks-core/tests/workflow_png.rs` measures both rows.
 
 `pil_agrees_with_our_encoding_choice` in `crates/sceneworks-core/tests/workflow_parameters.rs` runs
 the real library, asserts it reads both of our chunks back verbatim, and asserts PIL's own boundary
