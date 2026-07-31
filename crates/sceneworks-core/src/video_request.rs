@@ -1040,10 +1040,12 @@ mod tests {
     /// must NOT invent one.
     ///
     /// **The backends now agree** — sc-12308 reconciled them, so the table is simply each
-    /// engine's cap rather than the stricter of two answers. Both reject an over-cap request
-    /// (candle `wan14b.rs:645` / `model_vace.rs:298` / `candle-gen-bernini/src/config.rs:164` /
-    /// `candle-gen-scail2/src/pipeline.rs:294` / `lib.rs`'s new `MAX_AREA_5B` check; mlx
-    /// `validate_impl` → `reject_over_area`), at these values.
+    /// engine's cap rather than the stricter of two answers. Both measure the same rendered,
+    /// lattice-aligned geometry and reject it when it exceeds that cap. The relevant validation
+    /// paths are candle's Wan `validate` methods, Bernini's `validate_bernini_geometry`, and
+    /// SCAIL-2's `reject_over_area`; mlx validation reaches `reject_over_area`,
+    /// `validate_bernini_geometry`, or SCAIL-2's `reject_unrenderable_geometry` →
+    /// `reject_over_area_dims`.
     ///
     /// Before that they disagreed three ways on one manifest entry, and the table had to carry
     /// the strictest: mlx T2V/VACE/bernini/scail2 were **uncapped**, mlx I2V/5B **silently
@@ -1052,7 +1054,7 @@ mod tests {
     /// values themselves were wrong too: the whole 14B family carried the TI2V-5B's 901,120.
     /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
     ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
-    ///   **latent tokens** (`candle-gen-ltx/src/lib.rs:454`: `t_lat·h_lat·w_lat > 131_072`), which
+    ///   **latent tokens** through `config::max_latent_tokens` (`t_lat·h_lat·w_lat > 131_072`), which
     ///   is proportional to `frames × w × h`. That is a frames×area constraint and therefore
     ///   outside `maxPixels`' scope — `maxPixels` is a pure per-frame area budget with no frame
     ///   term, so no value of it could express this cap without either under- or over-constraining
