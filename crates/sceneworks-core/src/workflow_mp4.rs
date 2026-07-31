@@ -55,6 +55,15 @@
 //!
 //! Parsing goes through [`crate::workflow_share::parse_workflow_share_json`] and nothing else, so
 //! the sc-15946 allow-list sanitizer runs on the way in exactly as it does for a PNG.
+//!
+//! **The video envelope is write-only in the product today.** [`read_workflow_metadata_file`] and
+//! [`read_workflow_metadata`] have no production callers: nothing imports a clip's recipe, and no
+//! studio surface offers to replay one. Their callers are this crate's tests, which is what makes
+//! the write side provable end-to-end — an envelope is only demonstrably in a file if something can
+//! read it back out. Do not mistake the section above for a shipped round trip: it describes the
+//! posture the reader ALREADY has, so that the day a video import lands (the sc-15949 equivalent
+//! for clips) the boundary is not being designed under deadline against files from strangers. The
+//! PNG lane took the opposite order and it cost a story.
 
 use std::fmt;
 use std::fs::File;
@@ -190,8 +199,9 @@ fn io_error(error: &std::io::Error) -> WorkflowMp4Error {
 
 /// Escape one value for an `ffmetadata` document.
 ///
-/// ffmpeg's own rule: `=`, `;`, `#`, `\` and a newline are escaped with a backslash. There is no
-/// escape for a carriage return — see [`ffmetadata_document`], which is why this is not public.
+/// ffmpeg's own rule: `=`, `;`, `#`, `\` and a newline are escaped with a backslash. A carriage
+/// return is escapable the same way and is deliberately NOT escaped here — see
+/// [`ffmetadata_document`] for why one is a refusal instead, and why this is not public.
 fn escape_ffmetadata(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 16);
     for character in value.chars() {
@@ -207,11 +217,18 @@ fn escape_ffmetadata(value: &str) -> String {
 ///
 /// # The carriage-return hazard
 ///
-/// `ffmetadata`'s line parser has escapes for `=`, `;`, `#`, `\` and `\n`, and **none for `\r`**.
-/// A raw carriage return in a value silently TRUNCATES it at that byte — measured: `"a\rb"` written,
-/// `"a"` read back, no error from ffmpeg at either end. That is the worst failure shape available
-/// (a recipe that is half a recipe and claims to be whole), so it is refused rather than escaped:
-/// there is nothing to escape it *to*.
+/// `ffmetadata`'s line parser treats a raw carriage return as a line terminator, and an UNESCAPED
+/// one in a value silently TRUNCATES it at that byte — measured: `"a\rb"` written, `"a"` read back,
+/// no error from ffmpeg at either end. That is the worst failure shape available: a recipe that is
+/// half a recipe and claims to be whole.
+///
+/// It is refused rather than escaped, and the reason is NOT that a `\r` is inescapable — the
+/// sc-15956 review measured that too, and `\` + CR round-trips a literal CR back out intact, the
+/// same as `\n`. The reason is what a raw CR in this string would MEAN. The value is
+/// `serde_json::to_string` output, JSON escapes every control character, and so a 0x0D byte in it
+/// says that something upstream stopped going through `serde_json` — at which point escaping it and
+/// carrying on would encode whatever else that change broke into every clip, quietly. Refusing
+/// turns an invariant violation into a failure at the seam that noticed it.
 ///
 /// It is also unreachable. The value is `serde_json::to_string` output, and JSON escapes every
 /// control character — a `\r` inside a prompt is the two bytes `\` `r`, never the one byte 0x0D.

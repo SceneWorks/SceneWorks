@@ -899,14 +899,23 @@ pub(crate) async fn run_video_generate_job(
     let workflow_metadata = plan.media_path.with_extension("workflow.ffmeta");
     let embedded =
         video_workflow_metadata(settings, job, &request, &plan, seed, &workflow_metadata);
-    encode_media(
+    let encoded = encode_media(
         &plan.media_path,
         decoded,
         embedded.then_some(workflow_metadata.as_path()),
         Some(ctx),
     )
-    .await?;
+    .await;
+    // The scratch goes on EVERY path, and the `?` waits for it. `encode_media(...).await?` here
+    // propagated FIRST, so a failed or cancelled encode left `*.workflow.ffmeta` — the whole
+    // envelope, prompt in plaintext — sitting in the user's project directory permanently, next to
+    // no video. A metadata document is a file the user never asked for; it must not outlive the
+    // encode it was written for. `encode_media` already keeps its own three temporaries on this
+    // exact shape (`let result = …; remove; result`), and `seedvr2.rs` uses an RAII `ScratchDir`
+    // for the same reason. Pinned by `the_workflow_metadata_scratch_does_not_outlive_a_failed_
+    // encode` in `crates/sceneworks-worker/src/video_jobs/tests.rs`.
     let _ = tokio::fs::remove_file(&workflow_metadata).await;
+    encoded?;
 
     let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
     let result = streaming_result(&plan, &fact, adapter);

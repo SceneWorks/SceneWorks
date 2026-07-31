@@ -79,8 +79,51 @@ a test asserts it is strict semver.
 `schemaVersion` is the contract version and is **the only version the parser branches on**.
 `producer.version` is recorded so a bug report is actionable and is never interpreted. (It is not
 the only *field* the parser branches on: the `sceneworksWorkflow` marker is checked too, and a blob
-whose marker names a lane this build does not read — a future video envelope, say — is refused as an
-unsupported kind rather than parsed as an image one.)
+whose marker names a kind this build has no reader for at all — `hologram`, say — is refused as an
+unsupported kind rather than parsed as an image one. That check runs BEFORE the version check, so a
+kind we do not understand is never reported as a version problem.)
+
+A kind this build *does* know is a different question, and the shared parser is deliberately not
+where it is answered — see [Every container asserts its own
+kind](#every-container-asserts-its-own-kind).
+
+### Every container asserts its own kind
+
+The parser accepts **every** kind in the contract, because an envelope is an envelope. A *reader* is
+narrower: it hands its result to one lane, and a lane can only act on the kind it was built for.
+Offering a clip's recipe to Image Studio is the same failure as parsing an unknown marker as an
+image — it presents a file as a kind it is not — so it is refused in the same way, with the same
+error and the same `UnsupportedKind` shape.
+
+So the rule is per-reader, and there are three readers:
+
+<!-- PINNED: container-kinds -->
+
+| What is being read | File | Reader | Kind it accepts |
+| --- | --- | --- | --- |
+| A PNG's `sceneworks:workflow` chunk | `crates/sceneworks-core/src/workflow_png.rs` | `read_workflow_chunk_from` | `image` |
+| An MP4's `comment` tag | `crates/sceneworks-core/src/workflow_mp4.rs` | `read_workflow_metadata_from` | `video` |
+| The envelope recorded on an imported asset | `apps/rust-api/src/workflows.rs` | `get_asset_workflow` | `image` |
+
+<!-- END PINNED: container-kinds -->
+
+The third row is the one that was missed. Until sc-15956 the marker had exactly one legal value, so
+the shared parser's refusal of `"video"` did every reader's container check for it, for free. Widening
+the marker to `image` | `video` removed that inheritance — silently, from a route in a crate the
+change did not touch. `GET …/assets/:asset_id/workflow` went on calling `parse_workflow_share` alone
+and started answering `200 { status: "workflow" }` for a video envelope, whose response feeds
+`recipeFromWorkflowShare` and an **Image Studio prefill**. The asset panel's `asset.type === "image"`
+button guard is not a substitute: a video envelope recorded on an image asset passes it unchanged.
+
+`the_asset_route_500s_when_the_stored_envelope_names_another_container` in
+`apps/rust-api/src/tests/workflows.rs` pins that reader against a complete, valid video envelope —
+one the parser accepts — so the test fails if the container assert is removed rather than passing on
+a deserialize error. The table above is pinned by `the_doc_lists_exactly_the_container_kind_asserts`,
+which reads each named file and fails if the assert it claims is not there.
+
+**Adding a container, or a reader, means adding a row here and an assert there.** The parser is not
+the place to put it: an envelope that is legal to parse and wrong to act on is exactly the case this
+rule exists for.
 
 | The file says | This build does |
 | --- | --- |
@@ -117,7 +160,7 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `count` | How many images the run requested — so the file says it was one of a batch of N. |
 | `durationSeconds` | **Video.** The clip length the run asked for. The ask, not the measurement — a 6.0 s ask that rendered 5.96 s replays as 6.0. |
 | `fps` | **Video.** The frame rate the run asked for, for the same reason. |
-| `quality` | **Video.** The quality preset the run was submitted at. A named tier off a menu the receiving install also has. |
+| `quality` | **Video.** The quality preset the run was submitted at — `fast`, `balanced` or `best`. A named tier off a menu the receiving install also has (it shows them as "Draft" / "Balanced" / "Final"; the value is what travels). |
 | `stylePreset` | The style preset label the run used. |
 | `styleId` | The catalog style id the user picked. |
 | `fitMode` | How the source image was fitted (`crop`, `contain`, …). |
@@ -273,6 +316,60 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 
 <!-- END PINNED: advanced-withheld -->
 
+## Person replacement is withheld by default
+
+Four fields carry a person-replacement run's specifics, and none of them travel: `personTrackId` and
+`replacementMode` at the top level of the request, `advanced.selectedPersonTrack` and
+`advanced.replacementModeLabel` inside the map. The first is an install-local id, which alone would
+put it in the same class as `controlImage`. The rest are withheld for a stronger reason.
+
+`selectedPersonTrack` is the sharpest object any payload carries: a `name` the user typed, which is
+routinely a real person's name; a `sourceDisplayName` that is the original imported filename; local
+asset ids; and a `frames[].mask` array of filesystem paths. `replacementModeLabel` is neither an id
+nor a path — it is the string "Face Only" — and it is withheld anyway, because **which variant of a
+replacement ran is a fact about a real person who did not choose to share it**. There is no replay
+value to weigh against that: a recipient has no access to the track, so the field could only ever
+inform, never reproduce.
+
+### What does travel, and why the copy has to say so
+
+`mode` is `replace_person`, verbatim, and `model` names a replacement engine
+(`wan_2_2_vace_fun_14b`). Both are ordinary shared fields, and neither is special-cased. **So the
+file does disclose the technique.** What it withholds is the identity and the variant.
+
+That distinction is not a technicality, because it is the difference between a true sentence and a
+false one on the Settings surface. The "Not in the file" copy read *"anything about a person
+replacement"* until the sc-15956 review measured it against real bytes; the enumerated tail was
+true, the leading clause was not, and the key-level pin joining that copy to the tables above could
+not catch it, because `mode` is not a key in either list. It is asserted directly instead, by
+`the_settings_copy_does_not_overclaim_about_person_replacement` in
+`crates/sceneworks-core/tests/workflow_share_doc.rs`, which builds a real `replace_person` envelope,
+proves the four fields are absent from the serialized bytes, proves `mode` is present, and then
+reads the sentence.
+
+Narrowing the withholding to close that gap was available and was refused: the disclosure that
+matters is *who*, and `mode` is a field every video envelope carries for every mode. Dropping it for
+one mode would be a hole in the field list that a reader could detect — an absent `mode` on a video
+envelope would itself say "this was a replacement".
+
+### Why it is not in `omitted`
+
+This is the one place the contract's "a stated absence beats an invisible one" rule is deliberately
+inverted, and it is worth reading before anyone "fixes" the inconsistency.
+
+`omitted` exists for collections too large to record — `loras`, `inputs`, `advanced.poses` — where
+naming the gap costs nothing and tells the receiving user why their replay is incomplete. Writing
+`omitted: ["personTrackId"]` would cost something: it would **announce the replacement to every
+reader** while withholding only the id. Naming a withheld thing in a field designed to be read is
+worse than an absence, when the absence is the point.
+
+The honest weakness of that argument, recorded here rather than left for someone to rediscover: it
+is weaker than it looks, because `mode` announces the replacement anyway (above). What `omitted`
+would add is not the disclosure — that is already there — but a second, redundant one, in a field
+whose whole purpose is to be surfaced to a reader, naming the private half by key. The inversion
+stands on the narrower ground: the technique travels once, in the field that always carries it, and
+nothing else points at what was withheld.
+
 ## Input images travel by shape, not by id
 
 A recipe that started from an image records **that it needs one, and of what kind** — never the
@@ -323,6 +420,11 @@ The marker is emitted in **both** directions. On the write side it is the differ
 silently lost 70-pose selection and a visible one, which is the point: our own writer can hit these
 caps, and a recipe that says "no LoRAs" when it had five is exactly the silent loss this contract
 exists to prevent.
+
+There is **one deliberate exception**, and it is the only place this rule is inverted: the
+person-replacement fields are withheld without an `omitted` entry. The argument, and its honest
+weakness, are in [Person replacement](#person-replacement-is-withheld-by-default). Read it before
+adding them here for consistency — the inconsistency is the decision.
 
 ## Ceilings
 
@@ -528,6 +630,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
 | `apps/web/src/screens/EditorScreen.jsx` | `bridgeGap` | Timeline bridge. |
 | `apps/web/src/simple/simpleJobs.js` | `buildSimpleVideoRequest` | The Simple shell's video request. |
+| `apps/web/src/screens/VideoUpscalePanel.jsx` | `onUpscale` | The standalone video upscale. Registered as emitting **no** `advanced` map, for the same reason `buildUpscaleJobBody` is. |
 
 <!-- END PINNED: builders -->
 
@@ -610,7 +713,8 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs/detail.rs` | `run_image_detail_job` | Embeds — writes the refined PNG. macOS-gated; the scan is textual, so it is read on every platform. |
 | `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_image_upscale_job` | Embeds — hands the standalone upscale's envelope to the shared single-child writer. |
 | `crates/sceneworks-worker/src/single_child_asset.rs` | `write_single_child_asset` | Conduit — writes the envelope its caller decided on, and builds none itself. |
-| `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the one funnel every generated clip is encoded through, whatever engine or studio produced it. |
+| `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the funnel every *generated* clip is encoded through, whatever engine or studio produced it. |
+| `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` | `seedvr2_workflow_metadata` | Embeds — the SeedVR2 video upscale's own clip. macOS + candle-gated; the scan is textual, so it is read on every platform. |
 | `crates/sceneworks-worker/src/segment_jobs.rs` | `run_image_segment_job` | Declines — a smart-select mask has no generation recipe to replay, and is grayscale. |
 
 <!-- END PINNED: write-seams -->

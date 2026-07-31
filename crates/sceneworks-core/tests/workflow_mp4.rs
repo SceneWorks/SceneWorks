@@ -43,7 +43,7 @@ fn payload(extra: Value) -> Map<String, Value> {
         "prompt": "a fox crossing a frozen river",
         "duration": 5.0,
         "fps": 24,
-        "quality": "standard",
+        "quality": "balanced",
         "width": 768,
         "height": 512,
     });
@@ -526,7 +526,7 @@ fn the_video_knobs_travel() {
     let share = video_share();
     assert_eq!(share.duration_seconds, Some(5.0));
     assert_eq!(share.fps, Some(24));
-    assert_eq!(share.quality.as_deref(), Some("standard"));
+    assert_eq!(share.quality.as_deref(), Some("balanced"));
 }
 
 /// …and an IMAGE envelope never grows them, even from a payload that carries the keys.
@@ -534,7 +534,7 @@ fn the_video_knobs_travel() {
 fn an_image_envelope_never_grows_the_video_knobs() {
     let share = sceneworks_core::workflow_share::build_workflow_share_from(
         &facts(),
-        &payload(json!({ "duration": 5.0, "fps": 24, "quality": "standard" })),
+        &payload(json!({ "duration": 5.0, "fps": 24, "quality": "balanced" })),
     );
     assert_eq!(share.duration_seconds, None);
     assert_eq!(share.fps, None);

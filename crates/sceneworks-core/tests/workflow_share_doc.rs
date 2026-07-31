@@ -38,7 +38,7 @@ use sceneworks_core::workflow_share::{
     SeamDisposition, WorkflowInput, WorkflowLora, WorkflowProducer, WorkflowShare, WorkflowUpscale,
     ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, INPUT_KINDS,
     INPUT_KIND_SOURCE, OMITTED_FIELDS, OMITTED_LORAS, POSE_FIELDS, PRODUCER_NAME, PRODUCER_URL,
-    WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_KINDS, WORKFLOW_KIND_IMAGE, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
     WORKFLOW_SHARE_SCHEMA_VERSION, WORKFLOW_WRITE_SEAMS,
 };
 use serde_json::{json, Value};
@@ -335,7 +335,7 @@ fn fully_populated_envelope() -> WorkflowShare {
         // document is pinned against every field rather than against one lane's.
         duration_seconds: Some(5.0),
         fps: Some(24),
-        quality: Some("standard".to_owned()),
+        quality: Some("balanced".to_owned()),
         style_preset: Some("cinematic".to_owned()),
         style_id: Some("noir".to_owned()),
         fit_mode: Some("crop".to_owned()),
@@ -555,6 +555,135 @@ fn the_doc_lists_exactly_the_omitted_vocabulary() {
             .collect(),
         "omitted-fields",
         "`OMITTED_FIELDS`",
+    );
+}
+
+/// Every reader named in the `container-kinds` table really asserts the kind the table claims
+/// (sc-15956 review).
+///
+/// The rule this pins is the one the marker's widening broke: the shared parser accepts every kind
+/// in `WORKFLOW_KINDS`, so a reader that hands its result to one lane owes a container assert of its
+/// own. The PNG reader had one, the MP4 reader had one, and the asset route — the third reader,
+/// in a crate the widening did not touch — silently lost the refusal it used to inherit from the
+/// parser.
+///
+/// Not a prose check. Each row names a file and a function, and this reads that file and fails if
+/// the assert it claims is not in it, so deleting a gate breaks the document as well as the route's
+/// own test.
+#[test]
+fn the_doc_lists_exactly_the_container_kind_asserts() {
+    let rows = pinned_rows(&doc(), "container-kinds");
+    assert!(
+        rows.len() >= WORKFLOW_KINDS.len(),
+        "{DOC_PATH}: the `container-kinds` block lists {} readers for {} kinds — every kind needs \
+         at least one container that accepts it",
+        rows.len(),
+        WORKFLOW_KINDS.len()
+    );
+    let mut accepted: BTreeSet<String> = BTreeSet::new();
+    for row in &rows {
+        assert!(
+            row.len() >= 4,
+            "{DOC_PATH}: a `container-kinds` row has fewer than four columns: {row:?}"
+        );
+        let path = code(&row[1]);
+        let function = code(&row[2]);
+        let kind = code(&row[3]);
+        assert!(
+            WORKFLOW_KINDS.contains(&kind.as_str()),
+            "{DOC_PATH}: `container-kinds` says {function} accepts `{kind}`, which is not a kind \
+             this contract has. Known kinds: {WORKFLOW_KINDS:?}"
+        );
+        accepted.insert(kind.clone());
+
+        let source = read_repo_file(&path);
+        assert!(
+            source.contains(&format!("fn {function}")),
+            "{DOC_PATH}: `container-kinds` names `{function}` in {path}, which has no such \
+             function. A reader that moved needs the table moved with it."
+        );
+        let constant = if kind == WORKFLOW_KIND_IMAGE {
+            "WORKFLOW_KIND_IMAGE"
+        } else {
+            "WORKFLOW_KIND_VIDEO"
+        };
+        assert!(
+            source.contains(&format!("share.kind != {constant}")),
+            "{path} does not assert `share.kind != {constant}` anywhere, and {DOC_PATH}'s \
+             `container-kinds` table says `{function}` accepts only `{kind}`.\n\
+             The shared parser accepts EVERY kind, so a reader that feeds one lane is the only \
+             thing standing between a `{kind}`-only surface and an envelope of another kind being \
+             presented as one it is not."
+        );
+    }
+    assert_eq!(
+        accepted,
+        WORKFLOW_KINDS
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect::<BTreeSet<String>>(),
+        "{DOC_PATH}: every kind the contract has needs a container that accepts it, or the kind is \
+         one nothing can read"
+    );
+}
+
+/// Every in-document `](#anchor)` link resolves to a heading in this document.
+///
+/// The sc-15956 review found `[Person replacement](#person-replacement-is-withheld-by-default)`
+/// pointing at a heading that did not exist — and that dead link was the single pointer a future
+/// author had to the person-replacement rationale, from the withheld table's own row. A reader
+/// following it landed at the top of the page and could reasonably conclude the reasoning had never
+/// been written down.
+///
+/// GitHub's slug rule, near enough for this document: lowercase, drop everything that is not a
+/// letter, digit, space or hyphen, then spaces to hyphens.
+#[test]
+fn every_internal_link_in_the_doc_points_at_a_heading_that_exists() {
+    let doc = doc();
+    let mut headings: BTreeSet<String> = BTreeSet::new();
+    for line in doc.lines() {
+        // The privacy callout is a blockquote, so its headings carry a `>` prefix.
+        let line = line.trim_start().trim_start_matches('>').trim_start();
+        let Some(rest) = line.strip_prefix('#') else {
+            continue;
+        };
+        let title = rest.trim_start_matches('#').trim();
+        if title.is_empty() {
+            continue;
+        }
+        let slug: String = title
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+            .map(|c| if c == ' ' { '-' } else { c })
+            .collect();
+        headings.insert(slug);
+    }
+    assert!(
+        !headings.is_empty(),
+        "{DOC_PATH}: no headings parsed at all"
+    );
+
+    let mut dead: Vec<String> = Vec::new();
+    let mut seen = 0_usize;
+    // Links are hard-wrapped across lines, so search the FLOWED document.
+    let flowed = flowed(&doc);
+    for chunk in flowed.split("](#").skip(1) {
+        let Some(end) = chunk.find(')') else {
+            continue;
+        };
+        seen += 1;
+        // A wrapped link puts a space inside the anchor; the rendered href has none.
+        let anchor = chunk[..end].replace(' ', "");
+        if !headings.contains(&anchor) {
+            dead.push(anchor);
+        }
+    }
+    assert!(seen > 0, "{DOC_PATH}: no internal links parsed at all");
+    assert!(
+        dead.is_empty(),
+        "{DOC_PATH} links to {dead:?}, and no heading in it produces those anchors. \
+         The headings that exist are {headings:?}."
     );
 }
 
@@ -1034,6 +1163,150 @@ fn the_settings_copy_names_exactly_the_path_exempt_prose_fields() {
         read_repo_file(SETTINGS_COPY_PATH).contains(&link_target),
         "{SETTINGS_COPY_PATH} must link to {link_target} — the copy is a summary, and the summary \
          has to be able to send the user to the exact list"
+    );
+}
+
+/// The value of a `const NAME = "…";` string in the settings copy, unescaped enough to compare.
+///
+/// The person-replacement bullet is the one claim in that file no key-level lint can reach, so it
+/// has to be read as PROSE. Panics when the constant is gone, for the reason every parser here
+/// does: a lint that finds nothing passes against a file that was emptied.
+fn settings_copy_constant(name: &str) -> String {
+    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let anchor = format!("const {name} =");
+    let start = source.find(&anchor).unwrap_or_else(|| {
+        panic!("{SETTINGS_COPY_PATH} no longer declares `{anchor}`; teach this lint where it went")
+    }) + anchor.len();
+    let rest = &source[start..];
+    let open = rest
+        .find('"')
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: `{name}` has no string literal"));
+    let close = rest[open + 1..]
+        .find('"')
+        .unwrap_or_else(|| panic!("{SETTINGS_COPY_PATH}: `{name}`'s string is never closed"))
+        + open
+        + 1;
+    let value = rest[open + 1..close].to_owned();
+    assert!(
+        !value.trim().is_empty(),
+        "{SETTINGS_COPY_PATH}: `{name}` parsed to an empty string"
+    );
+    value
+}
+
+/// The person-replacement bullet says only what a real `replace_person` envelope actually withholds
+/// (sc-15956 review).
+///
+/// # The failure this exists for
+///
+/// The bullet read *"anything about a person replacement — the selected track, the person's name,
+/// the original file name, the mask images, or which replacement mode ran"*, rendered into the
+/// **"Not in the file"** list. Every item after the dash was true. The leading clause was not:
+/// `mode` is in the **"In the file"** list, and a person-replacement run writes it verbatim as
+/// `replace_person`. `model` says it a second time — `wan_2_2_vace_fun_14b` is a replacement
+/// engine. So the file announces the TECHNIQUE while the copy said it announced nothing, which is
+/// the one direction `workflowEmbed.js`'s own header forbids: claiming more privacy than the
+/// allow-list delivers.
+///
+/// # Why the key-level pins could not catch it
+///
+/// `the_settings_copy_accounts_for_every_shared_and_withheld_field` joins the copy to the doc on
+/// KEYS, and `mode` is not a key in either of the two lists it compares — it is a shared field the
+/// copy already declares correctly. The error was in a sentence about a different key. So this
+/// asserts the sentence against the bytes of a real envelope instead.
+#[test]
+fn the_settings_copy_does_not_overclaim_about_person_replacement() {
+    // A real Video Studio person-replacement payload, with every person-shaped value the builder
+    // can be handed.
+    let payload = json!({
+        "mode": "replace_person",
+        "model": "wan_2_2_vace_fun_14b",
+        "prompt": "the same shot, continuous motion",
+        "duration": 5.0,
+        "fps": 24,
+        "quality": "balanced",
+        "personTrackId": "track_9f3c1b2a",
+        "replacementMode": "full_person_keep_outfit",
+        "advanced": {
+            "motion": "static",
+            "replacementModeLabel": "Full Person, Keep Outfit",
+            "selectedPersonTrack": {
+                "name": "Sarah Whitfield",
+                "sourceDisplayName": "sarah-audition-take3.mov",
+                "frames": [{ "mask": "D:/Clients/Acme/masks/0001.png" }]
+            }
+        }
+    })
+    .as_object()
+    .expect("an object")
+    .clone();
+    let share = sceneworks_core::workflow_share::build_video_workflow_share_from(
+        &sceneworks_core::workflow_share::WorkflowAssetFacts {
+            mode: "replace_person".to_owned(),
+            model: "wan_2_2_vace_fun_14b".to_owned(),
+            prompt: "the same shot, continuous motion".to_owned(),
+            negative_prompt: String::new(),
+            seed: 7,
+            width: Some(832),
+            height: Some(480),
+        },
+        &payload,
+    );
+    let bytes = serde_json::to_string(&share).expect("the envelope serializes");
+
+    // Half one: the withholding is real. These are the things the bullet promises are absent.
+    for withheld in [
+        "track_9f3c1b2a",
+        "Sarah Whitfield",
+        "sarah-audition-take3.mov",
+        "0001.png",
+        "full_person_keep_outfit",
+        "Full Person, Keep Outfit",
+        "selectedPersonTrack",
+    ] {
+        assert!(
+            !bytes.contains(withheld),
+            "`{withheld}` reached a real person-replacement envelope: {bytes}"
+        );
+    }
+
+    // Half two: and the technique is NOT withheld. This is what makes the old leading clause false,
+    // asserted rather than argued — if this ever stops holding, the copy may go back to the
+    // stronger sentence, and this assert is what will say so.
+    assert_eq!(share.mode, "replace_person");
+    assert!(
+        bytes.contains("\"mode\":\"replace_person\""),
+        "the envelope must still carry the generation mode verbatim: {bytes}"
+    );
+    assert!(
+        bytes.contains("wan_2_2_vace_fun_14b"),
+        "and the model, which names a replacement engine: {bytes}"
+    );
+
+    // Half three: the sentence a user reads matches both halves.
+    let copy = settings_copy_constant("N_PERSON");
+    assert!(
+        !copy.contains("anything about a person replacement"),
+        "{SETTINGS_COPY_PATH}: `N_PERSON` claims the file says nothing about a replacement, and \
+         `mode` says `replace_person` in every one: {copy}"
+    );
+    for named in [
+        "who was replaced",
+        "the selected track",
+        "the person's name",
+        "the original file name",
+        "the mask images",
+    ] {
+        assert!(
+            copy.contains(named),
+            "{SETTINGS_COPY_PATH}: `N_PERSON` no longer names {named:?}, which the envelope really \
+             does withhold: {copy}"
+        );
+    }
+    assert!(
+        copy.contains("generation mode") && copy.contains("do travel"),
+        "{SETTINGS_COPY_PATH}: `N_PERSON` must say that the mode and the model travel, because \
+         they do — an absence list that omits this is the overclaim this test exists for: {copy}"
     );
 }
 

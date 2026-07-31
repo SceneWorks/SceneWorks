@@ -205,11 +205,24 @@ const N_SEEDS = "the other seeds in a batch";
 const N_IMAGES = "the input images themselves, though what a pose selection traced from one does travel";
 const N_BUDGET = "this machine's quality tier, attention kernel or GPU";
 const N_LOCAL = "local library ids — a Key Point collection, a control image, a trained overlay, a recipe preset";
-// The strongest claim in this list, and the only one here for PRIVACY rather than for
-// portability: a shared video must not disclose that it was made by replacing a specific
-// person, still less who or in which mode (sc-15956).
+// The only claim in this list made for PRIVACY rather than for portability: a shared video must not
+// disclose WHO was replaced, or which variant of a replacement ran (sc-15956).
+//
+// It carries its own caveat for the same reason `N_IMAGES` does, and the caveat is load-bearing.
+// This bullet used to read "anything about a person replacement", and that was FALSE in the leading
+// clause while true in every item it went on to enumerate: `mode` is in the "In the file" list
+// above, and a person-replacement run writes it verbatim as `replace_person`. `model` says the same
+// thing again — `wan_2_2_vace_fun_14b` is a replacement engine. So the TECHNIQUE travels, and a
+// bullet claiming otherwise claimed more privacy than the allow-list delivers, which is the one
+// direction this file's header forbids. What the allow-list actually withholds is the IDENTITY and
+// the VARIANT — the track, the name, the source filename, the masks, and the Face Only / Full
+// Person label — and that is what the sentence now says.
+//
+// The key-level pin in `workflow_share_doc.rs` cannot catch a copy error of this shape, because
+// `mode` is not a key in either list; `the_settings_copy_does_not_overclaim_about_person_
+// replacement` in that file asserts this text against a real `replace_person` envelope instead.
 const N_PERSON =
-  "anything about a person replacement — the selected track, the person's name, the original file name, the mask images, or which replacement mode ran";
+  "who was replaced or which variant of a replacement ran — the selected track, the person's name, the original file name, the mask images, and the Face Only / Full Person label. The generation mode and the model do travel, so the file does say that a replacement is what ran";
 const N_TIMELINE = "your timeline's name and the local ids of the clips on it";
 const N_ADVICE = "the on-screen advice the studio shows about a model";
 

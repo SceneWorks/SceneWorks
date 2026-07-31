@@ -245,8 +245,16 @@ pub struct WorkflowShare {
     /// **Video lane**: the frame rate the user asked for. The ask, for the reason above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
-    /// **Video lane**: the quality preset the run was submitted at (`draft` / `standard` / …).
+    /// **Video lane**: the quality preset the run was submitted at — `fast`, `balanced` or `best`,
+    /// the closed vocabulary `qualityChoices` in `apps/web/src/jobTypes.js` offers (the studio
+    /// LABELS them "Draft" / "Balanced" / "Final"; the value is what travels). Written as
+    /// `draft` / `standard` here until the sc-15956 review measured it — neither was a value the
+    /// app can emit.
+    ///
     /// A named tier off a menu, not a hardware budget — the receiving install has the same menu.
+    /// The field is still an unvalidated string on the parse side, because an envelope from a
+    /// newer build may name a tier this one has never heard of and refusing the whole recipe over
+    /// a menu label would be worse than reporting it unresolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -480,6 +488,11 @@ pub enum AdvancedKeySource {
     /// image sibling delegates to `buildImageJobRequest` and so rides [`Self::StudioBuilder`];
     /// this one builds its own two-key map.
     SimpleVideoBuilder,
+    /// `VideoUpscalePanel.onUpscale` — the standalone `video_upscale` job's payload (sc-15956
+    /// review). It emits NO `advanced` map, and is registered for exactly the reason
+    /// [`Self::UpscaleBuilder`] is: its lane embeds, so the day it grows a knob the lint demands a
+    /// classification. No rule is tagged with it.
+    VideoUpscaleBuilder,
     /// Stamped onto `advanced` by the API after the request arrives (recipe-preset resolution
     /// in `apps/rust-api/src/generation.rs`). Classified here for the record; the lint does
     /// not expect to find them in the JS, and no [`ADVANCED_BUILDERS`] entry claims it.
@@ -504,6 +517,7 @@ impl AdvancedKeySource {
         Self::TimelineReplaceBuilder,
         Self::TimelineBridgeBuilder,
         Self::SimpleVideoBuilder,
+        Self::VideoUpscaleBuilder,
         Self::Server,
     ];
 }
@@ -748,6 +762,17 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
                by `video_jobs/mod.rs::encode_media`",
         anchors: &["resolution"],
         minimum_keys: 1,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::VideoUpscaleBuilder,
+        path: "apps/web/src/screens/VideoUpscalePanel.jsx",
+        function: "onUpscale",
+        shape: AdvancedBuilderShape::NoAdvancedMap,
+        lane: "POST /api/v1/jobs type=video_upscale, written by \
+               `video_jobs/seedvr2.rs::encode_seedvr2_stream`",
+        anchors: &[],
+        minimum_keys: 0,
         spread_of: &[],
     },
 ];
@@ -1018,9 +1043,17 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
     WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/video_jobs/mod.rs",
         function: "video_workflow_metadata",
-        lane: "POST /api/v1/jobs type=video_generate — the ONE funnel every generated clip is \
-               encoded through (`encode_media`), whatever engine, route or studio produced it",
+        lane: "POST /api/v1/jobs type=video_generate — the funnel every GENERATED clip is encoded \
+               through (`encode_media`), whatever engine, route or studio produced it",
         disposition: SeamDisposition::Embeds(VIDEO_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        function: "seedvr2_workflow_metadata",
+        lane: "POST /api/v1/jobs type=video_upscale — the SeedVR2 upscale's own clip, encoded \
+               through `encode_seedvr2_stream` (macOS + candle-gated; the scan is textual, so \
+               this seam is read on every platform)",
+        disposition: SeamDisposition::Embeds(VIDEO_UPSCALE_BUILDERS),
     },
     WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/segment_jobs.rs",
@@ -1035,10 +1068,27 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
     },
 ];
 
+/// The builder behind an upscaled clip (sc-15956 review).
+///
+/// Its own list rather than a seventh entry in [`VIDEO_JOB_BUILDERS`], because it is a different
+/// job type on a different encoder: `type=video_upscale` through `encode_seedvr2_stream`, not
+/// `type=video_generate` through `encode_media`. The image lane draws the same line —
+/// `buildUpscaleJobBody` feeds `run_image_upscale_job` and nothing else.
+///
+/// The panel posts no `advanced` map at all, and is registered precisely so that stays true: it
+/// feeds an embedding lane, so the day it grows a knob the coverage lint demands a classification
+/// instead of dropping it silently.
+const VIDEO_UPSCALE_BUILDERS: &[WebBuilderRef] = &[WebBuilderRef {
+    path: "apps/web/src/screens/VideoUpscalePanel.jsx",
+    function: "onUpscale",
+}];
+
 /// Every builder behind a generated clip (sc-15956).
 ///
-/// All six feed ONE seam, because all six post `type=video_generate` and every video job funnels
-/// through `encode_media` — the same property that let sc-12371 measure clip length in one place.
+/// All six feed ONE seam, because all six post `type=video_generate` and every video-GENERATE job
+/// funnels through `encode_media` — the same property that let sc-12371 measure clip length in one
+/// place. It is not, and never was, the only libx264 site in the worker: `video_upscale` has one of
+/// its own, and [`VIDEO_UPSCALE_BUILDERS`] is the seam behind it.
 const VIDEO_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
         path: "apps/web/src/screens/VideoStudio.jsx",
