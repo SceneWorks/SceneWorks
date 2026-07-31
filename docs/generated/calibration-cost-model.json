@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:62cabe606f69802add9d61b8f30a20f178ba84c352b9dea3fe646622e46bc59a",
-    "matrixRevision": "source-tree:fc89014f932a68f606ef77c0c3f951c4d358131db11fef597263d265810156ad",
+    "sceneWorksRevision": "source-tree:acc7c0c6bd064f9f0ee695de80597423bed81601074b3e73564577f403314bbb",
+    "matrixRevision": "source-tree:b6185c297d34855fb20e31b0405942a07ac5e7527d3589af9077bd490998f720",
     "inferenceRevision": "20e8e02c440ae045c4b223a2a491b0e2f1f00d0c",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "ae917873fc1be8ca66b78136c4f2b49c58dc191058f74f06adfe0973014aa6d9"
+        "sha256": "3a339b115f770f4c5781b6b7771e043bfd3485a9653f5c55b02f709ec502b0f8"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "fb806d8b8da1ab6f53ad19500ee6fa78d285a478db0cf4d39c4e4b3dc9ba4d53"
+        "sha256": "011bc42ed7aa2bf6acccb57c15415ebad678600d6033402a0f763f87751f98eb"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "32b858c41470f1b4c5a1553c8242083ea458a84b02f06eaf6ba73c4e186ca4f0"
+        "sha256": "47b2a4a1e8894f703598c0094f515478f4d53fdcf150f6b6fb67dba7cea13841"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -342,8 +342,8 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2371,
-      "Missing": 4983,
+      "Implemented/unverified": 2372,
+      "Missing": 4982,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -352,9 +352,9 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 730,
-      "Implemented/unverified @ mlx": 1641,
+      "Implemented/unverified @ mlx": 1642,
       "Missing @ candle": 2004,
-      "Missing @ mlx": 2979,
+      "Missing @ mlx": 2978,
       "Structurally N/A @ candle": 6
     },
     "byRung": {
@@ -384,15 +384,15 @@
       "lora": 2460,
       "none": 2760
     },
-    "geometryExpandedCells": 44670,
-    "geometryCollapseFactor": 6.069,
+    "geometryExpandedCells": 44850,
+    "geometryCollapseFactor": 6.094,
     "sessions": {
       "total": 1472,
       "byBackend": {
         "candle": 548,
         "mlx": 924
       },
-      "geometryExpanded": 8934,
+      "geometryExpanded": 8970,
       "rungsPerSession": [
         5
       ]
@@ -871,8 +871,8 @@
     "strategies": [
       {
         "name": "exhaustive-exact-geometry",
-        "sessions": 8934,
-        "providerInvocations": 44670,
+        "sessions": 8970,
+        "providerInvocations": 44850,
         "policy": "Measure every advertised resolution. This is what the manifest's own evidenceRecords comment demands: 'exact request envelopes, not permission to interpolate'."
       },
       {
@@ -891,8 +891,8 @@
       }
     ],
     "ratios": {
-      "exactGeometryOverFit": 2.96,
-      "exactGeometryOverPerCell": 6.07,
+      "exactGeometryOverFit": 2.97,
+      "exactGeometryOverPerCell": 6.09,
       "fitOverPerCell": 2.05
     },
     "finding": "Fitting does NOT beat the per-cell campaign on run count — it costs more, because the matrix already collapsed geometry and a curve needs a second geometry point the per-cell campaign never takes. Fitting wins only against the policy the manifest actually states (no interpolation), where it is the difference between a campaign that covers every advertised resolution and one that does not. The decision is therefore about which geometry policy is true, not about which strategy is cheaper.",
@@ -921,7 +921,7 @@
           "fitSessions": 2944,
           "validationSessions": 0,
           "modelLoads": 2944,
-          "exactGeometryOverFit": 3.03,
+          "exactGeometryOverFit": 3.05,
           "fitOverPerCell": 2
         },
         {
@@ -931,7 +931,7 @@
           "fitSessions": 2944,
           "validationSessions": 74,
           "modelLoads": 3018,
-          "exactGeometryOverFit": 2.96,
+          "exactGeometryOverFit": 2.97,
           "fitOverPerCell": 2.05
         },
         {
@@ -941,7 +941,7 @@
           "fitSessions": 2944,
           "validationSessions": 368,
           "modelLoads": 3312,
-          "exactGeometryOverFit": 2.7,
+          "exactGeometryOverFit": 2.71,
           "fitOverPerCell": 2.25
         },
         {
@@ -951,7 +951,7 @@
           "fitSessions": 1988,
           "validationSessions": 0,
           "modelLoads": 1988,
-          "exactGeometryOverFit": 4.49,
+          "exactGeometryOverFit": 4.51,
           "fitOverPerCell": 1.35
         },
         {
@@ -961,7 +961,7 @@
           "fitSessions": 1988,
           "validationSessions": 74,
           "modelLoads": 2062,
-          "exactGeometryOverFit": 4.33,
+          "exactGeometryOverFit": 4.35,
           "fitOverPerCell": 1.4
         },
         {
@@ -971,7 +971,7 @@
           "fitSessions": 1988,
           "validationSessions": 368,
           "modelLoads": 2356,
-          "exactGeometryOverFit": 3.79,
+          "exactGeometryOverFit": 3.81,
           "fitOverPerCell": 1.6
         },
         {
@@ -981,7 +981,7 @@
           "fitSessions": 4416,
           "validationSessions": 0,
           "modelLoads": 4416,
-          "exactGeometryOverFit": 2.02,
+          "exactGeometryOverFit": 2.03,
           "fitOverPerCell": 3
         },
         {
@@ -991,7 +991,7 @@
           "fitSessions": 4416,
           "validationSessions": 74,
           "modelLoads": 4490,
-          "exactGeometryOverFit": 1.99,
+          "exactGeometryOverFit": 2,
           "fitOverPerCell": 3.05
         },
         {
@@ -1001,7 +1001,7 @@
           "fitSessions": 4416,
           "validationSessions": 368,
           "modelLoads": 4784,
-          "exactGeometryOverFit": 1.87,
+          "exactGeometryOverFit": 1.88,
           "fitOverPerCell": 3.25
         },
         {
@@ -1011,7 +1011,7 @@
           "fitSessions": 2504,
           "validationSessions": 0,
           "modelLoads": 2504,
-          "exactGeometryOverFit": 3.57,
+          "exactGeometryOverFit": 3.58,
           "fitOverPerCell": 1.7
         },
         {
@@ -1021,7 +1021,7 @@
           "fitSessions": 2504,
           "validationSessions": 74,
           "modelLoads": 2578,
-          "exactGeometryOverFit": 3.47,
+          "exactGeometryOverFit": 3.48,
           "fitOverPerCell": 1.75
         },
         {
@@ -1031,7 +1031,7 @@
           "fitSessions": 2504,
           "validationSessions": 368,
           "modelLoads": 2872,
-          "exactGeometryOverFit": 3.11,
+          "exactGeometryOverFit": 3.12,
           "fitOverPerCell": 1.95
         },
         {
@@ -1071,7 +1071,7 @@
           "fitSessions": 3020,
           "validationSessions": 0,
           "modelLoads": 3020,
-          "exactGeometryOverFit": 2.96,
+          "exactGeometryOverFit": 2.97,
           "fitOverPerCell": 2.05
         },
         {
@@ -1081,7 +1081,7 @@
           "fitSessions": 3020,
           "validationSessions": 74,
           "modelLoads": 3094,
-          "exactGeometryOverFit": 2.89,
+          "exactGeometryOverFit": 2.9,
           "fitOverPerCell": 2.1
         },
         {
@@ -1091,7 +1091,7 @@
           "fitSessions": 3020,
           "validationSessions": 368,
           "modelLoads": 3388,
-          "exactGeometryOverFit": 2.64,
+          "exactGeometryOverFit": 2.65,
           "fitOverPerCell": 2.3
         }
       ],
@@ -1102,19 +1102,19 @@
         "fitSessions": 2944,
         "validationSessions": 74,
         "modelLoads": 3018,
-        "exactGeometryOverFit": 2.96,
+        "exactGeometryOverFit": 2.97,
         "fitOverPerCell": 2.05
       },
       "exactGeometryOverFitRange": [
         1.43,
-        4.49
+        4.51
       ],
       "fitOverPerCellRange": [
         1.35,
         4.25
       ],
       "inversionHoldsEverywhere": true,
-      "note": "These three parameters were previously fixed and unswept while the file's own policy says an unknowable value must be exposed and swept. They move the exact-geometry/fit ratio across the range above — a factor of about 3.1 — so the single headline ratio is a point on a surface, not a constant. What does NOT move is the DIRECTION: fit/per-cell exceeds 1 at every grid point, so fitting costs more than the per-cell campaign under every combination tested. The finding is robust; its magnitude is not."
+      "note": "These three parameters were previously fixed and unswept while the file's own policy says an unknowable value must be exposed and swept. They move the exact-geometry/fit ratio across the range above — a factor of about 3.2 — so the single headline ratio is a point on a surface, not a constant. What does NOT move is the DIRECTION: fit/per-cell exceeds 1 at every grid point, so fitting costs more than the per-cell campaign under every combination tested. The finding is robust; its magnitude is not."
     }
   },
   "parameters": {

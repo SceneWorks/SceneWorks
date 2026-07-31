@@ -412,6 +412,17 @@ test("a shipping control lane is declared, not inferred from having been measure
     kreaMlx.length > 0,
     "the shipping MLX Krea control lane must have control cells even with no mlx.control block",
   );
+  const kreaBounded = kreaMlx.find(
+    (cell) =>
+      cell.tier === "q4" &&
+      cell.mode === "text_to_image" &&
+      cell.rung === "bounded_decode",
+  );
+  assert.equal(
+    kreaBounded?.resolvedRoute,
+    "krea_2_turbo_control",
+    "Krea control evidence must bind to the distinct production provider",
+  );
 
   // Every declared lane is represented on every backend the entry advertises — the declaration is what
   // generates cells now, so a lane can be unmeasured without being invisible.

@@ -378,6 +378,10 @@ function runtimeStrategyParameters(parameters) {
   );
 }
 
+function canonicalParameters(parameters) {
+  return Object.fromEntries(Object.entries(parameters).sort(([left], [right]) => left.localeCompare(right)));
+}
+
 export function calibrationBinding(record, cell) {
   const reasons = [];
   if (record.status !== "complete") reasons.push("record-not-complete");
@@ -385,8 +389,8 @@ export function calibrationBinding(record, cell) {
   if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
   if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
   if (
-    JSON.stringify(record.strategy.parameters) !==
-    JSON.stringify(runtimeStrategyParameters(cell.strategyParameters))
+    JSON.stringify(canonicalParameters(record.strategy.parameters)) !==
+    JSON.stringify(canonicalParameters(runtimeStrategyParameters(cell.strategyParameters)))
   ) reasons.push("strategy-parameters-mismatch");
   const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
   if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
@@ -550,6 +554,22 @@ export const CONTROL_LANE_MODELS = [
   "z_image_turbo",
 ];
 
+// Most control lanes reuse their catalog route id. Krea's MLX lane is a distinct production
+// provider registered by mlx-gen-krea, so its evidence must bind to that provider instead of being
+// orphaned behind the base `krea_2_turbo` route.
+const CONTROL_PROVIDER_OVERRIDES = new Map([
+  ["krea_2_turbo:mlx", "krea_2_turbo_control"],
+]);
+
+function providerFor(model, backend, overlay, route) {
+  if (overlay !== "control") return route.engine;
+  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? route.engine;
+}
+
+function matrixOverlayFor(recordOverlay) {
+  return /^control:\d+$/.test(recordOverlay) ? "control" : recordOverlay;
+}
+
 function overlaysFor(model, backend) {
   const overlays = ["none"];
   if (model.loraCompatibility) overlays.push("lora");
@@ -651,7 +671,32 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-function strategyStatus({ backend, rung, route, sequentialEngines, model, tier, mode, overlay }) {
+function strategyStatus({ backend, rung, route, provider, sequentialEngines, model, tier, mode, overlay }) {
+  const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
+    (binding) =>
+      binding.provider === provider &&
+      binding.tier === tier &&
+      binding.mode === mode &&
+      matrixOverlayFor(binding.overlay) === overlay &&
+      binding.rung === rung,
+  );
+  if (declaredCalibrations.length) {
+    const fingerprints = sortedUnique(declaredCalibrations.map((binding) => binding.fingerprint));
+    const parameters = sortedUnique(
+      declaredCalibrations.map((binding) => JSON.stringify(binding.parameters ?? {})),
+    );
+    if (fingerprints.length !== 1 || parameters.length !== 1) {
+      throw new Error(
+        `${model.id}:${backend}:${tier}:${mode}:${overlay}:${rung} has inconsistent exact calibration bindings`,
+      );
+    }
+    return {
+      state: "Implemented/unverified",
+      source: "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route",
+      parameters: JSON.parse(parameters[0]),
+      calibrationFingerprint: fingerprints[0],
+    };
+  }
   if (
     rung === "resident" &&
     !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image")
@@ -905,11 +950,13 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
       for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend)) {
+            const provider = providerFor(model, backend, overlay, route);
             for (const rung of RUNGS) {
               const status = strategyStatus({
                 backend,
                 rung,
                 route,
+                provider,
                 sequentialEngines,
                 model,
                 tier,
@@ -923,7 +970,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                     derivedCalibrationFingerprint({
                       inferencePin: pin,
                       model: model.id,
-                      provider: route.engine,
+                      provider,
                       backend,
                       tier,
                       mode,
@@ -935,11 +982,11 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
               const calibrationRuns = calibrationBundle.records.filter(
                 (record) =>
                   record.target.modelId === model.id &&
-                  record.target.provider === route.engine &&
+                  record.target.provider === provider &&
                   record.backend === backend &&
                   record.target.tier === tier &&
                   record.target.mode === mode &&
-                  record.target.overlay === overlay &&
+                  matrixOverlayFor(record.target.overlay) === overlay &&
                   record.strategy.rung === rung,
               );
               const runSummary = (record) => {
@@ -990,10 +1037,10 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
                   }) === "current" && record.status === "complete",
               );
               cells.push({
-                id: [model.id, route.engine, backend, tier, mode, overlay, rung].join(":"),
+                id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),
                 modelId: model.id,
-                resolvedRoute: route.engine,
-                provider: route.engine,
+                resolvedRoute: provider,
+                provider,
                 backend,
                 tier,
                 mode,
@@ -1042,7 +1089,7 @@ export async function buildMatrix({ sourceOverrides = {} } = {}) {
         candidate.backend === record.backend &&
         candidate.tier === record.target.tier &&
         candidate.mode === record.target.mode &&
-        candidate.overlay === record.target.overlay &&
+        candidate.overlay === matrixOverlayFor(record.target.overlay) &&
         candidate.rung === record.strategy.rung,
     );
     if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
