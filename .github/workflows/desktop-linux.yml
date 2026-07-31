@@ -1,19 +1,101 @@
 name: Desktop (Linux packages)
 
 # Build the complete Linux/NVIDIA desktop packages on the Ubuntu 22.04
-# compatibility baseline. Manual-only, like server-candle-linux.yml: compiling
-# the candle sidecar runs nvcc for every provider and is too heavy for the
-# standing PR lanes. A GPU is not required to compile or package it.
+# compatibility baseline. `package-linux` is manual-only, like
+# server-candle-linux.yml: compiling the candle sidecar runs nvcc for every
+# provider and is too heavy for the standing PR lanes. A GPU is not required to
+# compile or package it.
+#
+# `check-linux` (sc-16269) is the cheap PR gate alongside it. Until it existed,
+# `#[cfg(target_os = "linux")]` code in apps/desktop was compiled by NO automatic
+# lane: the crate is excluded from workspace `default-members` (it needs GTK/
+# WebKit), so the Linux `Check` lane skips it, and this workflow was
+# workflow_dispatch-only. desktop-windows.yml runs on PRs, so only the LINUX
+# branches were dark — which is how sc-16247, itself a Linux bug report, came to
+# add Linux-only desktop code that nothing would have compiled.
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths: &desktop_linux_paths
+      - "apps/desktop/**"
+      # The only workspace crate apps/desktop depends on.
+      - "crates/sceneworks-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/desktop-linux.yml"
+  push:
+    branches: [main]
+    paths: *desktop_linux_paths
 
 concurrency:
   group: desktop-linux-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # The Linux mirror of desktop-windows.yml's `build-windows` PR job: same staging
+  # script, same tests, same lint. Deliberately NOT a package build — `cargo test`
+  # / `cargo clippy` never run tauri's beforeBuildCommand, so this needs neither the
+  # candle sidecar nor the CUDA toolkit, only the GTK/WebKit dev headers.
+  check-linux:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_OFFLINE: "true"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+
+      # The same Tauri/WebKitGTK prerequisites package-linux installs, minus the
+      # packaging-only ones: libfuse2/patchelf/gstreamer1.0-libav serve AppImage
+      # bundling and the webview's runtime media stack, and nothing here bundles or
+      # runs a webview.
+      - name: Install GTK and WebKitGTK development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+
+      # `tauri_build` validates tauri.conf.json's `externalBin` + `resources` at
+      # build.rs time and panics if any is missing, so the desktop crate cannot even
+      # typecheck without them. The same script desktop-windows.yml uses; it writes
+      # tiny placeholders, which is sufficient because nothing here bundles them.
+      # Building the real sidecar would mean nvcc over every candle provider —
+      # precisely the cost this job exists to avoid.
+      - name: Stage desktop test sidecar placeholders
+        run: node apps/desktop/scripts/stage-test-sidecars.mjs
+
+      - name: Run desktop Rust tests (Linux)
+        run: cargo test -p sceneworks-desktop
+
+      - name: Check desktop Rust lint (Linux)
+        run: npm run desktop:check
+
   package-linux:
+    # Stays manual-only. It installs the CUDA toolkit and runs the full
+    # sidecar + AppImage/deb build (90-minute cap) — adding the PR trigger above
+    # must not drag that onto every PR.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-22.04
     env:
       # compute_80 PTX the driver JITs forward to sm_120. Keep this and the CUDA
