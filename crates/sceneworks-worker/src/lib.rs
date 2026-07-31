@@ -450,6 +450,13 @@ mod voiceclone_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448). Test-only +
+// macOS-only; the sibling of footprint_measure with the axis rotated — that one measures ONE
+// resolution across tiers, this one measures ONE tier across resolutions, sampling the same
+// process-global MLX counters. Supplies the shape the mlx_fit_gate request estimator's headroom term
+// is fitted to, replacing the linear-in-megapixels scaling of a 1024²-only calibration.
+#[cfg(all(test, target_os = "macos"))]
+mod resolution_sweep;
 // On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
 // macOS-only; an #[ignore]d helper that drives `runtime_macos::providers::wan::convert::convert_t2v_14b` once per tier
 // (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
