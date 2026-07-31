@@ -74,6 +74,29 @@ pub const WORKFLOW_SHARE_MARKER_KEY: &str = "sceneworksWorkflow";
 /// (sc-15956) can share the marker key without a reader having to sniff the body.
 pub const WORKFLOW_KIND_IMAGE: &str = "image";
 
+/// Marker value for the video lane (sc-15956).
+///
+/// A NEW KIND rather than a `schemaVersion` bump, and that is the load-bearing decision. The two
+/// gates in [`parse_workflow_share`] fail differently and only one of them is right here:
+///
+/// * a version bump would make an older build report *"this file was written by a newer version of
+///   SceneWorks"* for a video — true, but it would say the same about an image, and the image
+///   contract did not change;
+/// * an unknown KIND makes an older build report exactly what is wrong — it does not understand
+///   this kind of workflow — and it does so for videos ONLY, leaving every shared image reading as
+///   it always did.
+///
+/// The kind gate deliberately runs BEFORE the version gate for that reason. sc-15954 established
+/// the surrounding rule this follows: an older reader that would present a recipe it does not
+/// really understand is worse than one that refuses, so the refusal is arranged to happen.
+pub const WORKFLOW_KIND_VIDEO: &str = "video";
+
+/// The workflow kinds this build understands, in the order a reader should think about them.
+///
+/// The parse gate is a membership test against this rather than a chain of `==`, so adding a third
+/// lane is one entry and cannot half-land.
+pub const WORKFLOW_KINDS: &[&str] = &[WORKFLOW_KIND_IMAGE, WORKFLOW_KIND_VIDEO];
+
 /// The contract version. Bump ONLY on a breaking field change — an additive field does not
 /// need it (an older reader drops what it does not know). [`parse_workflow_share`] branches
 /// on this and on nothing else.
@@ -136,6 +159,16 @@ pub const INPUT_KIND_REFERENCE: &str = "reference";
 pub const INPUT_KIND_MASK: &str = "mask";
 /// A pre-made control map fed verbatim (`advanced.controlImage`).
 pub const INPUT_KIND_CONTROL: &str = "control";
+/// A source CLIP a video run continues, re-times or bridges from (`sourceClipAssetId`,
+/// `sourceClipAssetIds`, `bridgeRightClipAssetId`) — sc-15956.
+///
+/// A separate kind from [`INPUT_KIND_SOURCE`] because the two are not interchangeable to a reader:
+/// "this recipe needs a still to start from" and "this recipe needs a clip to continue" are
+/// different missing-input panels and different asks of the person replaying it.
+pub const INPUT_KIND_SOURCE_CLIP: &str = "sourceClip";
+/// A reference CLIP a video run conditions on (`referenceClipAssetId`, Bernini's ads2v) —
+/// sc-15956. The moving counterpart of [`INPUT_KIND_REFERENCE`].
+pub const INPUT_KIND_REFERENCE_CLIP: &str = "referenceClip";
 
 /// A LoRA the run applied, reduced to what another install can act on: the display name, the
 /// weight, and the Hugging Face repo id when the catalog entry resolved to one. No local id,
@@ -201,6 +234,21 @@ pub struct WorkflowShare {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
+    /// **Video lane** (sc-15956): the clip length the user ASKED for, in seconds.
+    ///
+    /// The ask, not the measurement. `file.duration` on the sidecar is what the encoder actually
+    /// produced — those differ whenever a model's temporal stride snaps the frame count, and a 6.0 s
+    /// ask that rendered 5.96 s replays as 6.0 (sc-12371 established the same split for the
+    /// sidecar). An envelope is a recipe: it must round-trip the ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    /// **Video lane**: the frame rate the user asked for. The ask, for the reason above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// **Video lane**: the quality preset the run was submitted at (`draft` / `standard` / …).
+    /// A named tier off a menu, not a hardware budget — the receiving install has the same menu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,7 +386,7 @@ impl fmt::Display for WorkflowShareError {
             ),
             Self::UnsupportedKind { found, supported } => write!(
                 f,
-                "This is a `{found}` SceneWorks workflow; this reader handles `{supported}` workflows."
+                "This is a `{found}` SceneWorks workflow; this build reads: {supported}. Update {PRODUCER_NAME} to load it."
             ),
             Self::MissingSchemaVersion => write!(
                 f,
@@ -413,6 +461,25 @@ pub enum AdvancedKeySource {
     /// is registered precisely so that stays true: it feeds an embedding lane (sc-15948 ISSUE 1),
     /// so the day it grows a knob the lint demands a classification. No rule is tagged with it.
     UpscaleBuilder,
+    /// `VideoStudio.submit` — the Video Studio's own ~20-knob builder, and the video lane's
+    /// equivalent of [`Self::StudioBuilder`] (sc-15956).
+    VideoStudioBuilder,
+    /// `useEditorGeneration.buildBasePayload` — the timeline editor's shared video payload, spread
+    /// into all three [`Self::TimelineExtendBuilder`]-family actions (sc-15956).
+    TimelineBaseBuilder,
+    /// `EditorScreen.extendSelectedClip` — the timeline "extend this clip" action. It and its two
+    /// siblings each spread `buildBasePayload`'s map and add `timelineAction` / `timelineContext`;
+    /// those two keys are tagged to this one, because a key needs just one builder holding it
+    /// honest and all three emit the same pair.
+    TimelineExtendBuilder,
+    /// `EditorScreen.replaceSelectedItem` — the timeline "replace this clip" action.
+    TimelineReplaceBuilder,
+    /// `EditorScreen.bridgeGap` — the timeline "bridge this gap" action.
+    TimelineBridgeBuilder,
+    /// `simpleJobs.buildSimpleVideoRequest` — the Simple shell's video request (sc-15956). Its
+    /// image sibling delegates to `buildImageJobRequest` and so rides [`Self::StudioBuilder`];
+    /// this one builds its own two-key map.
+    SimpleVideoBuilder,
     /// Stamped onto `advanced` by the API after the request arrives (recipe-preset resolution
     /// in `apps/rust-api/src/generation.rs`). Classified here for the record; the lint does
     /// not expect to find them in the JS, and no [`ADVANCED_BUILDERS`] entry claims it.
@@ -431,6 +498,12 @@ impl AdvancedKeySource {
         Self::CharacterPoseExtras,
         Self::InterleaveBuilder,
         Self::UpscaleBuilder,
+        Self::VideoStudioBuilder,
+        Self::TimelineBaseBuilder,
+        Self::TimelineExtendBuilder,
+        Self::TimelineReplaceBuilder,
+        Self::TimelineBridgeBuilder,
+        Self::SimpleVideoBuilder,
         Self::Server,
     ];
 }
@@ -460,6 +533,16 @@ pub enum AdvancedBuilderShape {
     /// because it feeds an embedding lane: the lint asserts the function stays empty of
     /// `advanced`, so the day someone adds a knob there it has to be classified.
     NoAdvancedMap,
+    /// `advanced: { key, ...(cond ? { key } : {}) }` — an `advanced:` literal WITH conditional
+    /// spreads, in a payload passed to a call rather than returned (sc-15956).
+    ///
+    /// The video builders' shape, and the one the four existing arms between them could not read:
+    /// [`Self::FlatAdvancedLiteral`] asserts the literal has no spread and no nesting, and
+    /// [`Self::ReturnedObject`] looks for a `return {`. Uses the same brace-aware
+    /// `scan_object_literal` [`Self::ReturnedObject`] does, and honours
+    /// [`AdvancedBuilder::spread_of`] the way [`Self::AssignedObject`] does — so a spread of
+    /// somebody else's map has to name the builder that accounts for it.
+    SpreadAdvancedLiteral,
 }
 
 /// One JS builder whose `advanced` keys reach an embedding lane.
@@ -588,6 +671,85 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
         minimum_keys: 0,
         spread_of: &[],
     },
+    // -----------------------------------------------------------------------
+    // The VIDEO builders (sc-15956), promoted out of `DEFERRED_ADVANCED_BUILDERS`
+    // -----------------------------------------------------------------------
+    //
+    // All six moved in the SAME change as the video write seams below, because the back-check that
+    // every entry here is named by an embedding seam makes the two halves inseparable — see
+    // `WORKFLOW_WRITE_SEAMS`.
+    AdvancedBuilder {
+        source: AdvancedKeySource::VideoStudioBuilder,
+        path: "apps/web/src/screens/VideoStudio.jsx",
+        function: "submit",
+        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
+        lane: "POST /api/v1/jobs type=video_generate — the Video Studio, written by \
+               `video_jobs/mod.rs::encode_media`",
+        anchors: &[
+            "motion",
+            "selectedPersonTrack",
+            "replacementModeLabel",
+            "lightning",
+            "videoConditioningStrength",
+        ],
+        minimum_keys: 20,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::TimelineBaseBuilder,
+        path: "apps/web/src/components/editor/useEditorGeneration.js",
+        function: "buildBasePayload",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/jobs type=video_generate — the timeline editor's shared video payload \
+               (queueTimelineVideoJob), written by `video_jobs/mod.rs::encode_media`",
+        anchors: &["resolution", "motion", "lightning"],
+        minimum_keys: 6,
+        spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::TimelineExtendBuilder,
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "extendSelectedClip",
+        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
+        lane: "POST /api/v1/jobs type=video_generate — timeline extend, written by \
+               `video_jobs/mod.rs::encode_media`",
+        anchors: &["timelineAction", "timelineContext"],
+        minimum_keys: 2,
+        spread_of: &["base.advanced"],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::TimelineReplaceBuilder,
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "replaceSelectedItem",
+        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
+        lane: "POST /api/v1/jobs type=video_generate — timeline replace, written by \
+               `video_jobs/mod.rs::encode_media`",
+        anchors: &["timelineAction", "timelineContext"],
+        minimum_keys: 2,
+        spread_of: &["base.advanced"],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::TimelineBridgeBuilder,
+        path: "apps/web/src/screens/EditorScreen.jsx",
+        function: "bridgeGap",
+        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
+        lane: "POST /api/v1/jobs type=video_generate — timeline bridge, written by \
+               `video_jobs/mod.rs::encode_media`",
+        anchors: &["timelineAction", "timelineContext"],
+        minimum_keys: 2,
+        spread_of: &["base.advanced"],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::SimpleVideoBuilder,
+        path: "apps/web/src/simple/simpleJobs.js",
+        function: "buildSimpleVideoRequest",
+        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
+        lane: "POST /api/v1/jobs type=video_generate — the Simple shell's video request, written \
+               by `video_jobs/mod.rs::encode_media`",
+        anchors: &["resolution"],
+        minimum_keys: 1,
+        spread_of: &[],
+    },
 ];
 
 /// A builder that produces an `advanced` map the lint has SEEN and deliberately does not
@@ -619,13 +781,20 @@ pub struct DeferredAdvancedBuilder {
 /// [`ADVANCED_BUILDERS`] as where the entry moves if it ever does.
 pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 
-/// The VIDEO builders (sc-15956 owns the video envelope and these keys), plus one permanent
-/// exemption for an `advanced` map that is not an image payload at all.
+/// One permanent exemption for an `advanced` map that is not a generation payload at all.
 ///
-/// `VideoStudio.jsx` alone emits ~15 keys nothing here classifies. That is fine only for as long
-/// as no video write seam embeds: the moment sc-15956 threads a workflow into a video write, its
-/// builder moves up into [`ADVANCED_BUILDERS`] and every one of those keys needs an
-/// `allow`/`deny` decision.
+/// **The six video builders that used to live here were promoted by sc-15956** — the story this
+/// list was built for — and their 17 unclassified keys are now rules in [`ADVANCED_KEY_RULES`].
+/// The mechanism worked exactly as designed: making a video seam embed was impossible until every
+/// one of those keys had an `allow`/`deny` decision, and two of them (`selectedPersonTrack`,
+/// `timelineContext`) turned out to be object-shaped id-and-free-text carriers that would have
+/// travelled silently under the pre-sc-16113 arrangement.
+///
+/// Note the count. This list's own comment said "~15 keys"; the real number was 17, because two
+/// (`timelineAction`, `timelineContext`) are emitted only by the three `EditorScreen.jsx` actions
+/// and no one had read those builders. A deferral list records that a decision is owed, not what
+/// the decision costs — and that gap is the argument for the lint being a discovery scan rather
+/// than a hand-maintained tally.
 ///
 /// # What enforces that, and what does not (sc-16113)
 ///
@@ -661,44 +830,6 @@ pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 /// to be written at all, and that the honest version of it fails the build. Review is what catches
 /// the dishonest one.
 pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/screens/VideoStudio.jsx",
-        function: "submit",
-        reason: "The Video Studio's own ~15-knob advanced map. No video write seam embeds a \
-                 workflow yet; sc-15956 owns the video envelope and must classify these keys \
-                 before it does.",
-    },
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/components/editor/useEditorGeneration.js",
-        function: "buildBasePayload",
-        reason: "The timeline editor's shared video payload (queueTimelineVideoJob). Video lane — \
-                 sc-15956 classifies it when video images start embedding.",
-    },
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "extendSelectedClip",
-        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
-                 timelineContext. Video lane — sc-15956.",
-    },
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "replaceSelectedItem",
-        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
-                 timelineContext. Video lane — sc-15956.",
-    },
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "bridgeGap",
-        reason: "Timeline video action: `buildBasePayload`'s advanced plus timelineAction / \
-                 timelineContext. Video lane — sc-15956.",
-    },
-    DeferredAdvancedBuilder {
-        path: "apps/web/src/simple/simpleJobs.js",
-        function: "buildSimpleVideoRequest",
-        reason: "The Simple shell's VIDEO request. Its image sibling \
-                 (`buildSimpleImageRequest`) delegates to `buildImageJobRequest` and so is \
-                 covered by the studio builder; this one is a video lane — sc-15956.",
-    },
     DeferredAdvancedBuilder {
         path: "apps/web/src/training/trainingConfig.js",
         function: "trainingConfigSnapshot",
@@ -1253,6 +1384,142 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "presetMissingLoras",
         "Local LoRA ids the API could not resolve on THIS install.",
     ),
+    // -----------------------------------------------------------------------
+    // The VIDEO arm (sc-15956)
+    // -----------------------------------------------------------------------
+    //
+    // Same rule of thumb, same table. What is new is a third question the image lane never had to
+    // ask: a video knob can be neither generation intent nor a hardware budget, but a disclosure
+    // about a PERSON. `selectedPersonTrack` and `replacementModeLabel` are that, and they are
+    // denied for a reason the other denials do not carry.
+    allow_from(
+        "motion",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored camera-motion preset (`static`, `slow push-in`, `handheld`) off a closed menu. \
+         It conditions the generation, so it decides what is made.",
+    ),
+    allow_from(
+        "ltxPipeline",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX pipeline selector. It picks which denoise path runs, so two values produce \
+         two different clips from one prompt — output, not budget.",
+    ),
+    allow_from(
+        "distilledVariant",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX distilled-checkpoint variant. A different checkpoint is a different model \
+         for replay purposes — the same class as `usePid`, which is also a decoder choice that \
+         changes the output rather than a memory accommodation.",
+    ),
+    allow_from(
+        "textEncoderModel",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored text-encoder pick. It changes what the model SEES of the prompt, so a replay \
+         without it is a different run. A catalog-global model slug, not an install-local id — the \
+         same class as `styleId` and unlike `controlWeights`, which carries a resolved path.",
+    ),
+    allow_from(
+        "lightning",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored Wan2.2 A14B fast-4-step toggle. It swaps in a distilled recipe and overrides the \
+         step count, so it visibly changes the clip; it is a speed/quality choice the user made, \
+         not a tier this machine could afford.",
+    ),
+    allow_from(
+        "videoCfgGuidanceScale",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX native CFG scale — the video lane's `guidanceScale`.",
+    ),
+    allow_from(
+        "videoStgGuidanceScale",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX spatiotemporal-guidance scale.",
+    ),
+    allow_from(
+        "videoRescaleScale",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored LTX guidance-rescale factor.",
+    ),
+    allow_from(
+        "videoConditioningStrength",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored source-clip conditioning strength (extend, bridge, Krea Realtime v2v) — the \
+         video lane's `strength`, and the same authored-strength class as `ipAdapterScale`.",
+    ),
+    allow_from(
+        "bridgeRightVideoConditioningStrength",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored right-clip conditioning strength for a bridge — the sibling of \
+         `videoConditioningStrength`, and dropping it would make a shared bridge replay lopsided.",
+    ),
+    allow_from(
+        "timelineAction",
+        AdvancedShape::Scalar,
+        AdvancedKeySource::TimelineExtendBuilder,
+        "Which timeline operation produced the clip (`extend` / `replace` / `bridge`) — a closed \
+         three-value vocabulary that names the generation MODE, with no id in it. Its companion \
+         `timelineContext` is denied, so this travels alone: \"this was an extend\" is true and \
+         useful on any install, where \"an extend of item 4f2c… on timeline 91ab…\" is neither.",
+    ),
+    deny_from(
+        "durationHint",
+        AdvancedKeySource::VideoStudioBuilder,
+        "Model-catalog prose the studio echoes back into the payload (\"Recommended: 5s or \
+         less.\"), not a knob anybody set. It is not intent and it is not a value the run used — \
+         the receiving install renders its own from its own catalog, and a stale hint from someone \
+         else's build would be worse than none.",
+    ),
+    deny_from(
+        "precision",
+        AdvancedKeySource::VideoStudioBuilder,
+        "LTX weight precision (`fp8` / `bf16`): what THIS machine can afford to hold the weights \
+         in. The same hardware-budget class as `mlxQuantize`, and the receiving install picks its \
+         own.",
+    ),
+    deny_from(
+        "quantization",
+        AdvancedKeySource::VideoStudioBuilder,
+        "The torch lane's quant tier — `mlxQuantize` for a different backend, and denied for the \
+         identical reason.",
+    ),
+    deny_from(
+        "selectedPersonTrack",
+        AdvancedKeySource::VideoStudioBuilder,
+        "The WHOLE person-track record, not an id: a user-typed `name` that is routinely a real \
+         person's name, a `sourceDisplayName` that is the original imported FILENAME, install-local \
+         asset ids, and a `frames[].mask` array of filesystem PATHS. It is simultaneously every \
+         class this allow-list excludes, and it is not gated on mode — a stale selection rides a \
+         plain text_to_video payload. Denied on privacy first and on shape second (sc-15956).",
+    ),
+    deny_from(
+        "replacementModeLabel",
+        AdvancedKeySource::VideoStudioBuilder,
+        "The display label for a person-replacement mode (\"Face Only\", \"Full Person, Keep \
+         Outfit\"). Not an id, not a path, and denied anyway: a shared video must not disclose \
+         that it was made by replacing a specific person, still less which mode of replacement. \
+         Its top-level twin `replacementMode` is withheld by the builder for the same reason — see \
+         `build_video_workflow_share_from`. There is no replay value to weigh against it, because \
+         a recipient has no access to the track this describes.",
+    ),
+    deny_from(
+        "timelineContext",
+        AdvancedKeySource::TimelineExtendBuilder,
+        "Where in the LOCAL timeline to write the result: `timelineId`, `itemId`, `trackId`, \
+         `sourceAssetId` and friends are install-local UUIDs, and `timelineName` is the user's own \
+         typed name for a project structure that is nobody else's business. The same class as \
+         `recipePresetId`, with a free-text field on top. `timelineAction` carries the part that \
+         travels.",
+    ),
 ];
 
 /// The rule for `key`, if it is classified.
@@ -1671,6 +1938,53 @@ pub fn build_workflow_share_from(
     facts: &WorkflowAssetFacts,
     job_payload: &JsonObject,
 ) -> WorkflowShare {
+    build_share_of_kind(WORKFLOW_KIND_IMAGE, facts, job_payload)
+}
+
+/// [`build_workflow_share_from`] for the VIDEO lane (sc-15956) — the same builder, the same single
+/// reducer, and a [`WORKFLOW_KIND_VIDEO`] marker.
+///
+/// Ungated, like its image sibling: [`embeddable_video_workflow_share`] is the form a write seam
+/// must call.
+///
+/// # What a video envelope carries that an image one does not
+///
+/// `durationSeconds`, `fps` and `quality` — the three knobs off the studio's own menus that decide
+/// what gets made. `fitMode` was already a top-level field and is shared.
+///
+/// # What it deliberately does NOT carry
+///
+/// **The person-replacement fields, `personTrackId` and `replacementMode`, are withheld — always,
+/// not by preference.** A shared video must not disclose that it was made by replacing a specific
+/// person. `personTrackId` is an install-local id that resolves to nothing elsewhere, which alone
+/// would put it in the same class as `controlImage`; `replacementMode` is not an id at all and is
+/// withheld for the stronger reason, which is that the pair together tell a stranger the clip is a
+/// face replacement and which mode of one. That is a fact about a real person who did not choose to
+/// share it, and no replay value justifies it — a recipient replaying this recipe has no access to
+/// the track anyway, so the field could only ever inform, never reproduce.
+///
+/// Withheld SILENTLY rather than through `omitted`, which is the one place this contract's
+/// "a stated absence beats an invisible one" rule is deliberately inverted: `omitted:
+/// ["personTrackId"]` would announce the replacement to every reader while withholding only the id,
+/// which is the disclosure the withholding exists to prevent. `OMITTED_FIELDS` is for collections
+/// too large to record, where naming the gap costs nothing.
+///
+/// The clip ids (`sourceClipAssetIds`, `bridgeRightClipAssetId`, `referenceClipAssetId`) are
+/// withheld as ids and recorded as SHAPE through [`INPUT_KIND_SOURCE_CLIP`] /
+/// [`INPUT_KIND_REFERENCE_CLIP`], exactly as the image lane treats `sourceAssetId`.
+#[must_use]
+pub fn build_video_workflow_share_from(
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> WorkflowShare {
+    build_share_of_kind(WORKFLOW_KIND_VIDEO, facts, job_payload)
+}
+
+fn build_share_of_kind(
+    kind: &str,
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> WorkflowShare {
     let string_field = |key: &str| {
         job_payload
             .get(key)
@@ -1707,8 +2021,9 @@ pub fn build_workflow_share_from(
     // Every value goes out through the SAME reducer an incoming envelope comes in through
     // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
     // guard — which is exactly how the top-level labels below escaped the path check before.
+    let is_video = kind == WORKFLOW_KIND_VIDEO;
     reduce_workflow_share(WorkflowShare {
-        kind: WORKFLOW_KIND_IMAGE.to_owned(),
+        kind: kind.to_owned(),
         schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
         producer: WorkflowProducer::default(),
         mode,
@@ -1719,6 +2034,14 @@ pub fn build_workflow_share_from(
         width: u32_field("width").or(facts.width),
         height: u32_field("height").or(facts.height),
         count: u32_field("count"),
+        // Video-only, and read off the payload rather than off the encoded file: these are the ASK
+        // (see the field docs). Gated on the kind so an image envelope cannot grow a `fps` from a
+        // payload key that happened to be there.
+        duration_seconds: is_video
+            .then(|| job_payload.get("duration").and_then(Value::as_f64))
+            .flatten(),
+        fps: is_video.then(|| u32_field("fps")).flatten(),
+        quality: is_video.then(|| string_field("quality")).flatten(),
         style_preset: string_field("stylePreset"),
         style_id: string_field("styleId"),
         fit_mode: string_field("fitMode"),
@@ -1755,6 +2078,23 @@ pub fn embeddable_workflow_share(
     within_recording_ceiling(&share).ok().map(|()| share)
 }
 
+/// [`embeddable_workflow_share`] for the VIDEO lane (sc-15956): the gated builder a video write
+/// seam must call, and the only video form that runs the recording ceiling.
+///
+/// The ceiling is the same number and the same measurement — the serialized envelope — because it
+/// is a bound on what gets PERSISTED, not on what a container can hold. An MP4's tag store would
+/// take far more than 160 KiB; that is not a reason to record more, and letting the two lanes
+/// diverge would mean an envelope that round-trips through a video and is refused by the PNG
+/// reader. See [`crate::workflow_mp4::workflow_metadata_size`] for what the container adds on top.
+#[must_use]
+pub fn embeddable_video_workflow_share(
+    facts: &WorkflowAssetFacts,
+    job_payload: &JsonObject,
+) -> Option<WorkflowShare> {
+    let share = build_video_workflow_share_from(facts, job_payload);
+    within_recording_ceiling(&share).ok().map(|()| share)
+}
+
 /// Input images by shape. Reads the ids only to count them; no id ever reaches the envelope.
 fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
     let has_id = |key: &str| {
@@ -1777,10 +2117,14 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
     };
 
     let mut inputs = Vec::new();
-    if has_id("sourceAssetId") {
+    // `lastFrameAssetId` is the video lane's end-frame target: a STILL, like `sourceAssetId`, so it
+    // counts here rather than as a clip. An image payload never carries it, so this is a no-op for
+    // the image lane.
+    let sources = usize::from(has_id("sourceAssetId")) + usize::from(has_id("lastFrameAssetId"));
+    if sources > 0 {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_SOURCE.to_owned(),
-            count: 1,
+            count: u32::try_from(sources).unwrap_or(u32::MAX),
             control_mode: None,
         });
     }
@@ -1795,6 +2139,26 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
     if has_id("maskAssetId") {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_MASK.to_owned(),
+            count: 1,
+            control_mode: None,
+        });
+    }
+    // The video lane's clip ids (sc-15956), counted exactly as the image lane counts its stills.
+    // `lastFrameAssetId` is a STILL, not a clip — it is the end-frame an i2v run targets — so it
+    // joins the `source` count above rather than this one.
+    let source_clips = usize::from(has_id("sourceClipAssetId"))
+        + usize::from(has_id("bridgeRightClipAssetId"))
+        + id_list_len("sourceClipAssetIds");
+    if source_clips > 0 {
+        inputs.push(WorkflowInput {
+            kind: INPUT_KIND_SOURCE_CLIP.to_owned(),
+            count: u32::try_from(source_clips).unwrap_or(u32::MAX),
+            control_mode: None,
+        });
+    }
+    if has_id("referenceClipAssetId") {
+        inputs.push(WorkflowInput {
+            kind: INPUT_KIND_REFERENCE_CLIP.to_owned(),
             count: 1,
             control_mode: None,
         });
@@ -1877,13 +2241,20 @@ fn sanitize_loras(value: Option<&Value>) -> Vec<WorkflowLora> {
 // Value-level reduction (shared by build and parse)
 // ---------------------------------------------------------------------------
 
-/// The four input kinds, in the order [`describe_inputs`] emits them. An `inputs[].kind`
-/// outside this set is not something a reader can act on, so it does not survive a parse.
+/// The input kinds, in the order [`describe_inputs`] emits them. An `inputs[].kind` outside this
+/// set is not something a reader can act on, so it does not survive a parse.
+///
+/// The last two are the video lane's (sc-15956), and they arrive here for the same reason the first
+/// four did: a video recipe's `sourceClipAssetIds` / `referenceClipAssetId` are exactly the
+/// identifier class the allow-list excludes, so they become SHAPE — "this recipe needs two source
+/// clips" — instead of dangling local UUIDs.
 pub const INPUT_KINDS: &[&str] = &[
     INPUT_KIND_SOURCE,
     INPUT_KIND_REFERENCE,
     INPUT_KIND_MASK,
     INPUT_KIND_CONTROL,
+    INPUT_KIND_SOURCE_CLIP,
+    INPUT_KIND_REFERENCE_CLIP,
 ];
 
 // ---------------------------------------------------------------------------
@@ -2078,6 +2449,9 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         width,
         height,
         count,
+        duration_seconds,
+        fps,
+        quality,
         style_preset,
         style_id,
         fit_mode,
@@ -2133,6 +2507,14 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         width,
         height,
         count,
+        // The video knobs, reduced on the way IN exactly as on the way out. A non-finite
+        // `durationSeconds` from a stranger's file would serialize as `null` and re-parse as a
+        // different envelope, so it is dropped here rather than carried — the same treatment
+        // `upscale.softness` already gets. `quality` is a menu label and goes through the same
+        // bound-and-path check as every other label.
+        duration_seconds: duration_seconds.filter(|value| value.is_finite()),
+        fps,
+        quality: quality.as_deref().and_then(shareable_label),
         style_preset: style_preset.as_deref().and_then(shareable_label),
         style_id: style_id.as_deref().and_then(shareable_label),
         fit_mode: fit_mode.as_deref().and_then(shareable_label),
@@ -2515,10 +2897,10 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
             field: WORKFLOW_SHARE_MARKER_KEY.to_owned(),
             detail: "must be a workflow-kind string".to_owned(),
         })?;
-    if kind != WORKFLOW_KIND_IMAGE {
+    if !WORKFLOW_KINDS.contains(&kind) {
         return Err(WorkflowShareError::UnsupportedKind {
             found: kind.to_owned(),
-            supported: WORKFLOW_KIND_IMAGE.to_owned(),
+            supported: WORKFLOW_KINDS.join(", "),
         });
     }
 
