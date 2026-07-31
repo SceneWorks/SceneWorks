@@ -899,6 +899,16 @@ describe("editor download note", () => {
     expect(edited.detail).toMatch(/4096 × 4096 working size/);
   });
 
+  // A recipe-free source over the desktop ceiling is the one case where nothing was RESIZED and
+  // the download is still not the file you opened. "Working size" would be a claim about a resize
+  // that did not happen, so the label names what actually changed.
+  it("names the desktop-ceiling fallback for a recipe-free source", () => {
+    const row = note({ mode: "raster", reason: RASTER_REASON_DESKTOP_CAP, workflow: "absent" });
+    expect(row.label).toBe("Not the original file");
+    expect(row.detail).toContain("256 MB");
+    expect(row.detail).not.toMatch(/×/);
+  });
+
   it("keeps the recipe headline and appends the resolution when both apply", () => {
     const row = note({ mode: "original", workflow: "present" }, { downscaled: DOWNSCALED });
     expect(row.label).toBe("Recipe included");

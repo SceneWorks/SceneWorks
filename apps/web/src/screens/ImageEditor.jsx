@@ -930,12 +930,17 @@ export function editorDownloadNote(plan, { downscaled = null } = {}) {
       ),
     };
   }
-  // `absent`: the reader walked the file and found nothing. The only thing left worth saying is
-  // what sc-15954 changed about the SIZE of the download.
+  // `absent`: the reader walked the file and found nothing, so there is no recipe to speak about.
+  // What is left is what sc-15954 changed about the FILE ITSELF — which resolution it downloads
+  // at, and whether it is the original at all. Both are silent otherwise.
   if (!size && !cap) return null;
   return {
     tone: "size",
-    label: plan.mode === "original" ? "Original size" : "Working size",
+    label: cap
+      ? "Not the original file"
+      : plan.mode === "original"
+        ? "Original size"
+        : "Working size",
     detail: joinSentences(cap, size),
   };
 }
