@@ -871,6 +871,39 @@ test("an implemented family is Implemented/unverified only where the provider ac
   );
 });
 
+test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
+  const matrix = await buildMatrix();
+  const source = await surveyFixture();
+  const sourceReport = source.families["15517"].backends.candle;
+  const krea = matrix.rung4SurveyRows.find(
+    (row) => row.familyStory === 15517 && row.backend === "candle",
+  );
+  const kreaCell = matrix.cells.find(
+    (cell) =>
+      cell.modelId === "krea_2_turbo" &&
+      cell.backend === "candle" &&
+      cell.rung === "bounded_transformer_residency" &&
+      cell.state === "Implemented/unverified",
+  );
+  const report = kreaCell.rung4Survey;
+
+  assert.equal(krea.implementation, "shared-primitive");
+  assert.equal(report.implementation, "shared-primitive");
+  assert.match(report.summary, /candle_gen::block_window::run_windowed/);
+  assert.ok(
+    sourceReport.evidence.some(
+      (item) =>
+        item.source.endsWith("candle-gen/src/block_window.rs") &&
+        /BlockWindowBackend/.test(item.reason),
+    ),
+    "the audit must name the Candle backend that makes the Implemented declaration reachable",
+  );
+
+  const serialized = JSON.stringify(sourceReport);
+  assert.doesNotMatch(serialized, /provider-local/);
+  assert.doesNotMatch(serialized, /does not go through.*BlockWindowBackend/i);
+});
+
 test("rung 4 is not claimed where its declared rung-1 prerequisite is absent", async () => {
   // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
   // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and

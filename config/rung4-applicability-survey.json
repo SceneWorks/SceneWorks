@@ -73,7 +73,7 @@
         "candle": {
           "structuralApplicability": "full",
           "implementation": "none",
-          "summary": "Same uniform 12-block dual-stream trunk as the MLX twin; no block-window code path on Candle.",
+          "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -87,8 +87,8 @@
               "reason": "The Candle port carries the same 12-block dual-stream trunk and declares no memory_strategy_contract, so it exposes no rung-4 capability."
             },
             {
-              "source": "inference:crates/contracts/gen-core/src/block_window.rs",
-              "reason": "BlockWindowBackend has exactly one production implementation (MLX). Candle has no adapter, so no Candle family can drive the shared primitive (SC-15792)."
+              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
+              "reason": "Candle implements the shared BlockWindowBackend adapter, but the Mage provider has no streamed-block loader wired to candle_gen::block_window::run_windowed, so this family cannot drive it."
             }
           ],
           "requestPeak": {
@@ -165,7 +165,7 @@
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
-              "reason": "Declares BoundedTransformerResidency Implemented only when the load is a re-openable `WeightsSource::Dir` under `OffloadPolicy::Sequential`, and publishes transformer_window_sizes = [1] plus all three component scopes."
+              "reason": "Declares BoundedTransformerResidency Implemented only when the load is a re-openable `WeightsSource::Dir` with `LoadShape::DeferredMaterialization`, and publishes transformer_window_sizes = [1] plus all three component scopes."
             }
           ],
           "requestPeak": {
@@ -234,8 +234,8 @@
               "reason": "The Candle Z-Image provider declares no memory_strategy_contract and carries no streamed-block loader, so rung 4 has no implementation to select."
             },
             {
-              "source": "inference:crates/contracts/gen-core/src/block_window.rs",
-              "reason": "No Candle BlockWindowBackend exists (SC-15792), so the shared primitive is unreachable from this backend."
+              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
+              "reason": "Candle implements the shared BlockWindowBackend adapter, but the Candle Z-Image provider has no streamed-block loader wired to candle_gen::block_window::run_windowed, so this family cannot drive it."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer.rs",
@@ -735,7 +735,7 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "provider-local",
+          "implementation": "shared-primitive",
           "implementedEntries": [
             "krea_2_turbo"
           ],
@@ -758,7 +758,7 @@
               }
             ]
           },
-          "summary": "The only shipped rung-4 outside MLX Z-Image. Real block streaming, but through a provider-local `TransformerBlocks::Streamed` loader rather than the shared primitive.",
+          "summary": "The only shipped rung-4 outside MLX Z-Image. `TransformerBlocks::Streamed` materializes each selected window through `candle_gen::block_window::run_windowed` and the shared `BlockWindowBackend` contract.",
           "blockStacks": [
             {
               "name": "text_fusion",
@@ -782,7 +782,11 @@
           "evidence": [
             {
               "source": "inference:crates/media/candle-gen/candle-gen-krea/src/transformer/mod.rs",
-              "reason": "`Krea2Transformer::load_block_streamed` builds the front-end with `TransformerBlocks::Streamed(weights)`, so the 28 trunk blocks are materialized per block rather than held."
+              "reason": "`Krea2Transformer::load_block_streamed` builds `TransformerBlocks::Streamed(weights)`, whose forward path materializes each selected window through `candle_gen::block_window::run_windowed`."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
+              "reason": "CandleWindowBackend implements `gen_core::block_window::BlockWindowBackend`, and the thin `run_windowed` adapter delegates scheduling to the shared gen-core driver while synchronizing teardown on every exit path."
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs",
@@ -808,7 +812,7 @@
             ]
           },
           "findings": [
-            "SC-15958 reads this as an unbacked declaration. The survey's answer is narrower: the declaration IS backed by a real streaming loader, but that loader is provider-local and does not go through `gen_core::block_window::BlockWindowBackend`. The gap is duplication of the shared primitive, not a phantom capability — which changes what SC-15792/SC-15958 have to do.",
+            "SC-15958 identified an unbacked declaration before SC-15792 landed. SC-15792 supplied Candle's shared `BlockWindowBackend`, moved Krea's streamed loader onto `gen_core::block_window::run_windowed`, and added parity, mutation, cancellation, error-cleanup and worker-thread coverage; the Implemented declaration is now backed at the pinned inference revision.",
             "Overlay incompatibility here is a property of the ADAPTER MECHANISM, not of the architecture: Krea folds diff-patch deltas into the base weights at load, and a streamed block is rebuilt from the snapshot, so the fold cannot be carried. MLX Z-Image, whose adapters are forward-time residuals, streams with overlays fine. The existing Structurally N/A on Krea's Candle overlay cells is therefore correct and must not be generalised to other families."
           ]
         }
