@@ -495,6 +495,7 @@ fn memory_for_selection(
     selection: MemorySelection,
 ) -> GenerationMemory {
     GenerationMemory {
+        stage_residency: contract.engages(selection.strategy, MemoryStrategy::StagedResidency),
         tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
         chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
         stream_transformer_blocks: contract.engages(
@@ -1261,6 +1262,10 @@ fn evaluate_request_with_budget_using_bundle(
         cache_state = ?cache_state,
         load_policy = ?load_policy,
         strategy = ?selection.strategy,
+        cache_eviction = contract.engages(
+            selection.strategy,
+            MemoryStrategy::StagedResidency,
+        ),
         parameters = ?selection.parameters,
         evidence_record_id = selected_record_id.as_deref().unwrap_or("none"),
         predicted_peak_bytes,
@@ -3806,9 +3811,29 @@ mod tests {
             contract
         };
         let memory = memory_for_selection(&all_implemented, deepest);
+        assert!(
+            !memory.stage_residency,
+            "rung 4 must not evict the warm cache by implicitly engaging rung 1"
+        );
         assert!(memory.tile_vae_decode);
         assert!(memory.chunk_attention);
         assert!(memory.stream_transformer_blocks);
+
+        let staged = memory_for_selection(
+            &all_implemented,
+            MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: request_plan().tier,
+            },
+        );
+        assert!(
+            staged.stage_residency,
+            "an explicit rung-1 selection must reach GenerationMemory"
+        );
+        assert!(!staged.tile_vae_decode);
+        assert!(!staged.chunk_attention);
+        assert!(!staged.stream_transformer_blocks);
     }
 
     #[test]
