@@ -489,6 +489,14 @@ pub(super) async fn generate_candle_krea_control_stream(
     // resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS + `normalize_app_managed_
     // lora_path`), then installed on the base at load — the pose control branch is never adapted.
     let adapters = resolve_adapters(request, settings)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Krea 2 cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })?;
 
     let steps = krea_control_candle_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -596,10 +604,11 @@ pub(super) async fn generate_candle_krea_control_stream(
         // an indistinguishable `None` and the ladder took the zero-adaptation big-card path in silence.
         // It also removes the standing risk of pairing one tier's peak with another tier's savings.
         |budget| {
-            crate::krea_control_fit::fit_ladder_for_entry(
+            crate::krea_control_fit::fit_ladder_for_entry_with_adapter_bytes(
                 &request.model_manifest_entry,
                 tier,
                 budget,
+                adapter_bytes,
             )
         },
         // Two non-fits differing only in their reported free number are the same non-outcome — a reclaim
@@ -629,8 +638,12 @@ pub(super) async fn generate_candle_krea_control_stream(
     .await?;
     // The peak this admitted load actually leaves in the cudarc pool (sc-13960) — recorded below as the
     // reclaimable high-water. Computed before the by-value match consumes `fit`; `None` on a reject.
-    let incurred_peak =
-        crate::krea_control_fit::incurred_peak_gb(&fit, &request.model_manifest_entry, tier);
+    let incurred_peak = crate::krea_control_fit::incurred_peak_gb_with_adapter_bytes(
+        &fit,
+        &request.model_manifest_entry,
+        tier,
+        adapter_bytes,
+    );
     let (offload_policy, tile_vae_decode, chunk_attention) = match fit {
         // Big-card fast path (or no signal): monolithic full-speed decode, unchunked attention.
         crate::krea_control_fit::KreaControlFit::Unknown

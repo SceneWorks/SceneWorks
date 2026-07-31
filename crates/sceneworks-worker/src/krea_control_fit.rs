@@ -496,7 +496,18 @@ pub(crate) fn fit_ladder_for_entry(
     tier_key: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> KreaControlFit {
-    let peak = predicted_control_peak_gb(manifest_entry, tier_key);
+    fit_ladder_for_entry_with_adapter_bytes(manifest_entry, tier_key, budget, 0)
+}
+
+/// Adapter-aware control ladder. Krea retains adapter overlays independently at every residency rung.
+pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+    adapter_bytes: u64,
+) -> KreaControlFit {
+    let adapter_gb = adapter_bytes as f64 / crate::fit_gate::BYTES_PER_GIB;
+    let peak = predicted_control_peak_gb(manifest_entry, tier_key).map(|gb| gb + adapter_gb);
     if peak.is_none() && control_block_present(manifest_entry) {
         return KreaControlFit::Unverified {
             offload_policy: OffloadPolicy::Sequential,
@@ -507,7 +518,7 @@ pub(crate) fn fit_ladder_for_entry(
     }
     fit_ladder(
         peak,
-        predicted_control_sequential_peak_gb(manifest_entry, tier_key),
+        predicted_control_sequential_peak_gb(manifest_entry, tier_key).map(|gb| gb + adapter_gb),
         budget,
         decode_tile_save_gb(manifest_entry, tier_key),
         chunk_attn_save_gb(manifest_entry),
@@ -546,6 +557,16 @@ pub(crate) fn incurred_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
+    incurred_peak_gb_with_adapter_bytes(fit, manifest_entry, tier_key, 0)
+}
+
+/// Reclaimable peak for an admitted adapter-aware control load.
+pub(crate) fn incurred_peak_gb_with_adapter_bytes(
+    fit: &KreaControlFit,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+) -> Option<f64> {
     if !control_evidence_is_current(manifest_entry) {
         return None;
     }
@@ -574,7 +595,7 @@ pub(crate) fn incurred_peak_gb(
     }
     // No branch-tier term: past the guard above, `candle.control.measured` is true, so the rows describe
     // the configuration that actually loads and there is no packing delta left to apply.
-    Some(peak.max(0.0))
+    Some((peak + adapter_bytes as f64 / crate::fit_gate::BYTES_PER_GIB).max(0.0))
 }
 
 #[cfg(test)]
@@ -674,6 +695,40 @@ mod tests {
             tile_vae_decode: false,
             chunk_attention: false,
         }
+    }
+
+    #[test]
+    fn additive_adapter_bytes_shift_every_control_rung_and_incurred_peak() {
+        let manifest = krea_manifest_measured();
+        let tier = "q4";
+        let one_gib = crate::fit_gate::BYTES_PER_GIB as u64;
+        let resident = predicted_control_peak_gb(&manifest, tier).unwrap();
+
+        assert_eq!(
+            fit_ladder_for_entry_with_adapter_bytes(
+                &manifest,
+                tier,
+                Some(budget(resident + 0.5)),
+                0,
+            ),
+            fits_nothing_engaged()
+        );
+        assert_ne!(
+            fit_ladder_for_entry_with_adapter_bytes(
+                &manifest,
+                tier,
+                Some(budget(resident + 0.5)),
+                one_gib,
+            ),
+            fits_nothing_engaged(),
+            "a one-GiB adapter must cross the resident fit boundary"
+        );
+
+        let fit =
+            fit_ladder_for_entry_with_adapter_bytes(&manifest, tier, Some(budget(96.0)), one_gib);
+        let plain = incurred_peak_gb(&fits_nothing_engaged(), &manifest, tier).unwrap();
+        let adapted = incurred_peak_gb_with_adapter_bytes(&fit, &manifest, tier, one_gib).unwrap();
+        assert!((adapted - plain - 1.0).abs() < 1e-6);
     }
 
     /// Assert a [`KreaControlFit::TooBig`] whose `needed_gb` is ~`expected` (float-tolerant).

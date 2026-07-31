@@ -2849,7 +2849,7 @@ fn krea_streamed_blocks_adapter_evidence(adapters: &[AdapterSpec]) -> (bool, Opt
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_adapter_resident_bytes(
+pub(super) fn candle_adapter_resident_bytes(
     engine_id: &str,
     tier: &str,
     measured_source_bytes: u64,
@@ -4847,6 +4847,7 @@ fn tier_probe_spec(
     weights_dir: &Path,
     request: &ImageRequest,
     settings: &Settings,
+    adapters: &[AdapterSpec],
 ) -> LoadSpec {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
     attach_required_components(
@@ -4856,6 +4857,7 @@ fn tier_probe_spec(
         settings,
     )
     .unwrap_or(spec)
+    .with_adapters(adapters.to_vec())
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -4890,6 +4892,9 @@ async fn generate_stream(
     // reconcile + spec build (so both the recorded precision and the load follow the downtiered tier).
     let mut weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
+    // Capability downtier probes must carry the exact adapter stack the eventual load sees. Resolving
+    // here lets a lower adapted tier win instead of keeping a base-only fit that the final gate rejects.
+    let adapters = resolve_adapters(request, settings)?;
     // sc-10733 capability downtier (MLX): for a DEFAULT job (no explicit per-(screen,model) pick), if the
     // resolved tier won't fit this machine's unified memory even under sequential residency, step DOWN to
     // the highest installed tier that does — floored at the per-model quality floor — rejecting only when
@@ -4911,8 +4916,13 @@ async fn generate_stream(
                     .filter_map(|cand| {
                         resolve_tier_dir(request, settings, cand)
                             .map(|dir| {
-                                let probe =
-                                    tier_probe_spec(engine_id, &dir, request, settings);
+                                let probe = tier_probe_spec(
+                                    engine_id,
+                                    &dir,
+                                    request,
+                                    settings,
+                                    &adapters,
+                                );
                                 (cand, mlx_tier_fit(engine_id, &probe))
                             })
                     })
@@ -4945,7 +4955,7 @@ async fn generate_stream(
                         .map(|dir| {
                             crate::mlx_fit_gate::spec_weights_gb(
                                 engine_id,
-                                &tier_probe_spec(engine_id, &dir, request, settings),
+                                &tier_probe_spec(engine_id, &dir, request, settings, &adapters),
                             )
                         })
                         .filter(|gb| *gb > 0.0)
@@ -5076,7 +5086,6 @@ async fn generate_stream(
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
-    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(
         request,

@@ -1492,11 +1492,40 @@ pub(crate) fn wan_video_fit_error(
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
+    wan_video_fit_error_with_adapter_bytes(
+        model_label,
+        manifest_entry,
+        tier_key,
+        weight_bytes,
+        0,
+        gpu_id,
+        budget,
+    )
+}
+
+/// Adapter-aware Wan admission. Packed callers pass the independently resident user stack; dense
+/// callers pass zero because their factors are folded. The calibrated Lightning stack is already in
+/// the manifest peak and must not be included here.
+pub(crate) fn wan_video_fit_error_with_adapter_bytes(
+    model_label: &str,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    weight_bytes: u64,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
     // Unmeasured (no `candle` block, or no row for this tier and no `minMemoryGb`) ⇒ the sc-12344
     // floor, byte-for-byte the shipped behavior.
     let Some(needed_gb) = predicted_peak_gb(manifest_entry, tier_key) else {
-        return video_weights_fit_error(model_label, weight_bytes, gpu_id, budget);
+        return video_weights_fit_error(
+            model_label,
+            weight_bytes.saturating_add(adapter_bytes),
+            gpu_id,
+            budget,
+        );
     };
+    let needed_gb = needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let budget = budget?;
     (budget.free_gb + f64::EPSILON < needed_gb)
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
@@ -3452,6 +3481,50 @@ mod tests {
             wan_video_fit_error("wan_2_2", &entry, "bf16", WAN_5B_Q4_DISK_BYTES, "0", card52)
                 .is_some(),
             "bf16's measured 54.0 GB peak + 2 headroom overflows a 52 GB card — refuse"
+        );
+    }
+
+    #[test]
+    fn wan_additive_adapter_bytes_flip_the_measured_and_floor_boundaries() {
+        let entry = wan_5b_entry();
+        let one_gib = BYTES_PER_GIB as u64;
+        let boundary = apply_vram_cap(None, Some(48.6));
+        assert!(wan_video_fit_error_with_adapter_bytes(
+            "wan_2_2", &entry, "q4", 0, 0, "0", boundary,
+        )
+        .is_none());
+        assert!(
+            wan_video_fit_error_with_adapter_bytes(
+                "wan_2_2", &entry, "q4", 0, one_gib, "0", boundary,
+            )
+            .is_some(),
+            "a packed adapter must be added to the measured render peak"
+        );
+
+        let no_measurement = obj(json!({}));
+        let floor_boundary = apply_vram_cap(None, Some(3.5));
+        assert!(wan_video_fit_error_with_adapter_bytes(
+            "wan",
+            &no_measurement,
+            "q4",
+            one_gib,
+            0,
+            "0",
+            floor_boundary,
+        )
+        .is_none());
+        assert!(
+            wan_video_fit_error_with_adapter_bytes(
+                "wan",
+                &no_measurement,
+                "q4",
+                one_gib,
+                one_gib,
+                "0",
+                floor_boundary,
+            )
+            .is_some(),
+            "the unmeasured weights floor must also include additive adapters"
         );
     }
 
