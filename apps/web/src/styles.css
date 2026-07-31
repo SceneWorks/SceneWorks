@@ -9766,6 +9766,67 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--ie-warn, #d97706);
 }
 
+/* Whether Download will carry the embedded workflow (sc-15954, epic 15945). Sits immediately
+   before the Download button so it reads as a caption on that action, and it is only rendered
+   when the opened image carried a recipe at all. Muted rather than alarming in both states: this
+   is a statement of fact about the next click, not a warning. */
+.ie-recipe-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ie-border);
+  background: transparent;
+  color: var(--ie-muted);
+  font: 600 11px var(--font-ui);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+}
+.ie-recipe-note::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ie-recipe-note[data-tone="included"] {
+  border-color: color-mix(in srgb, var(--ie-accent) 40%, var(--ie-border));
+  color: color-mix(in srgb, var(--ie-accent) 78%, var(--ie-text));
+}
+.ie-recipe-note[data-tone="dropped"] {
+  border-color: color-mix(in srgb, var(--ie-warn, #d97706) 40%, var(--ie-border));
+  color: color-mix(in srgb, var(--ie-warn, #d97706) 78%, var(--ie-text));
+}
+/* "Recipe unknown" and the resolution note are neither good news nor a loss — the muted default
+   border is right for both, and only the dot distinguishes them from a filled state. */
+.ie-recipe-note[data-tone="pending"]::before {
+  opacity: 0.45;
+}
+/* sc-15954: the live region stays MOUNTED for the life of the document so a screen reader has
+   something to observe changing — a region inserted into the DOM already populated is not
+   reliably announced, because there was no change to observe.
+   Emptied, it is collapsed with the standard visually-hidden recipe and NOT with `display: none`
+   or `visibility: hidden`: both of those drop the element from the accessibility tree, which is
+   the very thing unmounting it did wrong. Taken out of flow so it contributes no flex gap to the
+   header row either. */
+.ie-recipe-note[data-empty] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.ie-recipe-note[data-empty]::before {
+  display: none;
+}
+
 /* Shared unsaved-work pill for the library screens (sc-11971): the Pose Library Create
    review, the Key Point Capture review, and the Collections builder all flag in-progress
    work not yet saved, pairing with the appConfirm-guarded Discard/Cancel controls. Uses
