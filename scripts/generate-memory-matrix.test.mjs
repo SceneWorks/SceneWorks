@@ -622,8 +622,13 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.equal(
     kreaBounded?.evidence.currentEnvironmentVerification.length,
+    0,
+    "exact Krea control runs from the prior inference revision must not remain current after a pin bump",
+  );
+  assert.equal(
+    kreaBounded?.evidence.historicalVerification.length,
     2,
-    "both current exact Krea control geometries must remain attached to the matrix cell",
+    "both exact Krea control geometries remain attached as history until rerun on the new runtime",
   );
 
   // Every declared lane is represented on every backend the entry advertises — the declaration is what

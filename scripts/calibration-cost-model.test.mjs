@@ -455,11 +455,17 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
   assert.equal(byId["producible-today"], 20, "alpha's none and proven lora cells are runnable");
 });
 
-test("published cost model reports promoted records instead of the obsolete zero baseline", async () => {
+test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
   assert.equal(model.completedBaseline.completeRecords, 2);
-  assert.equal(model.completedBaseline.matrixSummaryCurrentCalibrationRuns, 2);
+  assert.equal(
+    model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
+    0,
+    "an inference pin change must not relabel exact runs from the prior runtime as current",
+  );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
+  assert.match(model.completedBaseline.note, /2 complete record\(s\) exist/);
+  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 2 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
