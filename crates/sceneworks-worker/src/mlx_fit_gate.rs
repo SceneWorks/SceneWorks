@@ -126,15 +126,64 @@ impl MlxRequestPlan {
         }
     }
 
+    /// The fixed, resolution-INDEPENDENT part of [`Self::activation_headroom_bytes`]: the macOS/app
+    /// share of [`OS_APP_RESERVE_GB`] that survives after request budgeting carries the legacy
+    /// unified reserve separately. Clamped to the whole allowance so a family whose headroom is
+    /// smaller than the reserve can never produce a negative area term.
+    fn fixed_reserve_bytes(&self) -> u64 {
+        gib_to_bytes(
+            (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+        )
+        .min(self.activation_headroom_bytes)
+    }
+
+    /// Request peak for the generic/legacy path: resident weights + a FIXED OS/app reserve + the
+    /// activation transient scaled by output area (sc-16195).
+    ///
+    /// The predecessor scaled the WHOLE `activation_headroom_bytes` by megapixels. That constant is
+    /// `HEADROOM_GB` (a 1024²-only calibration) minus the legacy reserve, and its own doc comment
+    /// decomposes it as *transient + a ~4 GiB macOS/app reserve*. Scaling the reserve was simply
+    /// wrong: the OS's working set does not grow because this request renders 2048² instead of 1024².
+    ///
+    /// The AREA term, by contrast, is scaled exactly as before — because the sc-16195 sweep
+    /// (`crate::resolution_sweep`, five cells per tier, `docs/sc-16195/`) found the measured
+    /// transient to be PROPORTIONAL to megapixels above 1024², to within ~2%, across three
+    /// architectures that have no reason to agree:
+    ///
+    /// | tier                 | 1024² | ×1.50 area | ×2.25 area | ×4.00 area |
+    /// |----------------------|------:|-----------:|-----------:|-----------:|
+    /// | illustrious q8 (UNet)| 14.04 |      1.497 |      2.244 |      3.921 |
+    /// | z_image_turbo q4(DiT)| 14.04 |      1.497 |          — |          — |
+    /// | qwen_image q8 (tiled)|  7.66 |      1.499 |      2.247 |          — |
+    ///
+    /// This matters more as a REFUTATION than as a confirmation. The story that filed this work
+    /// reasoned from the only prior evidence — two sc-5567 points suggesting the transient was
+    /// markedly SUBLINEAR (16× area → 3.8× memory, i.e. an exponent near 0.48) — and expected the fix
+    /// to be a fitted sub-linear curve. Fitting that exponent would have UNDER-predicted illustrious
+    /// q8 at 2048² by ~25 GiB on a gate whose permissive-side failure mode is an OS Jetsam SIGKILL.
+    /// The area term is left linear because it measured linear, not because it was not examined.
+    ///
+    /// The `.max(1.0)` floor on the scale is likewise kept: below 1024² the measured transient stops
+    /// falling off proportionally (illustrious 0.305× and qwen 0.512× of their anchors at 0.25×
+    /// area, both ABOVE the 0.25× a proportional term would predict), so the floor is the
+    /// conservative reading of the data rather than a leftover.
+    ///
+    /// `batch` continues to multiply the area term only — a genuine batched pass renders more
+    /// pixels, but it does not run more copies of macOS. See [`request_batch`]: on this lane it is
+    /// always 1, because a multi-image job is a sequential loop (sc-16194).
     fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
-        self.asset_bytes.saturating_add(
-            (self.activation_headroom_bytes as f64 * request_scale)
-                .round()
-                .clamp(0.0, u64::MAX as f64) as u64,
-        )
+        let fixed_reserve_bytes = self.fixed_reserve_bytes();
+        let area_bytes = self.activation_headroom_bytes - fixed_reserve_bytes;
+        self.asset_bytes
+            .saturating_add(fixed_reserve_bytes)
+            .saturating_add(
+                (area_bytes as f64 * request_scale)
+                    .round()
+                    .clamp(0.0, u64::MAX as f64) as u64,
+            )
     }
 }
 
@@ -1446,6 +1495,26 @@ const HEADROOM_GB: f64 = 18.0;
 /// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
 /// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
 const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
+
+/// The macOS/app share inside [`HEADROOM_GB`] — the part of the flat allowance that covers the OS and
+/// other apps drawing from the same unified pool, as opposed to this request's activation transient.
+///
+/// This is the sc-10863 decomposition read back out and given a name: `HEADROOM_GB` 18 = the max
+/// common-case measured 1024² transient (14.04, illustrious q8 & lens q4) + this ~4 GiB reserve. It
+/// was previously only prose in that constant's doc comment, which is precisely how it came to be
+/// multiplied by megapixels — the request estimator could not tell the two halves apart.
+///
+/// It exists so [`MlxRequestPlan::generic_total_peak_bytes`] can hold it FIXED while scaling the area
+/// term (sc-16195). Naming it does not change the load-time gate: `HEADROOM_GB` and
+/// [`LENS_DENSE_HEADROOM_GB`] keep their values and their meanings there.
+///
+/// Note the two constants are not the same KIND of quantity, which is a pre-existing wrinkle this
+/// story deliberately does not disturb: `HEADROOM_GB` is transient + reserve, while
+/// `LENS_DENSE_HEADROOM_GB` is documented as a measured transient ALONE. Because the split below is
+/// applied to whatever allowance a family carries, both keep exactly their current 1024² totals;
+/// only the >1024² slope changes. Reconciling their semantics belongs with sc-11924's per-family
+/// in-memory weight sizing, not here.
+const OS_APP_RESERVE_GB: f64 = 4.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table. Shared with the candle gate
@@ -3852,6 +3921,72 @@ mod tests {
         assert!(
             peak(1) > plan.generic_total_peak_bytes(request_geometry(&request_inputs(512, 512, 1))),
             "the estimator must still grow with output resolution"
+        );
+    }
+
+    /// sc-16195: the OS/app reserve inside the flat headroom is FIXED, so only the activation term
+    /// may scale with output area.
+    ///
+    /// Every number here is pinned in absolute GiB rather than re-derived from the formula, so the
+    /// test fails if the split moves — a test that recomputed `fixed + area * mp` would pass against
+    /// any split, including the broken one.
+    #[test]
+    fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
+        let asset_gb = 33.22_f64;
+        let plan = MlxRequestPlan {
+            engine_id: "krea_2_turbo",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+            },
+            asset_bytes: gib_to_bytes(asset_gb),
+            activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        let peak_gb = |width, height| {
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
+                as f64
+                / BYTES_PER_GIB
+        };
+        // The split: 16 GiB of allowance = a 2 GiB fixed remainder of the 4 GiB OS/app reserve (the
+        // other 2 are carried separately as the legacy unified reserve) + a 14 GiB area term.
+        let close = |actual: f64, expected: f64| (actual - expected).abs() < 1e-6;
+
+        // 1024² is the calibration anchor and must be BIT-IDENTICAL to the pre-sc-16195 estimator —
+        // the sweep re-derived the shape, it did not re-cut the safety margin.
+        assert!(
+            close(peak_gb(1024, 1024), asset_gb + 16.0),
+            "1024² must be unchanged at asset + 16: got {:.4}",
+            peak_gb(1024, 1024)
+        );
+
+        // Above 1024² only the 14 GiB area term scales. The old estimator scaled all 16.
+        for (width, height, megapixels) in
+            [(1024, 1536, 1.5), (1152, 2048, 2.25), (2048, 2048, 4.0)]
+        {
+            let expected = asset_gb + 2.0 + 14.0 * megapixels;
+            assert!(
+                close(peak_gb(width, height), expected),
+                "{width}x{height}: expected asset + 2 + 14*{megapixels} = {expected:.4}, got {:.4}",
+                peak_gb(width, height)
+            );
+            // Mutation guard: the pre-sc-16195 formula scaled the whole 16, so it is strictly
+            // larger everywhere above the anchor. If the reserve ever starts scaling again, this
+            // fires even if the arithmetic above were loosened.
+            assert!(
+                peak_gb(width, height) < asset_gb + 16.0 * megapixels,
+                "{width}x{height} must model below the old whole-headroom scaling"
+            );
+        }
+
+        // Below 1024² the scale is floored at 1.0: the measured transient stops falling off
+        // proportionally down there (illustrious 0.305x and qwen 0.512x of their anchors at 0.25x
+        // area, both above proportional), so the floor is the conservative reading.
+        assert!(
+            close(peak_gb(512, 512), asset_gb + 16.0),
+            "sub-anchor requests stay floored at the 1024² allowance: got {:.4}",
+            peak_gb(512, 512)
         );
     }
 
