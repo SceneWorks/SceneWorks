@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+import { findActionPinViolations } from "./lib/action-pins.mjs";
+
 const workflowPath = ".github/workflows/publish-runpod.yml";
 const [workflow, dockerfile, serverCandle, desktopWindows] = await Promise.all([
   readFile(workflowPath, "utf8"),
@@ -39,6 +41,8 @@ assert.equal(
 
 for (const contract of [
   "ghcr.io/sceneworks/sceneworks-runpod",
+  "actions/checkout@",
+  "actions/setup-node@",
   "docker/login-action@",
   "registry: ghcr.io",
   "username: ${{ github.actor }}",
@@ -61,20 +65,14 @@ for (const contract of [
   requireText(workflow, contract);
 }
 
-for (const [action, version, sha] of [
-  ["actions/checkout", "v7.0.1", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
-  ["actions/setup-node", "v7.0.0", "820762786026740c76f36085b0efc47a31fe5020"],
-  ["docker/login-action", "v4.5.1", "abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"],
-  ["docker/setup-buildx-action", "v4.2.0", "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"],
-  ["docker/metadata-action", "v6.2.0", "dc802804100637a589fabce1cb79ff13a1411302"],
-  ["docker/build-push-action", "v7.3.0", "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a"],
-]) {
-  requireText(
-    workflow,
-    `uses: ${action}@${sha} # ${version}`,
-    `${action} must use the reviewed immutable ${version} commit`,
-  );
-}
+// Pin *shape* is enforced repo-wide by scripts/check-action-pins.mjs, which stays
+// true across Dependabot bumps. Naming exact SHAs here only re-broke this check
+// every time Dependabot rewrote the workflow it was guarding.
+assert.deepEqual(
+  findActionPinViolations(workflow, workflowPath),
+  [],
+  "publication workflow actions must be pinned to immutable commits",
+);
 
 assert.match(workflow, /\^refs\/tags\/v\(\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\)\$/);
 requireText(workflow, 'type=raw,value=latest,enable=${{ steps.publication.outputs.release == \'true\' }}');
