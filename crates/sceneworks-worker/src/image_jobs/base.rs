@@ -2889,6 +2889,7 @@ fn load_spec(
 /// decision: a roomy machine keeps Lens resident, while a constrained machine adds Sequential and
 /// thereby satisfies the provider's exact rung-4 predicate. Keep every overlay exclusion explicit
 /// so an unmeasured load can never inherit the dense, native-decode result.
+#[cfg(target_os = "macos")]
 fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let lens_dense_native = matches!(engine_id, "lens" | "lens_turbo")
         && matches!(&spec.weights, WeightsSource::Dir(_))

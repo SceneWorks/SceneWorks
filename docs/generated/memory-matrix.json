@@ -1,7 +1,7 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:63c734e86747335ac53c7f500203570e9ffbae1b1c0da64f4e92d2e92f6321db",
+    "sceneWorksRevision": "source-tree:015779a3d1c419de3628c0d30b0feaf0c52ddc3e1995c68cd4a3ae56257fa905",
     "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "manifest": {
@@ -14,7 +14,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "c7596a83e2d8cb8bc16e914372bc6141f433bffe4d922204db7531718b0b985e"
+        "sha256": "70447a1a42d99e88a8736cb0dfbe862df52e81da49e294be42c42938cce6be73"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
