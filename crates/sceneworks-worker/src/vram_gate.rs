@@ -530,8 +530,9 @@ fn krea_rung_parameters(
         // request peak 0.0%, so widening the scope buys an admission gate nothing.
         //
         // The scope is declared only on the rung that owns it. `validate_selected_parameters`
-        // rejects any `Some(..)` below `BoundedTransformerResidency` as "irrelevant below its
-        // owning strategy rung", and the three cheaper rungs here pair with cheaper strategies
+        // rejects any `Some(..)` below `BoundedTransformerResidency` as "irrelevant: the selection
+        // does not engage its owning strategy rung", and the three cheaper rungs here pair with
+        // cheaper strategies
         // (see `rung_pairs`); a blanket `Some` would fail `validate_selection` on three of the
         // four candidates and silently downgrade their evidence verdicts. `None` on those rungs
         // carries the identical DiT meaning without tripping that check.
@@ -1674,6 +1675,13 @@ mod tests {
             .clone()
     }
 
+    fn builtin_krea_turbo_manifest_with_original_fingerprint() -> JsonObject {
+        let mut manifest = builtin_krea_turbo_manifest();
+        manifest["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        manifest
+    }
+
     #[test]
     fn parse_vram_cap_accepts_positive_numbers_only() {
         assert_eq!(parse_vram_cap(Some("10")), Some(10.0));
@@ -2022,8 +2030,87 @@ mod tests {
     }
 
     #[test]
-    fn builtin_krea_q4_curves_select_24_16_and_12_gb_rungs() {
+    fn builtin_krea_cumulative_rung_two_and_three_curves_are_fingerprint_invalidated() {
         let manifest = builtin_krea_turbo_manifest();
+        let turbo_fit = manifest["candle"]["turboFit"]
+            .as_object()
+            .expect("Krea turbo fit");
+        let invalidating_fingerprint = turbo_fit["calibrationFingerprint"]
+            .as_str()
+            .expect("manifest calibration fingerprint");
+        assert_eq!(
+            invalidating_fingerprint,
+            "krea-turbo-cuda-phase-curves-v1-superseded-sc-15994"
+        );
+
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
+            )
+            .expect("Krea contract lookup succeeds")
+            .expect("Krea contract exists");
+        let provider_fingerprint = provider_contract
+            .calibration
+            .as_ref()
+            .expect("Krea provider declares calibration")
+            .fingerprint
+            .as_str();
+        assert_ne!(
+            invalidating_fingerprint, provider_fingerprint,
+            "the manifest must stay fingerprint-mismatched until non-staged curves are captured"
+        );
+
+        for tier in ["q4", "q8", "bf16"] {
+            for (manifest_rung, selection) in [
+                ("tiledVae", gen_core::MemoryStrategy::BoundedDecode),
+                (
+                    "chunkedAttention",
+                    gen_core::MemoryStrategy::BoundedAttention,
+                ),
+            ] {
+                let row = turbo_fit["phaseCurvesByTier"][tier][manifest_rung]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("missing affected {tier}.{manifest_rung} curve"));
+                assert!(
+                    ["text", "denoise", "decode"]
+                        .into_iter()
+                        .all(|phase| row.get(phase).is_some_and(Value::is_object)),
+                    "affected {tier}.{manifest_rung} curve must remain as historical provenance"
+                );
+                assert!(
+                    !provider_contract
+                        .engages(selection, gen_core::MemoryStrategy::StagedResidency),
+                    "{selection:?} must execute without the staged composition used to capture \
+                     {tier}.{manifest_rung}"
+                );
+            }
+        }
+
+        for (tier, free_gb) in [("q4", 24.0), ("q8", 32.0), ("bf16", 48.0)] {
+            assert_eq!(
+                krea_turbo_fit(
+                    &manifest,
+                    tier,
+                    1024,
+                    1024,
+                    Some(VramBudget {
+                        free_gb,
+                        total_gb: free_gb,
+                    }),
+                    true,
+                ),
+                Some(KreaTurboFit::Unverified {
+                    reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+                }),
+                "{tier} evidence must fail closed before any historical phase curve can authorize a fit"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_builtin_krea_q4_curves_select_24_16_and_12_gb_rungs() {
+        let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         let fit = |free_gb| {
             krea_turbo_fit(
                 &manifest,
@@ -2090,8 +2177,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_krea_q8_curves_keep_q8_and_select_only_measured_useful_rungs() {
-        let manifest = builtin_krea_turbo_manifest();
+    fn historical_builtin_krea_q8_curves_keep_q8_and_select_only_measured_useful_rungs() {
+        let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         let fit = |free_gb| {
             krea_turbo_fit(
                 &manifest,
@@ -2207,7 +2294,7 @@ mod tests {
 
     #[test]
     fn q8_and_bf16_768_measurements_report_out_of_envelope_without_exact_records() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         for tier in ["q8", "bf16"] {
             assert!(matches!(
                 krea_turbo_fit(
@@ -2229,8 +2316,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_krea_bf16_curves_keep_bf16_and_select_only_measured_useful_rungs() {
-        let manifest = builtin_krea_turbo_manifest();
+    fn historical_builtin_krea_bf16_curves_keep_bf16_and_select_only_measured_useful_rungs() {
+        let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         let fit = |free_gb| {
             krea_turbo_fit(
                 &manifest,
