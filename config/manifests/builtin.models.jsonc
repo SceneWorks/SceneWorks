@@ -4806,15 +4806,15 @@
           "engagedCompositions": {
             "resident": ["resident"],
             "threeStage": ["resident", "staged_residency"],
-            "tiledVae": ["resident", "bounded_decode"],
-            "chunkedAttention": ["resident", "bounded_decode", "bounded_attention"],
+            "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+            "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
             "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
           },
           // Exact parameter cells exercised by the historical curves below. Capture was cumulative:
           // Krea kept each cheaper bound active while adding the next constraint, including staged
-          // residency for tiledVae and chunkedAttention. That is no longer the composition selected
-          // by the shared contract, so the exact measured-composition check rejects those rows. They
-          // remain only as provenance until sc-15913 replaces them with non-staged captures.
+          // residency for tiledVae and chunkedAttention. The provider contract declares that
+          // provider-specific three-stage prerequisite explicitly, so these exact measured
+          // compositions remain eligible while any genuinely different composition fails closed.
           "strategyParameters": {
             "resident": {},
             "threeStage": {},

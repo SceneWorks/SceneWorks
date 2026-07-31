@@ -1640,9 +1640,10 @@ mod tests {
                         "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
                         "measuredCompositions": {
                             "threeStage": ["resident", "staged_residency"],
-                            "tiledVae": ["resident", "bounded_decode"],
+                            "tiledVae": ["resident", "staged_residency", "bounded_decode"],
                             "chunkedAttention": [
                                 "resident",
+                                "staged_residency",
                                 "bounded_decode",
                                 "bounded_attention"
                             ],
@@ -2187,11 +2188,11 @@ mod tests {
                 ])
             );
             assert!(
-                !provider_contract.engages(
+                provider_contract.engages(
                     gen_core::MemoryStrategy::BoundedDecode,
                     gen_core::MemoryStrategy::StagedResidency,
                 ),
-                "the current bounded-decode contract deliberately differs from its measured row"
+                "the provider contract must preserve the staged-residency coupling in its measured row"
             );
         }
 

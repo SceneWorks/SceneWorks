@@ -1,12 +1,12 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e70c20e1faf6f1164a28571a7da073f51d9f60d298c59614f47e815b7feee783",
+    "sceneWorksRevision": "source-tree:e7e1b1bb1e2895c44adaf2a1e2c9c3490ae8f7e86a925b76d396e6d8015ab08f",
     "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c80703e10352eb675c98292a0990ba82e3bb0a97cc72a9fb67cdfdce112ded58"
+        "sha256": "dd55e9743ab207916516054db09e211884a67cd8e3006aa37ad5c8b1550ae89d"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "05714af3786399dcf244ce16dee256288573e864b64859049c8d1cbdc1b279e0"
+        "sha256": "360e7ba0d28b88bdf3545b13d1302a9b21b5dd5bee1b65e9d7d828ce5be36b96"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -210852,6 +210852,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode",
         "bounded_attention"
       ],
@@ -210975,6 +210976,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode"
       ],
       "state": "Implemented/unverified",
@@ -213546,6 +213548,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode",
         "bounded_attention"
       ],
@@ -213708,6 +213711,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode"
       ],
       "state": "Implemented/unverified",
@@ -216403,6 +216407,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode",
         "bounded_attention"
       ],
@@ -216526,6 +216531,7 @@
       },
       "engagedRungs": [
         "resident",
+        "staged_residency",
         "bounded_decode"
       ],
       "state": "Implemented/unverified",
