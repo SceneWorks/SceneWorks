@@ -54,6 +54,45 @@ const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b
 /// when the legacy dense `krea/Krea-2-Turbo` repo is absent (retired, sc-9092). Mirrors the candle lane's
 /// `KREA_CONTROL_MLX_REPO` (sc-11727).
 const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
+const KREA_CONTROL_BASE_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
+const KREA_CONTROL_OVERLAY_PIN: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
+
+fn krea_control_calibration_provenance(
+    weights_dir: &Path,
+    control_weights: &Path,
+    verified_default_overlay: bool,
+) -> Option<crate::model_jobs::ResolvedArtifactProvenance> {
+    let weights_dir = std::fs::canonicalize(weights_dir).ok()?;
+    let control_weights = std::fs::canonicalize(control_weights).ok()?;
+    let tier = weights_dir.file_name()?.to_str()?;
+    if tier != "q4" {
+        return None;
+    }
+    let base_suffix = format!(
+        "models--SceneWorks--krea-2-turbo-mlx/snapshots/{KREA_CONTROL_BASE_REVISION}/q4"
+    );
+    let overlay_suffix = format!(
+        "models--SceneWorks--krea2-pose-controlnet-beta/snapshots/{KREA_CONTROL_OVERLAY_PIN}/{KREA_CONTROL_OVERLAY_FILE}"
+    );
+    if !weights_dir.to_string_lossy().ends_with(&base_suffix) {
+        return None;
+    }
+    if !verified_default_overlay && !control_weights.to_string_lossy().ends_with(&overlay_suffix) {
+        return None;
+    }
+    Some(crate::model_jobs::ResolvedArtifactProvenance {
+        identity: crate::model_jobs::ResolvedArtifactIdentity {
+            repository: KREA_CONTROL_MLX_REPO.to_owned(),
+            revision: KREA_CONTROL_BASE_REVISION.to_owned(),
+            variant: tier.to_owned(),
+            fingerprint: format!(
+                "{KREA_CONTROL_MLX_REPO}@{KREA_CONTROL_BASE_REVISION}:q4|\
+                 {KREA_CONTROL_OVERLAY_REPO}@{KREA_CONTROL_OVERLAY_PIN}:{KREA_CONTROL_OVERLAY_FILE}"
+            ),
+        },
+        fixed_artifact_tier: Some(tier.to_owned()),
+    })
+}
 
 /// Model ids the MLX Krea strict-pose control route accepts (the deployed base the overlay applies on).
 fn is_krea_control_model(model: &str) -> bool {
@@ -211,27 +250,30 @@ async fn ensure_krea_control_weights(
     settings: &Settings,
     job: &JobSnapshot,
     request: &ImageRequest,
-) -> WorkerResult<PathBuf> {
+) -> WorkerResult<(PathBuf, bool)> {
     if let Ok(p) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
         let p = PathBuf::from(p.trim());
         if p.is_file() {
-            return Ok(p);
+            return Ok((p, false));
         }
     }
     if let Some(p) = krea_control_payload_overlay_path(settings, request)? {
         if p.is_file() {
-            return Ok(p);
+            return Ok((p, false));
         }
     }
     let (repo, file) = krea_control_overlay_repo_file(request)?;
     let revision =
         trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
+    let verified_default_overlay = repo == KREA_CONTROL_OVERLAY_REPO
+        && revision == KREA_CONTROL_OVERLAY_PIN
+        && file == KREA_CONTROL_OVERLAY_FILE;
     if let Some(snapshot) =
         crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
     {
         let f = snapshot.join(&file);
         if f.is_file() {
-            return Ok(f);
+            return Ok((f, verified_default_overlay));
         }
     }
     let client = crate::downloads::streaming_download_client();
@@ -250,8 +292,8 @@ async fn ensure_krea_control_weights(
         .join(&file);
     // Pin the exact commit for the default overlay repo so `main` moving under us can't swap the
     // checkpoint (parity with the candle lane). Registered overlays carry their own immutable pin.
-    ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
-    Ok(dst)
+    let path = ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
+    Ok((path, verified_default_overlay))
 }
 
 /// Flat telemetry recorded on MLX Krea control assets.
@@ -329,8 +371,9 @@ fn krea_control_generate_one(
     text_style_gain: Option<f32>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -342,9 +385,13 @@ fn krea_control_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("Krea control generation failed: {error}")))?;
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_evaluation.map(|evaluation| &evaluation.context),
+        on_progress,
+    )
+    .map_err(|error| WorkerError::Engine(format!("Krea control generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {
@@ -379,7 +426,8 @@ async fn generate_krea_control_stream(
             "Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned(),
         )
     })?;
-    let control_weights = ensure_krea_control_weights(api, settings, job, request).await?;
+    let (control_weights, verified_default_overlay) =
+        ensure_krea_control_weights(api, settings, job, request).await?;
     // User LoRA/LoKr adapters ride additively on the frozen base DiT (mlx-gen sc-11720, the MLX twin of the
     // candle sc-11721 wiring): resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS +
     // `normalize_app_managed_lora_path`), then installed on the base at load — the pose control branch is
@@ -442,7 +490,37 @@ async fn generate_krea_control_stream(
     // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. User
     // LoRA/LoKr adapters (resolved above) install additively on the base DiT (mlx-gen sc-11720).
     let (quant, _quant_bits) = resolve_quant(request, Some(&weights_dir));
+    let adapter_count = adapters.len();
     let spec = krea_control_spec(weights_dir, control_weights, quant, adapters);
+    let calibration_provenance = krea_control_calibration_provenance(
+        match &spec.weights {
+            WeightsSource::Dir(path) => path,
+            WeightsSource::File(_) => unreachable!("Krea control base is a directory"),
+        },
+        match spec.control.as_ref() {
+            Some(WeightsSource::File(path)) => path,
+            _ => unreachable!("Krea control overlay is a file"),
+        },
+        verified_default_overlay,
+    );
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        KREA_CONTROL_ENGINE_ID,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        calibration_provenance,
+    );
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: 1,
+        mode: request.mode.clone(),
+        overlay: Some("control:1".to_owned()),
+        adapter_count,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+    };
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         KREA_CONTROL_ENGINE_ID,
@@ -461,6 +539,7 @@ async fn generate_krea_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            let mut cache_state = gen_core::MemoryCacheState::Cold;
             drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -476,6 +555,15 @@ async fn generate_krea_control_stream(
                 // `Control` is the only conditioning.
                 let conditioning =
                     build_control_conditioning(control, control_kind.clone(), control_scale, None);
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    cache_state,
+                    gen_core::OffloadPolicy::Resident,
+                    0,
+                )?;
+                cache_state = gen_core::MemoryCacheState::Warm;
                 let (out_w, out_h, pixels) = krea_control_generate_one(
                     generator,
                     &prompt,
@@ -487,6 +575,7 @@ async fn generate_krea_control_stream(
                     text_style_gain,
                     &cancel,
                     on_progress,
+                    Some(&memory_evaluation),
                 )?;
                 let face_likeness = scorer.as_ref().and_then(|scorer| {
                     crate::face_likeness::score_generated_image(

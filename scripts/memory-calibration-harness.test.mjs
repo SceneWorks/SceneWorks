@@ -320,7 +320,7 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
 test("plan separates seven identical-latent positives from a deterministic output-bias negative", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
-  const qwen = cases.filter((item) => item.backend === "mlx");
+  const qwen = cases.filter((item) => item.target.provider === "qwen_image");
   assert.equal(qwen.filter((item) => item.expectedResult === "passed").length, 7);
   const negative = qwen.find((item) => item.negative);
   assert.deepEqual(negative.strategy.parameters, {
@@ -367,7 +367,9 @@ test("positive Qwen completion never suppresses the separate 256/32 negative pla
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
   validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [record] });
-  const qwenRemaining = expandPlan(config, [record]).filter((item) => item.backend === "mlx");
+  const qwenRemaining = expandPlan(config, [record]).filter(
+    (item) => item.target.provider === "qwen_image",
+  );
   assert.equal(qwenRemaining.length, 1);
   assert.equal(qwenRemaining[0].negative, true);
   assert.deepEqual(qwenRemaining[0].strategy.parameters, {

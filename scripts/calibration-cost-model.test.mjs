@@ -357,6 +357,8 @@ test("the producibility gates partition every cell exactly once, in priority ord
   assert.equal(result.behindProviderCode, 29);
   assert.equal(result.producibleToday, 0);
   assert.match(result.headline, /ZERO cells are producible today/);
+  assert.match(result.headline, /0 provider pair\(s\) have emitted a `complete` record/);
+  assert.match(result.headline, /1 provider pair\(s\) have an adapter at all/);
 
   // The declared gate list and the computed partition must not drift apart.
   assert.deepEqual(
@@ -378,6 +380,34 @@ test("a complete record for a covered pair moves its cells into producible-today
   assert.equal(result.producibleToday, 10);
   assert.equal(result.behindProviderCode, 19);
   assert.doesNotMatch(result.headline, /ZERO/);
+});
+
+test("a complete passed overlay record unblocks only its exact matrix overlay", () => {
+  const cells = syntheticCells({ overlays: ["none", "lora"] });
+  const result = producibility(cells, {
+    adapterPairs: ["alpha|mlx"],
+    pairsWithCompleteRecords: ["alpha|mlx"],
+    overlayKeysWithCompleteRecords: ["alpha|mlx|lora"],
+  });
+  const byId = Object.fromEntries(result.partition.map((gate) => [gate.id, gate.cells]));
+
+  assert.equal(byId["overlay-declined"], 5, "beta's uncovered lora cells stay declined");
+  assert.equal(byId["producible-today"], 20, "alpha's none and proven lora cells are runnable");
+});
+
+test("published cost model reports promoted records instead of the obsolete zero baseline", async () => {
+  const model = await buildCostModel();
+  assert.equal(model.completedBaseline.completeRecords, 2);
+  assert.equal(model.completedBaseline.matrixSummaryCurrentCalibrationRuns, 2);
+  assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
+  assert.match(model.completedBaseline.note, /Exact records remain narrower/);
+  assert.match(model.biggestUncertainties[0].why, /Only 2 of 53 catalog entries/);
+  const allProse = JSON.stringify(model);
+  assert.doesNotMatch(
+    allProse,
+    /no adapter has ever emitted|zero cells are producible|Zero calibration records|no overlay handling at all/i,
+    "no generated section may retain the pre-promotion zero-baseline claims",
+  );
 });
 
 /**
@@ -513,31 +543,20 @@ test("the rung axis is UNPROVEN, with its citations downgraded and the MLX/Candl
   assert.match(rung.caveat, /cannot release LIVE weight arrays/);
 });
 
-/**
- * MAJOR 3, pinned. The old remediation said "capture one `complete` record end to end on either
- * backend and time it. One run collapses this uncertainty entirely" — which contradicts section 0 of
- * the same document, where zero cells are producible and no adapter has ever emitted a `complete`
- * record. A planner reads that as cheap when it is the epic's most expensive item.
- */
-test("the perRunSeconds remediation no longer contradicts section 0, and names the cheap alternative", () => {
-  const uncertainties = rankUncertainties(
-    producibility(syntheticCells({ overlays: ["none", "lora"] }), {
+test("the perRunSeconds remediation derives current completion counts and asks for timing", () => {
+  const prod = producibility(syntheticCells({ overlays: ["none", "lora"] }), {
       adapterPairs: ["alpha|mlx"],
-      pairsWithCompleteRecords: [],
-    }),
-  );
+      pairsWithCompleteRecords: ["alpha|mlx"],
+    });
+  const uncertainties = rankUncertainties(prod, { completeRecords: 2 });
   const perRun = uncertainties.find((item) => item.input === "perRunSeconds");
   assert.ok(perRun, "perRunSeconds must still be reported as an uncertainty");
 
-  // The contradiction must be gone AND explicitly disowned, so it cannot be reinstated quietly.
   assert.doesNotMatch(perRun.howToResolve, /One run\s+collapses this uncertainty entirely/);
-  assert.match(perRun.howToResolve, /NOT by 'capturing one `complete` record'/);
-  assert.match(perRun.howToResolve, /most expensive item in the epic/);
-
-  // And the genuinely cheap alternative must be named: the gated MLX adapter already runs 8 real
-  // invocations in CI today, so per-scenario timing needs no new campaign.
-  assert.match(perRun.howToResolve, /gated MLX\s+adapter/);
-  assert.match(perRun.howToResolve, /8 real provider invocations/);
+  assert.match(perRun.why, /2 complete record/);
+  assert.match(perRun.why, new RegExp(`${prod.producibleToday} producible cell`));
+  assert.match(perRun.howToResolve, /per-scenario timing instrumentation/);
+  assert.match(perRun.howToResolve, /now-complete Krea MLX adapter path/);
 
   // It is a multiplier, not a cell gate, so it must carry no blocking count.
   assert.equal(perRun.gate, undefined);

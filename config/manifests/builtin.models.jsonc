@@ -4360,7 +4360,7 @@
         // ≤1536² VISIBILITY floor — the extra single-pass VAE-decode spike at 2048² is what the
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
-        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        "resolutions": ["1024x1024", "896x896", "768x768", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
         "count": [1, 2, 4],
         // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
         // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
@@ -4381,7 +4381,48 @@
         // bf16 ~43 GB. minMemoryGb 48 covers Q8 + the 1536² stretch with headroom.
         "minMemoryGb": 48,
         "quantize": 8,
-        "repo": "SceneWorks/krea-2-turbo-mlx"
+        "repo": "SceneWorks/krea-2-turbo-mlx",
+        // SC-16099: exact, current MLX pose-control evidence. These bindings are intentionally
+        // geometry-specific; the refusal path may name 768² only by selecting its complete promoted
+        // record through the shared reader. No curve or area interpolation is permitted.
+        "calibrations": [
+          {
+            "abi": 1,
+            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+            "sceneWorksRevision": "15bdd36231920d2705234cc2b432542b825a469f",
+            "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
+            "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
+            "provider": "krea_2_turbo_control",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control:1",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
+            "rung": "bounded_decode",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+            "sceneWorksRevision": "15bdd36231920d2705234cc2b432542b825a469f",
+            "matrixSourceRevision": "source-tree:fa3efae3e3227b5672ff37286e8d16c8ce6440c9e7f67598cb2bfcd5ee16e564",
+            "inferenceRevision": "9a4c579707dc668a2f68d0f82b6c1528f0ae78ab",
+            "provider": "krea_2_turbo_control",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control:1",
+            "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
+            "rung": "bounded_decode",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          }
+        ]
       },
       // candle/CUDA VRAM gate (sc-9094/sc-12131, epic 9083 → epic 10765) — MEASURED on an RTX PRO
       // 6000 (Blackwell sm_120) at 1024²/8-step with the rendered-device two-process probe. Resident

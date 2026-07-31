@@ -9,15 +9,26 @@ import uuid
 
 import jsonschema
 import pytest
+from referencing import Registry, Resource
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "docs" / "generated" / "memory-matrix.json"
 SCHEMA = ROOT / "packages" / "schemas" / "memory-matrix.schema.json"
+CALIBRATION_SCHEMA = ROOT / "packages" / "schemas" / "memory-calibration.schema.json"
 
 
 def load_matrix():
     return json.loads(MATRIX.read_text(encoding="utf-8"))
+
+
+def matrix_validator():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    calibration_schema = json.loads(CALIBRATION_SCHEMA.read_text(encoding="utf-8"))
+    registry = Registry().with_resource(
+        calibration_schema["$id"], Resource.from_contents(calibration_schema)
+    )
+    return jsonschema.Draft202012Validator(schema, registry=registry)
 
 
 def test_generated_memory_matrix_is_current_and_schema_valid():
@@ -26,9 +37,7 @@ def test_generated_memory_matrix_is_current_and_schema_valid():
         cwd=ROOT,
         check=True,
     )
-    jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8"))).validate(
-        load_matrix()
-    )
+    matrix_validator().validate(load_matrix())
 
 
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
@@ -63,11 +72,7 @@ def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
 
 
 def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
-    calibration_schema = json.loads(
-        (ROOT / "packages/schemas/memory-calibration.schema.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    calibration_schema = json.loads(CALIBRATION_SCHEMA.read_text(encoding="utf-8"))
     calibration = json.loads(
         (ROOT / "docs/generated/memory-calibration-evidence.json").read_text(
             encoding="utf-8"
@@ -77,8 +82,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         calibration_schema, format_checker=jsonschema.FormatChecker()
     ).validate(calibration)
     matrix = load_matrix()
-    assert calibration["records"] == []
-    assert matrix["calibrationRuns"] == []
+    expected_ids = {
+        "imc-1f5c99e76d170df1327b",
+        "imc-cd9bbbac7df2f0ee3fbd",
+    }
+    assert {record["id"] for record in calibration["records"]} == expected_ids
+    assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == expected_ids
+    assert all(run["binding"] == {"eligible": True, "reasons": []} for run in matrix["calibrationRuns"])
+    assert all(run["semantics"] == "current" for run in matrix["calibrationRuns"])
 
 
 def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
@@ -281,8 +292,7 @@ def test_aggregate_cells_do_not_promote_exact_records_to_dynamic_verification():
 
 def test_matrix_schema_rejects_malformed_evidence_records():
     matrix = load_matrix()
-    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
+    validator = matrix_validator()
     krea_index = next(
         index
         for index, cell in enumerate(matrix["cells"])

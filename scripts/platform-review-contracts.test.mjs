@@ -290,3 +290,22 @@ test("MLX parity control preserves the real comparison and applies only a planne
   assert.ok(shapeGuard >= 0, "MLX comparison must guard exact output shapes");
   assert.ok(flatten > shapeGuard, "shape equality must be checked before either output is flattened");
 });
+
+test("Krea lifecycle cleanup uses the established warm follow-up peak contract", async () => {
+  const adapter = await source(
+    "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+  );
+  assert.match(
+    adapter,
+    /lifecycle_control_peak\.saturating_add\(lifecycle_control_peak \/ 50\)/,
+  );
+  assert.match(adapter, /recovery_peak > lifecycle_recovery_limit/);
+  assert.match(
+    adapter,
+    /"lifecycleWarmControlPeak", "bytes", lifecycle_control_peak/,
+  );
+  assert.match(
+    adapter,
+    /"lifecycleMaximumRecoveryPeak", "bytes", lifecycle_max_recovery_peak/,
+  );
+});

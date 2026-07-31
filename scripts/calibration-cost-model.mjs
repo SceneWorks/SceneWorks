@@ -398,15 +398,11 @@ export const PRODUCIBILITY_GATES = [
   },
   {
     id: "overlay-declined",
-    label: "Non-`none` overlay: no adapter can emit a truthful overlay scenario",
+    label: "Non-`none` overlay without a complete truthful overlay record",
     blockedBy: "provider-adapter code",
     citation:
-      "crates/sceneworks-memory-adapter/src/bin/candle.rs hardcodes the overlay scenario to " +
-      '`not_applicable` with the fixed reason "ordinary Krea Turbo text-to-image calibration has ' +
-      'no overlay", which is false for a lora/identity/control target; ' +
-      "crates/sceneworks-memory-adapter/src/bin/mlx.rs contains no overlay handling at all, so its " +
-      "overlay scenario stays `not_run` (from lib.rs#not_run_scenarios), which " +
-      "scripts/memory-calibration-harness.mjs#validateComplete rejects outright",
+      "docs/generated/memory-calibration-evidence.json (complete records whose exact overlay " +
+      "scenario passed, normalized from control:N to the matrix control axis)",
   },
   {
     id: "no-provider-adapter",
@@ -420,8 +416,7 @@ export const PRODUCIBILITY_GATES = [
     blockedBy: "provider-adapter code (phase telemetry and lifecycle injection)",
     citation:
       "docs/generated/memory-calibration-evidence.json (records with status `complete`, per " +
-      "(entry, backend)); docs/memory-calibration-harness.md documents both adapters as returning " +
-      "`gated` records today",
+      "(entry, backend)); a pair remains gated only while that set has no complete record",
   },
   {
     id: "producible-today",
@@ -442,7 +437,11 @@ export const PRODUCIBILITY_GATES = [
  * be charged first — which is exactly the error this block exists to prevent.
  */
 const CODE_BLOCKERS = [
-  { id: "overlay-declined", blocks: (cell) => cell.overlay !== "none" },
+  {
+    id: "overlay-declined",
+    blocks: (cell, ctx) =>
+      cell.overlay !== "none" && !ctx.completeOverlays.has(ctx.overlayKey(cell)),
+  },
   { id: "no-provider-adapter", blocks: (cell, ctx) => !ctx.adapters.has(ctx.pair(cell)) },
   {
     id: "adapter-gated",
@@ -450,11 +449,16 @@ const CODE_BLOCKERS = [
   },
 ];
 
-export function producibility(cells, { adapterPairs, pairsWithCompleteRecords }) {
+export function producibility(
+  cells,
+  { adapterPairs, pairsWithCompleteRecords, overlayKeysWithCompleteRecords = [] },
+) {
   const adapters = new Set(adapterPairs);
   const complete = new Set(pairsWithCompleteRecords);
+  const completeOverlays = new Set(overlayKeysWithCompleteRecords);
   const pair = (cell) => `${cell.modelId}|${cell.backend}`;
-  const ctx = { adapters, complete, pair };
+  const overlayKey = (cell) => `${pair(cell)}|${cell.overlay}`;
+  const ctx = { adapters, complete, completeOverlays, pair, overlayKey };
   const buckets = new Map(PRODUCIBILITY_GATES.map((gate) => [gate.id, []]));
 
   // Every blocker on every cell, order-independent. This is the multiset the ordered partition
@@ -467,17 +471,10 @@ export function producibility(cells, { adapterPairs, pairsWithCompleteRecords })
   const blockerSets = cells.map((cell) => ({ cell, blockers: blockersOf(cell) }));
 
   for (const cell of cells) {
-    const key = pair(cell);
     const gate =
       cell.state === "Structurally N/A"
         ? "no-run-needed"
-        : cell.overlay !== "none"
-          ? "overlay-declined"
-          : !adapters.has(key)
-            ? "no-provider-adapter"
-            : !complete.has(key)
-              ? "adapter-gated"
-              : "producible-today";
+        : (CODE_BLOCKERS.find((blocker) => blocker.blocks(cell, ctx))?.id ?? "producible-today");
     buckets.get(gate).push(cell);
   }
 
@@ -597,7 +594,7 @@ export function producibility(cells, { adapterPairs, pairsWithCompleteRecords })
         `${adapterCoverageFirst["no-provider-adapter"] ?? 0}. ` +
         `PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is ` +
         `the only thing wrong with ${adapterCoverage?.soleBlockerCells ?? 0} cells and it touches ` +
-        `${adapterCoverage?.cellsTouched ?? 0}. Scoping overlay support in both adapters is still ` +
+        `${adapterCoverage?.cellsTouched ?? 0}. Closing the remaining overlay-support gaps is still ` +
         `necessary, but on its own it moves ${adapterCoverageFirst["overlay-declined"] ?? 0} cells, ` +
         `not ${overlayCharged}.`,
     },
@@ -609,9 +606,10 @@ export function producibility(cells, { adapterPairs, pairsWithCompleteRecords })
     headline:
       producible === 0
         ? "ZERO cells are producible today. The binding constraint on this epic is provider-adapter " +
-          "code, not GPU hours: no adapter has ever emitted a `complete` record, and 2 of 53 " +
-          "entries have an adapter at all. Every hour in the wall-clock sweep below is hypothetical " +
-          "until that changes."
+          `code, not GPU hours: ${complete.size} provider pair(s) have emitted a ` +
+          `\`complete\` record, while ${adapters.size} provider pair(s) have an adapter at all. ` +
+          "Every hour in the wall-clock sweep below is hypothetical until the remaining code gates " +
+          "change."
         : `${producible} of ${total} cells could be certified by a run started right now.`,
   };
 }
@@ -1221,7 +1219,7 @@ export function kreaFitPrecedent(manifestJson) {
  *
  * The previous version of this list ranked the overlay gate #1 on the strength of its first-match
  * bucket size ("the largest single bucket... gates 59.5% of the matrix") and prescribed scoping
- * overlay support in both adapters. That mis-directs the wave: the overwhelming majority of those
+ * overlay support everywhere. That mis-directs the wave: the overwhelming majority of those
  * cells are ALSO blocked by having no provider adapter at all, so overlay work moves far fewer cells
  * than the bucket size implies. Ranking is therefore derived from `independentBlocking` — cells a gate
  * is the ONLY thing wrong with — rather than from which gate happens to be charged first.
@@ -1230,7 +1228,10 @@ export function kreaFitPrecedent(manifestJson) {
  * count; it is placed directly after the top code gate because it scales everything the code gates
  * unlock.
  */
-export function rankUncertainties(prod) {
+export function rankUncertainties(
+  prod,
+  { completeRecords = 0, adapterModelCount = 0, catalogEntryCount = 0 } = {},
+) {
   const blocking = Object.fromEntries(prod.independentBlocking.map((entry) => [entry.id, entry]));
   const ranking = prod.blockerRanking;
   const partitionTotal = prod.partition.reduce((sum, entry) => sum + entry.cells, 0);
@@ -1247,7 +1248,8 @@ export function rankUncertainties(prod) {
         `This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with ` +
         `${blocking["no-provider-adapter"]?.soleBlockerCells ?? 0} cells and it touches ` +
         `${blocking["no-provider-adapter"]?.cellsTouched ?? 0} — ${ranking.overlayAlsoBlockedByAdapterCoverage} ` +
-        "of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter " +
+        `of them jointly with the overlay gap. Only ${adapterModelCount} of ${catalogEntryCount} ` +
+        "catalog entries have a provider adapter " +
         "at all, so most of the matrix cannot be measured by any code that exists, for any overlay. " +
         "Charge this gate before overlay and it accounts for " +
         `${prod.gateOrderSensitivity.adapterCoverageFirst["no-provider-adapter"] ?? 0} cells.`,
@@ -1263,15 +1265,14 @@ export function rankUncertainties(prod) {
       input: "what a `complete` record actually requires from an existing adapter",
       why:
         `${blocking["adapter-gated"]?.soleBlockerCells ?? 0} cells are blocked ONLY by this, and ` +
-        `${blocking["adapter-gated"]?.cellsTouched ?? 0} in total. Both shipped adapters return ` +
-        "`gated` records: the Candle adapter's own blocker string names predicted phase curves, " +
-        "bounded-output tolerance approval, exact-fit/stale/unknown worker selection and a measured " +
-        "negative mutation as still missing. This is the smallest gate by cell count but it is the " +
-        "one that proves the pipeline can close at all.",
+        `${blocking["adapter-gated"]?.cellsTouched ?? 0} in total. The Krea MLX control adapter has ` +
+        "now emitted complete exact records, proving the pipeline can close; this bucket applies " +
+        "only to adapter-covered pairs that still have no complete record.",
       howToResolve:
-        "Close the four items the Candle adapter's blocker string enumerates for one target, on one " +
-        "backend. That converts the first cells in the matrix from `adapter-gated` to " +
-        "`producible-today` and is the precondition for every hour in the wall-clock sweep.",
+        "Close the harness contract for each remaining adapter-covered pair: real phase telemetry, " +
+        "bounded-output parity, exact-fit/stale/unknown selection, lifecycle recovery, loadability, " +
+        "and a measured negative mutation. Complete records then move those exact targets out of " +
+        "`adapter-gated`.",
       story: 15508,
     },
     {
@@ -1284,7 +1285,7 @@ export function rankUncertainties(prod) {
         `it the #1 uncertainty. But it is the SOLE blocker on ` +
         `${ranking.overlayIndependentlyBlocking} of them: ${ranking.overlayAlsoBlockedByAdapterCoverage} ` +
         "are also blocked by having no adapter or no `complete` record at all. Scoping overlay " +
-        `support in both adapters therefore moves ${ranking.overlayBindingAfterAdapterCoverage} cells, ` +
+        `support where it remains absent therefore moves ${ranking.overlayBindingAfterAdapterCoverage} cells, ` +
         `not ${ranking.overlayChargedByFirstMatch}. It remains necessary work — those ` +
         `${ranking.overlayChargedByFirstMatch} cells cannot be certified without it — but it is ` +
         "not where the schedule is decided.",
@@ -1314,26 +1315,14 @@ export function rankUncertainties(prod) {
     input: "perRunSeconds",
     why:
       "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The " +
-      "only measured anchor covers a VAE decode seam producing `gated` records, so it does not " +
-      "bound a `complete` record from below in any useful way.",
-    // MAJOR correction: the previous text said "capture one `complete` record end to end on either
-    // backend and time it. One run collapses this uncertainty entirely." That contradicts section 0
-    // of this same document, which establishes that ZERO cells are producible and no adapter has
-    // ever emitted a `complete` record. Presenting it as one cheap run mis-prices the epic's single
-    // most expensive item.
+      `current artifact has ${completeRecords} complete record(s) and ${prod.producibleToday} ` +
+      "producible cell(s), but the records do not carry per-scenario duration telemetry, so they " +
+      "do not narrow that multiplier yet.",
     howToResolve:
-      "NOT by 'capturing one `complete` record', which is how this was previously phrased. That is " +
-      "the most expensive item in the epic, not the cheapest: per section 0 no adapter has ever " +
-      "emitted a `complete` record, zero cells are producible, and the Candle adapter's own blocker " +
-      "string still lists predicted phase curves, bounded-output tolerance approval, " +
-      "exact-fit/stale/unknown worker selection and a measured negative mutation as missing. It is " +
-      "gated on the two code uncertainties above and cannot be scheduled ahead of them. " +
-      "THE GENUINELY CHEAP ALTERNATIVE: add per-scenario timing instrumentation to the gated MLX " +
-      "adapter, which already executes 8 real provider invocations today. That needs no new " +
-      "measurement campaign and no `complete` record — it converts an existing green CI step into a " +
-      "per-scenario cost breakdown, which narrows the 40x sweep immediately and bounds the parts of " +
-      "a `complete` record that are already implemented. Do that first; treat the end-to-end " +
-      "`complete` record as the thing being scheduled, not the thing that unblocks scheduling.",
+      "Add per-scenario timing instrumentation to the now-complete Krea MLX adapter path and retain " +
+      "the exact geometry/strategy identity on every duration. This reuses an already-green real " +
+      "campaign instead of extrapolating one end-to-end duration across unrelated providers, and " +
+      "it narrows the 40x sweep without inventing timing for still-gated pairs.",
   };
 
   return [
@@ -1414,9 +1403,8 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
   const runs = collapseToRuns(cells, DEFAULT_PARAMETERS);
   const precedent = kreaFitPrecedent(manifest);
 
-  // There is no completed-work baseline to subtract. Derived rather than assumed, from two
-  // independent places that would have to agree: the committed evidence bundle and the matrix's own
-  // summary. If either ever becomes nonzero, the run counts below stop being the whole population.
+  // Completed work is derived rather than assumed, from two independent places that must agree:
+  // the committed evidence bundle and the matrix's own summary.
   const recordsByStatus = tally(evidence.records.map((record) => record.status));
   const completedBaseline = {
     evidenceBundleRecords: evidence.records.length,
@@ -1426,9 +1414,10 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     matrixSummaryCurrentCalibrationRuns: matrix.summary.currentCalibrationRuns,
     verifiedCells: census.byState.Verified ?? 0,
     note:
-      "Every run count in this document is the WHOLE POPULATION, not a remainder. Zero calibration " +
-      "records exist on either backend, zero cells are `Verified`, and both the evidence bundle and " +
-      "the matrix summary agree on that independently.",
+      `${recordsByStatus.complete ?? 0} complete record(s) exist in the evidence bundle; the matrix ` +
+      `reports ${matrix.summary.currentCalibrationRuns} current calibration run(s) and ` +
+      `${census.byState.Verified ?? 0} aggregate Verified cell(s). Exact records remain narrower ` +
+      "than aggregate matrix cells, so a current exact run does not by itself promote a whole cell.",
   };
 
   // Producibility. Adapter coverage is derived from the shipped plan's provider targets; the
@@ -1439,7 +1428,25 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
   const pairsWithCompleteRecords = evidence.records
     .filter((record) => record.status === "complete")
     .map((record) => `${record.target.modelId}|${record.backend}`);
-  const producible = producibility(cells, { adapterPairs, pairsWithCompleteRecords });
+  const matrixOverlay = (overlay) => (/^control:\d+$/.test(overlay) ? "control" : overlay);
+  const overlayKeysWithCompleteRecords = evidence.records
+    .filter(
+      (record) =>
+        record.status === "complete" &&
+        record.target.overlay !== "none" &&
+        record.scenarios.some(
+          (scenario) => scenario.name === "overlay" && scenario.result === "passed",
+        ),
+    )
+    .map(
+      (record) =>
+        `${record.target.modelId}|${record.backend}|${matrixOverlay(record.target.overlay)}`,
+    );
+  const producible = producibility(cells, {
+    adapterPairs,
+    pairsWithCompleteRecords,
+    overlayKeysWithCompleteRecords,
+  });
 
   // Control-overlay coverage is capability-declared, not inferred from measurement blocks
   // (sc-16069). `CONTROL_LANE_MODELS` is the generator's declaration source; every declared model
@@ -1548,7 +1555,11 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
       sensitivity: fitSensitivity(cells),
     },
     parameters: DEFAULT_PARAMETERS,
-    biggestUncertainties: rankUncertainties(producible),
+    biggestUncertainties: rankUncertainties(producible, {
+      completeRecords: completedBaseline.completeRecords,
+      adapterModelCount: new Set(plan.providers.map((provider) => provider.target.modelId)).size,
+      catalogEntryCount: new Set(cells.map((cell) => cell.modelId)).size,
+    }),
   };
 
   return model;
@@ -1643,9 +1654,9 @@ function renderMarkdown(model) {
     "",
     `Remediation priority below is ranked by **${prod.blockerRanking.rankedBy}**, not by bucket size: ${prod.blockerRanking.ranking.map((id) => `\`${id}\``).join(" > ")}.`,
     "",
-    `There is also no completed-work baseline to subtract. ${model.completedBaseline.note}`,
+    `Completed-evidence baseline: ${model.completedBaseline.note}`,
     "",
-    `The wall-clock sweep in section 5 is therefore an answer to "what would this cost once it is runnable", not "when will this be done".`,
+    `The wall-clock sweep in section 5 is a gross campaign cost model, not a remaining-time estimate; promoted exact records are reported above rather than silently subtracted from aggregate cells.`,
     "",
     "## 1. Cells (fact)",
     "",
