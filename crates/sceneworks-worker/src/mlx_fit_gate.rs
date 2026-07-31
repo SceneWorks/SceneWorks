@@ -458,6 +458,8 @@ struct VerifiedGeometryAlternative {
     geometry: CalibrationGeometry,
     calibration_abi: u32,
     calibration_fingerprint: String,
+    strategy: MemoryStrategy,
+    engaged_composition: Vec<MemoryStrategy>,
 }
 
 #[derive(Clone, Debug)]
@@ -1039,12 +1041,21 @@ fn verified_lower_alternative(
             };
             let envelope = record.mlx_admission_envelope()?;
             let effective = budget.effective_bytes();
+            let strategy = evidence_strategy(record.strategy.rung);
             (envelope.required_host_bytes() <= budget.total_bytes
                 && envelope.peak_bytes <= effective)
                 .then_some(VerifiedGeometryAlternative {
                     geometry: binding.geometry,
                     calibration_abi: binding.query.abi,
                     calibration_fingerprint: binding.query.fingerprint.clone(),
+                    strategy,
+                    engaged_composition: record
+                        .strategy
+                        .engaged_rungs
+                        .iter()
+                        .copied()
+                        .map(evidence_strategy)
+                        .collect(),
                 })
         })
         .max_by_key(|alternative| {
@@ -1163,6 +1174,8 @@ fn evaluate_request_with_budget_using_bundle(
                 .is_none_or(|alternative| {
                     identity.abi == alternative.calibration_abi
                         && identity.fingerprint == alternative.calibration_fingerprint
+                        && contract.engaged_composition(alternative.strategy)
+                            == alternative.engaged_composition
                 })
         })
     {
@@ -3557,6 +3570,34 @@ mod tests {
         assert!(
             !message.contains("current verified alternative"),
             "a loaded-provider fingerprint mutation must suppress evidence-derived naming: {message}"
+        );
+
+        let mut mismatched = packaged_krea_generator();
+        let bounded_decode = mismatched
+            .contract
+            .as_mut()
+            .expect("Krea contract")
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        bounded_decode.support = gen_core::MemoryStrategySupport::Missing;
+        let message = evaluate_request_with_budget(
+            &mismatched,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            gib_to_bytes(130.0),
+            0,
+            &[],
+        )
+        .expect_err("the composition-mismatched provider still refuses on the independent estimate")
+        .to_string();
+        assert!(
+            !message.contains("current verified alternative"),
+            "a loaded-provider composition mutation must suppress evidence-derived naming: {message}"
         );
     }
 
