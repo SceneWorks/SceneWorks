@@ -100,6 +100,8 @@ One provider process probes one backend-specific hardware shape, so `--backend m
 required when the config contains both backends. Omitting it from a mixed plan fails before starting
 the adapter. `--provider <plan-provider-name>` optionally selects one named provider block; use it
 to run the current Krea v1 production point separately from non-promotable v2 candidates.
+`--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
+way to execute a multi-rung reference ladder as one reproducible capture.
 
 Validate or merge captured output:
 

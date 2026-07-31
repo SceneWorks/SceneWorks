@@ -510,7 +510,7 @@ function execute(command, args, input) {
 }
 
 export async function runProviderPlan({
-  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName,
+  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const gitState = async (repo, sceneWorks = false) => ({
@@ -534,11 +534,17 @@ export async function runProviderPlan({
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
   const existing = resume ? validateBundle(resume) : { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [] };
-  const selectedConfig = providerName
-    ? { ...config, providers: config.providers.filter((provider) => provider.name === providerName) }
-    : config;
+  const selectedConfig = {
+    ...config,
+    providers: config.providers.filter(
+      (provider) => (!providerName || provider.name === providerName) && (!fixture || provider.fixture === fixture),
+    ),
+  };
   if (providerName && selectedConfig.providers.length === 0) {
     fail(`provider run selected no plan provider named ${providerName}`);
+  }
+  if (fixture && selectedConfig.providers.length === 0) {
+    fail(`provider run selected no plan provider with fixture ${fixture}`);
   }
   const expanded = expandPlan(selectedConfig, existing.records);
   const cases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
@@ -636,6 +642,7 @@ async function main() {
       resume: value("--resume") ? await readJson(value("--resume")) : undefined,
       backend: value("--backend"),
       providerName: value("--provider"),
+      fixture: value("--fixture"),
     });
     return void await atomicWrite(value("--output"), output);
   }

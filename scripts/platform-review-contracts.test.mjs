@@ -116,7 +116,7 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   );
   assert.match(
     workflow,
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot && 240 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(\(inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot\) \|\| \(inputs\.run_five_rung_reference && inputs\.provision_z_image_snapshot\)\) && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
   assert.match(
     workflow,
@@ -268,6 +268,10 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   const candle = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   const krea = mlx.slice(mlx.indexOf("fn run_krea_control("), mlx.indexOf("fn run_qwen("));
   const qwen = mlx.slice(mlx.indexOf("fn run_qwen("), mlx.indexOf("fn run(request:"));
+  const candleReference = candle.slice(
+    candle.indexOf("fn run_five_rung_reference("),
+    candle.indexOf("fn run(request:"),
+  );
 
   assert.match(
     krea,
@@ -279,7 +283,15 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   );
   assert.equal(qwen.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
   assert.doesNotMatch(qwen, /protocol::gated_fragment\(/);
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
+  assert.match(
+    candleReference,
+    /validate_plain_overlay_target\(request, KREA_PLAIN_EXECUTION_PATH\)\?/,
+  );
+  assert.ok(
+    candleReference.indexOf("validate_plain_overlay_target") < candleReference.indexOf("required_env"),
+    "the Candle five-rung reference must reject a mismatched overlay before provider work",
+  );
+  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
 });
 

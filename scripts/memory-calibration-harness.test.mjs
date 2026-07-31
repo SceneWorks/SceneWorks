@@ -330,6 +330,91 @@ test("plan separates seven identical-latent positives from a deterministic outpu
   });
 });
 
+test("shipped fresh-process oracle declares exact five-rung ladders for MLX and Candle", async () => {
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  const expectedRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const assertLadder = (cases, backend, expectedTarget, expectedCompositions) => {
+    assert.equal(cases.length, 5, `${backend} must declare exactly five fresh-reference cases`);
+    assert.deepEqual(
+      cases.map((item) => item.strategy.rung).sort(),
+      [...expectedRungs].sort(),
+      `${backend} must declare every rung exactly once`,
+    );
+    assert.equal(
+      new Set(cases.map((item) => JSON.stringify(item.target))).size,
+      1,
+      `${backend} cases must keep one exact target tuple`,
+    );
+    assert.deepEqual(cases[0].target, expectedTarget);
+    for (const item of cases) {
+      assert.deepEqual(
+        item.strategy.engagedRungs,
+        expectedCompositions[item.strategy.rung],
+        `${backend} ${item.strategy.rung} composition`,
+      );
+    }
+  };
+  const assertPlan = (candidate) => {
+    const cases = expandPlan(candidate);
+    assertLadder(
+      cases.filter((item) => item.fixture === "fresh-five-rung-z-image-q4-768-seed16402-step2"),
+      "mlx",
+      {
+        provider: "z_image_turbo", modelId: "z_image_turbo", tier: "q4",
+        mode: "text_to_image", overlay: "none",
+        geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+      },
+      {
+        resident: ["resident"],
+        staged_residency: ["resident", "staged_residency"],
+        bounded_decode: ["resident", "bounded_decode"],
+        bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
+        bounded_transformer_residency: [
+          "resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency",
+        ],
+      },
+    );
+    assertLadder(
+      cases.filter((item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2"),
+      "candle",
+      {
+        provider: "krea_2_turbo", modelId: "krea_2_turbo", tier: "q4",
+        mode: "text_to_image", overlay: "none",
+        geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
+      },
+      {
+        resident: ["resident"],
+        staged_residency: ["resident", "staged_residency"],
+        bounded_decode: ["resident", "staged_residency", "bounded_decode"],
+        bounded_attention: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+        bounded_transformer_residency: [
+          "resident", "staged_residency", "bounded_decode", "bounded_attention",
+          "bounded_transformer_residency",
+        ],
+      },
+    );
+  };
+  assertPlan(config);
+
+  const missingRung = structuredClone(config);
+  missingRung.providers = missingRung.providers.filter(
+    (provider) => provider.name !== "mlx-z-image-q4-fresh-reference-bounded-attention",
+  );
+  assert.throws(() => assertPlan(missingRung), /exactly five/);
+
+  const wrongComposition = structuredClone(config);
+  wrongComposition.providers.find(
+    (provider) => provider.name === "candle-krea-q4-fresh-reference-bounded-transformer",
+  ).engagedRungs = ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"];
+  assert.throws(() => assertPlan(wrongComposition), /composition/);
+});
+
 test("Krea current v1 production truth is separate from non-promotable v2 candidates", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const current = config.providers.find((provider) => provider.name === "candle-krea-production-current-v1");
@@ -429,6 +514,30 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
   }
 });
 
+test("gated no-parameter references use an empty sweep instead of a fabricated field", () => {
+  const record = complete({
+    status: "gated",
+    sweep: {
+      axes: [],
+      cases: [{ parameters: {}, result: "passed" }],
+      rangeVerified: false,
+    },
+  });
+  record.strategy.parameters = {};
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  const promoted = structuredClone(record);
+  promoted.status = "complete";
+  promoted.logicalCaseId = logicalCaseId(promoted);
+  promoted.id = recordId(promoted);
+  assert.throws(
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [promoted] }),
+    /schema validation failed|sweep axes must not be empty/,
+  );
+});
+
 test("executable runner handles fragmented responses across probe and multiple case processes", async () => {
   const config = {
     providers: [{
@@ -457,6 +566,46 @@ test("executable runner handles fragmented responses across probe and multiple c
   assert.equal(result.records.length, 2);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
+});
+
+test("provider execution can select every rung sharing one reproducible fixture", async () => {
+  const provider = {
+    evidenceScope: "fixture",
+    backend: "candle",
+    target: complete().target,
+    calibrationFingerprint: "fixture-formula-v2",
+    fixture: "fresh-five-rung-fixture",
+    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+  };
+  const config = {
+    providers: [
+      {
+        ...provider,
+        name: "selected",
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "bounded_decode"],
+      },
+      {
+        ...provider,
+        name: "unrelated",
+        fixture: "different-fixture",
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "bounded_decode"],
+      },
+    ],
+  };
+  const result = await runProviderPlan({
+    config,
+    fixture: "fresh-five-rung-fixture",
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].fixture, "fresh-five-rung-fixture");
 });
 
 test("provider early exit is rejected without an unhandled stdin EPIPE", async () => {

@@ -60,6 +60,30 @@ on:
     branches: [main]
     paths: *candle_paths
   workflow_dispatch:
+    inputs:
+      run_five_rung_reference:
+        description: "Capture the SC-16402 Krea fresh-process five-rung reference"
+        required: false
+        type: boolean
+        default: false
+      provision_krea_snapshot:
+        description: "Provision the exact public Krea q4 snapshot before capture"
+        required: false
+        type: boolean
+        default: false
+      inference_revision:
+        description: "Exact 40-hex inference revision pinned by the adapter"
+        required: false
+        type: string
+      krea_repository:
+        description: "Published Krea MLX artifact repository identity"
+        required: false
+        type: string
+        default: "SceneWorks/krea-2-turbo-mlx"
+      krea_revision:
+        description: "Exact 40-hex Krea artifact revision"
+        required: false
+        type: string
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -99,7 +123,7 @@ jobs:
     # that box and starves every queued PR/main run on it until the cap fires
     # (sc-13603). Well above the healthy ~11-14 min build+test+clippy — a cold
     # candle-kernels (nvcc) rebuild still fits comfortably.
-    timeout-minutes: 45
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
@@ -164,6 +188,117 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+      - name: Validate five-rung reference inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: pwsh
+        env:
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_KREA_SNAPSHOT: ${{ inputs.provision_krea_snapshot }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          KREA_REPOSITORY: ${{ inputs.krea_repository }}
+          KREA_REVISION: ${{ inputs.krea_revision }}
+        run: |
+          if ($env:PROVISION_KREA_SNAPSHOT -eq 'true' -and $env:RUN_FIVE_RUNG_REFERENCE -ne 'true') {
+            throw 'provision_krea_snapshot requires run_five_rung_reference=true'
+          }
+          if ($env:RUN_FIVE_RUNG_REFERENCE -ne 'true') { exit 0 }
+          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          if ($env:KREA_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'krea_revision must be an exact lowercase 40-hex artifact revision'
+          }
+          if ($env:KREA_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
+            throw 'krea_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact'
+          }
+          $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
+          if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+            throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
+          }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        with:
+          node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
+        with:
+          python-version: "3.12"
+      - name: Provision exact public Krea reference snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
+        shell: pwsh
+        env:
+          KREA_REVISION: ${{ inputs.krea_revision }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          @'
+          import os
+          from huggingface_hub import snapshot_download
+
+          snapshot_download(
+              repo_id="SceneWorks/krea-2-turbo-mlx",
+              repo_type="model",
+              revision=os.environ["KREA_REVISION"],
+              allow_patterns=["q4/**"],
+              cache_dir=os.path.join(os.environ["USERPROFILE"], ".cache", "huggingface", "hub"),
+              token=False,
+              max_workers=4,
+          )
+          print("Exact public Krea reference snapshot provisioned")
+          '@ | python -
+      - name: Resolve exact Krea reference snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        shell: pwsh
+        env:
+          KREA_REVISION: ${{ inputs.krea_revision }}
+          KREA_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_KREA_ROOT }}
+        run: |
+          if ($env:KREA_ROOT_OVERRIDE) {
+            $root = $env:KREA_ROOT_OVERRIDE
+          } else {
+            $root = Join-Path $env:USERPROFILE ".cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\$env:KREA_REVISION\q4"
+          }
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            throw 'the exact Krea reference snapshot is not available on this runner'
+          }
+          $root = (Resolve-Path -LiteralPath $root).Path
+          $suffix = "\models--SceneWorks--krea-2-turbo-mlx\snapshots\$env:KREA_REVISION\q4"
+          if (-not $root.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'the Krea reference root does not match the fixed repository and exact revision'
+          }
+          "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out the exact inference reference source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_revision }}
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
+          path: .calibration/inference
+          persist-credentials: false
+      - name: Build and run the authoritative Candle five-rung reference
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        shell: cmd
+        env:
+          SCENEWORKS_KREA_REPOSITORY: ${{ inputs.krea_repository }}
+          SCENEWORKS_KREA_REVISION: ${{ inputs.krea_revision }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          echo .calibration/>>.git\info\exclude
+          cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16402-candle-fresh.json"
+          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16402-candle-fresh.json"
+      - name: Upload raw schema-checked Candle five-rung reference
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-16402-candle-fresh-${{ github.run_id }}
+          path: ${{ runner.temp }}/sc-16402-candle-fresh.json
+          if-no-files-found: error
       - name: Clippy (candle worker)
         shell: cmd
         run: |
