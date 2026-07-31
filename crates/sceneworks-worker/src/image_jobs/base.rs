@@ -2841,6 +2841,9 @@ fn mlx_raw_settings(
     guidance: Option<f32>,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
+    // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
+    scrub_untrusted_memory_strategy_disclosure(&mut raw);
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -5383,6 +5386,139 @@ fn apply_request_scoped_candle_residency(
     }
 }
 
+/// Caller-visible explanation for the one Krea memory decision whose latency would otherwise look
+/// like a hung render (sc-16104). This is deliberately presentation-small: the worker folds the note
+/// into its ordinary progress message rather than creating a dialog, toast, or separate UI surface.
+#[derive(Clone, Debug, PartialEq)]
+struct AutoTierStreamingDisclosure {
+    tier: String,
+    measured_materialization_ms_per_block: Option<f64>,
+    measured_materialization_ms_per_step: Option<u64>,
+}
+
+const AUTO_TIER_STREAMING_DISCLOSURE_KEY: &str = "memoryStrategyDisclosure";
+
+fn scrub_untrusted_memory_strategy_disclosure(raw_settings: &mut JsonObject) {
+    raw_settings.remove(AUTO_TIER_STREAMING_DISCLOSURE_KEY);
+}
+
+impl AutoTierStreamingDisclosure {
+    fn progress_message(&self, progress: &str) -> String {
+        format!(
+            "{progress} Streaming transformer blocks to hold the auto-selected {} tier.",
+            self.tier
+        )
+    }
+
+    #[cfg(any(
+        test,
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn record(&self) -> Value {
+        json!({
+            "strategy": "bounded_transformer_residency",
+            "cause": "streaming_transformer_blocks_to_hold_auto_selected_tier",
+            "tier": self.tier,
+            "measuredMaterializationMsPerBlock": self.measured_materialization_ms_per_block,
+            "measuredMaterializationMsPerStep": self.measured_materialization_ms_per_step,
+            "measurementSource": "sc-16096-rtx-pro-6000-blackwell",
+        })
+    }
+
+    #[cfg(any(
+        test,
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn telemetry(&self, job_id: &str, model: &str) -> Value {
+        let mut telemetry = self.record();
+        let fields = telemetry
+            .as_object_mut()
+            .expect("memory-strategy disclosure record is an object");
+        fields.insert("jobId".to_owned(), Value::String(job_id.to_owned()));
+        fields.insert("model".to_owned(), Value::String(model.to_owned()));
+        telemetry
+    }
+}
+
+fn progress_with_auto_tier_streaming(
+    progress: &str,
+    disclosure: Option<&AutoTierStreamingDisclosure>,
+) -> String {
+    disclosure.map_or_else(
+        || progress.to_owned(),
+        |disclosure| disclosure.progress_message(progress),
+    )
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoTierFitDecision {
+    StreamedBlocks,
+    Other,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn auto_tier_fit_decision(
+    final_fit: Option<&crate::vram_gate::KreaTurboFit>,
+) -> AutoTierFitDecision {
+    if matches!(
+        final_fit,
+        Some(crate::vram_gate::KreaTurboFit::Fits {
+            rung: crate::vram_gate::KreaTurboRung::StreamedBlocks,
+            ..
+        })
+    ) {
+        AutoTierFitDecision::StreamedBlocks
+    } else {
+        AutoTierFitDecision::Other
+    }
+}
+
+/// SC-16096 measured Krea's real packed q4/q8 window materialization after the device-format sidecar
+/// fix. Krea Turbo is a fixed 30-block, CFG-free single-forward denoiser, so block median x 30 is the
+/// measured materialization component paid by each rung-4 denoise step. Dense bf16 was not measured;
+/// disclose the strategy there without inventing a number.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn krea_streaming_measurement(tier: &str) -> (Option<f64>, Option<u64>) {
+    let block_ms: Option<f64> = match tier {
+        "q4" => Some(56.2),
+        "q8" => Some(101.7),
+        _ => None,
+    };
+    let step_ms = block_ms.map(|milliseconds| (milliseconds * 30.0).round() as u64);
+    (block_ms, step_ms)
+}
+
+/// A disclosure exists only for Auto plus the final rung-4 selection. Explicit picks keep bypassing
+/// the capability downtier and do not claim that Auto retained their tier; cheaper rungs do not claim
+/// transformer streaming. These two guards are mutation-pinned below.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn auto_tier_streaming_disclosure(
+    explicit_pick: bool,
+    tier: &str,
+    final_fit: AutoTierFitDecision,
+) -> Option<AutoTierStreamingDisclosure> {
+    if explicit_pick || final_fit != AutoTierFitDecision::StreamedBlocks {
+        return None;
+    }
+    let (measured_materialization_ms_per_block, measured_materialization_ms_per_step) =
+        krea_streaming_measurement(tier);
+    Some(AutoTierStreamingDisclosure {
+        tier: tier.to_owned(),
+        measured_materialization_ms_per_block,
+        measured_materialization_ms_per_step,
+    })
+}
+
 #[cfg(test)]
 mod candle_request_residency_tests {
     use super::*;
@@ -5408,6 +5544,101 @@ mod candle_request_residency_tests {
         let composed = composed.expect("existing rung memory is preserved");
         assert!(composed.stage_residency);
         assert!(composed.tile_vae_decode);
+    }
+
+    #[test]
+    fn auto_rung_four_disclosure_names_cause_and_real_krea_cost() {
+        let disclosure =
+            auto_tier_streaming_disclosure(false, "q8", AutoTierFitDecision::StreamedBlocks)
+            .expect("Auto plus rung 4 must disclose streaming");
+        assert_eq!(disclosure.measured_materialization_ms_per_block, Some(101.7));
+        assert_eq!(disclosure.measured_materialization_ms_per_step, Some(3_051));
+        let progress = disclosure.progress_message("Image 1/1 — step 1/8.");
+        assert!(progress.contains("Streaming transformer blocks"));
+        assert!(progress.contains("hold the auto-selected q8 tier"));
+        let trace = disclosure.telemetry("job-1", "krea_2_turbo");
+        assert_eq!(trace["strategy"], "bounded_transformer_residency");
+        assert_eq!(
+            trace["cause"],
+            "streaming_transformer_blocks_to_hold_auto_selected_tier"
+        );
+        assert_eq!(trace["measuredMaterializationMsPerStep"], 3_051);
+        let mut raw_settings = JsonObject::new();
+        raw_settings.insert(
+            AUTO_TIER_STREAMING_DISCLOSURE_KEY.to_owned(),
+            disclosure.record(),
+        );
+        assert_eq!(raw_settings["memoryStrategyDisclosure"], disclosure.record());
+
+        // Mutation guards: removing either predicate would mislabel an explicit choice or a cheaper
+        // rung as Auto's block-streaming decision.
+        assert!(auto_tier_streaming_disclosure(
+            true,
+            "q8",
+            AutoTierFitDecision::StreamedBlocks
+        )
+        .is_none());
+        assert!(auto_tier_streaming_disclosure(false, "q8", AutoTierFitDecision::Other).is_none());
+    }
+
+    #[test]
+    fn client_raw_settings_cannot_forge_auto_rung_four_disclosure() {
+        let mut advanced = JsonObject::new();
+        advanced.insert(
+            AUTO_TIER_STREAMING_DISCLOSURE_KEY.to_owned(),
+            json!({
+                "tier": "q8",
+                "cause": "streaming_transformer_blocks_to_hold_auto_selected_tier",
+            }),
+        );
+
+        scrub_untrusted_memory_strategy_disclosure(&mut advanced);
+        assert!(!advanced.contains_key(AUTO_TIER_STREAMING_DISCLOSURE_KEY));
+        assert_eq!(
+            progress_with_auto_tier_streaming("Image 1/1 — step 1/8.", None),
+            "Image 1/1 — step 1/8."
+        );
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn final_krea_fit_enum_is_the_trusted_disclosure_source() {
+        let fit = |rung| crate::vram_gate::KreaTurboFit::Fits {
+            rung,
+            phases: crate::vram_gate::KreaTurboPhasePeaks {
+                text_gb: 1.0,
+                denoise_gb: 1.0,
+                decode_gb: 1.0,
+            },
+            needed_gb: 1.0,
+            selection: gen_core::MemorySelection {
+                strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+                parameters: Default::default(),
+                tier: gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: Some(gen_core::Quant::Q8),
+                },
+            },
+        };
+        let streamed = fit(crate::vram_gate::KreaTurboRung::StreamedBlocks);
+        let cheaper = fit(crate::vram_gate::KreaTurboRung::ChunkedAttention);
+
+        assert_eq!(
+            auto_tier_fit_decision(Some(&streamed)),
+            AutoTierFitDecision::StreamedBlocks
+        );
+        assert_eq!(
+            auto_tier_fit_decision(Some(&cheaper)),
+            AutoTierFitDecision::Other
+        );
+        assert_eq!(auto_tier_fit_decision(None), AutoTierFitDecision::Other);
+    }
+
+    #[test]
+    fn streaming_measurements_are_krea_specific_and_do_not_invent_bf16_cost() {
+        assert_eq!(krea_streaming_measurement("q4"), (Some(56.2), Some(1_686)));
+        assert_eq!(krea_streaming_measurement("q8"), (Some(101.7), Some(3_051)));
+        assert_eq!(krea_streaming_measurement("bf16"), (None, None));
     }
 }
 
@@ -6428,6 +6659,11 @@ async fn generate_candle_stream(
             )
         })
         .flatten();
+    let auto_tier_streaming = auto_tier_streaming_disclosure(
+        explicit_pick,
+        tier,
+        auto_tier_fit_decision(shared_krea_fit.as_ref()),
+    );
     if krea_turbo_ladder {
         match shared_krea_fit {
             Some(crate::vram_gate::KreaTurboFit::Unverified { reason }) => {
@@ -6847,6 +7083,45 @@ async fn generate_candle_stream(
         spec.text_encoder = Some(WeightsSource::File(convrot_dit));
     }
 
+    // Surface the decision before model execution, while the reason for a slow render is still clear,
+    // then keep the same compact note on subsequent progress updates. The structured event is the
+    // statistics trace; the tracing event remains useful in the worker log. Neither changes admission
+    // or tier ordering, and neither creates a dialog/toast UI (Michael's sc-16104 constraint).
+    if let Some(disclosure) = auto_tier_streaming.as_ref() {
+        raw_settings.insert(
+            AUTO_TIER_STREAMING_DISCLOSURE_KEY.to_owned(),
+            disclosure.record(),
+        );
+        tracing::info!(
+            job_id = %job.id,
+            model = %request.model,
+            tier = %disclosure.tier,
+            strategy = "bounded_transformer_residency",
+            cause = "streaming_transformer_blocks_to_hold_auto_selected_tier",
+            measured_materialization_ms_per_block = ?disclosure.measured_materialization_ms_per_block,
+            measured_materialization_ms_per_step = ?disclosure.measured_materialization_ms_per_step,
+            measurement_source = "sc-16096-rtx-pro-6000-blackwell",
+            "streaming transformer blocks to hold the auto-selected tier"
+        );
+        emit_event(
+            "image_memory_strategy_selected",
+            disclosure.telemetry(&job.id, &request.model),
+        );
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::LoadingModel,
+                ProgressStage::LoadingModel,
+                0.0,
+                &disclosure.progress_message("Preparing render."),
+                Some(streaming_result(plan, asset_writes)),
+                backend,
+            ),
+        )
+        .await?;
+    }
+
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -6917,7 +7192,7 @@ async fn generate_candle_stream(
         },
     );
 
-    consume_gen_events(
+    consume_gen_events_with_disclosure(
         api,
         settings,
         job,
@@ -6926,6 +7201,7 @@ async fn generate_candle_stream(
         backend,
         adapter_label,
         &raw_settings,
+        auto_tier_streaming.as_ref(),
         count,
         rx,
         cancel,
@@ -7128,6 +7404,42 @@ async fn consume_gen_events(
     adapter_label: &str,
     raw_settings: &JsonObject,
     total: usize,
+    rx: tokio::sync::mpsc::Receiver<GenEvent>,
+    cancel: CancelFlag,
+    blocking: tokio::task::JoinHandle<WorkerResult<()>>,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    consume_gen_events_with_disclosure(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        adapter_label,
+        raw_settings,
+        None,
+        total,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_gen_events_with_disclosure(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    adapter_label: &str,
+    raw_settings: &JsonObject,
+    auto_tier_streaming: Option<&AutoTierStreamingDisclosure>,
+    total: usize,
     mut rx: tokio::sync::mpsc::Receiver<GenEvent>,
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
@@ -7222,7 +7534,10 @@ async fn consume_gen_events(
                         JobStatus::Running,
                         ProgressStage::Generating,
                         step_fraction(index, current, step_total, total_u32),
-                        &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
+                        &progress_with_auto_tier_streaming(
+                            &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
+                            auto_tier_streaming,
+                        ),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
@@ -7259,7 +7574,10 @@ async fn consume_gen_events(
                         JobStatus::LoadingModel,
                         ProgressStage::LoadingModel,
                         step_fraction(index, 0, 1, total_u32),
-                        &format!("Image {}/{total} — loading {component}.", index + 1),
+                        &progress_with_auto_tier_streaming(
+                            &format!("Image {}/{total} — loading {component}.", index + 1),
+                            auto_tier_streaming,
+                        ),
                         Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),

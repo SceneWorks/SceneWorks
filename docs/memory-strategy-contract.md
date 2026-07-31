@@ -136,7 +136,9 @@ The Krea capability-downtier consumes the ladder's verdict as a boolean: `KreaTu
 (`crates/sceneworks-worker/src/image_jobs/base.rs`), and `choose_downtier` keeps the highest-fidelity
 tier that fits. So under **Auto** a tier whose *only* fit is rung 4 outranks a lower tier that fits
 resident, and the cost of that rung is what the higher tier is bought with. After SC-16096 hoisted the
-packed repack, z-image's measured q8 block-materialization median is 101.7 ms; that is still additive
+packed repack, Krea's real packed q8 block-materialization median on an RTX PRO 6000 Blackwell is
+101.7 ms. Krea Turbo is CFG-free and walks its fixed 30-block transformer once per denoise step, so
+the measured materialization component is about 3.05 seconds per step. That is still additive
 streaming work, but no longer the pre-fix ~1.3–1.5 seconds per block.
 
 **That is intended, and is the same rule the rest of this epic applies.** Fidelity the user asked for is
@@ -150,10 +152,12 @@ Two things this does **not** license:
 - **An explicit pick never reaches the downtier at all** and never had to — `explicit_pick`
   (`mlxQuantizeExplicit`) skips it outright, as does an NVFP4 selection, which is unrankable on purpose.
   The rule above is about Auto only.
-- **Accepting the cost is not the same as hiding it.** Nothing today tells a caller that its render is
-  slower *because* it is streaming blocks to hold the tier. SC-16096 removed the dominant conversion,
-  but the remaining transfer cost is still material and should be visible. Disclosure is SC-16104's
-  remaining scope; the policy question it was filed to settle is settled here.
+- **Accepting the cost is not the same as hiding it.** SC-16104 surfaces a compact progress note for
+  Auto jobs that engage rung 4, naming that transformer blocks are streaming to hold the selected
+  tier. The worker also emits a structured `image_memory_strategy_selected` event and a tracing event
+  with the cause and SC-16096 measurement. This deliberately uses the existing inline progress/log
+  surfaces — no dialog, toast, or large UI warning — while leaving the fidelity-first selection and
+  explicit-pick bypass unchanged.
 
 One historical consequence: this **declined** SC-15791's recommendation *"do not enable rung 4 on q8
 until the repack is hoisted"*. Deliberately — gating q8 would have been exactly the fidelity substitution
