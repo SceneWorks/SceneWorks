@@ -1190,11 +1190,12 @@ export function ImageStudio() {
       : DEFAULT_RESOLUTION_OPTIONS;
     const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
       backend: activeBackend,
+      tier: quantTier,
     });
     // Never collapse to an empty picker: if the gate somehow trims everything (it never trims
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, activeBackend]);
+  }, [selectedModel, unifiedMemoryGb, activeBackend, quantTier]);
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000

@@ -87,6 +87,16 @@ export function SimpleImageStudio() {
     () => models.find((entry) => entry.id === model) ?? null,
     [models, model],
   );
+  const tier = useMemo(
+    () =>
+      resolveSimpleTier(selectedModel, TIER_SCREEN, {
+        convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
+        nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
+        unifiedMemoryGb,
+        backend: memoryBackend,
+      }),
+    [selectedModel, visibleWorkers, unifiedMemoryGb, memoryBackend],
+  );
 
   // Keep the selection valid as the tab (and therefore the eligible set) changes.
   useEffect(() => {
@@ -104,9 +114,10 @@ export function SimpleImageStudio() {
       : DEFAULT_RESOLUTIONS;
     const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
       backend: memoryBackend,
+      tier: tier.quantTier,
     });
     return gated.length ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, memoryBackend]);
+  }, [selectedModel, unifiedMemoryGb, memoryBackend, tier.quantTier]);
 
   // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
   // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
@@ -236,12 +247,6 @@ export function SimpleImageStudio() {
     }
     setSubmitting(true);
     try {
-      const tier = resolveSimpleTier(selectedModel, TIER_SCREEN, {
-        convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
-        nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
-        unifiedMemoryGb,
-        backend: memoryBackend,
-      });
       const request = buildSimpleImageRequest({
         prompt: prompt.trim(),
         mode,

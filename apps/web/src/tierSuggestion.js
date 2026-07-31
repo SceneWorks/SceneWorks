@@ -197,6 +197,10 @@ function measuredVariantPeakGb(variant) {
   return peak !== null && peak > 0 ? peak / BYTES_PER_GB : null;
 }
 
+function positiveIntegerOrNull(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 // Declared quant tier → the MLX measured peak (GB) for that tier, for the real bits-based tiers only
 // (bf16/q8/q4). The "default" pseudo-variant of a single-variant model and the non-quant "training" base
 // are excluded, so neither can ever be mistaken for a generation tier's footprint.
@@ -411,11 +415,61 @@ function maxHostGb(a, b) {
 // `options` also forwards `installedTiers`' host-eligibility gates (convRotEligible / nvfp4Eligible), so
 // a tier this host cannot serve never contributes to the ceiling.
 export function installedTierPeakGb(model, options = {}) {
+  const explicit = typeof options.tier === "string" && options.tier ? options.tier : null;
+  if (explicit) {
+    return installedTierPeakEvidence(model, options)?.peakGb ?? null;
+  }
   // NO fill: this is the strict primitive, so an unevidenced installed tier makes it null.
   const { ceiling, complete, count } = installedCeiling(model, options);
   // An installed tier we have no number for means the set is unbounded — the caller must not treat the
   // ceiling as the requirement (see `installedFloorHostGb`, which fills or floors it instead).
   return count === 0 || !complete ? null : ceiling;
+}
+
+// The active lane's own peak + measurement geometry for one explicitly-selected INSTALLED tier.
+// Resolution gating needs both values: a raw peak measured at 1024² cannot serve as a 1536² baseline
+// until the caller normalizes it. Returning one object prevents a peak from being paired with another
+// row's geometry.
+//
+// The selected tier is intersected with `installedTiers(model, options)` before any evidence read. A
+// catalog refetch can remove a tier while React still holds the old selection for one render; that stale
+// key must fall back to the blanket rather than read a removed lighter tier's peak (sc-16020).
+export function installedTierPeakEvidence(model, options = {}) {
+  const tier = typeof options.tier === "string" && options.tier ? options.tier : null;
+  if (tier === null || !installedTiers(model, options).includes(tier)) {
+    return null;
+  }
+
+  if (options.backend === "candle") {
+    const peakGb = numberOrNull(model?.candle?.vramGbByTier?.[tier]);
+    const measuredPixels = positiveIntegerOrNull(model?.candle?.vramMeasuredPixels);
+    return peakGb !== null && peakGb > 0 && measuredPixels !== null
+      ? { peakGb, measuredPixels }
+      : null;
+  }
+
+  let selected = null;
+  for (const variant of model?.variants ?? []) {
+    if (variant?.variant !== tier || tierQuantize(tier) === null) {
+      continue;
+    }
+    const peakGb = measuredVariantPeakGb(variant);
+    const measuredPixels = positiveIntegerOrNull(variant?.footprint?.measuredPixels);
+    if (peakGb === null) {
+      continue;
+    }
+    // A component duplicate with no peak is not evidence, but a declared peak whose geometry is
+    // absent/invalid makes the selected tier ambiguous. Likewise, raw peaks measured at different
+    // geometries cannot be ranked before normalization: the smaller raw peak can become the larger
+    // 1536² floor. Let the caller use the calibrated blanket instead of choosing an unsafe row.
+    if (measuredPixels === null || (selected !== null && measuredPixels !== selected.measuredPixels)) {
+      return null;
+    }
+    if (selected === null || peakGb > selected.peakGb) {
+      selected = { peakGb, measuredPixels };
+    }
+  }
+  return selected;
 }
 
 // One installed tier's MLX-lane ESTIMATED peak (GB) — `variantFootprintBytes` in the same base-1024³ unit

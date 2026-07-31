@@ -253,6 +253,7 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         assert model["candle"] == {
             "minMemoryGb": 17,
             "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+            "vramMeasuredPixels": 1024 * 1024,
             "measured": True,
         }
         assert model["defaults"]["steps"] == steps
@@ -277,6 +278,7 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["candle"] == {
             "minMemoryGb": 17,
             "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+            "vramMeasuredPixels": 1024 * 1024,
             "measured": True,
         }
         assert model["defaults"]["steps"] == steps
@@ -618,6 +620,72 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
         f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
         for error in errors
     )
+
+
+def test_measured_memory_rows_declare_their_1024_square_geometry():
+    """sc-16020: geometry is data, not a prose assumption.
+
+    The counts were derived from the live catalog when the field landed. Update them when
+    adding/removing measured rows; the universal assertions are what prevent a new row from
+    silently escaping the normalization contract.
+    """
+    manifest = _load_builtin_models_manifest()
+    mlx_rows = []
+    candle_rows = []
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            footprint = download.get("footprint", {})
+            if footprint.get("peakMemoryBytes") is not None:
+                mlx_rows.append((model["id"], download.get("variant"), footprint))
+        candle = model.get("candle", {})
+        if "vramGbByTier" in candle:
+            candle_rows.append((model["id"], candle))
+
+    assert len(mlx_rows) == 16
+    assert len(candle_rows) == 35
+    assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
+    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in candle_rows), candle_rows
+
+
+def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
+    """Mutation guard for both lane-owned measurement shapes."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    mlx_entry = _model_entry_with_download(
+        {
+            "provider": "huggingface",
+            "repo": "namespace/model",
+            "files": [],
+            "footprint": {
+                "diskSizeBytes": 1,
+                "peakMemoryBytes": 2,
+            },
+        }
+    )
+    mlx_errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [mlx_entry]})
+    )
+    assert any(
+        error.validator == "required"
+        and "measuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["footprint"]
+        for error in mlx_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in mlx_errors]
+
+    candle_entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    candle_entry["candle"] = {"vramGbByTier": {"q4": 12.5}}
+    candle_errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [candle_entry]})
+    )
+    assert any(
+        error.validator == "required"
+        and "vramMeasuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
 
 
 def test_builtin_schema_rejects_an_unknown_closed_model_key():

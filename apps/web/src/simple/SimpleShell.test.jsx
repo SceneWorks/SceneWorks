@@ -5,6 +5,18 @@ import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { resetStartupTimingForTests } from "../startupTiming.js";
 
+vi.mock("../api.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    apiFetch: vi.fn(async (path) =>
+      path === "/api/v1/host-capabilities"
+        ? { memoryGb: 80, memoryKind: "unified", platform: "macos" }
+        : {},
+    ),
+  };
+});
+
 // The Simple shell mounts inside App's providers and reads everything through them, so a
 // single legacy <AppContext.Provider> is enough to drive it in isolation (see AppContext's
 // fallback contract). These tests cover the shell's own contract: navigation, the picker
@@ -21,6 +33,27 @@ const IMAGE_MODEL = {
   // Z-Image declares reference-guided generation in the real catalog, with this exact
   // strength config — so the Text tab's Reference tile is live for it.
   ui: { img2img: true, img2imgStrength: { default: 0.5, min: 0, max: 1, step: 0.05 } },
+};
+
+const TIERED_HIGHRES_MODEL = {
+  ...IMAGE_MODEL,
+  id: "tiered_highres",
+  name: "Tiered Highres",
+  defaults: { resolution: "1024x1024" },
+  limits: { resolutions: ["1024x1024", "2048x2048"] },
+  mlx: { minMemoryGb: 80 },
+  hasVariantMatrix: true,
+  variants: [
+    {
+      variant: "q4",
+      installState: "installed",
+      footprint: {
+        diskSizeBytes: 8 * 1024 ** 3,
+        peakMemoryBytes: 22 * 1024 ** 3,
+        measuredPixels: 1024 * 1024,
+      },
+    },
+  ],
 };
 
 const REFERENCE_ASSET = {
@@ -208,6 +241,23 @@ describe("SimpleShell", () => {
     expect(
       [...container.querySelectorAll(".su-select")].some((node) => node.textContent.includes("16:9")),
     ).toBe(true);
+  });
+
+  it("gates resolutions with the same resolved tier Simple sends to generation", async () => {
+    const context = baseContext({
+      imageModels: [TIERED_HIGHRES_MODEL],
+      models: [TIERED_HIGHRES_MODEL],
+      macCapabilities: { macGatingActive: true },
+    });
+    await renderShell(root, context);
+    await act(async () => {}); // host-memory promise + tier-dependent resolution memo
+
+    const resolutionButton = [...container.querySelectorAll(".su-select")].find((node) =>
+      node.textContent.includes("1:1"),
+    );
+    await click(resolutionButton);
+    const options = [...container.querySelectorAll(".su-sheet .su-option-tile")];
+    expect(options.some((node) => node.textContent.includes("2048"))).toBe(true);
   });
 
   it("opens the prompt guide overlay and closes it again", async () => {
