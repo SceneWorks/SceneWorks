@@ -586,6 +586,118 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
     assert_eq!((decoded.width(), decoded.height()), (320, 256));
 }
 
+#[test]
+fn a_kreamania_generation_records_the_worker_resolved_steps_civitai_requires() {
+    // Regression for Civitai post 30111231. The uploaded PNG's request envelope carried only
+    // `advanced.resolution`, while the imported-Krea worker actually ran its resolved 8-step default
+    // and recorded that fact in `raw_settings.numInferenceSteps`. Civitai requires a numeric `Steps:`
+    // value; a non-numeric placeholder passes its first gate but fails its schema and drops everything.
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    let payload = json!({
+        "projectId": "p",
+        "mode": "text_to_image",
+        "model": "kreamania_v5",
+        "prompt": "An expressive impasto oil painting of deep crimson roses",
+        "count": 2,
+        "width": 1024,
+        "height": 1024,
+        "seed": 3_502_903_515_i64,
+        "advanced": { "resolution": "1024x1024" }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert!(
+        payload["advanced"].get("steps").is_none(),
+        "the regression must begin with the same missing request field as the uploaded image"
+    );
+    let req = ImageRequest::from_payload(&payload);
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let raw_settings = json!({
+        "realModelInference": true,
+        "numInferenceSteps": 8,
+        "engine": "candle_krea_imported"
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let fact = write_image_asset(
+        &plan,
+        0,
+        3_502_903_515,
+        1024,
+        1024,
+        stub_rgb8(1024, 1024, 3_502_903_515),
+        "candle_krea_imported",
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let media = project_path.join(fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .unwrap()
+        .expect("the generated PNG carries its workflow");
+    assert_eq!(share.advanced.get("steps"), Some(&json!(8)));
+
+    let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (1024, 1024));
+    assert!(parameters.contains("Steps: 8"), "{parameters:?}");
+    assert!(!parameters.contains("Steps: Unknown"), "{parameters:?}");
+    assert_eq!(
+        parameters
+            .lines()
+            .last()
+            .and_then(|line| line.strip_prefix("Steps: "))
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|steps| steps.parse::<u32>().ok()),
+        Some(8),
+        "Civitai validates the mapped steps value as a number"
+    );
+    let bytes = std::fs::read(media).unwrap();
+    assert!(
+        bytes
+            .windows(b"Steps: 8".len())
+            .any(|window| window == b"Steps: 8"),
+        "the numeric value must reach the actual PNG parameters chunk"
+    );
+}
+
+#[test]
+fn only_worker_resolved_steps_can_enrich_the_share_envelope() {
+    let forged = json!({
+        "projectId": "p",
+        "advanced": { "numInferenceSteps": 999 }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let resolved = json!({ "numInferenceSteps": 8 })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        resolved_steps_for_share(&forged, &resolved, false),
+        None,
+        "a client-supplied telemetry key must never be promoted into the trusted envelope"
+    );
+
+    let phased = json!({
+        "projectId": "p",
+        "advanced": { "phases": [{ "steps": 4 }, { "steps": 4 }] }
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        resolved_steps_for_share(&phased, &resolved, true),
+        None,
+        "a multi-phase schedule must not be collapsed into one top-level step count"
+    );
+}
+
 /// Turning the setting off writes the file SceneWorks writes today, to the byte.
 ///
 /// Proven by comparison against a real `save_with_format` write of the same pixel buffer rather

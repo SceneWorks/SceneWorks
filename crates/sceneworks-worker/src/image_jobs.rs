@@ -25,7 +25,9 @@ use super::*;
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::workflow_png::write_workflow_chunk;
-use sceneworks_core::workflow_share::{embeddable_workflow_share, WorkflowAssetFacts};
+use sceneworks_core::workflow_share::{
+    embeddable_workflow_share, WorkflowAssetFacts, OMITTED_PHASES,
+};
 use std::sync::Arc;
 
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
@@ -1496,6 +1498,36 @@ impl ImagePlan {
     }
 }
 
+/// Add the worker-resolved denoise count to the sanitized share envelope when the request did not
+/// already carry one.
+///
+/// Several generation lanes choose a real default after request parsing and record it as
+/// `raw_settings.numInferenceSteps`. The original workflow source is the user request, so without
+/// this narrow overlay a generated PNG can omit the step count even though the worker knows exactly
+/// what ran. Civitai then rejects the entire A1111 `parameters` block.
+///
+/// Only the single trusted field is copied, and only when `numInferenceSteps` was absent from the raw
+/// request. That provenance check prevents an API caller from forging an internal telemetry value.
+/// Multi-phase schedules remain untouched: one numeric A1111 `Steps` value cannot represent them.
+fn resolved_steps_for_share(
+    workflow_source: &JsonObject,
+    raw_settings: &JsonObject,
+    has_multi_phase: bool,
+) -> Option<u32> {
+    let source_supplied_runtime_steps = workflow_source
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| advanced.contains_key("numInferenceSteps"));
+    if has_multi_phase || source_supplied_runtime_steps {
+        return None;
+    }
+    raw_settings
+        .get("numInferenceSteps")
+        .and_then(Value::as_u64)
+        .filter(|steps| *steps >= 1)
+        .and_then(|steps| u32::try_from(steps).ok())
+}
+
 /// Save image `index` (its RGB8 `pixels`) under `assets/images/` and return the flat
 /// fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -1551,6 +1583,11 @@ pub(crate) fn write_image_asset(
             },
             payload,
         )?;
+        let has_multi_phase = share.advanced.contains_key("phases")
+            || share.omitted.iter().any(|field| field == OMITTED_PHASES);
+        if let Some(steps) = resolved_steps_for_share(payload, &raw_settings, has_multi_phase) {
+            share.advanced.insert("steps".to_owned(), json!(steps));
+        }
         // This function only ever writes a BASE render. The inline-upscale post-pass writes its
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
         // `upscale.enabled: true` from the request would describe, on this file, a pass this file
