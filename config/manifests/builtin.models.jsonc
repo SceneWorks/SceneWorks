@@ -4360,7 +4360,7 @@
         // ≤1536² VISIBILITY floor — the extra single-pass VAE-decode spike at 2048² is what the
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
-        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        "resolutions": ["1024x1024", "896x896", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
         "count": [1, 2, 4],
         // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
         // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
@@ -4414,7 +4414,7 @@
             "tier": "q4",
             "mode": "text_to_image",
             "overlay": "control:1",
-            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
             "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
             "artifactVariant": "q4",

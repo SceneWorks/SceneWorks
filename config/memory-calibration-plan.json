@@ -2,7 +2,7 @@
   "overlayCoverage": {
     "decision": "mlx-krea-pose-control-measurable",
     "story": "sc-16099",
-    "reason": "The MLX adapter now loads the exact q4 Krea base plus the pinned beta pose-control branch, conditions every render on a deterministic control map, and executes the full warm/cancel/error lifecycle at conditioning, denoise, and decode boundaries. Its two authoritative 768 and 1024 cells therefore report `overlay: passed`; unrelated providers remain unchanged.",
+    "reason": "The MLX adapter now loads the exact q4 Krea base plus the pinned beta pose-control branch, conditions every render on a deterministic control map, and executes the full warm/cancel/error lifecycle at conditioning, denoise, and decode boundaries. Its two authoritative 768 and 896 cells therefore report `overlay: passed`; unrelated providers remain unchanged.",
     "whyItMatters": "A Krea pose-control refusal may name a lower geometry only when the base, overlay, tier, strategy parameters, provider ABI, and exact geometry all match current promoted evidence. These are the first current MLX overlay cells that satisfy that identity.",
     "unblockedBy": "Completed by the sc-16099 Krea control adapter and provider lifecycle seam.",
     "reviewedAgainst": "docs/memory-strategy-contract.md"
@@ -54,7 +54,7 @@
       ]
     },
     {
-      "name": "mlx-krea-pose-control-q4-1024",
+      "name": "mlx-krea-pose-control-q4-896",
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "target": {
@@ -63,7 +63,7 @@
         "tier": "q4",
         "mode": "text_to_image",
         "overlay": "control:1",
-        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+        "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 }
       },
       "rung": "bounded_decode",
       "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
