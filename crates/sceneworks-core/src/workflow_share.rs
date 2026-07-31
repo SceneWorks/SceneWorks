@@ -625,8 +625,33 @@ pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 /// `VideoStudio.jsx` alone emits ~15 keys nothing here classifies. That is fine only for as long
 /// as no video write seam embeds: the moment sc-15956 threads a workflow into a video write, its
 /// builder moves up into [`ADVANCED_BUILDERS`] and every one of those keys needs an
-/// `allow`/`deny` decision. Nothing about a video lane can start embedding while its keys sit in
-/// this list — that is what this list is for.
+/// `allow`/`deny` decision.
+///
+/// # What enforces that, and what does not (sc-16113)
+///
+/// This list used to claim, in this comment, that "nothing about a video lane can start embedding
+/// while its keys sit in this list". Nothing did. A reviewer added a `write_workflow_chunk` +
+/// `embeddable_workflow_share` call to a real video-lane PNG write in
+/// `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` and every lint stayed green, because the
+/// sweep over `apps/web/src` accepts membership in EITHER registry and the write-seam lint read
+/// four hard-coded worker files.
+///
+/// What is enforced now, by `every_worker_write_seam_declares_the_lane_it_embeds_for` in
+/// `crates/sceneworks-core/tests/workflow_share.rs`:
+///
+/// * every function in `crates/sceneworks-worker/src` that touches a `WorkflowShare` — discovered
+///   by scanning the crate, not by a file list — must have a [`WORKFLOW_WRITE_SEAMS`] entry, and
+///   an undeclared one fails the build;
+/// * a seam declared [`SeamDisposition::Embeds`] must name the web builders that feed it, and a
+///   named builder that is in THIS list fails the build, naming the seam, the lane and the builder;
+/// * a seam cannot dodge that by declaring [`SeamDisposition::Declines`]: the disposition is
+///   checked against the source, and a seam that builds an envelope may not claim to decline.
+///
+/// So making a video lane embed now requires moving its builder into [`ADVANCED_BUILDERS`] —
+/// which is what forces every key it emits to be classified. What the lint still cannot check is
+/// whether a seam's declared builder list is the WHOLE truth: an author who declares a video seam
+/// as embedding for an image builder has written a false statement in a registry, and only review
+/// catches that.
 pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
     DeferredAdvancedBuilder {
         path: "apps/web/src/screens/VideoStudio.jsx",
@@ -678,6 +703,214 @@ pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
                  would have to change is a training write seam that embeds. Then, and only then, \
                  this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
                  allow/deny decision.",
+    },
+];
+
+/// A (file, function) reference to one entry in [`ADVANCED_BUILDERS`] or
+/// [`DEFERRED_ADVANCED_BUILDERS`] (sc-16113).
+///
+/// The same key those two registries are already joined on by
+/// `every_advanced_builder_in_the_web_app_is_accounted_for`, so a seam names a builder exactly the
+/// way the sweep does. A reference that resolves to neither registry fails the lint; a reference
+/// that resolves to the DEFERRED one fails it too, and that is the whole point of the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebBuilderRef {
+    /// Repo-relative path of the JS/JSX file that defines the builder.
+    pub path: &'static str,
+    /// The builder function's name.
+    pub function: &'static str,
+}
+
+/// What one worker seam does about the workflow chunk (sc-16113).
+///
+/// Three states, not two, because "writes no chunk" and "writes whatever its caller decided" are
+/// different claims and only one of them ends the question. Each is checked against the seam's
+/// own source, so the disposition is a declaration the lint verifies rather than one it trusts.
+#[derive(Debug, Clone, Copy)]
+pub enum SeamDisposition {
+    /// Builds an envelope from a job payload and writes it. Must name at least one builder, and
+    /// every one of them must be in [`ADVANCED_BUILDERS`] — a reference to
+    /// [`DEFERRED_ADVANCED_BUILDERS`] is exactly the state this registry exists to refuse.
+    Embeds(&'static [WebBuilderRef]),
+    /// Writes an envelope its CALLER built, and builds none itself. The lane question belongs to
+    /// the callers, and they are seams in their own right: a function that hands a
+    /// `WorkflowShare` to this one names it, which is what the discovery scan reads. The reason
+    /// says why the decision is not made here.
+    Conduit(&'static str),
+    /// Writes the file with no envelope at all, deliberately. The reason must say why that asset
+    /// has no generation recipe to record. Verified: a seam that builds an envelope may not
+    /// declare this, so declining is not a way to dodge classification.
+    Declines(&'static str),
+}
+
+/// One place in `sceneworks-worker` where a [`WorkflowShare`] can reach a written file (sc-16113).
+///
+/// The registry that ties "this lane has an embedding write seam" to "its builder is in
+/// [`ADVANCED_BUILDERS`]". `path` + `function` are read out of the repo, so a rename or a move
+/// fails loudly, and the seams themselves are DISCOVERED by scanning the worker crate rather than
+/// listed here — an entry nobody can find is as much a failure as a seam nobody declared.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowWriteSeam {
+    /// Repo-relative path of the file that contains the seam.
+    pub path: &'static str,
+    /// The Rust function whose body touches the envelope.
+    pub function: &'static str,
+    /// Prose: which product lane's files this seam writes, so a reader can see why the builders
+    /// below are the ones that feed it. Asserted only to be non-trivial.
+    pub lane: &'static str,
+    /// What it does about the chunk, checked against the source.
+    pub disposition: SeamDisposition,
+}
+
+/// Every worker seam a [`WorkflowShare`] can pass through, and the web builders behind each one.
+///
+/// **The gate this whole epic's deferral list was supposed to be.** Adding an embedding call to a
+/// lane whose builder sits in [`DEFERRED_ADVANCED_BUILDERS`] now fails the build twice over: once
+/// because the new seam has no entry here, and again if the entry names the deferred builder.
+///
+/// Kept honest in both directions by `every_worker_write_seam_declares_the_lane_it_embeds_for`: a
+/// discovered seam with no entry fails, and an entry whose function no longer touches an envelope
+/// fails too.
+pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "write_image_asset",
+        lane: "POST /api/v1/image/jobs (text_to_image / edit_image / character_image) and \
+               POST /api/v1/image/interleave/jobs — the one funnel every generated image is \
+               written through",
+        disposition: SeamDisposition::Embeds(IMAGE_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "upscaled_workflow_share",
+        lane: "POST /api/v1/image/jobs — the inline-upscale sub-step of a generate job, whose \
+               envelope is the generation's payload with the APPLIED pass overlaid",
+        disposition: SeamDisposition::Embeds(GENERATE_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "write_upscaled_asset",
+        lane: "POST /api/v1/image/jobs — the inline-upscaled variant's own PNG",
+        disposition: SeamDisposition::Embeds(GENERATE_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "detail_workflow_share",
+        lane: "POST /api/v1/image/detail/jobs — the standalone detail pass's own envelope",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildDetailJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "standalone_upscale_workflow_share",
+        lane: "POST /api/v1/jobs type=image_upscale — the standalone upscale job's own envelope",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs/detail.rs",
+        function: "run_image_detail_job",
+        lane: "POST /api/v1/image/detail/jobs — writes the refined PNG (macOS-gated; the scan is \
+               textual, so this seam is read on every platform)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildDetailJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
+        function: "run_image_upscale_job",
+        lane: "POST /api/v1/jobs type=image_upscale — hands the standalone upscale's envelope to \
+               the shared single-child writer",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/single_child_asset.rs",
+        function: "write_single_child_asset",
+        lane: "The shared one-PNG-child writer: the standalone upscale and the smart-select mask \
+               both come through here",
+        disposition: SeamDisposition::Conduit(
+            "It writes the `SingleChildAssetSpec::workflow` its caller decided on and builds no \
+             envelope of its own, so the lane question belongs to the callers — and every caller \
+             is a seam here in its own right, because handing a `WorkflowShare` in is what the \
+             discovery scan reads.",
+        ),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs",
+        function: "run_image_segment_job",
+        lane: "POST /api/v1/jobs type=image_segment — the smart-select mask",
+        disposition: SeamDisposition::Declines(
+            "A smart-select mask is not a generated image: it is a binary selection derived from a \
+             box prompt and a concept string, with no generation recipe to replay. It is also \
+             grayscale, and the chunk writer encodes RGB8, so embedding would triple its size and \
+             change its colour type.",
+        ),
+    },
+];
+
+/// The builders behind every image the generate lane writes (`POST /api/v1/image/jobs`).
+///
+/// Named once because three seams share it: the base render, the inline-upscale envelope, and the
+/// upscaled variant's own PNG.
+const GENERATE_JOB_BUILDERS: &[WebBuilderRef] = &[
+    WebBuilderRef {
+        path: "apps/web/src/imageJobAdvanced.js",
+        function: "buildImageJobAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/imageJobs.js",
+        function: "buildEditJobBody",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
+        function: "buildAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "useAngleController",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "usePoseController",
+    },
+];
+
+/// [`GENERATE_JOB_BUILDERS`] plus the interleave lane, which reaches `write_image_asset` through
+/// `sensenova_jobs.rs` threading its `workflow_source` into the same `ImagePlan`.
+///
+/// The interleave lane has no inline-upscale sub-step, so it is not in [`GENERATE_JOB_BUILDERS`].
+const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
+    WebBuilderRef {
+        path: "apps/web/src/imageJobAdvanced.js",
+        function: "buildImageJobAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/imageJobs.js",
+        function: "buildEditJobBody",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
+        function: "buildAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "useAngleController",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/characterPanels.jsx",
+        function: "usePoseController",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/screens/DocumentStudio.jsx",
+        function: "submit",
     },
 ];
 
