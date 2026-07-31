@@ -8,7 +8,7 @@
 Normative statement: [`docs/memory-strategy-contract.md`](../memory-strategy-contract.md) —
 "Tier integrity" (sc-15799). Executable rule: `gen_core::tier_integrity`.
 
-Declared exceptions: **91** — 24 measured, 67 unmeasured.
+Declared exceptions: **89** — 23 measured, 66 unmeasured.
 
 Above-tier residency is not rare. On a q4 or q8 tier the great majority of image entries keep a
 VAE, a text encoder, or both resident at bf16 or f32. Every component that meets the declaration
@@ -60,9 +60,7 @@ claims the residency holds identically on both.
 | `krea_2_raw` | vae | mlx + candle | f32 | q4, q8 | packing-exception | _unmeasured_ (sc-16015) | crates/media/mlx-gen/mlx-gen-krea/src/model.rs — Raw "shares `load_variant` + the whole KreaPipeline"; crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — "the VAE stays dense (the published `vae/` is f32)" |
 | `krea_2_turbo` | controlBranch | mlx + candle | q8 | q4 | packing-exception | 1.6 | crates/media/candle-gen/candle-gen-krea/src/control.rs `ControlBranch::from_checkpoint_quantized` — "the ~6.6 GB dense branch never lands in VRAM, and the resident footprint is ~1.7 GB at q4 / ~3.3 GB at q8"; the q8 floor forgoes the 3.3 − 1.7 = 1.6 GB difference. |
 | `krea_2_turbo` | vae | mlx + candle | f32 | q4, q8 | packing-exception | _unmeasured_ (sc-16015) | crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — "the VAE stays dense (the published `vae/` is f32)"; crates/media/mlx-gen/mlx-gen-krea/src/convert.rs `assemble_quantized_snapshot` copies `vae/` with no `bits` branch |
-| `lens` | textEncoder | mlx + candle | bf16 | q4, q8 | backend-capability | _unmeasured_ (sc-16014) | crates/media/candle-gen/candle-gen-lens/src/text_encoder.rs — "MXFP4 → dense bf16 (quant = None): the sc-5108 bring-up path (~40 GB resident)" |
 | `lens` | vae | mlx + candle | f32 | q4, q8 | packing-exception | _unmeasured_ (sc-16015) | crates/media/mlx-gen/mlx-gen-lens/src/quant.rs — "The VAE is the shared Flux.2 decoder and is never quantized (runs f32)" |
-| `lens_turbo` | textEncoder | mlx + candle | bf16 | q4, q8 | backend-capability | 17.24 | crates/sceneworks-worker/src/mlx_fit_gate.rs — the HEADROOM_GB calibration table (sc-10863): lens-turbo bf16 measures 28.43 GiB on disk / 45.67 GiB resident / 75.55 GiB peak; the 17.24 GiB in-memory weight expansion is resident − disk (1.61x). |
 | `lens_turbo` | vae | mlx + candle | f32 | q4, q8 | packing-exception | _unmeasured_ (sc-16015) | crates/media/candle-gen/candle-gen-lens/src/quant.rs — "the Flux.2 VAE stays f32" |
 | `mage_flow` | textEncoder | mlx + candle | q8 | q4 | packing-exception | 1.9 | crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `LM_LAYER_MIN_BITS = 8` |
 | `mage_flow` | transformerHead | mlx | q8 | q4 | packing-exception | 0.009 | crates/media/mlx-gen/mlx-gen-mage/src/quant.rs `FINAL_MOD_MIN_BITS = 8` — the floor is applied by the single seam `floor_bits(FINAL_MOD_BASE, bits)` that final_layer.rs:54 and convert.rs:172 both call, with no model or variant branch; quant.rs records the cost as "Keeping it packed at 8 bits costs 18.9 MB against 10.6 MB at Q4". |

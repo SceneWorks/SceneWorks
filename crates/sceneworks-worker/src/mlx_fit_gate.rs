@@ -1691,7 +1691,7 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// this class by ~29 GiB even AFTER a weight-byte correction — because the 29.88 transient ALONE exceeds
 /// 18 (75.55 − (28.43 + 18) = 29.12; the old provisional 10 under-predicted it by ~37: 75.55 −
 /// (28.43 + 10) = 37.12). So correcting only the weight bytes is INSUFFICIENT: both the in-memory weight
-/// size AND the outsized transient must be modeled for these tiers. (A blanket bf16 expansion factor
+/// size AND the outsized transient must be modeled for this bf16/MXFP4 source. (A blanket bf16 expansion factor
 /// also can't fix the weight half — a bf16 tier whose encoder is bf16-on-disk would then be
 /// over-rejected ~1.6× — so that fix needs per-family in-memory weight sizing plus a per-architecture
 /// transient term, backed by bf16 measurements across models.) Tracked in sc-11924. (2) Output
@@ -2481,6 +2481,11 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
 /// the `text_encoder*` subdir scan (which reads ZERO for boogu `mllm/`, bernini flat `t5_encoder`,
 /// anima `text_encoders/`, etc.), and folding a separate `spec.control` (qwen_image_control's VACE
 /// branch) into the HEAVY side so the staged split `rest = total − te` counts it on the DiT side.
+///
+/// sc-16014-resolution: rehosted-q4-q8. Lens q4/q8 use provider-detected MLX affine packs, so their
+/// provider footprint stays disk-derived. The bf16 artifact remains MXFP4 and receives both its
+/// measured materialization delta and the architecture-specific activation headroom. A genuinely
+/// bf16-on-disk encoder receives the same activation headroom but no invented weight expansion.
 fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, HeadroomAllowance) {
     let footprint = crate::inference_runtime::media()
         .footprint(engine_id, spec)
@@ -5508,13 +5513,10 @@ mod tests {
         assert_eq!(predicted_peak_gb(0), None);
     }
 
-    /// NOTE (sc-15799): `45.67` and `28.43` below are the THIRD copy of the lens-turbo measurement —
-    /// the other two are the `HEADROOM_GB` doc table above and the `lens_turbo` row in
-    /// `config/tier-integrity.jsonc`, which declares the 17.24 GiB mxfp4 → bf16 upcast as a
-    /// backend-capability exception. `scripts/check-tier-integrity.mjs` asserts all three numbers still
-    /// appear in THIS file, so a re-measure (sc-16014) that moves one copy and not the others fails the
-    /// `parity` lane with a message that names the reason, instead of turning this lane red for something
-    /// unrelated.
+    /// NOTE (sc-16014): these numbers remain the bf16/MXFP4 calibration; they no longer describe q4/q8,
+    /// whose re-hosted affine packs eliminated the tier-integrity exception. The ledger and this file
+    /// share the `sc-16014-resolution: rehosted-q4-q8` marker so a future artifact change must reconcile
+    /// both sources rather than reviving or erasing the exception silently.
     #[test]
     fn lens_dense_calibration_covers_the_measured_full_peak_without_blanket_inflation() {
         let gib = BYTES_PER_GIB;
@@ -5531,7 +5533,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn lens_provider_footprint_expands_only_the_dense_turnkey() {
+    fn lens_provider_footprint_distinguishes_storage_format() {
         let root = std::env::temp_dir().join(format!(
             "mlx_fit_gate_sc11924_{}_{}",
             std::process::id(),
@@ -5542,6 +5544,11 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("component dir");
             std::fs::write(dir.join("model.safetensors"), vec![0; bytes]).expect("fixture");
         }
+        std::fs::write(
+            root.join("text_encoder").join("config.json"),
+            r#"{"dtype":"bfloat16","quantization_config":{"quant_method":"mxfp4"}}"#,
+        )
+        .expect("mxfp4 marker");
         let spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
         let (dense_total, dense_te, dense_headroom) = spec_component_bytes("lens_turbo", &spec);
         let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
@@ -5554,9 +5561,28 @@ mod tests {
 
         std::fs::write(
             root.join("text_encoder").join("config.json"),
-            r#"{"quantization":{"bits":8,"group_size":64}}"#,
+            r#"{"dtype":"bfloat16"}"#,
         )
-        .expect("packed marker");
+        .expect("bf16 marker");
+        let (bf16_total, bf16_te, bf16_headroom) = spec_component_bytes("lens_turbo", &spec);
+        assert_eq!(
+            (bf16_total, bf16_te),
+            (27, 13),
+            "bf16-on-disk has no MXFP4 materialization delta"
+        );
+        assert_eq!(
+            bf16_headroom,
+            HeadroomAllowance::LENS_DENSE,
+            "the Lens activation transient remains architecture-specific even without a weight upcast"
+        );
+
+        std::fs::write(
+            root.join("text_encoder").join("config.json"),
+            // The re-hosted q4/q8 configs retain this inherited MXFP4 marker. The load-bearing MLX
+            // affine marker must win, or the fit gate would inflate the already-packed experts.
+            r#"{"quantization":{"bits":8,"group_size":64},"quantization_config":{"quant_method":"mxfp4"}}"#,
+        )
+        .expect("packed marker with inherited MXFP4 metadata");
         let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
         assert_eq!((packed_total, packed_te), (27, 13));
         assert_eq!(packed_headroom, HeadroomAllowance::GENERIC);

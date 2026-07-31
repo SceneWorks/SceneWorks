@@ -4,9 +4,9 @@
   "invariant": "No component is resident above the user's selected quant tier unless a declared, measured exception says otherwise.",
   "normativeHome": "docs/memory-strategy-contract.md#tier-integrity",
   "totals": {
-    "exceptions": 91,
-    "measured": 24,
-    "unmeasured": 67,
+    "exceptions": 89,
+    "measured": 23,
+    "unmeasured": 66,
     "entriesWithoutHostedTierVariants": 6
   },
   "entriesWithoutHostedTierVariants": [
@@ -619,26 +619,6 @@
     },
     {
       "model": "lens",
-      "component": "textEncoder",
-      "residentTier": "bf16",
-      "appliesToTiers": [
-        "q4",
-        "q8"
-      ],
-      "backends": [
-        "mlx",
-        "candle"
-      ],
-      "cause": "backend-capability",
-      "reason": "Same gpt-oss MoE encoder and the same missing mxfp4 compute path as lens_turbo; the candle lane's bring-up path loads it MXFP4 → dense bf16 with quant = None.",
-      "evidenceState": "unmeasured",
-      "costGb": null,
-      "source": "crates/media/candle-gen/candle-gen-lens/src/text_encoder.rs — \"MXFP4 → dense bf16 (quant = None): the sc-5108 bring-up path (~40 GB resident)\"",
-      "owedBy": "sc-16014",
-      "note": "~40 GB is a whole-encoder resident figure, not the isolated upcast delta, so this row is unmeasured rather than borrowing lens_turbo's 17.24."
-    },
-    {
-      "model": "lens",
       "component": "vae",
       "residentTier": "f32",
       "appliesToTiers": [
@@ -656,26 +636,6 @@
       "source": "crates/media/mlx-gen/mlx-gen-lens/src/quant.rs — \"The VAE is the shared Flux.2 decoder and is never quantized (runs f32)\"",
       "owedBy": "sc-16015",
       "note": null
-    },
-    {
-      "model": "lens_turbo",
-      "component": "textEncoder",
-      "residentTier": "bf16",
-      "appliesToTiers": [
-        "q4",
-        "q8"
-      ],
-      "backends": [
-        "mlx",
-        "candle"
-      ],
-      "cause": "backend-capability",
-      "reason": "The gpt-oss-20b MoE text encoder ships MXFP4 on disk and MLX has no mxfp4 compute path, so it is upcast to bf16 at load. No repackaging fixes this; it needs an mxfp4 compute path or a different published dtype.",
-      "evidenceState": "measured",
-      "costGb": 17.24,
-      "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs — the HEADROOM_GB calibration table (sc-10863): lens-turbo bf16 measures 28.43 GiB on disk / 45.67 GiB resident / 75.55 GiB peak; the 17.24 GiB in-memory weight expansion is resident − disk (1.61x).",
-      "owedBy": "sc-16014",
-      "note": "The bf16 tier is NOT above tier (bf16 is what the user selected), which is why appliesToTiers excludes it — but the 17.24 GiB was measured there, and it is the same upcast on every tier. The separate 29.88 GiB activation transient is not a residency exception and is out of scope for this ledger."
     },
     {
       "model": "lens_turbo",
