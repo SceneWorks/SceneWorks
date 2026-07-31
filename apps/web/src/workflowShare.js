@@ -54,27 +54,21 @@ function readBlobBytes(blob) {
   });
 }
 
-// Whether a dropped file is worth sending to `POST /api/v1/workflows/inspect`.
+// Whether a blob's first eight bytes are the PNG signature.
 //
-// This is the whole reason the drop path does not just POST whatever it was given. The endpoint
-// stages the entire body to disk BEFORE it looks at the first byte, and a scan miss is O(file) —
-// so dragging a 400 MB TIFF onto the app would upload 400 MB to be told "not a PNG". Two cheap
-// local checks close that:
+// A range read (`Blob.slice`), not a load of the file — so it costs the same on an 8 KB icon and
+// on a 700 MB scan. Deliberately says nothing about SIZE: "is this a PNG" and "would the server
+// accept it" are different questions with different consumers, and the Image Editor
+// (`editorSourceWorkflow.js`) needs the first one on files the second one refuses.
 //
-// * **The PNG signature**, read out of the first eight bytes with `Blob.slice` — a range read, not
-//   a load of the file. Only a PNG can carry the chunk at all, so anything else is rejected here
-//   and the drop stays exactly today's silent swallow.
-// * **The server's own cap**, so a file guaranteed to come back 413 is never sent.
-//
-// Anything that throws (a permission-revoked drag, an environment with no `Blob.arrayBuffer`)
-// answers `false`: an unreadable file is not a workflow candidate, and today's behaviour is the
-// correct fallback for every uncertainty on this path.
-export async function looksLikeWorkflowCandidate(file) {
+// Anything that throws (a permission-revoked drag, a runtime with neither `Blob.arrayBuffer` nor
+// `FileReader`) answers `false`: a blob nobody can read the head of is not a PNG we can vouch for.
+export async function blobIsPng(file) {
   if (!file || typeof file.slice !== "function") {
     return false;
   }
   const size = Number(file.size);
-  if (!Number.isFinite(size) || size < PNG_SIGNATURE.length || size > MAX_WORKFLOW_INSPECT_BYTES) {
+  if (!Number.isFinite(size) || size < PNG_SIGNATURE.length) {
     return false;
   }
   try {
@@ -83,6 +77,28 @@ export async function looksLikeWorkflowCandidate(file) {
   } catch {
     return false;
   }
+}
+
+// Whether a dropped file is worth sending to `POST /api/v1/workflows/inspect`.
+//
+// This is the whole reason the drop path does not just POST whatever it was given. The endpoint
+// stages the entire body to disk BEFORE it looks at the first byte, and a scan miss is O(file) —
+// so dragging a 400 MB TIFF onto the app would upload 400 MB to be told "not a PNG". Two cheap
+// local checks close that:
+//
+// * **The PNG signature** ([`blobIsPng`]). Only a PNG can carry the chunk at all, so anything else
+//   is rejected here and the drop stays exactly today's silent swallow.
+// * **The server's own cap**, so a file guaranteed to come back 413 is never sent.
+//
+// A `false` here is NOT "this file has no workflow" — it is "nobody looked". The drop path can
+// treat the two the same because its alternative is today's silent swallow; the Image Editor
+// cannot, and keeps them apart (`editorSourceWorkflow.js`).
+export async function looksLikeWorkflowCandidate(file) {
+  const size = Number(file?.size);
+  if (!Number.isFinite(size) || size > MAX_WORKFLOW_INSPECT_BYTES) {
+    return false;
+  }
+  return blobIsPng(file);
 }
 
 // ---- The envelope an already-imported asset is carrying -------------------------------------
@@ -295,6 +311,72 @@ export const ADVANCED_PREFILL = {
     label: "Reference guidance",
     prefill: PREFILL_NONE,
     detail: "A Document Studio interleave setting. Image Studio has no control for it.",
+  },
+  // The VIDEO arm (sc-15956). Every one of these travels in a shared MP4 and lands nowhere HERE,
+  // for one reason that covers all eleven: this registry drives Image Studio, and a video recipe
+  // replays in Video Studio. That is a different panel and a different story, so the honest thing
+  // for this one to say is that the setting arrived and this studio has no control for it —
+  // exactly what the four rows above say about the Detail, Character and Document lanes.
+  //
+  // They are listed individually rather than collapsed because the panel renders a LABEL per key:
+  // "videoStgGuidanceScale arrived" is not a sentence, and a shared clip whose settings show as
+  // raw camelCase reads as a bug rather than as a boundary.
+  motion: {
+    label: "Camera motion",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting. Image Studio has no camera-motion control.",
+  },
+  ltxPipeline: {
+    label: "LTX pipeline",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  distilledVariant: {
+    label: "Distilled variant",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
+  },
+  textEncoderModel: {
+    label: "Text encoder",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: which text encoder read the prompt.",
+  },
+  lightning: {
+    label: "Lightning steps",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the Wan2.2 fast four-step recipe.",
+  },
+  videoCfgGuidanceScale: {
+    label: "Video guidance",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoStgGuidanceScale: {
+    label: "Spatiotemporal guidance",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoRescaleScale: {
+    label: "Guidance rescale",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting for the LTX video model.",
+  },
+  videoConditioningStrength: {
+    label: "Clip strength",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: how strongly the source clip conditioned the result.",
+  },
+  bridgeRightVideoConditioningStrength: {
+    label: "Right-clip strength",
+    prefill: PREFILL_NONE,
+    detail: "A Video Studio setting: the second clip strength in a bridge.",
+  },
+  timelineAction: {
+    label: "Timeline action",
+    prefill: PREFILL_NONE,
+    detail:
+      "Which timeline operation made the clip. The timeline it belonged to deliberately does " +
+      "not travel, so there is nothing here to place it into.",
   },
 };
 

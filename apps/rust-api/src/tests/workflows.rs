@@ -39,6 +39,38 @@ fn image_envelope(model: &str, prompt: &str) -> WorkflowShare {
     .expect("the fixture envelope parses")
 }
 
+/// A COMPLETE, VALID video envelope — the sc-15956 marker plus every field the deserializer
+/// requires, and three video-only fields on top so the blob is unmistakably a clip's recipe.
+///
+/// Built through `parse_workflow_share_json` on purpose. The point of the fixture is that it is a
+/// record the shared parser *accepts*: a video envelope that failed to parse would pin nothing
+/// about the container gate, because the parse failure would be doing all the work. Written as a
+/// serialized `Value` rather than as a struct literal for the same reason the image fixture is —
+/// what a corrupted sidecar contains is JSON, not a Rust value.
+fn video_envelope(model: &str, prompt: &str) -> Value {
+    let json = format!(
+        r#"{{
+            "sceneworksWorkflow": "video",
+            "schemaVersion": 1,
+            "producer": {{ "name": "SceneWorks", "url": "https://example.invalid", "version": "0.8.1" }},
+            "mode": "text_to_video",
+            "model": "{model}",
+            "prompt": "{prompt}",
+            "durationSeconds": 5.0,
+            "fps": 24,
+            "quality": "balanced"
+        }}"#
+    );
+    let share = sceneworks_core::workflow_share::parse_workflow_share_json(&json)
+        .expect("the video fixture is a VALID envelope, not a malformed one");
+    assert_eq!(
+        share.kind,
+        sceneworks_core::workflow_share::WORKFLOW_KIND_VIDEO,
+        "the fixture must carry the video marker or it pins nothing"
+    );
+    serde_json::to_value(&share).expect("the video fixture serializes")
+}
+
 /// PNG bytes carrying `share` in a `sceneworks:workflow` iTXt chunk (or none at all), written
 /// through the ONE writer (sc-15947) rather than a hand-rolled chunk.
 fn sceneworks_png(temp_dir: &tempfile::TempDir, share: Option<&WorkflowShare>) -> Vec<u8> {
@@ -997,13 +1029,21 @@ async fn the_asset_route_500s_with_its_own_code_when_the_stored_envelope_no_long
         serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar reads"))
             .expect("sidecar is JSON");
     // Still an object, still under the right key, still obviously a workflow — and rejected,
-    // because the marker names a kind this build has no reader for. A record that fails at the
-    // FIRST gate rather than a blob of noise, so the 500 is the parser's verdict and not a JSON
-    // syntax error somewhere upstream of it.
+    // because the marker names a kind NO build has a reader for. A record that fails at the FIRST
+    // gate rather than a blob of noise, so the 500 is the parser's verdict and not a JSON syntax
+    // error somewhere upstream of it.
+    //
+    // The marker used to read `"video"` here, and that stopped being a first-gate failure the day
+    // sc-15956 widened `WORKFLOW_KINDS` to `image` | `video`: the fixture went on 500ing only
+    // because it omits `producer` / `model` / `prompt` and dies at deserialize, which is a status
+    // code any malformed blob earns and pins no invariant at all. `"hologram"` is a kind the
+    // parser genuinely refuses, so this test is back to asserting what its name says. The video
+    // case — a record that PARSES and is refused for naming another container — is
+    // `the_asset_route_500s_when_the_stored_envelope_names_another_container` below.
     record["extra"]["importedWorkflow"] = json!({
-        "sceneworksWorkflow": "video",
+        "sceneworksWorkflow": "hologram",
         "schemaVersion": 1,
-        "mode": "text_to_video",
+        "mode": "text_to_image",
     });
     std::fs::write(
         &sidecar,
@@ -1029,6 +1069,95 @@ async fn the_asset_route_500s_with_its_own_code_when_the_stored_envelope_no_long
         body["status"],
         json!("no_workflow"),
         "flattening this into the ordinary absent answer hides a bad record behind the user's file"
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("image itself is unaffected")),
+        "the sentence must say the picture is fine: {body}"
+    );
+}
+
+/// The container gate this route owns (sc-15956 review).
+///
+/// The record here is not corrupt in any way: it is a **complete, valid video envelope** that
+/// `parse_workflow_share` accepts without complaint — same parser, same version, every required
+/// field present. What it is not is an IMAGE recipe, and this route's response feeds
+/// `api.js::fetchAssetWorkflow` → `useWorkflowDrop.js` → `recipeFromWorkflowShare`, which builds an
+/// **Image Studio** prefill. Handing a clip's `durationSeconds` / `fps` / `quality` to that
+/// produces a fabricated image recipe for a video that was never an image — the "presented as a
+/// kind it is not" failure the marker exists to prevent.
+///
+/// Before sc-15956 the shared parser refused `"video"` outright, so this route inherited the
+/// refusal for free. Widening `WORKFLOW_KINDS` to `image` | `video` removed that inheritance from
+/// the one reader with no container of its own to check. The PNG reader asserts `image`, the MP4
+/// reader asserts `video`, and this asserts `image` because that is the lane behind it.
+///
+/// **Mutation proof.** Delete the `share.kind != WORKFLOW_KIND_IMAGE` block in
+/// `crate::workflows::get_asset_workflow` and this test fails on the FIRST assert, with a 200 and
+/// `status: "workflow"` — the route handing the web a video recipe to build an image prefill from.
+/// `assetPanels.jsx`'s `asset.type === "image"` guard does not save it: this envelope is stored on
+/// an IMAGE asset, which is exactly the shape that guard passes.
+#[tokio::test]
+async fn the_asset_route_500s_when_the_stored_envelope_names_another_container() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let _env = isolate_hf_cache();
+    let share = image_envelope("krea_2_turbo", "a lighthouse");
+    let (project_id, asset_id) = project_with_imported_image(
+        app.clone(),
+        "Wrong Container",
+        "shared.png",
+        &sceneworks_png(&temp_dir, Some(&share)),
+    )
+    .await;
+
+    let (_, project) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let sidecar = find_asset_sidecar_file(&project_path, &asset_id);
+    let mut record: Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar reads"))
+            .expect("sidecar is JSON");
+    record["extra"]["importedWorkflow"] = video_envelope("wan_2_2_vace_fun_14b", "a lighthouse");
+    std::fs::write(
+        &sidecar,
+        serde_json::to_vec_pretty(&record).expect("record serializes"),
+    )
+    .expect("sidecar writes");
+
+    let (status, body) = request(
+        app,
+        "GET",
+        &asset_workflow_route(&project_id, &asset_id),
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a VIDEO envelope must not reach the Image Studio prefill this route feeds: {body}"
+    );
+    assert_ne!(
+        body["status"],
+        json!("workflow"),
+        "answering `workflow` here hands the web a clip's recipe to prefill an image studio with"
+    );
+    assert!(
+        body["workflow"].is_null(),
+        "the envelope itself must not travel either: {body}"
+    );
+    assert_eq!(
+        body["code"],
+        json!("asset_workflow_unreadable"),
+        "same code as an unparseable record — it is the same fact about the same record: {body}"
     );
     assert!(
         body["detail"]

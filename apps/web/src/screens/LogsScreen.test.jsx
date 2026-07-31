@@ -22,7 +22,7 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { apiFetch } from "../api.js";
-import { LogsScreen } from "./LogsScreen.jsx";
+import { LogsScreen, logEntryClipboardText } from "./LogsScreen.jsx";
 import { AppContext } from "../context/AppContext.js";
 
 function row(seq, source, level, message, event) {
@@ -312,6 +312,114 @@ describe("LogsScreen", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ---- Log viewer ergonomics (#1966) ----------------------------------------
+
+  it("pins the filter panel below the topbar instead of letting it scroll away (#1966)", async () => {
+    // The real shell puts a sticky `.topbar` above the screen inside the
+    // scrolling `.workspace`, so the panel's sticky offset must clear it.
+    const topbar = document.createElement("header");
+    topbar.className = "topbar";
+    topbar.getBoundingClientRect = () => ({ height: 72 });
+    document.body.appendChild(topbar);
+    try {
+      await render();
+      const panel = container.querySelector(".logs-panel");
+      expect(panel).toBeTruthy();
+      // The stylesheet isn't loaded in jsdom, so assert the contract the CSS
+      // consumes: the measured topbar height, published as the offset var.
+      expect(panel.style.getPropertyValue("--logs-sticky-top")).toBe("72px");
+    } finally {
+      topbar.remove();
+    }
+  });
+
+  it("copies the expanded entry's event JSON to the clipboard (#1966)", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    try {
+      await render();
+      // Expand the error row, then hit its copy button.
+      const errorRow = [...container.querySelectorAll(".logs-row")].find((r) =>
+        r.textContent.includes("image_inference_failed"),
+      );
+      await act(async () => errorRow.click());
+      const copyButton = errorRow.querySelector(".logs-copy");
+      expect(copyButton).toBeTruthy();
+      await act(async () => copyButton.click());
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(
+        JSON.stringify({ event: "image_inference_failed", error: "boom" }, null, 2),
+      );
+      // The button confirms the copy rather than silently succeeding.
+      expect(errorRow.querySelector(".logs-copy").textContent).toBe("Copied");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the row expanded when the copy button is clicked (#1966)", async () => {
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: vi.fn(async () => {}) } });
+    try {
+      await render();
+      const errorRow = [...container.querySelectorAll(".logs-row")].find((r) =>
+        r.textContent.includes("image_inference_failed"),
+      );
+      await act(async () => errorRow.click());
+      await act(async () => errorRow.querySelector(".logs-copy").click());
+      // The click must not bubble to the row's expand/collapse toggle, or the
+      // detail — and the button itself — would vanish out from under the click.
+      expect(errorRow.querySelector(".logs-detail")).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports a failed clipboard write instead of claiming success (#1966)", async () => {
+    // Both paths unavailable: no navigator.clipboard, and execCommand refuses.
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    const execCommand = vi.fn(() => false);
+    document.execCommand = execCommand;
+    try {
+      await render();
+      const errorRow = [...container.querySelectorAll(".logs-row")].find((r) =>
+        r.textContent.includes("image_inference_failed"),
+      );
+      await act(async () => errorRow.click());
+      await act(async () => errorRow.querySelector(".logs-copy").click());
+      expect(errorRow.querySelector(".logs-copy").textContent).toContain("Couldn");
+    } finally {
+      delete document.execCommand;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("offers a copy button for entries with no parsed event, using the raw line (#1966)", async () => {
+    logRows = [{ seq: 7, source: "api", level: "info", timestamp: "2026-06-07T01:02:07Z", message: "plain line", raw: "plain line" }];
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    try {
+      await render();
+      const row = container.querySelector(".logs-row");
+      await act(async () => row.click());
+      const copyButton = row.querySelector(".logs-copy");
+      expect(copyButton).toBeTruthy();
+      await act(async () => copyButton.click());
+      expect(writeText).toHaveBeenCalledWith("plain line");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("prefers the structured event over the raw line when building clipboard text (#1966)", () => {
+    expect(logEntryClipboardText({ event: { event: "tick" }, raw: "tick raw" })).toBe(
+      JSON.stringify({ event: "tick" }, null, 2),
+    );
+    expect(logEntryClipboardText({ raw: "tick raw", message: "tick" })).toBe("tick raw");
+    expect(logEntryClipboardText({ message: "only message" })).toBe("only message");
+    expect(logEntryClipboardText(null)).toBe("");
   });
 
   it("backs off the poll after consecutive failures and resets to 2s cadence on success (sc-11224)", async () => {

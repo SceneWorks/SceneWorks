@@ -463,16 +463,15 @@ against the old staged+windowed generation must not validate resident+deferred r
   selection→controls site reads rung-1 engagement and no shipping behavior changes. **SC-15806** —
   which request-scopes rung 1 — is what makes this rule observable.
 
-  **Evidence consequence (SC-15994).** Engagement semantics are part of what a phase curve measured,
-  even though the current evidence key records only the selected rung. Krea Turbo's
+  **Evidence consequence (SC-15994, resolved by SC-16211).** Engagement semantics are part of what a
+  phase curve measured. Evidence keys and generated summaries now preserve the exact ordered engaged
+  composition. Krea Turbo's
   `tiledVae` and `chunkedAttention` curves for q4, q8, and bf16 were captured cumulatively with
   `StagedResidency` active. After rung 1's exclusion, `BoundedDecode` and `BoundedAttention` execute
   without that staged composition, so those six rows cannot authorize their predicted peaks. The
-  manifest keeps the captures as historical provenance but changes its catalog fingerprint away from
-  the provider's v1 declaration; the worker therefore returns `FingerprintMismatch` instead of a fit.
-  Because the fingerprint is catalog-wide, this conservatively invalidates every Krea Turbo phase
-  curve until SC-15913 recaptures the affected rows. SC-16211 owns the general contract change to key
-  evidence by its measured engaged composition and reject composition mismatches directly.
+  manifest keeps the captures as historical provenance with per-rung `measuredCompositions`; the
+  worker returns `CompositionMismatch` instead of a fit for the six affected rows. Three-stage and
+  streamed-block evidence still matches and no longer needs blanket fingerprint invalidation.
 - `validate_selected_parameters` and `select_strategy` needed no behavioural change, as predicted.
   *Other* sites that derived engagement from the enum's cost order were routed through the new seam.
   Two spellings of the same hazard had to be swept, not one:

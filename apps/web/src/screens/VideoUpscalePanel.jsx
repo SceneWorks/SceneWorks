@@ -37,7 +37,11 @@ export function VideoUpscalePanel({
   const targetLabel = srcW && srcH ? `${srcW * factor} × ${srcH * factor}` : null;
   const canSubmit = Boolean(sourceAssetId) && !block && !submitting;
 
-  const onUpscale = async () => {
+  // A `function` declaration rather than an arrow: this is the video lane's `buildUpscaleJobBody`
+  // — the one place a `video_upscale` knob would be added — and it is registered in
+  // `ADVANCED_BUILDERS` as posting NO `advanced` map, so the coverage lint reads its body by name
+  // (sc-15956 review). The lint's locator needs `function onUpscale`.
+  async function onUpscale() {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
@@ -55,7 +59,7 @@ export function VideoUpscalePanel({
     } finally {
       setSubmitting(false);
     }
-  };
+  }
 
   return (
     <aside className="upscale-card" data-testid="video-upscale-panel">

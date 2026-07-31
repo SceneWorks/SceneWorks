@@ -7,7 +7,7 @@
 //! was the only one — it was not); and [`no_value_in_a_built_envelope_is_path_shaped`] seeds the
 //! request with paths on purpose and asserts none of them reach the file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,9 +17,10 @@ use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
     advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
     parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
-    AdvancedKeySource, WorkflowAssetFacts, WorkflowShare, ADVANCED_BUILDERS, ADVANCED_KEY_RULES,
-    DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, PRODUCER_URL, PRODUCER_VERSION,
-    WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
+    AdvancedKeySource, SeamDisposition, WebBuilderRef, WorkflowAssetFacts, WorkflowShare,
+    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION,
+    PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
+    WORKFLOW_WRITE_SEAMS,
 };
 use serde_json::{json, Value};
 
@@ -1961,34 +1962,725 @@ fn no_legitimate_envelope_comes_close_to_the_recording_ceiling() {
 /// would embed a chunk our own reader then refuses with `TooLarge`, which is the writer-and-reader
 /// drift every guard in `workflow_share.rs` is arranged to prevent. Pinned as source structure
 /// because `sceneworks-worker` depends on this crate and cannot be inspected any other way.
+///
+/// sc-16113 replaced this test's hard-coded four-file list with the DISCOVERED seams, so a fifth
+/// file calling the ungated builder is no longer invisible to it.
 #[test]
 fn every_write_seam_embeds_through_the_gated_builder() {
-    for relative in [
-        "crates/sceneworks-worker/src/image_jobs.rs",
-        "crates/sceneworks-worker/src/image_jobs/detail.rs",
-        "crates/sceneworks-worker/src/upscale_jobs.rs",
-        "crates/sceneworks-worker/src/single_child_asset.rs",
-    ] {
-        let source = read_repo_file(relative);
-        // Only the code: the prose in these files names the function it does not call.
-        let code: String = source
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
-            .collect::<Vec<&str>>()
-            .join("\n");
-        assert!(
-            !code.contains("build_workflow_share_from("),
-            "{relative} builds an embedded envelope with `build_workflow_share_from`, which does \
-             not run the recording ceiling. Call `embeddable_workflow_share` and treat `None` as \
-             `write the file exactly as today`."
-        );
+    let sources = worker_sources();
+    let seams = discover_workflow_seams(&sources);
+    let ungated = ["build_workflow_share_from", "build_workflow_share"];
+    let mut checked = 0usize;
+    for seam in &seams {
+        for name in ungated {
+            assert!(
+                !seam.calls.iter().any(|call| call == name),
+                "{}::{} builds an embedded envelope with `{name}`, which does not run the \
+                 recording ceiling. Call `embeddable_workflow_share` and treat `None` as `write \
+                 the file exactly as today`.",
+                seam.path,
+                seam.function
+            );
+        }
+        checked += 1;
     }
-    let worker = read_repo_file("crates/sceneworks-worker/src/image_jobs.rs");
     assert!(
-        worker.contains("embeddable_workflow_share("),
+        checked >= 8,
+        "only {checked} worker seams were checked — the discovery scan lost the crate it is \
+         supposed to sweep, so this is not protecting anything"
+    );
+    assert!(
+        seams.iter().any(|seam| seam
+            .calls
+            .iter()
+            .any(|call| call == "embeddable_workflow_share")),
         "the worker stopped building envelopes through the gated builder"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The worker write-seam lint (sc-16113)
+// ---------------------------------------------------------------------------
+
+/// The core entry points through which a `WorkflowShare` reaches a FILE, with the reason each one
+/// is on the write side.
+///
+/// A list, but not one a human maintains silently: [`the_core_workflow_surface_is_classified`]
+/// asserts every name here still exists as a `pub fn` in the file it names, AND that every `pub fn`
+/// in the four `workflow_*` modules whose signature mentions `WorkflowShare` is in this list or in
+/// [`WORKFLOW_READ_SURFACE`]. A new core entry point is therefore a decision, not an omission —
+/// which is the same property [`ADVANCED_BUILDERS`] has, applied to the Rust side.
+const WORKFLOW_WRITE_SURFACE: &[(&str, &str, &str)] = &[
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_workflow_share",
+        "Builds an envelope from a sidecar asset. Ungated — no recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_workflow_share_from",
+        "Builds an envelope from per-image facts. Ungated — no recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "embeddable_workflow_share",
+        "The gated builder: the one form that runs the recording ceiling, and the one a write \
+         seam must call.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "build_video_workflow_share_from",
+        "Builds a VIDEO envelope from per-clip facts. Ungated — no recording ceiling (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "embeddable_video_workflow_share",
+        "The gated VIDEO builder: the one video form that runs the recording ceiling, and the one \
+         a video write seam must call.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "write_workflow_chunk",
+        "Writes the PNG, with the envelope in an iTXt chunk — and its A1111 `parameters` rendering \
+         beside it — when one is handed in.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_parameters.rs",
+        "parameters_text",
+        "Renders the envelope as the A1111 `parameters` text a third-party gallery displays \
+         (sc-15957). A second rendering of already-sanitized data, and the only thing that decides \
+         what the second chunk says.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "ffmetadata_document",
+        "Encodes the envelope as the `ffmetadata` document ffmpeg muxes into an MP4's `comment` \
+         tag (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "write_workflow_metadata_file",
+        "Writes that document to disk for ffmpeg to read — the MP4 lane's `write_workflow_chunk`.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "workflow_metadata_size",
+        "Measures an envelope's encoded size in an MP4's tag store.",
+    ),
+];
+
+/// The core entry points that READ an envelope, listed so the completeness half of
+/// [`the_core_workflow_surface_is_classified`] has somewhere to put them.
+///
+/// A reader is not a seam: `read_workflow_chunk_file` in the import path or a test says nothing
+/// about which lane's `advanced` map travels. Splitting them out is what keeps the discovery scan
+/// from flagging every call site of the reader as an unclassified write.
+const WORKFLOW_READ_SURFACE: &[(&str, &str, &str)] = &[
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "parse_workflow_share",
+        "Reads an envelope back out of a `Value`.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "parse_workflow_share_json",
+        "Reads an envelope back out of chunk text.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "read_workflow_chunk",
+        "Reads the chunk out of PNG bytes.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "read_workflow_chunk_file",
+        "Reads the chunk out of a PNG on disk.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "workflow_chunk_size",
+        "Measures an envelope's encoded size for the recording ceiling.",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "parameters_chunk_size",
+        "Measures the A1111 chunk's encoded size, so the per-image cost of sc-15957 is a measured \
+         number. Writes nothing (sc-15957).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata",
+        "Reads the envelope out of MP4 bytes (sc-15956).",
+    ),
+    (
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "read_workflow_metadata_file",
+        "Reads the envelope out of an MP4 on disk, without buffering `mdat`.",
+    ),
+];
+
+/// Both halves of the core surface are declared, and nothing in core has slipped between them.
+#[test]
+fn the_core_workflow_surface_is_classified() {
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    for (path, function, reason) in WORKFLOW_WRITE_SURFACE
+        .iter()
+        .chain(WORKFLOW_READ_SURFACE.iter())
+    {
+        assert!(
+            reason.len() > 20,
+            "the surface entry for `{function}` needs a real reason"
+        );
+        let stripped = rust_scannable(&read_repo_file(path));
+        assert!(
+            rust_fn_spans(&stripped)
+                .iter()
+                .any(|item| item.name == *function),
+            "`{function}` is declared on the workflow surface but {path} no longer defines it — a \
+             surface list pointing at nothing classifies nothing"
+        );
+        assert!(
+            declared.insert((*function).to_owned()),
+            "`{function}` is on the workflow surface twice"
+        );
+    }
+
+    // The completeness half: nothing in those modules handles a `WorkflowShare` in public without
+    // being classified as read or write. This is what stops a new core entry point from becoming a
+    // write seam nobody's discovery scan looks for.
+    //
+    // It found nothing at all until sc-15957, and the reason is worth recording rather than quietly
+    // fixing. `RustFn::signature_start` is the offset of the `fn` KEYWORD, so the slice below has
+    // never begun with a visibility modifier — `signature.contains("pub fn")` was false for every
+    // function in the tree, and the loop `continue`d on all of them. A lint that reads zero items
+    // and passes is the exact failure mode this file's own registry doctrine exists to prevent, and
+    // it was sitting inside the test that enforces it. Publicity is read off the text BEFORE the
+    // keyword now, which is where it lives.
+    let mut examined = 0usize;
+    for path in [
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "crates/sceneworks-core/src/workflow_png.rs",
+        "crates/sceneworks-core/src/workflow_mp4.rs",
+        "crates/sceneworks-core/src/workflow_parameters.rs",
+    ] {
+        let stripped = rust_scannable(&read_repo_file(path));
+        for item in rust_fn_spans(&stripped) {
+            let signature = &stripped[item.signature_start..item.body_start];
+            if !is_public_fn(&stripped, item.signature_start)
+                || !signature.contains("WorkflowShare")
+            {
+                continue;
+            }
+            examined += 1;
+            assert!(
+                declared.contains(&item.name),
+                "{path} exposes `{}`, whose signature handles a `WorkflowShare`, and neither \
+                 `WORKFLOW_WRITE_SURFACE` nor `WORKFLOW_READ_SURFACE` classifies it. A new public \
+                 entry point that BUILDS or WRITES an envelope has to join the write surface, or \
+                 `every_worker_write_seam_declares_the_lane_it_embeds_for` will not look for its \
+                 call sites; one that only READS one goes on the read surface.",
+                item.name
+            );
+        }
+    }
+    // The floor against the check going blind again. Every declared entry is a `pub fn` naming a
+    // `WorkflowShare`, so the scan must have found at least as many as are declared; anything less
+    // means it stopped recognizing them.
+    assert!(
+        examined >= declared.len(),
+        "the public-surface scan saw {examined} functions handling a `WorkflowShare` but \
+         {} are declared — the scan has gone blind, which is how this half of the test passed \
+         while checking nothing",
+        declared.len()
+    );
+}
+
+/// Whether the `fn` at `signature_start` is declared `pub` (and not `pub(crate)` / `pub(super)`).
+///
+/// Read from the text preceding the keyword on the same line, because that is where a visibility
+/// modifier is. Handles `pub fn`, `pub const fn`, `pub async fn` and `pub unsafe fn` — everything
+/// between `pub` and `fn` is a keyword, never an identifier, so the whole prefix is checked rather
+/// than only its first word.
+fn is_public_fn(stripped: &str, signature_start: usize) -> bool {
+    let line_start = stripped[..signature_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let prefix = stripped[line_start..signature_start].trim_start();
+    // `pub(crate)` is not public surface, and its prefix starts `pub(` rather than `pub `.
+    prefix.starts_with("pub ")
+}
+
+/// **The gate the deferral list only claimed to be** (sc-16113).
+///
+/// # The bug this closes
+///
+/// `DEFERRED_ADVANCED_BUILDERS` said, in its own doc comment, that "nothing about a video lane can
+/// start embedding while its keys sit in this list". Nothing did.
+/// `every_advanced_builder_in_the_web_app_is_accounted_for` accepts membership in EITHER registry,
+/// and this test's previous form read four hard-coded worker files. Adding a
+/// `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
+/// `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left all 46 tests here green while every
+/// one of `VideoStudio.jsx`'s ~15 unclassified keys was silently dropped from the file.
+///
+/// # Exactly what it proves
+///
+/// * **Discovery, not enumeration.** Every `.rs` file under `crates/sceneworks-worker/src` is
+///   walked. A function is a seam if its body NAMES something on [`WORKFLOW_WRITE_SURFACE`] —
+///   called or taken as a value — or names a worker function that carries a `WorkflowShare` in its
+///   own signature, or carries one itself. `use … as …` renames of those names are resolved first,
+///   so a file that imports the writer under another name is not a file the lint is asleep for.
+///   That closure is what reaches `upscale_jobs.rs` and `segment_jobs.rs` through
+///   `write_single_child_asset` without either being named anywhere. A brand-new worker file with
+///   an embedding call is caught the moment it appears
+///   ([`a_brand_new_worker_file_with_an_embedding_call_is_discovered`],
+///   [`a_renamed_import_of_the_write_surface_is_resolved`],
+///   [`the_write_surface_taken_as_a_value_is_still_discovered`]).
+/// * **Every seam is declared, exactly once.** A discovered seam with no
+///   [`WORKFLOW_WRITE_SEAMS`] entry fails, naming the file and the function. Two same-named
+///   functions in one file fail too, because the registry joins on `(path, function)` and the
+///   second would otherwise inherit the first's declaration
+///   ([`two_same_named_seams_in_one_file_fail_the_build`]).
+/// * **A declared lane may not be deferred.** A [`SeamDisposition::Embeds`] entry names the web
+///   builders that feed it; one that resolves into [`DEFERRED_ADVANCED_BUILDERS`] fails, naming
+///   the seam, the lane and the builder. That is the enforcement the doc comment now describes
+///   ([`a_seam_that_embeds_for_a_deferred_builder_fails_the_build`]).
+/// * **Declining is not a dodge, whatever the envelope's provenance.** The disposition is checked
+///   POSITIVELY against the source. [`SeamDisposition::Declines`] requires that the seam calls
+///   `write_workflow_chunk` with nothing but a literal `None`, never names `WorkflowShare` in its
+///   body, never accepts one through its signature, and fills every share-carrying field with
+///   `None` — by initializer, by `x.field = ..` assignment, or in shorthand. So a seam that got
+///   its envelope from a parse, a clone or a `from_value::<WorkflowShare>` and wrote it on is
+///   embedding, and flips to a failure rather than staying quiet
+///   ([`a_declining_seam_that_writes_a_carried_envelope_fails_the_build`],
+///   [`a_share_assigned_onto_a_field_after_a_none_initializer_is_read`],
+///   [`a_parsed_envelope_written_on_is_seen_as_embedding`]).
+/// * **The other two dispositions say something true.** [`SeamDisposition::Conduit`] requires that
+///   it accepts a share, reaches a writer, and sources none of its own; a carrier that reaches no
+///   writer is [`SeamDisposition::Inert`] instead, so "writes an envelope its caller built" is
+///   never written about a function that writes nothing
+///   ([`a_conduit_that_writes_nothing_fails_the_build`]).
+/// * **Both directions.** A registry entry whose function no longer touches an envelope fails as a
+///   stale claim, and every [`ADVANCED_BUILDERS`] entry must be named by some embedding seam — a
+///   builder classified *because its lane embeds* with no seam behind it is a claim nobody is
+///   maintaining.
+///
+/// # What it does NOT prove
+///
+/// Re-derived after the sc-16113 review, which found three working evasions that this list did not
+/// mention — two of them worse than anything it did. Those three are closed above; what is left is
+/// what is left.
+///
+/// * **That a seam's declared builder list is the whole truth.** The mapping is an explicit
+///   declaration, because a Rust write seam has no inherent knowledge of which web builder feeds
+///   it and every inference available (the job type, the file's directory) fails open. An author
+///   who declares a video seam as embedding for `buildImageJobAdvanced` has written a false
+///   statement into a public registry next to prose describing the lane; the lint cannot tell, and
+///   review is what catches it. **This is the biggest hole, and it is deliberate**: what the lint
+///   guarantees is that the statement had to be written at all, and that the honest version of it
+///   fails the build.
+/// * **That an envelope reaching a seam through a Rust `type` ALIAS is seen.** `use … as …` is
+///   resolved; `type Ws = WorkflowShare; fn f() -> Option<Ws>` is not, and would not register as a
+///   carrier. The same goes for a share reached only through a generic parameter or a trait
+///   object, and for a writer reached through a macro that pastes the name together.
+/// * **That an `Inert` or `Conduit` claim survives an indirection the scan cannot follow.** Both
+///   are checked on the names the body mentions. A helper that reaches a writer through a `dyn`
+///   call or a trait method could be declared inert and pass.
+/// * **Anything about seams outside `crates/sceneworks-worker/src`.** `apps/rust-api` writes
+///   chunks in its own tests; the product write path is the worker's.
+/// * The macOS-gated `image_jobs/detail.rs` is `include!`d rather than a `mod`, and this scan is
+///   TEXTUAL, so that seam is read on every platform — the same reason the old form could list it
+///   as a plain path. Test-only code is excluded by name (`tests.rs`, `tests/`) and by stripping
+///   `#[cfg(test)]` items, so a fixture in a `mod tests` is not a product seam.
+#[test]
+fn every_worker_write_seam_declares_the_lane_it_embeds_for() {
+    let sources = worker_sources();
+    assert!(
+        sources.len() >= 80,
+        "only {} worker source files were walked — the discovery scan lost the crate it is \
+         supposed to sweep, so it is not protecting anything",
+        sources.len()
+    );
+    let seams = discover_workflow_seams(&sources);
+    assert_declared_seams(&seams);
+
+    // The floor and the anchors: a scan that has quietly stopped understanding Rust reports no
+    // seams and passes, which is the failure mode this whole registry exists to prevent.
+    assert!(
+        seams.len() >= 8,
+        "only {} worker seams were discovered — the scan no longer understands the crate",
+        seams.len()
+    );
+    for anchor in [
+        "write_image_asset",
+        "write_single_child_asset",
+        "run_image_segment_job",
+        "run_image_upscale_job",
+        "run_image_detail_job",
+    ] {
+        assert!(
+            seams.iter().any(|seam| seam.function == anchor),
+            "the discovery scan missed the known seam `{anchor}`, so this lint is not protecting \
+             anything"
+        );
+    }
+
+    // The other direction: a registry entry nobody can find is as much a failure as an undeclared
+    // seam — it is how a stale declaration keeps excusing a seam that has moved.
+    for entry in WORKFLOW_WRITE_SEAMS {
+        assert!(
+            seams
+                .iter()
+                .any(|seam| seam.path == entry.path && seam.function == entry.function),
+            "`WORKFLOW_WRITE_SEAMS` declares {}::{} but the discovery scan finds no function there \
+             that touches a `WorkflowShare` any more — drop the entry or fix the path/name",
+            entry.path,
+            entry.function
+        );
+        assert!(
+            entry.lane.len() > 20,
+            "the seam entry for {}::{} needs a real `lane` — it is what tells the next author \
+             which product surface those builders sit behind",
+            entry.path,
+            entry.function
+        );
+    }
+
+    // And every registered builder is behind some embedding seam. A builder is in
+    // `ADVANCED_BUILDERS` because its lane embeds; if no seam names it, that reason has expired.
+    for builder in ADVANCED_BUILDERS {
+        assert!(
+            WORKFLOW_WRITE_SEAMS
+                .iter()
+                .any(|entry| match entry.disposition {
+                    SeamDisposition::Embeds(refs) =>
+                        refs.iter().any(|reference| reference.path == builder.path
+                            && reference.function == builder.function),
+                    _ => false,
+                }),
+            "`ADVANCED_BUILDERS` registers {} in {} — which means its keys are classified because \
+             its lane EMBEDS — but no `WORKFLOW_WRITE_SEAMS` entry names it. Either a seam lost \
+             the reference or the lane stopped embedding, in which case the entry belongs in \
+             `DEFERRED_ADVANCED_BUILDERS`.",
+            builder.function,
+            builder.path
+        );
+    }
+}
+
+/// Nothing on the core write surface is called in the worker where the scan cannot see it.
+///
+/// The counterpart to the floor and the anchors, and the one that answers "what if the blanking
+/// eats too much?". Every call to a [`WORKFLOW_WRITE_SURFACE`] function in the whole crate is found
+/// in a source that has only comments and literals removed, and each one must then either
+///
+/// * survive `#[cfg(test)]` blanking and land inside a function
+///   [`every_worker_write_seam_declares_the_lane_it_embeds_for`] declared — so a product call site
+///   the seam scan does not own fails here; or
+/// * lie INSIDE a region [`blank_test_only_items_with_spans`] removed, and that region must
+///   actually be a test item — so blanking that ran past its own item and swallowed product code
+///   fails here rather than making a seam quietly disappear.
+///
+/// The containment form matters: keying the rescue on a `#[test]` appearing textually BETWEEN the
+/// attribute and the call failed the build on the ordinary house layout, where a fixture sits
+/// above the first `#[test]` in a `#[cfg(test)] mod tests`. Eighty-four worker files use inline
+/// test modules, so that false positive was aimed at the team rather than at a bug.
+#[test]
+fn no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan() {
+    let sources = worker_sources();
+    let seams = discover_workflow_seams(&sources);
+    let mut product = 0usize;
+    for (path, source) in &sources {
+        let light = blank_comments_and_literals(source);
+        let (full, blanked) = blank_test_only_items_with_spans(&light);
+        let spans = rust_fn_spans(&full);
+        // Rename imports resolved the same way discovery resolves them, so this net cannot be
+        // switched off by the shape it exists to catch.
+        let aliases = import_aliases(&full);
+        for (_, canonical, _) in WORKFLOW_WRITE_SURFACE {
+            let mut names = vec![(*canonical).to_owned()];
+            names.extend(
+                aliases
+                    .iter()
+                    .filter(|(_, original)| original == canonical)
+                    .map(|(alias, _)| alias.clone()),
+            );
+            for name in &names {
+                for offset in call_sites(&light, name) {
+                    if !full[offset..].starts_with(name.as_str()) {
+                        let span = blanked
+                            .iter()
+                            .find(|(start, end)| offset >= *start && offset < *end)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{path}: the scan dropped a call to `{name}` that no \
+                                     `#[cfg(test)]` item covers — the blanking is eating product \
+                                     code"
+                                )
+                            });
+                        assert!(
+                            blanked_span_is_one_whole_item(&light[span.0..span.1]),
+                            "{path}: the scan dropped a call to `{name}` inside a `#[cfg(test)]` \
+                             region whose braces do not balance — that blanking ran past its own \
+                             item and is hiding product code from the seam scan"
+                        );
+                        continue;
+                    }
+                    let owner = innermost_owner(&spans, offset)
+                        .map(|(_, span)| span)
+                        .unwrap_or_else(|| {
+                            panic!("{path} calls `{name}` outside any function the scan can read")
+                        });
+                    assert!(
+                        seams
+                            .iter()
+                            .any(|seam| seam.path == *path && seam.function == owner.name),
+                        "{path}::{} calls `{name}` and the seam scan did not report it — the \
+                         discovery layers no longer reach it, so a lane could embed unmapped",
+                        owner.name
+                    );
+                    product += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        product >= 6,
+        "only {product} product call sites of the core write surface were found in the worker — \
+         the scan has stopped reading the crate"
+    );
+}
+
+/// A blanked `#[cfg(test)]` region is ONE WHOLE item and nothing after it.
+///
+/// The independent structural check on the blanking, and the only one it needs now that the spans
+/// are exact. A runaway — the historical bug, where `#[cfg(test)] probe_scans: u64,` ran on to the
+/// next `{` and swallowed the `impl` after it — starts inside a struct and therefore closes a
+/// brace it never opened. Balanced braces that never dip below zero say the region began and ended
+/// at the same nesting level, which one item does and a runaway does not.
+///
+/// Deliberately NOT "does it contain a `#[test]`". That reading failed the build on a standalone
+/// `#[cfg(test)] fn generic_fixture(..)` and on a `#[cfg(test)] impl`, neither of which carries a
+/// test attribute of its own and both of which are ordinary scaffolding.
+fn blanked_span_is_one_whole_item(item: &str) -> bool {
+    let mut depth = 0i32;
+    for byte in item.bytes() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// A brand-new worker file with an embedding call is discovered, with no list to add it to.
+///
+/// The proof for "seam discovery is not a hard-coded file list", run against the scanner itself so
+/// it cannot rot: `probe_video_jobs.rs` exists nowhere in the tree.
+#[test]
+fn a_brand_new_worker_file_with_an_embedding_call_is_discovered() {
+    let sources = vec![(
+        "crates/sceneworks-worker/src/video_jobs/probe_video_jobs.rs".to_owned(),
+        r#"
+fn write_probe_frame(img: &image::RgbImage, path: &Path) -> WorkerResult<()> {
+    let share = embeddable_workflow_share(&facts, &payload);
+    write_workflow_chunk(img, path, share.as_ref()).map_err(other)
+}
+"#
+        .to_owned(),
+    )];
+    let seams = discover_workflow_seams(&sources);
+    assert_eq!(seams.len(), 1);
+    assert_eq!(seams[0].function, "write_probe_frame");
+    assert!(seams[0].constructs, "it calls the gated builder");
+}
+
+#[test]
+#[should_panic(expected = "no `WORKFLOW_WRITE_SEAMS` entry")]
+fn an_undeclared_seam_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/video_jobs/seedvr2.rs".to_owned(),
+        function: "append_seedvr2_frames".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A declared seam whose builder is still deferred fails, naming the registry.
+///
+/// **Re-pointed by sc-15956**, exactly as sc-16113 predicted it would have to be. This test used
+/// `VideoStudio.jsx::submit` as its deferred example; sc-15956 promoted that builder into
+/// `ADVANCED_BUILDERS` — which is what the whole gate was built to force — so the mutation stopped
+/// panicking and the proof turned into a "did not panic as expected" failure.
+///
+/// The example is now `trainingConfig.js::trainingConfigSnapshot`, the PERMANENT exemption, and
+/// that is a better anchor than the one it replaces: a story-owned deferral is by definition
+/// temporary, so any test hard-coding one has an expiry date. This one does not — a permanent
+/// exemption only leaves `DEFERRED_ADVANCED_BUILDERS` if a training write seam appears, at which
+/// point its own entry says the whole classification has to be redone anyway.
+///
+/// What is proved is unchanged: SOME deferred builder is refused, and the message names the
+/// registry so the next author knows where to look.
+#[test]
+#[should_panic(expected = "DEFERRED_ADVANCED_BUILDERS")]
+fn a_seam_that_embeds_for_a_deferred_builder_fails_the_build() {
+    assert_embedded_builders_are_registered(
+        "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        "append_seedvr2_frames",
+        "the SeedVR2 video lane",
+        &[WebBuilderRef {
+            path: "apps/web/src/training/trainingConfig.js",
+            function: "trainingConfigSnapshot",
+        }],
+    );
+}
+
+/// And the deferral list still HAS an entry to point that test at.
+///
+/// The companion to the re-pointing above: `a_seam_that_embeds_for_a_deferred_builder_fails_the_build`
+/// is only a proof while some builder is deferred, and an empty registry would turn it into a test
+/// that panics for the wrong reason. sc-15956 emptied the list of everything except the permanent
+/// exemption, so this is the floor that says so out loud.
+#[test]
+fn the_deferral_registry_still_has_something_in_it() {
+    assert!(
+        !DEFERRED_ADVANCED_BUILDERS.is_empty(),
+        "`DEFERRED_ADVANCED_BUILDERS` is empty, so \
+         `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` has no example left to \
+         mutate. If the last entry really has been classified, that test needs a different \
+         construction — not a stale reference to a builder nobody defers."
+    );
+}
+
+/// A builder nobody declared at all is not a way in either.
+#[test]
+#[should_panic(expected = "neither")]
+fn a_seam_that_embeds_for_an_unknown_builder_fails_the_build() {
+    assert_embedded_builders_are_registered(
+        "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        "append_seedvr2_frames",
+        "the SeedVR2 video lane",
+        &[WebBuilderRef {
+            path: "apps/web/src/screens/ProbeStudio.jsx",
+            function: "submit",
+        }],
+    );
+}
+
+/// Declining is checked against the source, so it cannot be used to dodge classification.
+#[test]
+#[should_panic(expected = "declares that it writes no envelope")]
+fn a_declining_seam_that_builds_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        // The real declining seam, mutated to build an envelope while keeping its declaration.
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is passing a share into a field while still calling it a decline.
+#[test]
+#[should_panic(expected = "hands a workflow")]
+fn a_declining_seam_that_hands_a_share_on_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        calls: vec!["write_single_child_asset".to_owned()],
+        share_field_values: vec!["Some".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is writing a chunk with an envelope that came from somewhere else entirely.
+///
+/// The provenance-blind half (sc-16113). Nothing here BUILDS: `constructs` is false, no builder is
+/// called, no share-carrying field is filled. The envelope was parsed out of another file — which
+/// is the likeliest shape of sc-15956 and exactly what sc-15954 did for the editor export — and
+/// the only thing that catches it is reading the chunk writer's own argument.
+#[test]
+#[should_panic(expected = "not the literal `None`")]
+fn a_declining_seam_that_writes_a_carried_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        writes_a_share_chunk: true,
+        calls: vec!["write_workflow_chunk".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// ... and neither is a body that gets hold of one without writing it here.
+#[test]
+#[should_panic(expected = "gets hold of one")]
+fn a_declining_seam_that_parses_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/segment_jobs.rs".to_owned(),
+        function: "run_image_segment_job".to_owned(),
+        obtains_an_envelope: true,
+        calls: vec!["write_single_child_asset".to_owned()],
+        share_field_values: vec!["None".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A conduit that starts building its own envelope stops being a conduit.
+#[test]
+#[should_panic(expected = "gets hold of one itself")]
+fn a_conduit_that_builds_an_envelope_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/single_child_asset.rs".to_owned(),
+        function: "write_single_child_asset".to_owned(),
+        constructs: true,
+        carrier: true,
+        obtains_an_envelope: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// A conduit that reaches no writer is inert, and saying "writes an envelope its caller built"
+/// about it would be a false sentence in the registry (sc-16113).
+#[test]
+#[should_panic(expected = "calls nothing that reaches a write")]
+fn a_conduit_that_writes_nothing_fails_the_build() {
+    assert_declared_seams(&[WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/single_child_asset.rs".to_owned(),
+        function: "write_single_child_asset".to_owned(),
+        carrier: true,
+        ..WorkflowSeamSite::default()
+    }]);
+}
+
+/// Two functions of the same name in one file cannot share one declaration.
+///
+/// The registry joins on `(path, function)`. A second `write_image_asset` in `image_jobs.rs`
+/// embedding for the video lane inherited the first one's entry and passed every test.
+#[test]
+#[should_panic(expected = "can only describe one of them")]
+fn two_same_named_seams_in_one_file_fail_the_build() {
+    let seam = WorkflowSeamSite {
+        path: "crates/sceneworks-worker/src/image_jobs.rs".to_owned(),
+        function: "write_image_asset".to_owned(),
+        constructs: true,
+        obtains_an_envelope: true,
+        writes_a_share_chunk: true,
+        calls: vec!["embeddable_workflow_share".to_owned()],
+        ..WorkflowSeamSite::default()
+    };
+    assert_declared_seams(&[seam.clone(), seam]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2736,6 +3428,29 @@ fn emitted_keys(builder: &AdvancedBuilder, source: &str) -> BTreeSet<String> {
             );
             (BTreeSet::new(), Vec::new())
         }
+        // The video builders' shape (sc-15956): an `advanced:` literal WITH conditional spreads,
+        // in a payload handed to a call rather than returned. `FlatAdvancedLiteral` refuses a
+        // spread and `ReturnedObject` looks for a `return {`, so neither could read these.
+        AdvancedBuilderShape::SpreadAdvancedLiteral => {
+            let at = body
+                .find("advanced:")
+                .unwrap_or_else(|| panic!("{what} no longer carries an `advanced:` literal"));
+            let literal = object_literal_body(body, at + "advanced:".len(), &what);
+            let (keys, spreads) = scan_object_literal(&literal, &what, true);
+            let declared: BTreeSet<String> = builder
+                .spread_of
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(
+                spreads, declared,
+                "{what} spreads {spreads:?} into its `advanced` literal, but its registry entry \
+                 declares `spread_of: {declared:?}`. A spread nobody declared is a whole set of \
+                 keys this lint cannot see — either point `spread_of` at it and register the \
+                 builder that produces those keys, or stop spreading it."
+            );
+            (keys, vec![at])
+        }
     };
     refuse_unread_advanced_signals(body, &what, builder, &signals, &consumed);
     keys
@@ -2971,8 +3686,13 @@ fn scan_object_literal(
     let chars: Vec<char> = body.chars().collect();
     let mut keys = BTreeSet::new();
     let mut identifier_spreads = BTreeSet::new();
-    // (is_emit_scope, expecting_a_key)
-    let mut scopes: Vec<(bool, bool)> = vec![(true, true)];
+    // (is_emit_scope, expecting_a_key, paren_depth_at_open)
+    //
+    // The third field is sc-15956's. A `,` only starts a new KEY at the scope's own paren
+    // depth: `timelineContext: generationContext("extend", selectedItem, { .. })` separates
+    // CALL ARGUMENTS with commas, and reading those as keys made `selectedItem` look like an
+    // advanced knob that nobody had classified.
+    let mut scopes: Vec<(bool, bool, usize)> = vec![(true, true, 0)];
     // Open spread expressions, as (open scope count, paren depth at the `...`, produced an
     // object literal). Nested, because `...(a ? { k, ...(b ? { j } : {}) } : {})` happens.
     let mut spreads: Vec<(usize, usize, bool)> = Vec::new();
@@ -2990,14 +3710,14 @@ fn scan_object_literal(
                 let in_spread = spreads
                     .last()
                     .is_some_and(|(scope_count, _, _)| *scope_count == scopes.len());
-                let is_emit = in_spread && scopes.last().is_some_and(|(emit, _)| *emit);
+                let is_emit = in_spread && scopes.last().is_some_and(|(emit, _, _)| *emit);
                 if let (true, Some(spread)) = (is_emit, spreads.last_mut()) {
                     spread.2 = true;
                 }
                 if let Some(scope) = scopes.last_mut() {
                     scope.1 = false;
                 }
-                scopes.push((is_emit, true));
+                scopes.push((is_emit, true, paren_depth));
                 index += 1;
             }
             '}' => {
@@ -3036,13 +3756,15 @@ fn scan_object_literal(
             }
             ',' => {
                 if let Some(scope) = scopes.last_mut() {
-                    scope.1 = true;
+                    // Only at this scope's own depth — a comma deeper in is a call argument
+                    // separator, not the start of the next key (sc-15956).
+                    scope.1 = paren_depth == scope.2;
                 }
                 index += 1;
             }
             '.' => {
                 if index + 2 < chars.len() && chars[index + 1] == '.' && chars[index + 2] == '.' {
-                    if scopes.last().is_some_and(|(emit, _)| *emit) {
+                    if scopes.last().is_some_and(|(emit, _, _)| *emit) {
                         // The scanner follows `...( … )`, plus a bare identifier where the caller
                         // has declared one. Anything else — a call, a member expression — would
                         // leave a spread open forever, so the next nested object VALUE would read
@@ -3058,7 +3780,21 @@ fn scan_object_literal(
                                 .is_some_and(is_identifier_start);
                         if identifier_spread {
                             let start = lookahead;
-                            while lookahead < chars.len() && is_identifier_char(chars[lookahead]) {
+                            // A dotted MEMBER path (`...base.advanced`) reads as one name, not as
+                            // a refusal (sc-15956). The three timeline actions spread
+                            // `buildBasePayload`'s own map that way, and the property the refusal
+                            // protects is unchanged: the whole dotted name goes into
+                            // `identifier_spreads`, so `spread_of` must declare it and a builder
+                            // must account for the keys behind it. A CALL is still refused, below
+                            // — a call's keys have no declarable name.
+                            while lookahead < chars.len()
+                                && (is_identifier_char(chars[lookahead])
+                                    || (chars[lookahead] == '.'
+                                        && chars
+                                            .get(lookahead + 1)
+                                            .copied()
+                                            .is_some_and(is_identifier_start)))
+                            {
                                 lookahead += 1;
                             }
                             let mut after = lookahead;
@@ -3067,10 +3803,10 @@ fn scan_object_literal(
                             }
                             assert!(
                                 matches!(chars.get(after), Some(',') | Some('}') | None),
-                                "{what} spreads something this coverage lint cannot read: a \
-                                 member or call expression (`...{}`). Every key it contributes is \
-                                 invisible to this lint, so a new knob would silently stop \
-                                 travelling.",
+                                "{what} spreads something this coverage lint cannot read: a call \
+                                 expression or a computed member (`...{}`). Every key it \
+                                 contributes is invisible to this lint, so a new knob would \
+                                 silently stop travelling.",
                                 chars[start..]
                                     .iter()
                                     .take(24)
@@ -3119,7 +3855,7 @@ fn scan_object_literal(
                 while index < chars.len() && is_identifier_char(chars[index]) {
                     index += 1;
                 }
-                let (is_emit, expecting) = *scopes.last().expect("a scope is always open");
+                let (is_emit, expecting, _) = *scopes.last().expect("a scope is always open");
                 if is_emit && expecting {
                     let mut lookahead = index;
                     while lookahead < chars.len() && chars[lookahead].is_whitespace() {
@@ -3243,4 +3979,1811 @@ fn is_identifier_start(character: char) -> bool {
 
 fn is_identifier_char(character: char) -> bool {
     is_identifier_start(character) || character.is_ascii_digit()
+}
+
+// ---------------------------------------------------------------------------
+// The Rust seam scanner (sc-16113)
+// ---------------------------------------------------------------------------
+
+/// Every worker source file the seam scan reads, as (repo-relative path, source).
+///
+/// Test code is excluded by NAME rather than by hoping it looks different: `tests.rs` and anything
+/// under a `tests/` directory are fixtures, and a fixture that writes a chunk is not a product
+/// write seam. Everything else in the crate is read, including the macOS-gated
+/// `image_jobs/detail.rs` — the scan is textual, so a `cfg`-gated seam is as visible here as any
+/// other, which is the property the old four-path list depended on without saying so.
+fn worker_sources() -> Vec<(String, String)> {
+    let root = repo_root()
+        .join("crates")
+        .join("sceneworks-worker")
+        .join("src");
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) != Some("tests") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if !name.ends_with(".rs") || name == "tests.rs" {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repo_root())
+                .expect("under the repo root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            out.push((relative, source));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One discovered function that a `WorkflowShare` can pass through.
+#[derive(Debug, Clone, Default)]
+struct WorkflowSeamSite {
+    path: String,
+    function: String,
+    /// It BUILDS an envelope here — it calls a core builder, or a worker function that returns one.
+    constructs: bool,
+    /// It CARRIES one in its own signature (directly, or inside a struct that holds one), so a
+    /// caller decided the envelope and this function only passes it on.
+    carrier: bool,
+    /// It calls `write_workflow_chunk` — under that name or a rename import — with a share
+    /// argument that is not the literal `None`.
+    ///
+    /// PROVENANCE-BLIND on purpose (sc-16113). The first cut asked only whether the body called a
+    /// BUILDER, so a seam that got its envelope some other way — `parse_workflow_share_json(..)
+    /// .ok()`, a `.clone()` of one held elsewhere, `serde_json::from_value::<WorkflowShare>` — and
+    /// then wrote it could declare `Declines` and pass. That is the likeliest shape of sc-15956
+    /// ("carry the source's workflow into the output frame"), and it is exactly what sc-15954 did
+    /// for the editor export.
+    writes_a_share_chunk: bool,
+    /// Its body gets hold of an envelope of its own: a builder, a parser, or the type named
+    /// outright (`from_value::<WorkflowShare>`, `WorkflowShare::…`, a typed local).
+    obtains_an_envelope: bool,
+    /// Which surface names its body NAMES — called, or taken as a value — for the gated-builder
+    /// assertion. Canonical names, so a rename import is recorded as what it really is.
+    calls: Vec<String>,
+    /// The first token each share-carrying struct field is given in this body (`None`, `Some`, an
+    /// identifier). What separates "declines" from "hands one on" — read from struct-literal
+    /// initializers, from `x.field = ..` ASSIGNMENTS, and from field shorthand.
+    share_field_values: Vec<String>,
+}
+
+impl WorkflowSeamSite {
+    /// A share-carrying field is filled with something other than `None` somewhere in this body.
+    fn hands_a_share_on(&self) -> bool {
+        self.share_field_values.iter().any(|value| value != "None")
+    }
+
+    /// Any evidence at all that an envelope leaves this function: it builds one, it writes one
+    /// into a file, or it puts one in a field somebody else will write.
+    fn moves_an_envelope(&self) -> bool {
+        self.constructs || self.writes_a_share_chunk || self.hands_a_share_on()
+    }
+}
+
+/// Every function in the given worker sources through which a `WorkflowShare` can reach a file.
+///
+/// Discovery, in three derived layers rather than a list:
+///
+/// 1. the core write surface ([`WORKFLOW_WRITE_SURFACE`], itself checked against core's own
+///    `pub fn`s by [`the_core_workflow_surface_is_classified`]);
+/// 2. worker STRUCTS that hold a `WorkflowShare`, and the worker functions whose signature names
+///    one of those structs or the type itself — the "carriers";
+/// 3. every function whose body calls a name from (1) or (2).
+///
+/// Layer 2 is what makes `write_single_child_asset` a carrier without naming it, and layer 3 is
+/// what then reaches its two callers in `upscale_jobs.rs` and `segment_jobs.rs` — neither of which
+/// mentions anything from `sceneworks_core` at all.
+fn discover_workflow_seams(sources: &[(String, String)]) -> Vec<WorkflowSeamSite> {
+    let stripped: Vec<(String, String)> = sources
+        .iter()
+        .map(|(path, source)| (path.clone(), rust_scannable(source)))
+        .collect();
+
+    // Layer 0: rename imports, resolved before anything else reads a name. A single
+    // `use sceneworks_core::workflow_png::write_workflow_chunk as embed_png;` used to turn every
+    // layer below OFF for that file, because all three match surface names textually.
+    let mut alias_of: BTreeMap<String, String> = BTreeMap::new();
+    for (_, text) in &stripped {
+        for (alias, original) in import_aliases(text) {
+            alias_of.insert(alias, original);
+        }
+    }
+    let spellings = |canonical: &str| -> Vec<String> {
+        let mut out = vec![canonical.to_owned()];
+        out.extend(
+            alias_of
+                .iter()
+                .filter(|(_, original)| original.as_str() == canonical)
+                .map(|(alias, _)| alias.clone()),
+        );
+        out
+    };
+    // Every name the `WorkflowShare` TYPE can be written as in this crate.
+    let share_spellings = spellings("WorkflowShare");
+    let names_a_share_type =
+        |text: &str| -> bool { share_spellings.iter().any(|name| names_word(text, name)) };
+
+    // Layer 2a: structs whose body mentions a `WorkflowShare`, and the fields that hold one.
+    let mut share_types: BTreeSet<String> = BTreeSet::new();
+    let mut share_fields: BTreeSet<String> = BTreeSet::new();
+    for (_, text) in &stripped {
+        for (name, body) in rust_struct_bodies(text) {
+            if !names_a_share_type(&body) {
+                continue;
+            }
+            share_types.insert(name);
+            for line in body.lines() {
+                let line = line.trim();
+                if !names_a_share_type(line) {
+                    continue;
+                }
+                let field = line
+                    .trim_start_matches("pub(crate) ")
+                    .trim_start_matches("pub ")
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
+                if !field.is_empty() && field.bytes().all(is_rust_identifier_char) {
+                    share_fields.insert(field.to_owned());
+                }
+            }
+        }
+    }
+
+    // Layer 1 + 2b: the names whose appearance in a body makes that body a seam. Split into the
+    // ones that BUILD an envelope (a call to one of them is construction here) and the rest.
+    let mut constructors: BTreeSet<String> = WORKFLOW_WRITE_SURFACE
+        .iter()
+        .filter(|(_, function, _)| *function != "write_workflow_chunk")
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    let mut surface: BTreeSet<String> = WORKFLOW_WRITE_SURFACE
+        .iter()
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    // Not part of discovery — a reader is not a seam — but a body that PARSES an envelope has one
+    // of its own, which is what separates a conduit from a lane decision.
+    let parsers: BTreeSet<String> = WORKFLOW_READ_SURFACE
+        .iter()
+        .filter(|(_, function, _)| function.starts_with("parse_workflow_share"))
+        .map(|(_, function, _)| (*function).to_owned())
+        .collect();
+    let mut carriers: BTreeSet<String> = BTreeSet::new();
+    for (_, text) in &stripped {
+        for item in rust_fn_spans(text) {
+            let signature = &text[item.signature_start..item.body_start];
+            let names_a_share = names_a_share_type(signature)
+                || share_types.iter().any(|name| signature.contains(name));
+            if !names_a_share {
+                continue;
+            }
+            carriers.insert(item.name.clone());
+            surface.insert(item.name.clone());
+            // A carrier that RETURNS one builds it; a carrier that only accepts one passes it on.
+            if signature.split("->").skip(1).any(&names_a_share_type) {
+                constructors.insert(item.name.clone());
+            }
+        }
+    }
+
+    let mut out: Vec<WorkflowSeamSite> = Vec::new();
+    for (path, text) in &stripped {
+        let spans = rust_fn_spans(text);
+        // Every call, attributed to the INNERMOST function that contains it, so a nested helper is
+        // credited to itself rather than to the function around it.
+        let mut calls_by_function: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        let mut parses_by_function: BTreeSet<usize> = BTreeSet::new();
+        let mut chunk_arguments: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for name in surface.iter().chain(parsers.iter()) {
+            for spelling in spellings(name) {
+                // MENTIONS, not calls. A body that names a writer at all is a seam, so taking one
+                // as a value (`let write = write_workflow_chunk; write(..)`) is not an indirection
+                // the scan can be walked around with. Comments and literals are already blanked,
+                // and a `use` at module level sits inside no function body.
+                for offset in name_sites(text, &spelling) {
+                    let Some((index, span)) = innermost_owner(&spans, offset) else {
+                        continue;
+                    };
+                    if span.name == *name || span.name == spelling {
+                        continue;
+                    }
+                    if parsers.contains(name) {
+                        parses_by_function.insert(index);
+                        continue;
+                    }
+                    if name == "write_workflow_chunk" {
+                        if let Some(argument) = call_last_argument(text, offset + spelling.len()) {
+                            chunk_arguments.entry(index).or_default().push(argument);
+                        }
+                    }
+                    calls_by_function
+                        .entry(index)
+                        .or_default()
+                        .insert(name.clone());
+                }
+            }
+        }
+        for (index, item) in spans.iter().enumerate() {
+            let calls: Vec<String> = calls_by_function
+                .get(&index)
+                .map(|names| names.iter().cloned().collect())
+                .unwrap_or_default();
+            let carrier = carriers.contains(&item.name);
+            if calls.is_empty() && !carrier {
+                continue;
+            }
+            let body = &text[item.body_start..item.body_end];
+            let constructs = calls.iter().any(|name| constructors.contains(name));
+            out.push(WorkflowSeamSite {
+                path: path.clone(),
+                function: item.name.clone(),
+                constructs,
+                carrier,
+                writes_a_share_chunk: chunk_arguments
+                    .get(&index)
+                    .is_some_and(|arguments| arguments.iter().any(|argument| argument != "None")),
+                obtains_an_envelope: constructs
+                    || parses_by_function.contains(&index)
+                    || names_a_share_type(body),
+                calls,
+                share_field_values: share_fields
+                    .iter()
+                    .flat_map(|field| share_field_values(body, field))
+                    .collect(),
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.path, &a.function).cmp(&(&b.path, &b.function)));
+    out
+}
+
+/// Every discovered seam is declared, and its declaration matches what the code does.
+fn assert_declared_seams(seams: &[WorkflowSeamSite]) {
+    // The registry joins on `(path, function)`, so two same-named functions in one file would
+    // share one declaration — and the SECOND one would inherit whatever the first one declared. A
+    // second `write_image_asset` in `image_jobs.rs` embedding for the video lane passed every test
+    // before this check existed (sc-16113).
+    let mut seen: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for seam in seams {
+        *seen
+            .entry((seam.path.as_str(), seam.function.as_str()))
+            .or_default() += 1;
+    }
+    for ((path, function), count) in seen {
+        assert_eq!(
+            count, 1,
+            "{path} defines {count} functions named `{function}` that an envelope reaches, and \
+             `WORKFLOW_WRITE_SEAMS` can only describe one of them — the second would inherit the \
+             first's disposition and its builder list. Rename one."
+        );
+    }
+    for seam in seams {
+        let entry = WORKFLOW_WRITE_SEAMS
+            .iter()
+            .find(|entry| entry.path == seam.path && entry.function == seam.function)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}::{} handles a `WorkflowShare` and has no `WORKFLOW_WRITE_SEAMS` entry in \
+                     crates/sceneworks-core/src/workflow_share.rs.\n\
+                     Every place an envelope can reach a written file has to say which lane it \
+                     writes for, because that is what ties embedding to classification. Add an \
+                     entry with:\n\
+                     * `SeamDisposition::Embeds(&[..])` naming the web builders whose `advanced` \
+                     map reaches this file — every one of them must be in `ADVANCED_BUILDERS`, so \
+                     if the lane you are turning on is still in `DEFERRED_ADVANCED_BUILDERS` \
+                     (video, today), move it up and classify its keys FIRST; or\n\
+                     * `SeamDisposition::Conduit(reason)` if it writes an envelope its caller \
+                     built and obtains none itself; or\n\
+                     * `SeamDisposition::Declines(reason)` if this asset has no generation recipe \
+                     to record. Declining is checked POSITIVELY against the source — it may not \
+                     write a chunk with anything but a literal `None`, name a `WorkflowShare`, or \
+                     fill a share-carrying field with anything else; or\n\
+                     * `SeamDisposition::Inert(reason)` if a share reaches its signature and it \
+                     writes nothing at all.",
+                    seam.path, seam.function
+                )
+            });
+        match entry.disposition {
+            SeamDisposition::Embeds(builders) => {
+                assert!(
+                    seam.moves_an_envelope(),
+                    "`WORKFLOW_WRITE_SEAMS` declares {}::{} as embedding, but no envelope leaves \
+                     it: it builds none, writes no chunk with one, and fills no share-carrying \
+                     field. Either it became a `SeamDisposition::Conduit` (it writes one its \
+                     caller built) or the entry is stale.",
+                    seam.path,
+                    seam.function
+                );
+                assert_embedded_builders_are_registered(
+                    &seam.path,
+                    &seam.function,
+                    entry.lane,
+                    builders,
+                );
+            }
+            SeamDisposition::Conduit(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the conduit reason for {}::{} must say why the lane decision is not made \
+                     there",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    !seam.obtains_an_envelope,
+                    "{}::{} declares that it only passes on an envelope its caller built, but it \
+                     gets hold of one itself — it builds, parses or names a `WorkflowShare`. \
+                     Sourcing an envelope IS deciding a lane, however it is sourced, so it has to \
+                     name the builders behind it: make it `SeamDisposition::Embeds(&[..])`.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    seam.carrier,
+                    "{}::{} is declared a conduit but no `WorkflowShare` reaches it through its \
+                     signature, so there is nothing for it to pass on",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.calls.is_empty(),
+                    "{}::{} is declared a conduit — \"writes an envelope its caller built\" — but \
+                     it calls nothing that reaches a write. A function a share merely passes \
+                     through without being written is `SeamDisposition::Inert`, and calling it a \
+                     conduit would put a false sentence in the registry.",
+                    seam.path,
+                    seam.function
+                );
+            }
+            SeamDisposition::Declines(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the decline reason for {}::{} must say why that asset has no generation \
+                     recipe to record",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    !seam.writes_a_share_chunk,
+                    "{}::{} declares that it writes no envelope, but it calls \
+                     `write_workflow_chunk` with an argument that is not the literal `None`. \
+                     Where that envelope came from does not matter — building it, parsing it out \
+                     of another file, or cloning one held elsewhere all put somebody's `advanced` \
+                     map in this file. Name the web builders behind it with \
+                     `SeamDisposition::Embeds(&[..])`, and if one of them is still in \
+                     `DEFERRED_ADVANCED_BUILDERS` that is the work this change needs first.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.obtains_an_envelope,
+                    "{}::{} declares that it writes no envelope, but its body gets hold of one — \
+                     it builds, parses or names a `WorkflowShare`. A declining seam has no reason \
+                     to touch the type at all; if it now has one, it owes a lane.",
+                    seam.path, seam.function
+                );
+                assert!(
+                    !seam.carrier,
+                    "{}::{} declares that it writes no envelope, but one reaches it through its \
+                     signature — that is a `SeamDisposition::Conduit`",
+                    seam.path, seam.function
+                );
+                for value in &seam.share_field_values {
+                    assert_eq!(
+                        value, "None",
+                        "{}::{} declares that it writes no envelope, but hands a workflow on as \
+                         `{value}`. A decline must pass `None` everywhere a share-carrying field \
+                         is filled — by initializer OR by later assignment — or it is embedding \
+                         for a lane nobody classified.",
+                        seam.path, seam.function
+                    );
+                }
+            }
+            SeamDisposition::Inert(reason) => {
+                assert!(
+                    reason.len() > 40,
+                    "the inert reason for {}::{} must say what it does with the share it is \
+                     handed, given that it does not write it",
+                    seam.path,
+                    seam.function
+                );
+                assert!(
+                    seam.carrier,
+                    "{}::{} is declared inert, but no `WorkflowShare` reaches it through its \
+                     signature — so it is not a seam at all and the entry is stale",
+                    seam.path, seam.function
+                );
+                assert!(
+                    seam.calls.is_empty(),
+                    "{}::{} is declared inert — \"writes nothing\" — but it calls {:?}, which \
+                     reaches a write. It is a `SeamDisposition::Conduit` or a \
+                     `SeamDisposition::Embeds`.",
+                    seam.path,
+                    seam.function,
+                    seam.calls
+                );
+                assert!(
+                    !seam.moves_an_envelope() && !seam.obtains_an_envelope,
+                    "{}::{} is declared inert but an envelope leaves it, or it gets hold of one \
+                     of its own. Inert means the share it is handed goes nowhere.",
+                    seam.path,
+                    seam.function
+                );
+            }
+        }
+    }
+}
+
+/// The heart of it: a seam may not embed for a builder that is deferred, or for one nobody knows.
+fn assert_embedded_builders_are_registered(
+    path: &str,
+    function: &str,
+    lane: &str,
+    builders: &[WebBuilderRef],
+) {
+    assert!(
+        !builders.is_empty(),
+        "{path}::{function} is declared as embedding but names no builder. An embedding seam \
+         writes SOMEBODY's `advanced` map into the file; naming none says the map came from \
+         nowhere."
+    );
+    for reference in builders {
+        if ADVANCED_BUILDERS
+            .iter()
+            .any(|builder| builder.path == reference.path && builder.function == reference.function)
+        {
+            continue;
+        }
+        let deferred = DEFERRED_ADVANCED_BUILDERS.iter().find(|builder| {
+            builder.path == reference.path && builder.function == reference.function
+        });
+        if let Some(deferred) = deferred {
+            panic!(
+                "{path}::{function} embeds a workflow on the lane \"{lane}\", which is fed by {} \
+                 in {} — and that builder is in `DEFERRED_ADVANCED_BUILDERS`:\n  {}\n\n\
+                 Its `advanced` keys are NOT in `ADVANCED_KEY_RULES`, so every one of them would \
+                 be dropped silently from every file this seam writes, with nothing to say so. \
+                 Move the entry into `ADVANCED_BUILDERS` and classify every key it emits \
+                 (`every_registered_builder_has_its_advanced_keys_classified` names them), THEN \
+                 turn the seam on.",
+                reference.function, reference.path, deferred.reason
+            );
+        }
+        panic!(
+            "{path}::{function} embeds a workflow for {} in {}, which is in neither \
+             `ADVANCED_BUILDERS` nor `DEFERRED_ADVANCED_BUILDERS`. A seam cannot name a builder \
+             nobody has accounted for: register it (and classify its keys) or defer it with the \
+             story that owns it.",
+            reference.function, reference.path
+        );
+    }
+}
+
+/// Every offset in `text` where `name` appears as a whole identifier, called or not.
+///
+/// Discovery reads MENTIONS rather than calls, because `let write = write_workflow_chunk;` puts
+/// the writer in a local and `write(..)` is then a call to a name the scan has never heard of.
+/// Comments and string literals are blanked before this runs, and a module-level `use` sits inside
+/// no function body, so the two shapes that would make this noisy do not.
+fn name_sites(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(name) {
+        let at = from + offset;
+        let after = at + name.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        out.push(at);
+    }
+    out
+}
+
+/// Every offset in `text` where `name` is CALLED. Word-boundary, and the parenthesis has to be
+/// there, so `use …::write_workflow_chunk;` and a struct field of the same name are not calls.
+///
+/// The narrow half, used by the safety net: "this call site vanished from the scan" is a different
+/// claim from "this name is mentioned somewhere".
+fn call_sites(text: &str, name: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(name) {
+        let at = from + offset;
+        let after = at + name.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        if bytes.get(skip_ascii_whitespace(bytes, after)) == Some(&b'(') {
+            out.push(at);
+        }
+    }
+    out
+}
+
+/// The first token every share-carrying `field` in `body` is GIVEN, so a `None` and a `Some(x)` are
+/// distinguishable.
+///
+/// Three shapes, because reading only the first of them made the `Declines` check satisfiable by
+/// dead syntax (sc-16113). The reviewer mutated the real declining seam to
+///
+/// ```text
+/// let mut spec = SingleChildAssetSpec { … workflow: None };
+/// spec.workflow = parse_workflow_share_json(&text).ok();
+/// ```
+///
+/// and every test stayed green: the `workflow: None` literal was still there to be read while a
+/// real envelope travelled into the mask PNG.
+///
+/// * `field: VALUE` — a struct-literal initializer, never a path (`spec::workflow`);
+/// * `.field = VALUE` — a later assignment onto a `mut` binding;
+/// * `field` alone between `{`/`,` and `,`/`}` — FIELD SHORTHAND, whose value is a local this scan
+///   cannot follow, so it is reported as `<shorthand>` and a decline has to spell `None` out.
+fn share_field_values(body: &str, field: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = body[from..].find(field) {
+        let at = from + offset;
+        let after = at + field.len();
+        from = after;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let next = skip_ascii_whitespace(bytes, after);
+        let value = match bytes.get(next) {
+            // `field: value`, but not `path::field`.
+            Some(b':') if bytes.get(next + 1) != Some(&b':') => Some(next + 1),
+            // `spec.field = value`, but not `==`, `>=`, `!=` or any compound assignment.
+            Some(b'=')
+                if at > 0
+                    && bytes[at - 1] == b'.'
+                    && bytes.get(next + 1) != Some(&b'=')
+                    && !matches!(
+                        bytes.get(next.wrapping_sub(1)),
+                        Some(
+                            b'=' | b'!'
+                                | b'<'
+                                | b'>'
+                                | b'+'
+                                | b'-'
+                                | b'*'
+                                | b'/'
+                                | b'%'
+                                | b'&'
+                                | b'|'
+                                | b'^'
+                        )
+                    ) =>
+            {
+                Some(next + 1)
+            }
+            // Field shorthand: `SingleChildAssetSpec { .., workflow }`.
+            Some(b',' | b'}')
+                if at > 0
+                    && matches!(
+                        body[..at].trim_end().as_bytes().last(),
+                        Some(b'{') | Some(b',')
+                    ) =>
+            {
+                out.push("<shorthand>".to_owned());
+                continue;
+            }
+            _ => None,
+        };
+        let Some(value) = value else { continue };
+        let (token, _) = identifier_at(bytes, body, skip_ascii_whitespace(bytes, value));
+        if !token.is_empty() {
+            out.push(token.to_owned());
+        }
+    }
+    out
+}
+
+/// The innermost `fn` span containing `offset`, with its index.
+fn innermost_owner(spans: &[RustFn], offset: usize) -> Option<(usize, &RustFn)> {
+    spans
+        .iter()
+        .enumerate()
+        .filter(|(_, span)| offset >= span.body_start && offset < span.body_end)
+        .min_by_key(|(_, span)| span.body_end - span.body_start)
+}
+
+/// The LAST top-level argument of the call whose name ends at `after_name`, trimmed.
+///
+/// `write_workflow_chunk(image, path, share.as_ref())` is the only call this is asked about, and
+/// its last argument is the envelope. `None` there and anything else there are the two states the
+/// `Declines` check turns on, and reading the argument is what makes that check positive rather
+/// than a search for a builder call that a determined author simply does not make.
+fn call_last_argument(text: &str, after_name: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let open = skip_ascii_whitespace(bytes, after_name);
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = matching_paren(bytes, open)?;
+    let inner = &text[open + 1..close];
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, byte) in inner.as_bytes().iter().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' | b'<' => depth += 1,
+            b')' | b']' | b'}' | b'>' => depth -= 1,
+            b',' if depth <= 0 => start = index + 1,
+            _ => {}
+        }
+    }
+    Some(inner[start..].trim().to_owned())
+}
+
+/// `alias -> original` for every `use …::ORIGINAL as ALIAS;` in one blanked Rust source.
+///
+/// A rename import is the one shape that turns a surface-name scan off completely: a brand-new
+/// worker file that says `use …::write_workflow_chunk as embed_png;` and calls `embed_png` was
+/// invisible to discovery AND to its safety net, so the whole gate was off for that file
+/// (sc-16113). Resolving the rename is better than refusing it, because refusing would only move
+/// the problem to whichever spelling the refusal did not think of.
+fn import_aliases(text: &str) -> Vec<(String, String)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = text[index..].find("use") {
+        let at = index + offset;
+        index = at + 3;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(at + 3)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let end = text[at..].find(';').map_or(text.len(), |o| at + o);
+        let statement = &text[at..end];
+        let statement_bytes = statement.as_bytes();
+        let mut cursor = 0usize;
+        while let Some(found) = statement[cursor..].find("as") {
+            let word = cursor + found;
+            cursor = word + 2;
+            if word > 0 && is_rust_identifier_char(statement_bytes[word - 1]) {
+                continue;
+            }
+            if statement_bytes
+                .get(word + 2)
+                .is_some_and(|byte| is_rust_identifier_char(*byte))
+            {
+                continue;
+            }
+            let Some(original) = identifier_ending_before(statement, word) else {
+                continue;
+            };
+            let (alias, _) = identifier_at(statement_bytes, statement, word + 2);
+            if alias.is_empty() || alias == "_" {
+                continue;
+            }
+            out.push((alias.to_owned(), original));
+        }
+        index = end;
+    }
+    out
+}
+
+/// The identifier that ends just before `at`, skipping whitespace.
+fn identifier_ending_before(text: &str, at: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_rust_identifier_char(bytes[start - 1]) {
+        start -= 1;
+    }
+    (start < end).then(|| text[start..end].to_owned())
+}
+
+/// `word` appears in `text` as a whole identifier, not as part of a longer one.
+fn names_word(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(word) {
+        let at = from + offset;
+        let after = at + word.len();
+        from = at + 1;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(after)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn is_rust_identifier_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// One Rust function definition: its name, where its signature starts, and its body span.
+#[derive(Debug, Clone)]
+struct RustFn {
+    name: String,
+    signature_start: usize,
+    body_start: usize,
+    body_end: usize,
+}
+
+/// Comments, string/char literals and `#[cfg(test)]` items blanked, byte for byte.
+///
+/// Length-preserving on purpose: the seam scan compares byte offsets of calls against byte offsets
+/// of function bodies, and blanking in place makes the two the same number. Blanked bytes become
+/// spaces (newlines survive), so a line number computed from an offset is still the file's.
+///
+/// `#[cfg(test)]` and `#[cfg(all(test, ..))]` items go with them. `#[cfg(any(.., test))]` does NOT:
+/// `image_jobs.rs` gates `detail_workflow_share` that way so the lineage contract is tested off
+/// macOS, and it is a real production seam on macOS. Neither does `#[cfg(not(test))]`, which is
+/// production-ONLY code — see [`cfg_predicate_is_test_only`].
+fn rust_scannable(source: &str) -> String {
+    blank_test_only_items(&blank_comments_and_literals(source))
+}
+
+/// Comments and string/char literals blanked, but `#[cfg(test)]` items left in place.
+///
+/// The half [`no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan`] compares against,
+/// so "the scan dropped this call site" and "the call site is test scaffolding" are two statements
+/// rather than one.
+fn blank_comments_and_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let start = index;
+        let end = match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let mut depth = 1usize;
+                index += 2;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                index
+            }
+            b'"' => rust_string_end(bytes, index + 1, 0),
+            b'r' | b'b'
+                if (index == 0 || !is_rust_identifier_char(bytes[index - 1]))
+                    && rust_raw_string_open(bytes, index).is_some() =>
+            {
+                let (quote, hashes) = rust_raw_string_open(bytes, index).expect("checked");
+                rust_string_end(bytes, quote + 1, hashes)
+            }
+            // A char literal, or a lifetime that only looks like one. Eating a lifetime would
+            // swallow the rest of the file.
+            b'\''
+                if bytes.get(index + 1) == Some(&b'\\') || bytes.get(index + 2) == Some(&b'\'') =>
+            {
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'\\') {
+                    cursor += 1;
+                }
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor] != b'\'' {
+                    cursor += 1;
+                }
+                (cursor + 1).min(bytes.len())
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        for byte in out.iter_mut().take(end).skip(start) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        index = end.max(start + 1);
+    }
+
+    String::from_utf8(out).expect("blanking only ever replaces whole regions")
+}
+
+/// `#[cfg(test)]` items blanked out of an already comment- and literal-blanked source.
+fn blank_test_only_items(source: &str) -> String {
+    blank_test_only_items_with_spans(source).0
+}
+
+/// The same blanking, plus the `(start, end)` of every region it removed.
+///
+/// The spans are what [`no_workflow_call_site_in_the_worker_is_invisible_to_the_seam_scan`] checks
+/// a vanished call site against. Keying that rescue on containment in a span — rather than on an
+/// attribute appearing textually between two offsets — is what stops the house layout
+/// (`#[cfg(test)] mod tests { fn fixture() { .. } #[test] fn t() { } }`, fixture ABOVE the first
+/// `#[test]`) from failing the build with a message describing a bug that did not happen.
+fn blank_test_only_items_with_spans(source: &str) -> (String, Vec<(usize, usize)>) {
+    let mut text = source.to_owned();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    while let Some((at, attribute_end)) = test_only_cfg_attribute(&text) {
+        // Always at least the attribute itself, so the loop cannot see it a second time.
+        let end = cfg_item_end(&text, attribute_end).max(attribute_end);
+        spans.push((at, end));
+        let mut blanked = text.into_bytes();
+        for byte in blanked.iter_mut().take(end).skip(at) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        text = String::from_utf8(blanked).expect("ascii blanking");
+    }
+    spans.sort_unstable();
+    (text, spans)
+}
+
+/// Where the thing a `#[cfg(test)]` ending at `attribute_end` sits on ENDS.
+///
+/// Two shapes, and the ITEM KEYWORD is what tells them apart — which is the whole point of looking
+/// for it rather than stopping at the first `,` at paren depth zero:
+///
+/// * an item (`fn`, `impl`, `mod`, `struct`, `use`, `const`, …) ends at the matching `}` of its
+///   body or at its `;`, and commas inside its generics are not terminators. Stopping at the first
+///   comma turned `#[cfg(test)] fn fixture<P: AsRef<Path>, S: Into<String>>(..)` into a blank of
+///   the attribute alone, leaving the fixture in the scan as a product seam;
+/// * a struct FIELD or enum variant carries no keyword (`#[cfg(test)] probe_scans: u64,`) and ends
+///   at its comma — which this crate needs, because running on to the next `{` would blank a whole
+///   unrelated `impl` and hide every seam inside it.
+fn cfg_item_end(text: &str, attribute_end: usize) -> usize {
+    let bytes = text.as_bytes();
+    // Any further attributes stacked on the same item, skipped so the keyword scan sees the item.
+    let mut cursor = skip_ascii_whitespace(bytes, attribute_end);
+    while bytes.get(cursor) == Some(&b'#') {
+        let mut depth = 0i32;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        cursor += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        cursor = skip_ascii_whitespace(bytes, cursor);
+    }
+    // Visibility and the modifier keywords, none of which decide the shape.
+    let mut keyword = String::new();
+    loop {
+        let (word, after) = identifier_at(bytes, text, cursor);
+        if word.is_empty() {
+            break;
+        }
+        cursor = skip_ascii_whitespace(bytes, after);
+        if word == "pub" && bytes.get(cursor) == Some(&b'(') {
+            // `pub(crate)` / `pub(in path)`.
+            let mut depth = 0i32;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            cursor += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                cursor += 1;
+            }
+            cursor = skip_ascii_whitespace(bytes, cursor);
+            continue;
+        }
+        if matches!(word, "pub" | "async" | "unsafe" | "default" | "extern") {
+            continue;
+        }
+        if ITEM_KEYWORDS.contains(&word) {
+            keyword = word.to_owned();
+        }
+        break;
+    }
+    if keyword.is_empty() {
+        return field_or_variant_end(bytes, attribute_end);
+    }
+    // `use a::{b, c};` and `type`/`const`/`static` have no body brace of their own; a `{` inside
+    // them is a group or an initializer, so only the `;` ends them.
+    let semicolon_only = matches!(keyword.as_str(), "use" | "type" | "const" | "static");
+    let mut depth = 0i32;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'{' if depth <= 0 && !semicolon_only => {
+                return rust_matching_brace(bytes, cursor) + 1;
+            }
+            b'{' if depth <= 0 => depth += 1,
+            b'}' if depth <= 0 => return cursor,
+            b'}' => depth -= 1,
+            b';' if depth <= 0 => return cursor + 1,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+/// The item keywords that mean "this is a definition, not a struct field".
+const ITEM_KEYWORDS: &[&str] = &[
+    "fn",
+    "impl",
+    "mod",
+    "struct",
+    "enum",
+    "trait",
+    "union",
+    "use",
+    "const",
+    "static",
+    "type",
+    "macro_rules",
+    "macro",
+];
+
+/// The end of a keyword-less `#[cfg(..)]` item — a struct field or an enum variant.
+///
+/// Angle depth is tracked so `#[cfg(test)] cache: HashMap<String, u64>,` ends at its own comma and
+/// not at the one inside the type.
+fn field_or_variant_end(bytes: &[u8], from: usize) -> usize {
+    let mut depth = 0i32;
+    let mut angle = 0i32;
+    let mut cursor = from;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'<' if depth <= 0 && bytes.get(cursor + 1) != Some(&b'<') => angle += 1,
+            b'>' if depth <= 0
+                && angle > 0
+                && !matches!(bytes.get(cursor - 1), Some(b'-') | Some(b'=')) =>
+            {
+                angle -= 1;
+            }
+            b'}' if depth <= 0 => return cursor,
+            b'}' => depth -= 1,
+            b',' | b';' if depth <= 0 && angle <= 0 => return cursor + 1,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+/// `(start, end)` of the next test-only `#[cfg(..)]` attribute still present in `text`.
+fn test_only_cfg_attribute(text: &str) -> Option<(usize, usize)> {
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find("#[cfg(") {
+        let at = from + offset;
+        let open = at + "#[cfg".len();
+        from = open + 1;
+        let Some(close) = matching_paren(text.as_bytes(), open) else {
+            continue;
+        };
+        if cfg_predicate_is_test_only(&text[open + 1..close]) {
+            // Past the `)` and the `]`.
+            return Some((at, (close + 2).min(text.len())));
+        }
+    }
+    None
+}
+
+/// Whether a `cfg(..)` predicate can only ever hold under `--cfg test`.
+///
+/// Evaluated as the tree it is rather than sniffed for the token `test`, because both mistakes
+/// that reading makes are build-breaking in opposite directions. `#[cfg(any(target_os = "macos",
+/// test))]` is a real macOS seam (`image_jobs.rs` gates `detail_workflow_share` that way so the
+/// lineage contract is tested off macOS), and `#[cfg(not(test))]` — nine occurrences in this repo —
+/// is PRODUCTION-only code that the old bare-token reading blanked, failing the build with a
+/// message about a bug that had not happened.
+fn cfg_predicate_is_test_only(predicate: &str) -> bool {
+    let predicate = predicate.trim();
+    if predicate == "test" {
+        return true;
+    }
+    let Some(open) = predicate.find('(') else {
+        return false;
+    };
+    let head = predicate[..open].trim();
+    let Some(close) = matching_paren(predicate.as_bytes(), open) else {
+        return false;
+    };
+    let inner = &predicate[open + 1..close];
+    match head {
+        // A conjunction holds only when every arm does, so ONE test arm makes the whole thing
+        // test-only.
+        "all" => cfg_arguments(inner)
+            .iter()
+            .any(|arm| cfg_predicate_is_test_only(arm)),
+        // A disjunction holds when any arm does, so it is test-only only if EVERY arm is.
+        "any" => {
+            let arms = cfg_arguments(inner);
+            !arms.is_empty() && arms.iter().all(|arm| cfg_predicate_is_test_only(arm))
+        }
+        // A negation never narrows to test: `not(test)` is the production build.
+        "not" => false,
+        _ => false,
+    }
+}
+
+/// The top-level comma-separated arguments of a `cfg` predicate list.
+fn cfg_arguments(inner: &str) -> Vec<String> {
+    let bytes = inner.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(inner[start..index].trim().to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_owned());
+    }
+    out
+}
+
+/// The offset of the `)` matching the `(` at `open`.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The offset just past the closing quote of a string starting at `from` with `hashes` hashes.
+fn rust_string_end(bytes: &[u8], from: usize, hashes: usize) -> usize {
+    let mut index = from;
+    while index < bytes.len() {
+        if hashes == 0 && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'"' {
+            let close = (index + 1 + hashes).min(bytes.len());
+            if bytes[index + 1..close].iter().all(|byte| *byte == b'#') {
+                return close;
+            }
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// `(offset of the opening quote, hash count)` if a raw string starts at `at`.
+fn rust_raw_string_open(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let mut index = at;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hashes_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'"') {
+        Some((index, index - hashes_start))
+    } else {
+        None
+    }
+}
+
+/// The offset of the `}` matching the `{` at `open`.
+fn rust_matching_brace(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len().saturating_sub(1)
+}
+
+/// Every `fn` in a blanked Rust source, innermost definitions included.
+fn rust_fn_spans(stripped: &str) -> Vec<RustFn> {
+    let bytes = stripped.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = stripped[index..].find("fn") {
+        let at = index + offset;
+        index = at + 2;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        if bytes
+            .get(at + 2)
+            .is_some_and(|byte| is_rust_identifier_char(*byte))
+        {
+            continue;
+        }
+        let name_at = skip_ascii_whitespace(bytes, at + 2);
+        let (name, after) = identifier_at(bytes, stripped, name_at);
+        if name.is_empty() {
+            // `fn(u8) -> u8` — a function POINTER type, not a definition.
+            continue;
+        }
+        let mut cursor = after;
+        let mut depth = 0i32;
+        let mut body = None;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'{' if depth <= 0 => {
+                    body = Some(cursor);
+                    break;
+                }
+                b';' if depth <= 0 => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let Some(body_start) = body else { continue };
+        out.push(RustFn {
+            name: name.to_owned(),
+            signature_start: at,
+            body_start,
+            body_end: rust_matching_brace(bytes, body_start) + 1,
+        });
+    }
+    out
+}
+
+/// Every `struct NAME .. { .. }` in a blanked Rust source, as (name, body text).
+fn rust_struct_bodies(stripped: &str) -> Vec<(String, String)> {
+    let bytes = stripped.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = stripped[index..].find("struct") {
+        let at = index + offset;
+        index = at + 6;
+        if at > 0 && is_rust_identifier_char(bytes[at - 1]) {
+            continue;
+        }
+        let name_at = skip_ascii_whitespace(bytes, at + 6);
+        let (name, after) = identifier_at(bytes, stripped, name_at);
+        if name.is_empty() {
+            continue;
+        }
+        let mut cursor = after;
+        let mut body = None;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'{' => {
+                    body = Some(cursor);
+                    break;
+                }
+                b';' => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let Some(open) = body else { continue };
+        let close = rust_matching_brace(bytes, open);
+        out.push((name.to_owned(), stripped[open..=close].to_owned()));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The Rust scanner's own unit tests: what it sees, and what it must not
+// ---------------------------------------------------------------------------
+
+/// Prose naming a function is not a call to it — the reason the old lint stripped comment lines.
+#[test]
+fn the_rust_scanner_blanks_comments_strings_and_test_modules() {
+    let source = r##"
+/// Doc prose naming write_workflow_chunk(x) that calls nothing.
+fn real(path: &Path) {
+    // write_workflow_chunk(a) in a line comment
+    /* write_workflow_chunk(b) in a block /* nested */ comment */
+    let label = "write_workflow_chunk(c) in a string";
+    let raw = r#"write_workflow_chunk(d) in a raw string"#;
+    let quote = '"';
+    let _ = (path, label, raw, quote);
+}
+#[cfg(test)]
+mod tests {
+    fn fixture() {
+        write_workflow_chunk(e);
+    }
+}
+"##;
+    let stripped = rust_scannable(source);
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "every mention above is prose, a literal or a test fixture:\n{stripped}"
+    );
+    assert_eq!(
+        stripped.len(),
+        source.len(),
+        "blanking must preserve byte offsets"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["real"],
+        "the `mod tests` body is blanked, so its functions go with it"
+    );
+}
+
+/// A `mod tests;` declaration has no body, and blanking forward from it would eat the file.
+#[test]
+fn the_rust_scanner_survives_a_bodyless_test_module_declaration() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nmod tests;\n\nfn kept() {\n    write_workflow_chunk(a);\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk"),
+        "the code after `mod tests;` must survive:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["kept"]
+    );
+}
+
+/// A `#[cfg(test)]` STRUCT FIELD has no body, and blanking forward from one would eat the `impl`
+/// after it — every seam inside included.
+///
+/// Not hypothetical: `catalog_image_fetch.rs` and `catalog_parquet_scanner.rs` both gate fields
+/// that way, and the first cut of this scanner blanked from the attribute to the next `{` it found.
+#[test]
+fn the_rust_scanner_survives_a_test_only_struct_field() {
+    let stripped = rust_scannable(
+        "struct Budget {\n    bytes: u64,\n    #[cfg(test)]\n    probe_scans: u64,\n}\n\nimpl \
+         Budget {\n    fn write(&self) {\n        write_workflow_chunk(a);\n    }\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk("),
+        "the `impl` after the gated field must survive:\n{stripped}"
+    );
+    assert!(!stripped.contains("cfg(test)"));
+}
+
+/// `#[cfg(any(target_os = "macos", test))]` is a real macOS seam, not test scaffolding.
+#[test]
+fn the_rust_scanner_keeps_a_cfg_that_is_only_partly_test() {
+    let stripped = rust_scannable(
+        "#[cfg(any(target_os = \"macos\", test))]\nfn detail_workflow_share() {\n    \
+         embeddable_workflow_share(a);\n}\n",
+    );
+    assert!(
+        stripped.contains("embeddable_workflow_share("),
+        "{stripped}"
+    );
+}
+
+/// Lifetimes look like an unterminated char literal, and eating one would swallow the file.
+#[test]
+fn the_rust_scanner_does_not_mistake_a_lifetime_for_a_char() {
+    let stripped = rust_scannable(
+        "struct Spec<'a> { path: &'a str }\nfn take(spec: Spec<'_>) {\n    \
+         write_workflow_chunk(a);\n}\n",
+    );
+    assert!(stripped.contains("write_workflow_chunk("), "{stripped}");
+    assert_eq!(
+        rust_struct_bodies(&stripped)
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["Spec"]
+    );
+}
+
+/// Generic bounds and where clauses carry parentheses; a body brace must still be found past them.
+#[test]
+fn the_rust_scanner_finds_a_body_past_generic_and_where_clauses() {
+    let stripped = rust_scannable(
+        "pub(crate) async fn write_single_child_asset<F>(spec: Spec, build: F) -> \
+         Result<()>\nwhere\n    F: FnOnce(&Write) -> Value,\n{\n    write_workflow_chunk(a);\n}\n",
+    );
+    let spans = rust_fn_spans(&stripped);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].name, "write_single_child_asset");
+    assert!(stripped[spans[0].body_start..spans[0].body_end].contains("write_workflow_chunk("));
+}
+
+/// The three layers of discovery, on a synthetic crate that names nothing the registry knows.
+///
+/// The carrier layer is the one that matters: `pass_on` never mentions `sceneworks_core`, and
+/// `caller` never mentions a `WorkflowShare` — the struct field is what connects them, which is how
+/// the real scan reaches `segment_jobs.rs` through `write_single_child_asset`.
+#[test]
+fn the_seam_scan_follows_a_share_through_a_struct_field() {
+    let sources = vec![
+        (
+            "crates/sceneworks-worker/src/probe_writer.rs".to_owned(),
+            "pub(crate) struct ProbeSpec<'a> {\n    pub label: &'a str,\n    pub workflow: \
+             Option<WorkflowShare>,\n}\nfn pass_on(spec: ProbeSpec) {\n    \
+             write_workflow_chunk(spec.workflow.as_ref());\n}\n"
+                .to_owned(),
+        ),
+        (
+            "crates/sceneworks-worker/src/probe_caller.rs".to_owned(),
+            "fn caller() {\n    pass_on(ProbeSpec { label: \"x\", workflow: None });\n}\n"
+                .to_owned(),
+        ),
+    ];
+    let seams = discover_workflow_seams(&sources);
+    assert_eq!(
+        seams
+            .iter()
+            .map(|seam| seam.function.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["caller", "pass_on"]
+    );
+    assert!(!seams[0].constructs && !seams[0].carrier);
+    assert_eq!(seams[0].share_field_values, vec!["None".to_owned()]);
+    assert!(seams[1].carrier, "it takes the spec that holds the share");
+}
+
+// ---------------------------------------------------------------------------
+// The evasions the first cut of this lint accepted (sc-16113 review)
+// ---------------------------------------------------------------------------
+
+/// One synthetic worker file through the scanner, as the one seam it must find.
+fn only_seam(path: &str, source: &str) -> WorkflowSeamSite {
+    let seams = discover_workflow_seams(&[(path.to_owned(), source.to_owned())]);
+    assert_eq!(
+        seams.len(),
+        1,
+        "expected exactly one seam, got {:?}",
+        seams
+            .iter()
+            .map(|seam| seam.function.as_str())
+            .collect::<Vec<&str>>()
+    );
+    seams.into_iter().next().expect("checked")
+}
+
+/// One named seam out of a synthetic worker file.
+fn seam_named(path: &str, source: &str, function: &str) -> WorkflowSeamSite {
+    let seams = discover_workflow_seams(&[(path.to_owned(), source.to_owned())]);
+    seams
+        .into_iter()
+        .find(|seam| seam.function == function)
+        .unwrap_or_else(|| panic!("the scan found no seam called `{function}`"))
+}
+
+/// A `None` initializer followed by an ASSIGNMENT is not a decline.
+///
+/// The exact mutation the review landed on the real declining seam: the `workflow: None` literal
+/// stays, so a check that reads only struct-literal initializers is satisfied by dead syntax while
+/// a real envelope travels into the mask PNG.
+#[test]
+fn a_share_assigned_onto_a_field_after_a_none_initializer_is_read() {
+    let seam = seam_named(
+        "crates/sceneworks-worker/src/probe_segment.rs",
+        "fn run_probe_segment_job() {\n    let mut spec = SingleChildAssetSpec { mode: \"m\", \
+         workflow: None };\n    spec.workflow = parse_workflow_share_json(&text).ok();\n    \
+         write_single_child_asset(&path, image, spec, build);\n}\nstruct SingleChildAssetSpec {\n \
+         mode: &'static str,\n    workflow: Option<WorkflowShare>,\n}\nfn \
+         write_single_child_asset(spec: SingleChildAssetSpec) {\n    \
+         write_workflow_chunk(a, b, spec.workflow.as_ref());\n}\n",
+        "run_probe_segment_job",
+    );
+    assert_eq!(
+        seam.share_field_values,
+        vec!["None".to_owned(), "parse_workflow_share_json".to_owned()],
+        "both the dead initializer AND the assignment have to be read"
+    );
+    assert!(seam.hands_a_share_on(), "the assignment moves an envelope");
+    assert!(
+        seam.obtains_an_envelope,
+        "it parses one out of another file"
+    );
+}
+
+/// Field SHORTHAND is not a `None` either, because the scan cannot follow the local.
+#[test]
+fn a_share_carrying_field_in_shorthand_is_not_a_decline() {
+    let caller = seam_named(
+        "crates/sceneworks-worker/src/probe_shorthand.rs",
+        "struct Spec {\n    workflow: Option<WorkflowShare>,\n}\nfn build_it(spec: Spec) {\n    \
+         write_workflow_chunk(a, b, spec.workflow.as_ref());\n}\nfn caller() {\n    let workflow \
+         = carried();\n    build_it(Spec { workflow });\n}\n",
+        "caller",
+    );
+    assert_eq!(caller.share_field_values, vec!["<shorthand>".to_owned()]);
+    assert!(
+        caller.hands_a_share_on(),
+        "the scan cannot follow the local, so a decline has to spell `None` out"
+    );
+}
+
+/// An envelope the seam did not BUILD is still an envelope: the provenance-blind half.
+///
+/// Nothing here calls a builder. The share is parsed back out of another file and written on,
+/// which is what sc-15954 did for the editor export and the likeliest shape of sc-15956 —
+/// "carry the source's workflow into the output frame".
+#[test]
+fn a_parsed_envelope_written_on_is_seen_as_embedding() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/video_jobs/probe_carry.rs",
+        "fn write_probe_frame(img: &image::RgbImage, path: &Path) -> WorkerResult<()> {\n    let \
+         carried = parse_workflow_share_json(&text).ok();\n    write_workflow_chunk(img, path, \
+         carried.as_ref()).map_err(other)\n}\n",
+    );
+    assert!(!seam.constructs, "it calls no builder at all");
+    assert!(!seam.carrier, "nothing reaches it through its signature");
+    assert!(
+        seam.writes_a_share_chunk,
+        "the chunk writer's last argument is not `None`"
+    );
+    assert!(seam.obtains_an_envelope, "it parses one");
+    assert!(seam.moves_an_envelope(), "so it embeds, and owes a lane");
+}
+
+/// A literal `None` argument is still a decline — the check has to distinguish the two.
+#[test]
+fn a_chunk_written_with_a_literal_none_is_not_embedding() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_none.rs",
+        "fn write_probe_mask(img: &image::GrayImage, path: &Path) {\n    \
+         write_workflow_chunk(img, path, None);\n}\n",
+    );
+    assert!(!seam.writes_a_share_chunk);
+    assert!(!seam.moves_an_envelope());
+    assert!(!seam.obtains_an_envelope);
+}
+
+/// A `use … as …` rename does not turn the gate off.
+///
+/// It did: a brand-new worker file that imported the chunk writer and the gated builder under
+/// other names called them with the whole lint asleep, because discovery AND its safety net both
+/// matched the surface names as literal text.
+#[test]
+fn a_renamed_import_of_the_write_surface_is_resolved() {
+    let source = "use sceneworks_core::workflow_png::write_workflow_chunk as embed_png;\nuse \
+                  sceneworks_core::workflow_share::embeddable_workflow_share as build_share;\nfn \
+                  append_probe_frames(img: &image::RgbImage, path: &Path) {\n    let share = \
+                  build_share(&facts, &payload);\n    embed_png(img, path, \
+                  share.as_ref());\n}\n";
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/video_jobs/probe_rename.rs",
+        source,
+    );
+    assert_eq!(seam.function, "append_probe_frames");
+    assert!(
+        seam.constructs,
+        "`build_share` IS `embeddable_workflow_share`"
+    );
+    assert!(
+        seam.writes_a_share_chunk,
+        "`embed_png` IS `write_workflow_chunk`, and its share argument is not `None`"
+    );
+    assert_eq!(
+        seam.calls,
+        vec![
+            "embeddable_workflow_share".to_owned(),
+            "write_workflow_chunk".to_owned()
+        ],
+        "the calls are recorded under the CANONICAL names, so downstream checks still match"
+    );
+    assert_eq!(
+        import_aliases(source),
+        vec![
+            ("embed_png".to_owned(), "write_workflow_chunk".to_owned()),
+            (
+                "build_share".to_owned(),
+                "embeddable_workflow_share".to_owned()
+            ),
+        ]
+    );
+}
+
+/// Taking the writer as a VALUE is not an indirection the scan can be walked around with.
+///
+/// Found while re-deriving the honest limits after the review: `call_sites` required the `(` to be
+/// there, so a local binding of the function itself was invisible to discovery AND to the safety
+/// net — the same class of hole as the rename import, one level further along.
+#[test]
+fn the_write_surface_taken_as_a_value_is_still_discovered() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_indirect.rs",
+        "fn write_probe_frame(img: &image::RgbImage, path: &Path) {\n    let writer = \
+         write_workflow_chunk;\n    let share = embeddable_workflow_share(&facts, \
+         &payload);\n    let _ = writer(img, path, share.as_ref());\n}\n",
+    );
+    assert_eq!(seam.function, "write_probe_frame");
+    assert!(
+        seam.calls.contains(&"write_workflow_chunk".to_owned()),
+        "the mention counts even though the call goes through a local: {:?}",
+        seam.calls
+    );
+    assert!(seam.constructs);
+}
+
+/// A renamed `WorkflowShare` TYPE still makes its holders carriers.
+#[test]
+fn a_renamed_import_of_the_share_type_is_resolved() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_type_rename.rs",
+        "use sceneworks_core::workflow_share::WorkflowShare as Ws;\nfn hand_on(share: \
+         Option<Ws>) {\n    write_workflow_chunk(a, b, share.as_ref());\n}\n",
+    );
+    assert!(seam.carrier, "the renamed type is still the share type");
+    assert!(seam.writes_a_share_chunk);
+}
+
+/// A carrier that reaches no writer is INERT, and the registry has a word for it.
+///
+/// Layer 2 makes any function whose signature names a share-carrying struct a seam, so a logging
+/// helper is one. Its only disposition used to be `Conduit`, whose doc says "writes an envelope
+/// its caller built" — a false statement about a function that writes nothing.
+#[test]
+fn a_carrier_that_writes_nothing_reaches_no_writer() {
+    let seam = only_seam(
+        "crates/sceneworks-worker/src/probe_logging.rs",
+        "struct Spec {\n    workflow: Option<WorkflowShare>,\n}\nfn log_spec(spec: &Spec) {\n    \
+         tracing::debug!(mode = spec.mode, \"single-child write\");\n}\n",
+    );
+    assert_eq!(seam.function, "log_spec");
+    assert!(seam.carrier);
+    assert!(
+        seam.calls.is_empty(),
+        "it calls nothing the scan can see reach a write"
+    );
+    assert!(!seam.moves_an_envelope() && !seam.obtains_an_envelope);
+}
+
+// ---------------------------------------------------------------------------
+// The false positives the first cut of this lint produced (sc-16113 review)
+// ---------------------------------------------------------------------------
+
+/// The safety net's rescue, run exactly as the net runs it.
+///
+/// Panics the way the net does, so the shapes below assert on the same code path rather than on a
+/// paraphrase of it.
+fn assert_the_rescue_accepts(source: &str, name: &str) {
+    let light = blank_comments_and_literals(source);
+    let (full, blanked) = blank_test_only_items_with_spans(&light);
+    let offset = call_sites(&light, name)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the fixture calls `{name}`"));
+    assert!(
+        !full[offset..].starts_with(name),
+        "the fixture must be blanked in the first place"
+    );
+    let span = blanked
+        .iter()
+        .find(|(start, end)| offset >= *start && offset < *end)
+        .expect("the blanked call lies inside the `#[cfg(test)]` item's own span");
+    assert!(
+        blanked_span_is_one_whole_item(&light[span.0..span.1]),
+        "and that span is one whole item:\n{}",
+        &light[span.0..span.1]
+    );
+}
+
+/// The house `#[cfg(test)]` layout — fixture ABOVE the first `#[test]` — is not a bug report.
+///
+/// Eighty-four worker files use inline test modules. The rescue used to require a `#[test]`
+/// textually between the nearest preceding `#[cfg(` and the blanked call, so this ordinary shape
+/// failed the build with a message describing a bug that had not happened, and moving the fixture
+/// below the first `#[test]` "fixed" it.
+#[test]
+fn a_test_fixture_above_the_first_test_attribute_is_still_test_scaffolding() {
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nmod tests {\n    use super::*;\n    fn \
+         png_fixture() {\n        write_workflow_chunk(a, b, None);\n    }\n    #[test]\n    fn \
+         t() {\n        png_fixture();\n    }\n}\n",
+        "write_workflow_chunk",
+    );
+}
+
+/// A STANDALONE `#[cfg(test)]` fixture carries no test attribute of its own, and is scaffolding.
+#[test]
+fn a_standalone_test_only_fixture_is_still_test_scaffolding() {
+    assert_the_rescue_accepts(
+        "fn product() {\n    let _ = 1;\n}\n#[cfg(test)]\nfn generic_fixture<P: AsRef<Path>, S: \
+         Into<String>>(path: P, label: S) {\n    write_workflow_chunk(a, path, None);\n}\n",
+        "write_workflow_chunk",
+    );
+    assert_the_rescue_accepts(
+        "struct Probe<A, B>(A, B);\n#[cfg(test)]\nimpl Probe<u8, u16> {\n    fn fixture(&self) \
+         {\n        write_workflow_chunk(a, b, None);\n    }\n}\n",
+        "write_workflow_chunk",
+    );
+}
+
+/// ... and a RUNAWAY span is still refused, which is what the rescue is for.
+///
+/// The historical bug: a `#[cfg(test)]` struct field whose end was never found, so the blanking ran
+/// to the next `{` and swallowed the `impl` after it. Such a region starts inside the struct and
+/// therefore closes a brace it never opened.
+#[test]
+fn a_runaway_blanking_span_is_refused() {
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\nmod tests {\n    fn f() {}\n}"
+    ));
+    assert!(blanked_span_is_one_whole_item(
+        "#[cfg(test)]\n    probes: u64,"
+    ));
+    assert!(
+        !blanked_span_is_one_whole_item(
+            "#[cfg(test)]\n    probes: u64,\n}\n\nimpl Budget {\n    fn write(&self) {\n        \
+             write_workflow_chunk(a, b, c);\n    }\n}"
+        ),
+        "a region that closes the struct it started inside is a runaway"
+    );
+}
+
+/// `#[cfg(not(test))]` is PRODUCTION-only code, not test scaffolding.
+///
+/// It contains a bare `test` token and no `any(`, so the first cut blanked it — and the safety net
+/// then failed the build on a production function with a message about blanking eating product
+/// code, which is precisely what had happened, to itself.
+#[test]
+fn the_rust_scanner_keeps_a_production_only_cfg() {
+    let stripped = rust_scannable(
+        "#[cfg(not(test))]\npub fn write_production_frame() {\n    write_workflow_chunk(a, b, \
+         c);\n}\n",
+    );
+    assert!(stripped.contains("write_workflow_chunk("), "{stripped}");
+    assert!(!cfg_predicate_is_test_only("not(test)"));
+    assert!(!cfg_predicate_is_test_only("all(not(test), unix)"));
+    assert!(cfg_predicate_is_test_only("test"));
+    assert!(cfg_predicate_is_test_only("all(test, feature = \"x\")"));
+    assert!(!cfg_predicate_is_test_only(
+        "any(target_os = \"macos\", test)"
+    ));
+    assert!(cfg_predicate_is_test_only("any(test, all(test, unix))"));
+}
+
+/// A GENERIC `#[cfg(test)]` fixture is stripped like any other.
+///
+/// The item scan used to stop at the first `,` at paren depth zero, so the comma inside
+/// `<P: AsRef<Path>, S: Into<String>>` ended the item before its body — leaving a test fixture in
+/// the scan, to be demanded as a product seam.
+#[test]
+fn the_rust_scanner_strips_a_generic_test_fixture() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nfn generic_fixture<P: AsRef<Path>, S: Into<String>>(path: P, label: S) \
+         {\n    write_workflow_chunk(a, b, c);\n}\nfn product() {\n    let _ = 1;\n}\n",
+    );
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "the generic fixture must go with every other one:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["product"]
+    );
+}
+
+/// ... and so is a generic `#[cfg(test)] impl`.
+#[test]
+fn the_rust_scanner_strips_a_generic_test_only_impl() {
+    let stripped = rust_scannable(
+        "#[cfg(test)]\nimpl Probe<A, B> {\n    fn fixture(&self) {\n        \
+         write_workflow_chunk(a, b, c);\n    }\n}\nfn product() {\n    let _ = 1;\n}\n",
+    );
+    assert!(
+        !stripped.contains("write_workflow_chunk"),
+        "the generic impl must go too:\n{stripped}"
+    );
+    assert_eq!(
+        rust_fn_spans(&stripped)
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["product"]
+    );
+}
+
+/// A generic `#[cfg(test)]` FIELD still ends at its own comma, not at the one inside its type.
+#[test]
+fn the_rust_scanner_survives_a_generic_test_only_struct_field() {
+    let stripped = rust_scannable(
+        "struct Budget {\n    bytes: u64,\n    #[cfg(test)]\n    probes: HashMap<String, u64>,\n \
+         }\n\nimpl Budget {\n    fn write(&self) {\n        write_workflow_chunk(a, b, c);\n    \
+         }\n}\n",
+    );
+    assert!(
+        stripped.contains("write_workflow_chunk("),
+        "the `impl` after the gated field must survive:\n{stripped}"
+    );
+    assert!(!stripped.contains("cfg(test)"));
 }

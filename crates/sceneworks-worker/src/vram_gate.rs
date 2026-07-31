@@ -655,6 +655,31 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 .get(phase)
                 .and_then(json_f64)
         };
+        let engaged_composition = manifest_rung.map_or_else(
+            || provider_contract.engaged_composition(selection.strategy),
+            |rung| {
+                evidence_record
+                    .and_then(|record| record.get("measuredCompositions"))
+                    .and_then(|compositions| compositions.get(rung))
+                    .and_then(Value::as_array)
+                    .and_then(|composition| {
+                        composition
+                            .iter()
+                            .map(|rung| match rung.as_str()? {
+                                "resident" => Some(MemoryStrategy::Resident),
+                                "staged_residency" => Some(MemoryStrategy::StagedResidency),
+                                "bounded_decode" => Some(MemoryStrategy::BoundedDecode),
+                                "bounded_attention" => Some(MemoryStrategy::BoundedAttention),
+                                "bounded_transformer_residency" => {
+                                    Some(MemoryStrategy::BoundedTransformerResidency)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .unwrap_or_default()
+            },
+        );
         let predicted_peak_gb =
             record_peak("predictedPeaksGb").unwrap_or(fallback_predicted_peak_gb);
         let observed_peak_gb = record_peak("observedPeaksGb");
@@ -837,6 +862,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 overlay: None,
                 geometry,
                 strategy: selection.strategy,
+                engaged_composition,
                 parameters: selection.parameters,
             },
             conformance: if verified {
@@ -1561,6 +1587,22 @@ mod tests {
                         "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
                         "compatibleSceneWorksRevision": "sc-15449-contract-v1",
                         "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+                        "measuredCompositions": {
+                            "threeStage": ["resident", "staged_residency"],
+                            "tiledVae": ["resident", "bounded_decode"],
+                            "chunkedAttention": [
+                                "resident",
+                                "bounded_decode",
+                                "bounded_attention"
+                            ],
+                            "streamedBlocks": [
+                                "resident",
+                                "staged_residency",
+                                "bounded_decode",
+                                "bounded_attention",
+                                "bounded_transformer_residency"
+                            ]
+                        },
                         "loadability": {
                             "provider": "huggingface",
                             "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -1889,6 +1931,19 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
             })
         );
+
+        let mut legacy = krea_fit_manifest();
+        legacy["candle"]["turboFit"]["evidenceRecords"][0]
+            .as_object_mut()
+            .expect("evidence record")
+            .remove("measuredCompositions");
+        assert_eq!(
+            fit(&legacy),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::Invalid,
+            }),
+            "composition-agnostic legacy evidence must not remain eligible"
+        );
     }
 
     #[test]
@@ -2030,18 +2085,15 @@ mod tests {
     }
 
     #[test]
-    fn builtin_krea_cumulative_rung_two_and_three_curves_are_fingerprint_invalidated() {
+    fn builtin_krea_evidence_is_keyed_by_the_measured_engaged_composition() {
         let manifest = builtin_krea_turbo_manifest();
         let turbo_fit = manifest["candle"]["turboFit"]
             .as_object()
             .expect("Krea turbo fit");
-        let invalidating_fingerprint = turbo_fit["calibrationFingerprint"]
+        let manifest_fingerprint = turbo_fit["calibrationFingerprint"]
             .as_str()
             .expect("manifest calibration fingerprint");
-        assert_eq!(
-            invalidating_fingerprint,
-            "krea-turbo-cuda-phase-curves-v1-superseded-sc-15994"
-        );
+        assert_eq!(manifest_fingerprint, "krea-turbo-cuda-phase-curves-v1");
 
         let provider_contract = crate::inference_runtime::media()
             .memory_strategy_contract(
@@ -2056,54 +2108,93 @@ mod tests {
             .expect("Krea provider declares calibration")
             .fingerprint
             .as_str();
-        assert_ne!(
-            invalidating_fingerprint, provider_fingerprint,
-            "the manifest must stay fingerprint-mismatched until non-staged curves are captured"
+        assert_eq!(
+            manifest_fingerprint, provider_fingerprint,
+            "composition identity, not a blanket fingerprint tombstone, invalidates mismatched rows"
         );
 
         for tier in ["q4", "q8", "bf16"] {
-            for (manifest_rung, selection) in [
-                ("tiledVae", gen_core::MemoryStrategy::BoundedDecode),
-                (
-                    "chunkedAttention",
-                    gen_core::MemoryStrategy::BoundedAttention,
+            let measured = turbo_fit["evidenceRecords"]
+                .as_array()
+                .expect("evidence records")
+                .iter()
+                .find(|record| {
+                    record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
+                })
+                .expect("1024 evidence record");
+            assert_eq!(
+                measured["measuredCompositions"]["tiledVae"],
+                json!(["resident", "staged_residency", "bounded_decode"])
+            );
+            assert_eq!(
+                measured["measuredCompositions"]["chunkedAttention"],
+                json!([
+                    "resident",
+                    "staged_residency",
+                    "bounded_decode",
+                    "bounded_attention"
+                ])
+            );
+            assert!(
+                !provider_contract.engages(
+                    gen_core::MemoryStrategy::BoundedDecode,
+                    gen_core::MemoryStrategy::StagedResidency,
                 ),
-            ] {
-                let row = turbo_fit["phaseCurvesByTier"][tier][manifest_rung]
-                    .as_object()
-                    .unwrap_or_else(|| panic!("missing affected {tier}.{manifest_rung} curve"));
-                assert!(
-                    ["text", "denoise", "decode"]
-                        .into_iter()
-                        .all(|phase| row.get(phase).is_some_and(Value::is_object)),
-                    "affected {tier}.{manifest_rung} curve must remain as historical provenance"
-                );
-                assert!(
-                    !provider_contract
-                        .engages(selection, gen_core::MemoryStrategy::StagedResidency),
-                    "{selection:?} must execute without the staged composition used to capture \
-                     {tier}.{manifest_rung}"
-                );
-            }
+                "the current bounded-decode contract deliberately differs from its measured row"
+            );
         }
 
-        for (tier, free_gb) in [("q4", 24.0), ("q8", 32.0), ("bf16", 48.0)] {
-            assert_eq!(
+        for tier in ["q4", "q8", "bf16"] {
+            let phases =
+                krea_rung_phase_peaks(&manifest, tier, KreaTurboRung::TiledVae, 1024, 1024)
+                    .expect("tiled-VAE phase peaks");
+            let required =
+                phases.text_gb.max(phases.denoise_gb).max(phases.decode_gb) + HEADROOM_GB;
+            assert!(matches!(
                 krea_turbo_fit(
                     &manifest,
                     tier,
                     1024,
                     1024,
                     Some(VramBudget {
-                        free_gb,
-                        total_gb: free_gb,
+                        free_gb: required,
+                        total_gb: required,
+                    }),
+                    true,
+                ),
+                Some(KreaTurboFit::Fits {
+                    rung: KreaTurboRung::StreamedBlocks,
+                    ..
+                })
+            ));
+
+            let mut no_compatible_deeper_row = manifest.clone();
+            let record = no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
+                .as_array_mut()
+                .expect("evidence records")
+                .iter_mut()
+                .find(|record| {
+                    record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
+                })
+                .expect("1024 evidence record");
+            record["measuredCompositions"]["streamedBlocks"] =
+                json!(["resident", "bounded_transformer_residency"]);
+            assert_eq!(
+                krea_turbo_fit(
+                    &no_compatible_deeper_row,
+                    tier,
+                    1024,
+                    1024,
+                    Some(VramBudget {
+                        free_gb: required,
+                        total_gb: required,
                     }),
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+                    reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
                 }),
-                "{tier} evidence must fail closed before any historical phase curve can authorize a fit"
+                "{tier} mismatched rows must fail closed when no exact deeper composition can fit"
             );
         }
     }
@@ -2135,7 +2226,7 @@ mod tests {
         assert!(matches!(
             fit(16.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                rung: KreaTurboRung::StreamedBlocks,
                 ..
             })
         ));
@@ -2202,7 +2293,7 @@ mod tests {
         assert!(matches!(
             fit(24.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                rung: KreaTurboRung::StreamedBlocks,
                 ..
             })
         ));
@@ -2233,7 +2324,12 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(8.95), Some(KreaTurboFit::Reject { .. })));
+        assert_eq!(
+            fit(8.95),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
+            })
+        );
         let budget = Some(VramBudget {
             free_gb: 8.95,
             total_gb: 8.95,
@@ -2293,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn q8_and_bf16_768_measurements_report_out_of_envelope_without_exact_records() {
+    fn q8_and_bf16_768_measurements_reject_missing_composition_keys_as_invalid() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         for tier in ["q8", "bf16"] {
             assert!(matches!(
@@ -2309,7 +2405,7 @@ mod tests {
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
+                    reason: gen_core::MemoryEvidenceVerdict::Invalid,
                 })
             ));
         }
@@ -2341,7 +2437,7 @@ mod tests {
         assert!(matches!(
             fit(31.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                rung: KreaTurboRung::StreamedBlocks,
                 ..
             })
         ));
@@ -2370,7 +2466,12 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(10.63), Some(KreaTurboFit::Reject { .. })));
+        assert_eq!(
+            fit(10.63),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
+            })
+        );
         let immediate_below = Some(VramBudget {
             free_gb: 10.63,
             total_gb: 10.63,

@@ -462,12 +462,13 @@ fn pixel_error(
 
 fn preflight_fragment(
     request: &Value,
+    strategy: &Value,
     blocker: String,
     measurement_name: &'static str,
     repository: &str,
     revision: &str,
 ) -> Result<Value, String> {
-    Ok(protocol::gated_fragment(
+    let mut fragment = protocol::gated_fragment(
         artifact(repository, revision),
         sweep(request, protocol::strategy_parameters(request)?, "failed")?,
         &blocker,
@@ -480,7 +481,40 @@ fn preflight_fragment(
             [blocker.clone()],
             [(measurement_name, "count", 1)],
         ),
-    ))
+    );
+    fragment["strategy"] = strategy.clone();
+    Ok(fragment)
+}
+
+fn strategy_name(strategy: MemoryStrategy) -> &'static str {
+    match strategy {
+        MemoryStrategy::Resident => "resident",
+        MemoryStrategy::StagedResidency => "staged_residency",
+        MemoryStrategy::BoundedDecode => "bounded_decode",
+        MemoryStrategy::BoundedAttention => "bounded_attention",
+        MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+fn measured_strategy(
+    request: &Value,
+    selection: &MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> Result<Value, String> {
+    let measured = json!({
+        "rung": strategy_name(selection.strategy),
+        "engagedRungs": engaged.iter().copied().map(strategy_name).collect::<Vec<_>>(),
+        "parameters": protocol::strategy_parameters(request)?,
+    });
+    let planned = protocol::planned(request)?
+        .get("strategy")
+        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
+    if planned != &measured {
+        return Err(format!(
+            "plan/provider strategy mismatch: plan={planned}, pinned provider measured={measured}"
+        ));
+    }
+    Ok(measured)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -530,6 +564,30 @@ fn run(request: &Value) -> Result<Value, String> {
                 protocol::INFERENCE_PIN
             )
         })?;
+    let edge = protocol::parameter(request, "decodeTileEdge")?;
+    let overlap = protocol::parameter(request, "decodeOverlap")?;
+    let attention = protocol::parameter(request, "attentionChunkSize")?;
+    let window = protocol::parameter(request, "transformerWindowSize")?;
+    let selected = MemoryStrategyParameters {
+        decode_tile_edge: Some(edge),
+        decode_overlap: Some(overlap),
+        attention_chunk_size: Some(attention),
+        transformer_window_size: Some(window),
+        transformer_window_component: Some(TransformerComponent::Dit),
+    };
+    let selection = MemorySelection {
+        strategy: MemoryStrategy::BoundedTransformerResidency,
+        parameters: selected,
+        tier: MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: Some(Quant::Q4),
+        },
+    };
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
     let planned_fingerprint = protocol::planned(request)?
         .get("calibrationFingerprint")
         .and_then(Value::as_str)
@@ -544,6 +602,7 @@ fn run(request: &Value) -> Result<Value, String> {
     if planned_fingerprint != actual_fingerprint {
         return preflight_fragment(
             request,
+            &strategy,
             format!(
                 "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={actual_fingerprint} at {}",
                 protocol::INFERENCE_PIN
@@ -554,35 +613,10 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
 
-    let edge = protocol::parameter(request, "decodeTileEdge")?;
-    let overlap = protocol::parameter(request, "decodeOverlap")?;
-    let attention = protocol::parameter(request, "attentionChunkSize")?;
-    let window = protocol::parameter(request, "transformerWindowSize")?;
-    let selected = MemoryStrategyParameters {
-        decode_tile_edge: Some(edge),
-        decode_overlap: Some(overlap),
-        attention_chunk_size: Some(attention),
-        transformer_window_size: Some(window),
-        // Rung 4's window scope (SC-15794). This adapter windows Krea's DiT blocks, and
-        // `candle-gen-krea` declares no `transformer_window_components`, which the contract reads
-        // as DiT-only -- so `Dit` is the one scope a request may name here. Stated explicitly
-        // rather than left `None` so the `validate_selection` call below actively checks the scope
-        // against the pinned provider's declared candidates; if a future Krea revision narrows
-        // rung 4 to a different component, this calibration run fails loudly at preflight instead
-        // of recording evidence under a silently-defaulted scope.
-        transformer_window_component: Some(TransformerComponent::Dit),
-    };
-    let selection = MemorySelection {
-        strategy: MemoryStrategy::BoundedTransformerResidency,
-        parameters: selected,
-        tier: MemoryNumericTier {
-            precision: Precision::Bf16,
-            quant: Some(Quant::Q4),
-        },
-    };
     if let Err(reason) = contract.validate_selection(&selection) {
         return preflight_fragment(
             request,
+            &strategy,
             format!("pinned provider rejected planned parameters before load: {reason}"),
             "contractParameterRejection",
             &repository,
@@ -592,6 +626,7 @@ fn run(request: &Value) -> Result<Value, String> {
     if !root.is_dir() {
         return preflight_fragment(
             request,
+            &strategy,
             "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the validated q4 snapshot".to_owned(),
             "missingWeights",
             &repository,
@@ -908,6 +943,7 @@ fn run(request: &Value) -> Result<Value, String> {
             ],
         ),
     );
+    fragment["strategy"] = strategy;
     fragment["observedMemory"] = json!({
         "conditioning": cuda_phase_metrics(conditioning_bytes),
         "denoise": cuda_phase_metrics(denoise_bytes),
