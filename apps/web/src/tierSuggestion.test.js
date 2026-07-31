@@ -648,6 +648,39 @@ describe("per-tier memory floor: duplicate tier keys resolve to the MAX", () => 
   });
 });
 
+describe("installedTierPeakGb explicit tier safety", () => {
+  const model = {
+    hasVariantMatrix: true,
+    candle: {
+      vramGbByTier: { q4: 12, q8: 24 },
+      vramMeasuredPixels: 1024 * 1024,
+    },
+    variants: [
+      {
+        variant: "q4",
+        installState: "installed",
+        footprint: { peakMemoryBytes: 10 * GB, measuredPixels: 1024 * 1024 },
+      },
+      {
+        variant: "q8",
+        installState: "missing",
+        footprint: { peakMemoryBytes: 20 * GB, measuredPixels: 1024 * 1024 },
+      },
+    ],
+  };
+
+  it("reads the selected installed tier on each lane", () => {
+    expect(installedTierPeakGb(model, { backend: "mlx", tier: "q4" })).toBe(10);
+    expect(installedTierPeakGb(model, { backend: "candle", tier: "q4" })).toBe(12);
+  });
+
+  it("rejects a stale selected tier removed from the installed set", () => {
+    // q8 still carries both lanes' evidence, so only the installedTiers intersection can reject it.
+    expect(installedTierPeakGb(model, { backend: "mlx", tier: "q8" })).toBeNull();
+    expect(installedTierPeakGb(model, { backend: "candle", tier: "q8" })).toBeNull();
+  });
+});
+
 describe("per-tier memory floor: an unevidenced INSTALLED tier is estimated, not ignored", () => {
   // THE ROUND-4 BLOCKER. `installedFloorHostGb` took `max(convertedCeiling, blanket)` when coverage was
   // incomplete, and `maxHostGb(x, null) === x` — so on a lane declaring NO blanket, the ceiling over the
