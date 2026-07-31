@@ -417,6 +417,7 @@ fn a_generated_png_round_trips_through_a_gallery_parser() {
     assert_eq!(parsed.params["Size"], "64x48");
     assert_eq!(parsed.params["Model"], "z_image_turbo");
     assert_eq!(parsed.params["Version"], PRODUCER_VERSION);
+    assert_eq!(parsed.params["software"], "SceneWorks");
 
     // The recipe chunk is still there and still the authoritative one — the second chunk is a
     // display convenience and does not replace the thing a SceneWorks install reads back.
@@ -447,6 +448,18 @@ fn an_exact_checkpoint_hash_becomes_a_civitai_model_resource_key() {
         ),
         "the exact digest must reach the physical PNG parameters chunk"
     );
+}
+
+#[test]
+fn client_software_input_cannot_replace_the_trusted_sceneworks_badge() {
+    let share = built(
+        "a lighthouse",
+        "",
+        json!({ "software": "Forged Generator", "producer": { "name": "Forged Producer" } }),
+    );
+    let parsed = parse_a1111(&parameters_text(&share, (64, 48)));
+    assert_eq!(parsed.params["software"], "SceneWorks");
+    assert!(!parsed.params.values().any(|value| value.contains("Forged")));
 }
 
 #[test]
@@ -542,7 +555,7 @@ fn the_settings_line_clears_the_pair_floor_a_gallery_parses_with() {
         (
             // `standalone_upscale_workflow_share` in the worker: mode `image_upscale`, the engine
             // as the model, no prompt at all, and the SOURCE geometry — so `Size` is correctly
-            // withheld from a file twice that size. Seed + Model + Version and nothing else.
+            // withheld from a file twice that size. Seed + Model + Version + software and nothing else.
             "the standalone upscale lane",
             lane_share(
                 WorkflowAssetFacts {
@@ -598,16 +611,14 @@ fn the_settings_line_clears_the_pair_floor_a_gallery_parses_with() {
         "the detail fixture must carry both allow-listed knobs and nothing that maps: {:?}",
         lanes[3].1.advanced
     );
-    // And the sharpest statement of where the cliff is: the upscale lane clears the floor by
-    // NOTHING. Stated as an equality so a change that removes a mapped field fails here rather than
-    // silently reducing the margin from zero to negative.
+    // The thinnest shipping lane now has one field of margin: Civitai's software badge joins the
+    // original Seed + Model + Version trio.
     assert_eq!(
         parse_a1111(&parameters_text(&lanes[2].1, lanes[2].2))
             .params
             .len(),
-        SETTINGS_PAIR_FLOOR,
-        "the standalone upscale lane is the one that sits ON the floor; if it no longer does, the \
-         lane that does is the one this test should be pinning"
+        SETTINGS_PAIR_FLOOR + 1,
+        "the standalone upscale lane should retain exactly one field of parser margin"
     );
 
     for (label, share, encoded, prompt) in lanes {
@@ -629,15 +640,14 @@ fn the_settings_line_clears_the_pair_floor_a_gallery_parses_with() {
 #[test]
 fn a_lane_that_cannot_reach_the_floor_withholds_the_line_instead_of_leaking_it_into_the_prompt() {
     // The other half, and the reason the pin above is worth extending rather than just widening.
-    // The upscale lane clears the floor by ZERO margin, so any envelope that loses one of its three
-    // fields falls off the cliff — and the renderer used to emit the two-pair remainder, which every
-    // gallery displays as prompt text.
+    // A malformed foreign producer plus a withheld model can still leave only two mapped fields,
+    // and every gallery displays those two as prompt text, so the renderer withholds them whole.
     //
     // Reachable? Not through today's catalog: `model` here is an upscaler engine id, and no id in it
     // is empty, over 200 characters or path-shaped, which are the three ways the sanitizer drops a
     // label. So this is latent rather than live — which is exactly the kind of thing that becomes
     // live when someone adds an engine whose id happens to look like a path.
-    let stripped = lane_share(
+    let mut stripped = lane_share(
         WorkflowAssetFacts {
             mode: "image_upscale".to_owned(),
             // Three segments, so `is_path_shaped` catches it and `shareable_label` withholds it —
@@ -656,6 +666,7 @@ fn a_lane_that_cannot_reach_the_floor_withholds_the_line_instead_of_leaking_it_i
         "the fixture must actually lose its model or it proves nothing: {:?}",
         stripped.model
     );
+    stripped.producer.name.clear();
 
     let text = parameters_text(&stripped, (2048, 2048));
     assert_eq!(
