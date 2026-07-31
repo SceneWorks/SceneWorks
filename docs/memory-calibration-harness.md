@@ -222,11 +222,16 @@ and reports the bounded output's maximum and mean pixel error without inventing 
 The record remains `gated` until predicted phase curves, an approved bounded-output tolerance,
 exact-fit/stale/unknown worker selection, and a measured negative mutation execute.
 
-At the current SceneWorks pin (`d36390da51bf6a1a67f8e00a8c7d7d8a385d2f20`), the authoritative plan
-matches the provider's `krea-turbo-cuda-phase-curves-v1` fingerprint and singleton production domain
-`512/128/134217728/window=1`. The unsupported `384/...` and `640/.../window=2` v2 experiments live in
-a separate `candidate` evidence scope. Candidate records can be measured or gated, but can never
-become current matrix evidence or impersonate the production v1 cell.
+The authoritative plan still names the provider's
+`krea-turbo-cuda-phase-curves-v1` fingerprint and singleton production domain
+`512/128/134217728/window=1`. SC-15994 deliberately moved the manifest to the tombstone fingerprint
+`krea-turbo-cuda-phase-curves-v1-superseded-sc-15994`: the q4/q8/bf16 bounded-decode and
+bounded-attention curves were captured with staged residency active, while those selections no longer
+engage staging. The mismatch keeps every historical Krea phase curve out of current admission until
+SC-15913 produces non-staged captures and updates both sides together. The unsupported `384/...` and
+`640/.../window=2` v2 experiments remain in a separate `candidate` evidence scope. Candidate records
+can be measured or gated, but can never become current matrix evidence or impersonate the production
+v1 cell.
 
 The inference repository's raw real-weight tests remain useful mechanism checks:
 

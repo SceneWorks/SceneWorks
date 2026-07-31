@@ -5517,6 +5517,26 @@ mod krea_turbo_memory_route_tests {
         capability_downtier_floor, krea_turbo_capability_reject_message,
         krea_turbo_memory_route, krea_unverified_resident_decision,
     };
+    use serde_json::{Map, Value};
+
+    fn historical_builtin_krea_turbo_manifest() -> Map<String, Value> {
+        let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
+        let mut parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+        let model = parsed["models"]
+            .as_array_mut()
+            .expect("models array")
+            .iter_mut()
+            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
+            .expect("Krea 2 Turbo manifest entry");
+        model["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        model
+            .as_object()
+            .expect("Krea 2 Turbo manifest object")
+            .clone()
+    }
 
     #[test]
     fn only_plain_turbo_text_to_image_uses_the_memory_ladder() {
@@ -5574,22 +5594,11 @@ mod krea_turbo_memory_route_tests {
     }
 
     #[test]
-    fn constrained_q8_reject_never_capability_downtiers_to_q4() {
+    fn historical_constrained_q8_reject_never_capability_downtiers_to_q4() {
         use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
-        use serde_json::Value;
 
-        let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let parsed: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-                .expect("builtin model manifest parses");
-        let manifest = parsed["models"]
-            .as_array()
-            .expect("models array")
-            .iter()
-            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
-            .and_then(Value::as_object)
-            .expect("Krea 2 Turbo manifest entry");
+        let manifest = historical_builtin_krea_turbo_manifest();
         let available_gb = 8.95;
         let budget = Some(VramBudget {
             free_gb: available_gb,
@@ -5597,7 +5606,7 @@ mod krea_turbo_memory_route_tests {
         });
         let fit = |tier| {
             let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
-            match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+            match krea_turbo_fit(&manifest, tier, 1024, 1024, budget, true, Some(&runtime))
                 .expect("Q8 and Q4 have measured ladder curves")
             {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,
@@ -5627,22 +5636,11 @@ mod krea_turbo_memory_route_tests {
     }
 
     #[test]
-    fn constrained_bf16_reject_never_capability_downtiers_to_q8_or_q4() {
+    fn historical_constrained_bf16_reject_never_capability_downtiers_to_q8_or_q4() {
         use super::{choose_downtier, tier_quality_rank, DowntierPick, TierFit};
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
-        use serde_json::Value;
 
-        let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let parsed: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-                .expect("builtin model manifest parses");
-        let manifest = parsed["models"]
-            .as_array()
-            .expect("models array")
-            .iter()
-            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
-            .and_then(Value::as_object)
-            .expect("Krea 2 Turbo manifest entry");
+        let manifest = historical_builtin_krea_turbo_manifest();
         let available_gb = 10.63;
         let budget = Some(VramBudget {
             free_gb: available_gb,
@@ -5650,7 +5648,7 @@ mod krea_turbo_memory_route_tests {
         });
         let fit = |tier| {
             let runtime = crate::vram_gate::KreaRuntimeEvidenceContext::verified_for_test(tier);
-            match krea_turbo_fit(manifest, tier, 1024, 1024, budget, true, Some(&runtime))
+            match krea_turbo_fit(&manifest, tier, 1024, 1024, budget, true, Some(&runtime))
                 .expect("BF16, Q8, and Q4 have measured ladder curves")
             {
             KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. } => TierFit::Fits,

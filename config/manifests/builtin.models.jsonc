@@ -4470,8 +4470,17 @@
         "turboFit": {
           // sc-15449 shared memory-strategy selector provenance. The worker accepts these measured curves
           // only while both source revisions and the provider request ABI fingerprint match.
+          //
+          // sc-15994 deliberately leaves the provider on v1 and changes this manifest fingerprint:
+          // tiledVae and chunkedAttention were captured with staged residency active, but the shared
+          // contract now executes BoundedDecode and BoundedAttention without engaging rung 1. Until
+          // SC-15913 recaptures those six q4/q8/bf16 rows without staging, the mismatch makes the
+          // catalog fail closed instead of authorizing a peak measured under another composition.
+          // The fingerprint is catalog-wide, so the otherwise-compatible rows are conservatively
+          // unavailable too; partial promotion would require the engaged-composition identity in
+          // SC-16211.
           "calibrationAbi": 1,
-          "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+          "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1-superseded-sc-15994",
           "sceneWorksRevision": "sc-15449-contract-v1",
           // The pinned 1c4354 merge changes Mage/request contracts only; Krea's measured CUDA
           // implementation and calibration fingerprint are byte-for-byte unchanged, so the
@@ -4680,8 +4689,11 @@
               }
             }
           ],
-          // Exact parameter cells exercised by the curves below. Later rungs are cumulative because
-          // Krea keeps each cheaper bound active while adding the next constraint.
+          // Exact parameter cells exercised by the historical curves below. Capture was cumulative:
+          // Krea kept each cheaper bound active while adding the next constraint, including staged
+          // residency for tiledVae and chunkedAttention. That is no longer the composition selected
+          // by the shared contract, so sc-15994 invalidates the catalog fingerprint above. These rows
+          // remain only as provenance until sc-15913 replaces them with non-staged captures.
           "strategyParameters": {
             "resident": {},
             "threeStage": {},
