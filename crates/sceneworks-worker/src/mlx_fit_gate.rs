@@ -4325,6 +4325,121 @@ mod tests {
         }
     }
 
+    /// SC-15808's reachability claim is structural: the Krea route enters the same admission path as
+    /// every other MLX provider and has no provider-local three-rung ceiling. The synthetic rows here
+    /// deliberately make no calibration claim; Krea's family/model stories still own implementation
+    /// and real-weight evidence for rungs 3 and 4. This test proves those future verified rows are not
+    /// hidden from `select_strategy` by route-specific admission code.
+    #[test]
+    fn krea_route_admission_reaches_later_rungs_when_verified_rows_exist() {
+        use gen_core::{LoadShape, MemoryParameterRanges, MemoryStrategySupport};
+        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+
+        const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
+        let (mut bundle, mut plan) = fixture_ladder();
+        let mut generator = fixture_generator();
+        generator.descriptor.id = KREA_CONTROL_ROUTE;
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = KREA_CONTROL_ROUTE.to_owned();
+        contract.load_shape = LoadShape::DeferredMaterialization;
+        contract.lifecycle.transformer_window_materialization = true;
+        let transformer = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedTransformerResidency)
+            .expect("transformer-residency capability");
+        transformer.support = MemoryStrategySupport::Implemented;
+        transformer.parameters = MemoryParameterRanges {
+            transformer_window_sizes: vec![1],
+            ..Default::default()
+        };
+
+        let transformer_parameters = JsonObject::from_iter([
+            ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+            ("decodeOverlap".to_owned(), serde_json::json!(128)),
+            ("attentionChunkSize".to_owned(), serde_json::json!(256)),
+            ("transformerWindowSize".to_owned(), serde_json::json!(1)),
+        ]);
+        let mut transformer_record = bundle
+            .records
+            .last()
+            .expect("attention fixture row")
+            .clone();
+        transformer_record.id = "imc-15808000000000000000".to_owned();
+        transformer_record.logical_case_id = "implan-15808000000000000000".to_owned();
+        transformer_record.strategy.rung = StrategyRung::BoundedTransformerResidency;
+        transformer_record.strategy.engaged_rungs = contract
+            .engaged_composition(MemoryStrategy::BoundedTransformerResidency)
+            .into_iter()
+            .map(|strategy| match strategy {
+                MemoryStrategy::Resident => StrategyRung::Resident,
+                MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
+                MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
+                MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency => {
+                    StrategyRung::BoundedTransformerResidency
+                }
+            })
+            .collect();
+        transformer_record.strategy.parameters = transformer_parameters.clone();
+        transformer_record.sweep.cases[0].parameters = transformer_parameters.clone();
+        if let RequiredNullable::Value(predicted) = &mut transformer_record.predicted_peak_bytes {
+            *predicted = PredictedPeakBytes {
+                conditioning: predicted.conditioning.min(gib_to_bytes(3.0)),
+                denoise: gib_to_bytes(3.0),
+                decode: predicted.decode.min(gib_to_bytes(3.0)),
+                overall: gib_to_bytes(3.0),
+            };
+        }
+        if let RequiredNullable::Value(observed) = &mut transformer_record.observed_memory {
+            observed.overall.active_bytes = gib_to_bytes(3.0);
+            observed.overall.allocator_bytes = gib_to_bytes(3.0);
+            observed.overall.device_bytes = gib_to_bytes(3.0);
+            observed.overall.wired_bytes = gib_to_bytes(3.0);
+            observed.overall.reclaimable_bytes = 0;
+        }
+        bundle.records.push(transformer_record);
+
+        plan.engine_id = KREA_CONTROL_ROUTE;
+        plan.model_id = "krea_2_turbo".to_owned();
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("fixture calibration");
+        };
+        calibration.bindings.push(fixture_binding_for(
+            "q4",
+            "packed-q4",
+            StrategyRung::BoundedTransformerResidency,
+            transformer_parameters,
+        ));
+        for binding in &mut calibration.bindings {
+            binding.provider = KREA_CONTROL_ROUTE.to_owned();
+        }
+        for record in &mut bundle.records {
+            record.target.provider = KREA_CONTROL_ROUTE.to_owned();
+            record.target.model_id = "krea_2_turbo".to_owned();
+        }
+
+        for (total_gib, expected) in [
+            (7.0, MemoryStrategy::BoundedAttention),
+            (6.0, MemoryStrategy::BoundedTransformerResidency),
+        ] {
+            let evaluation = evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(total_gib),
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                Some(&bundle),
+            )
+            .unwrap_or_else(|error| panic!("{total_gib} GiB Krea route failed: {error}"));
+            assert_eq!(evaluation.context.selection.strategy, expected);
+        }
+    }
+
     #[test]
     fn candidate_specific_foreign_reserve_does_not_block_a_fitting_lower_rung() {
         use sceneworks_core::memory_calibration::Hardware;
