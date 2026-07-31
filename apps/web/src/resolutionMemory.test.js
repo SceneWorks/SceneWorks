@@ -183,3 +183,105 @@ describe("a dense fine-tuned Mage base anchors the >1536 gate", () => {
     expect(fitsResolutionOptions(noFloor, ladder, 32, { backend: "mlx" })).toEqual(ladder);
   });
 });
+
+describe("selected-tier peaks are normalized to the 1536² baseline (sc-16020)", () => {
+  const GB = 1024 * 1024 * 1024;
+
+  function measuredModel({ measuredPixels = 1024 * 1024, installState = "installed" } = {}) {
+    return kreaModel({
+      mlx: { minMemoryGb: 80 },
+      candle: {
+        minMemoryGb: 80,
+        vramGbByTier: { q4: 10 },
+        vramMeasuredPixels: measuredPixels,
+      },
+      hasVariantMatrix: true,
+      variants: [
+        {
+          variant: "q4",
+          installState,
+          footprint: {
+            diskSizeBytes: 8 * GB,
+            peakMemoryBytes: 22 * GB,
+            measuredPixels,
+          },
+        },
+      ],
+    });
+  }
+
+  it("does not offer 2048² on 64 GB from a raw 22 GiB peak measured at 1024²", () => {
+    const model = measuredModel();
+    const normalizedBaseline =
+      22 + HIGHRES_TRANSIENT_GB_PER_MP * ((BASELINE_PIXELS - 1024 * 1024) / 1_000_000);
+    expect(predictedResolutionPeakGb(model, "1536x1536", "mlx", "q4")).toBeCloseTo(
+      normalizedBaseline,
+      8,
+    );
+
+    const rawUnnormalized2048 =
+      22 + HIGHRES_TRANSIENT_GB_PER_MP * ((2048 * 2048 - BASELINE_PIXELS) / 1_000_000);
+    expect(rawUnnormalized2048).toBeLessThan(64 * MEMORY_HEADROOM_FRACTION);
+    expect(resolutionFitsMemory(model, "2048x2048", 64, { backend: "mlx", tier: "q4" })).toBe(
+      false,
+    );
+  });
+
+  it("changes the answer when the same peak is measured at the 1536² baseline", () => {
+    const at1024 = measuredModel();
+    const at1536 = measuredModel({ measuredPixels: BASELINE_PIXELS });
+    expect(resolutionFitsMemory(at1024, "2048x2048", 64, { backend: "mlx", tier: "q4" })).toBe(
+      false,
+    );
+    expect(resolutionFitsMemory(at1536, "2048x2048", 64, { backend: "mlx", tier: "q4" })).toBe(
+      true,
+    );
+  });
+
+  it("uses each lane's own peak and geometry", () => {
+    const model = measuredModel();
+    expect(predictedResolutionPeakGb(model, "1536x1536", "mlx", "q4")).toBeCloseTo(39.03936, 5);
+    expect(predictedResolutionPeakGb(model, "1536x1536", "candle", "q4")).toBeCloseTo(
+      27.03936,
+      5,
+    );
+    expect(resolutionFitsMemory(model, "2048x2048", 64, { backend: "mlx", tier: "q4" })).toBe(
+      false,
+    );
+    expect(resolutionFitsMemory(model, "2048x2048", 64, { backend: "candle", tier: "q4" })).toBe(
+      true,
+    );
+  });
+
+  it("falls back to the lane blanket for missing geometry or a stale selected tier", () => {
+    const missingGeometry = measuredModel();
+    delete missingGeometry.variants[0].footprint.measuredPixels;
+    expect(predictedResolutionPeakGb(missingGeometry, "1536x1536", "mlx", "q4")).toBe(80);
+
+    const stale = measuredModel({ installState: "missing" });
+    expect(predictedResolutionPeakGb(stale, "1536x1536", "mlx", "q4")).toBe(80);
+    expect(predictedResolutionPeakGb(stale, "1536x1536", "candle", "q4")).toBe(80);
+  });
+
+  it("falls back to the blanket for mixed-geometry duplicate tier evidence in either order", () => {
+    const at1024 = measuredModel().variants[0];
+    at1024.footprint.peakMemoryBytes = 21 * GB;
+    const at1536 = {
+      ...at1024,
+      footprint: {
+        ...at1024.footprint,
+        peakMemoryBytes: 22 * GB,
+        measuredPixels: BASELINE_PIXELS,
+      },
+    };
+
+    for (const variants of [
+      [at1024, at1536],
+      [at1536, at1024],
+    ]) {
+      const model = measuredModel();
+      model.variants = variants;
+      expect(predictedResolutionPeakGb(model, "1536x1536", "mlx", "q4")).toBe(80);
+    }
+  });
+});
