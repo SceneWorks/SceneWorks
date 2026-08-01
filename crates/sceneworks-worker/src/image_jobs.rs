@@ -752,7 +752,9 @@ pub(crate) async fn run_image_generate_job(
                 // Z-Image img2img / edit (sc-6595) — `z_image_turbo` IS a candle txt2img id, so an
                 // `edit_image` job must divert here first (disjoint from the Z-Image control lane).
                 CandleImageRoute::ZimageEdit => {
-                    generate_candle_zimage_edit_stream(
+                    // The catalog alias resolves to the registered Turbo provider so edit requests
+                    // participate in the same shared request-scope memory lifecycle as text-to-image.
+                    generate_candle_stream(
                         api,
                         settings,
                         job,
@@ -2950,7 +2952,7 @@ use krea_control_candle::{generate_candle_krea_control_stream, krea_control_cand
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_edit_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_edit_candle::{generate_candle_zimage_edit_stream, zimage_edit_candle_available};
+use zimage_edit_candle::zimage_edit_candle_available;
 // In-place ComfyUI Z-Image base txt2img — Windows/CUDA candle lane ONLY (sc-10668, epic 10451). Renders
 // a user's ComfyUI Z-Image weights in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

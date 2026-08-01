@@ -96,24 +96,6 @@ fn plan_edit_batch(
     }
 }
 
-/// True when an Image-Edit *source* (`sourceAssetId`) should be pre-fitted to W×H: `edit_image`
-/// mode, a source asset, no character `referenceAssetId`, and a non-`stretch` fit mode. Used by the
-/// img2img-init edit resolvers (`zimage`/`kolors` `resolve_*_edit_init`) that fit only the edit
-/// source. The character-reference / multi-reference edit path is fitted by [`fit_edit_references`]
-/// instead — which, unlike this gate, does NOT exclude the character reference (sc-8253).
-fn should_fit_edit_source(request: &ImageRequest) -> bool {
-    let has_source = request
-        .source_asset_id
-        .as_deref()
-        .is_some_and(|id| !id.trim().is_empty());
-    // No character referenceAssetId (absent or empty).
-    let no_reference = !request
-        .reference_asset_id
-        .as_deref()
-        .is_some_and(|id| !id.trim().is_empty());
-    request.mode == "edit_image" && has_source && no_reference && request.fit_mode != "stretch"
-}
-
 /// Pre-fit every resolved edit reference — the character `referenceAssetId`, the multi-image
 /// `referenceAssetIds`, or the Image-Edit `sourceAssetId` alike — to the conditioning `width`×
 /// `height` before it reaches the engine, unless the fit mode is `stretch` (which keeps the legacy

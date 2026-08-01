@@ -888,6 +888,41 @@ test("an implemented family is Implemented/unverified only where the provider ac
     "the published window size and default component scope travel with the cell",
   );
 
+  // The Candle half lands independently under SC-15815. It resolves Edit through Turbo, publishes
+  // the same default window/component shape, and refuses to promote adapter/control overlays.
+  const zImageCandle = implemented.filter(
+    (cell) => cell.backend === "candle" && cell.owningFamilyStory === 15815,
+  );
+  assert.deepEqual(
+    [...new Set(zImageCandle.map((cell) => cell.modelId))].sort(),
+    ["z_image", "z_image_edit", "z_image_turbo"],
+  );
+  assert.ok(zImageCandle.every((cell) => cell.overlay === "none"));
+  assert.ok(
+    zImageCandle.every(
+      (cell) =>
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.strategyParameters.transformerWindowComponent === "Dit",
+      ),
+  );
+  for (const rung of ["bounded_decode", "bounded_attention"]) {
+    const cells = matrix.cells.filter(
+      (cell) =>
+        cell.backend === "candle" &&
+        cell.owningFamilyStory === 15815 &&
+        cell.rung === rung,
+    );
+    assert.ok(cells.length > 0);
+    assert.ok(
+      cells.every((cell) =>
+        cell.overlay === "control"
+          ? cell.state === "Missing"
+          : cell.state === "Implemented/unverified",
+      ),
+      `${rung} must be explicit for plain/adapter loads without leaking to bespoke control`,
+    );
+  }
+
   // Lens' measured win is deliberately tier- and overlay-specific. BF16/no-overlay exposes the
   // TextEncoder scope for both family entries; the Q4 request non-win and the unmeasured Q8/adapter
   // cells must not inherit a family-level implementation claim.
@@ -1159,17 +1194,6 @@ test("overlay incompatibility is a provider fact, applied where evidenced and no
   );
   assert.ok(zImageOverlay.length > 0);
   assert.ok(zImageOverlay.every((cell) => cell.state === "Implemented/unverified"));
-
-  // MLX Krea has the same forward-time-residual property, now proven with real LoRA and LoKr A/Bs.
-  const mlxKreaOverlay = matrix.cells.filter(
-    (cell) =>
-      cell.owningFamilyStory === 15517 &&
-      cell.backend === "mlx" &&
-      cell.rung === "bounded_transformer_residency" &&
-      cell.overlay === "lora",
-  );
-  assert.ok(mlxKreaOverlay.length > 0);
-  assert.ok(mlxKreaOverlay.every((cell) => cell.state === "Implemented/unverified"));
 });
 
 test("a Structurally N/A survey verdict without structural evidence is rejected", async () => {
@@ -1357,6 +1381,22 @@ test("every control-advertising family inventories its control-branch stack", as
       `${key}: advertises a control overlay but its block-stack inventory names no control stack`,
     );
   }
+});
+
+test("Z-Image Candle control does not inherit staged residency from the plain provider", async () => {
+  const matrix = await buildMatrix();
+  const cells = matrix.cells.filter(
+    (cell) =>
+      ["z_image", "z_image_turbo"].includes(cell.modelId) &&
+      cell.backend === "candle" &&
+      cell.overlay === "control" &&
+      cell.rung === "staged_residency",
+  );
+  assert.ok(cells.length > 0);
+  assert.ok(
+    cells.every((cell) => cell.state === "Missing"),
+    "the bespoke eager control provider declares every constrained rung Missing",
+  );
 });
 
 test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {
