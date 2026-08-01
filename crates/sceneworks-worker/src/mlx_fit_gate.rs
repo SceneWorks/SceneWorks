@@ -4141,6 +4141,7 @@ mod tests {
             repo,
             Some("fixture_model"),
             Some("default"),
+            crate::model_jobs::ProvenanceRepair::Skip,
         )
         .expect("receipt resolver");
         assert_eq!(resolved.path, snapshot);

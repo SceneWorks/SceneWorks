@@ -1,7 +1,7 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9d7b3902f4b75634b9adf9cfaa620b4f516022b5eb7b2e0d15ef6bd03c5fe884",
+    "sceneWorksRevision": "source-tree:5f26dfc2498656a906d250eeaceb0162478600d1d59a2c2487303d78c334ee74",
     "inferenceRevision": "b23ffc1adf8711ab3e9a2d7215a8ff860f2a750d",
     "sources": {
       "manifest": {
@@ -14,11 +14,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6a942f24d2a849b1122611cfc9ed0a42f7afcd9ee1bfb34829b1e2c6c35629af"
+        "sha256": "cd01f73df08fb3fbf08bcfda411efebaad12dfc22100edcb7172fe996a5725e3"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "67cbd22eac7dac1948a36038e4bece842a4fd7b318a8d3416f420ef23c7d34d3"
+        "sha256": "ff6358ba1a44c4119a66dcca7c075aebffe5707bf3455b84643e9399dc5536b0"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
