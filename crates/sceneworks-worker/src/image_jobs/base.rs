@@ -1838,10 +1838,18 @@ fn resolve_krea_convrot(
                 && dir.join("vae").is_dir()
         })?;
     // The ConvRot DiT single-file inside the private repo's snapshot.
-    let convrot_dit = huggingface_snapshot_dir(&settings.data_dir, KREA_CONVROT_REPO)
-        .map(|root| root.join(KREA_CONVROT_DIT_FILE))
-        .filter(|file| file.is_file())?;
+    let convrot_dit = resolve_krea_convrot_dit(settings)?;
     Some((base_dir, convrot_dit))
+}
+
+/// Resolve only the immutable ConvRot DiT single-file. Strict-pose routing uses this narrower probe so
+/// it can claim the Krea control lane before the shared bf16 tokenizer/TE/VAE surface is fetched on
+/// demand; generation then calls [`ensure_krea_convrot_base_present`] before resolving the full pair.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_krea_convrot_dit(settings: &Settings) -> Option<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, KREA_CONVROT_REPO)
+        .map(|root| root.join(KREA_CONVROT_DIT_FILE))
+        .filter(|file| file.is_file())
 }
 
 /// The shared `krea-2-turbo-mlx` turnkey repo (its `bf16/` subdir supplies the ConvRot base surface).

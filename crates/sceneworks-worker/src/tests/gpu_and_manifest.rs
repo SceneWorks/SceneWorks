@@ -1237,12 +1237,9 @@ fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
 /// sc-15799 changed three things this test now pins:
 ///   * there is NO branch-quant rung — the branch's tier comes from the base tier, so the ladder's
 ///     deepest rung is attention chunking;
-///   * every peak is the shipped `bf16Branch*` row read VERBATIM. It is NOT corrected by
-///     `branchPackSaveGb`: 8.4/10.2 GB exceed the entire 6.6 GB control branch, so they were never a
-///     weight-side quantity, and subtracting them under-predicted the q4/q8 host by ~5 GB straight into
-///     an OOM. The uncorrected row is a sound UPPER BOUND (a lighter branch can only lower a peak);
-///   * because the block declares `measured: false` / `supersededBy`, the ladder's floor is
-///     `BestEffort`, not `TooBig` — a reject computed from an upper bound can refuse a job that runs.
+///   * every peak is the current direct packed-branch row read verbatim; the retracted
+///     `branchPackSaveGb` correction remains absent;
+///   * because the block declares current measured evidence, the deepest-rung floor is `TooBig`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn krea_control_candle_block_drives_the_fit_ladder() {
@@ -1293,36 +1290,28 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
          follow to q4 (the measured drift)"
     );
 
-    // The shipped rows are the SUPERSEDED bf16-branch captures, renamed to say so (sc-15799). Their
-    // presence under the old names would mean a stale reader is still treating them as current evidence.
+    // The shipped rows are direct measurements against each tier's shipping branch configuration.
     assert!(
-        control.get("peakGbByTier").is_none() && control.get("branchQuantSaveGb").is_none(),
-        "the pre-sc-15799 key names must be gone, not aliased — they described a bf16 branch that no \
-         longer ships"
+        control.get("peakGbByTier").is_some() && control.get("sequentialPeakGbByTier").is_some(),
+        "current direct control-lane peak rows must ship"
     );
     // The RETRACTION (sc-15799 review): `branchPackSaveGb` claimed 8.4/10.2 GB of "measured WEIGHT-side"
     // reduction for a branch that is 6.6 GB in total, and the fit gate subtracted it. Neither the key nor
     // any reader of it may come back without a re-measure that reconciles with the branch's real size.
     assert!(
         control.get("branchPackSaveGb").is_none(),
-        "branchPackSaveGb is retracted: 8.4 GB exceeds the whole 6.6 GB control branch, so it is not a \
-         weight-side delta and must not be subtracted from a peak (sc-16013 owes the re-measure)"
+        "branchPackSaveGb is retracted: direct packed-branch peaks need no derived correction"
     );
     assert!(
-        !control_evidence_is_current(entry),
-        "the shipped control block is superseded, so the ladder must not be able to hard-reject from it"
+        control_evidence_is_current(entry),
+        "the shipped control block is current measured evidence"
     );
     assert_eq!(
         control.get("measured").and_then(Value::as_bool),
-        Some(false),
-        "the control block's peaks were captured against a branch tier that no longer ships, so it must \
-         NOT claim to be measured until sc-16013 re-measures"
+        Some(true),
+        "the control block's peaks were measured against the configuration that ships"
     );
-    assert_eq!(
-        control.get("supersededBy").and_then(Value::as_str),
-        Some("sc-15799"),
-        "a superseded block must name what superseded it, so no calibration reads it as green"
-    );
+    assert!(control.get("supersededBy").is_none());
 
     // Shipped MEASURED activation-chunking delta (sc-11745): the DEEPEST rung — a SCALAR
     // (tier-independent), speed-only, byte-identical output, and unaffected by the branch repack.
@@ -1330,38 +1319,23 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     let chunk_save = chunk.expect("chunkAttnSaveGb shipped (the sc-11745 chunking rung)");
     assert!(chunk_save > 0.0, "chunking must recover VRAM, got {chunk_save}");
 
-    // The common small-card install: q4 BASE tier. Both peaks are the shipped bf16-branch rows plus
-    // headroom, UNCORRECTED — the upper bound, which is the only thing a superseded row entitles the gate
-    // to. The physically-true host is the row less the branch's real weight-side delta (bf16 6.6 GB →
-    // ~3.3 GB at q8, the tier a q4 base floors its branch to), i.e. 34.9 / 31.2; the bound must sit at or
-    // above those, never below.
+    // The common small-card install: q4 base with its shipping q8 branch. Both direct measurements gain
+    // only the standard 2 GB admission headroom.
     let q4_peak = predicted_control_peak_gb(entry, "q4");
     let peak = q4_peak.expect("q4 control peak");
     assert!(
-        (peak - 38.2).abs() < 1e-6,
-        "36.2 bf16-branch row + 2.0 headroom, read verbatim, got {peak}"
-    );
-    assert!(
-        peak >= 36.2 - 3.3 + 2.0,
-        "the bound must not under-predict the physically-true q4 host (34.9), got {peak}"
+        (peak - 35.5).abs() < 1e-6,
+        "33.5 measured peak + 2.0 headroom, got {peak}"
     );
     let q4_sequential = predicted_control_sequential_peak_gb(entry, "q4");
     let sequential_peak = q4_sequential.expect("q4 sequential control peak");
     assert!(
-        (sequential_peak - 34.5).abs() < 1e-6,
-        "32.5 + 2.0, read verbatim, got {sequential_peak}"
-    );
-    assert!(
-        sequential_peak >= 32.5 - 3.3 + 2.0,
-        "the staged bound must not under-predict the true staged host (31.2), got {sequential_peak}"
+        (sequential_peak - 31.6).abs() < 1e-6,
+        "29.6 measured staged peak + 2.0 headroom, got {sequential_peak}"
     );
     // The q8 base tier the same way — the tier whose sub-tier branch packing this change gives up.
     let q8_peak = predicted_control_peak_gb(entry, "q8").expect("q8 control peak");
-    assert!((q8_peak - 47.4).abs() < 1e-6, "45.4 + 2.0, got {q8_peak}");
-    assert!(
-        q8_peak >= 45.4 - 3.3 + 2.0,
-        "the bound must not under-predict the physically-true q8 host (44.1), got {q8_peak}"
-    );
+    assert!((q8_peak - 43.9).abs() < 1e-6, "41.9 + 2.0, got {q8_peak}");
     let tile = decode_tile_save_gb(entry, "q4");
     let tile_save = tile.expect("q4 decodeTileSaveGb shipped (the sc-11744 tiling rung)");
     assert!(tile_save > 0.0, "tiling must recover VRAM, got {tile_save}");
@@ -1384,11 +1358,8 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             chunk_attention: false,
         }
     );
-    // What this lane can and cannot claim. A 32 GB card does NOT clear the monolithic bound (38.2) and
-    // does NOT clear the staged one (34.5); it clears the staged + tiled peak (27.8). An earlier revision
-    // asserted a resident admit here at a "packed-branch peak" of 29.8 — that number came from
-    // subtracting the retracted 8.4, and asserting a BENEFIT from an uncalibrated composition is exactly
-    // what a stale row cannot support. Whether the repack buys a rung back is sc-16013's to measure.
+    // A 32 GB card misses the 35.5 GB resident admission peak but clears the measured 31.6 GB staged
+    // peak, so sequential residency is sufficient without tiled decode.
     assert_eq!(
         fit_ladder(
             q4_peak,
@@ -1400,10 +1371,10 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: true,
+            tile_vae_decode: false,
             chunk_attention: false,
         },
-        "a 32 GB card stages and tiles against the stale 38.2/34.5 bounds"
+        "a 32 GB card only stages against the current 35.5/31.6 GB peaks"
     );
     // A card that fits the measured Sequential peak but not Resident engages residency only.
     assert_eq!(
@@ -1453,11 +1424,8 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             chunk_attention: true,
         }
     );
-    // Below the chunked peak there is nothing left to trade — sc-15799 deleted the branch-quant rung. On
-    // the SHIPPED block the outcome is `BestEffort`, not `TooBig`: the bounds it would reject on are
-    // superseded upper bounds, and refusing a job a stale bound cannot rule out is the one failure this
-    // lane is least allowed to have. sc-16013's re-measure flips `measured` back to true and restores the
-    // hard reject; the `true` arm below pins that.
+    // Below the chunked peak there is nothing left to trade. Current measured evidence makes this a
+    // reject-before-OOM rather than a best-effort runtime attempt.
     match fit_ladder(
         q4_peak,
         q4_sequential,
@@ -1466,36 +1434,10 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         chunk,
         control_evidence_is_current(entry),
     ) {
-        KreaControlFit::BestEffort {
-            offload_policy,
-            tile_vae_decode,
-            chunk_attention,
-            needed_gb,
-            ..
-        } => {
-            assert_eq!(offload_policy, OffloadPolicy::Sequential);
-            assert!(tile_vae_decode && chunk_attention, "every rung engaged");
-            assert!(
-                (needed_gb - chunked_peak).abs() < 1e-6,
-                "best-case (staged + tiling + chunking) peak, got {needed_gb}"
-            );
-        }
-        other => {
-            panic!("below staged+tiling+chunking on SUPERSEDED evidence → BestEffort, got {other:?}")
-        }
-    }
-    match fit_ladder(
-        q4_peak,
-        q4_sequential,
-        apply_vram_cap(None, Some(chunked_peak - 0.5)),
-        tile,
-        chunk,
-        true,
-    ) {
         KreaControlFit::TooBig { needed_gb, .. } => {
             assert!((needed_gb - chunked_peak).abs() < 1e-6);
         }
-        other => panic!("the same shortfall on CURRENT evidence → TooBig, got {other:?}"),
+        other => panic!("below the measured deepest-rung peak must be TooBig, got {other:?}"),
     }
 
     // The bf16 BASE tier carries no tiling saving (its denoise steady-state, not the decode, is the peak)
@@ -1508,13 +1450,13 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
          tier the retracted correction never touched"
     );
     let bf16_sequential = predicted_control_sequential_peak_gb(entry, "bf16");
-    assert!((bf16_sequential.expect("bf16 sequential control peak") - 52.0).abs() < 1e-6);
+    assert!((bf16_sequential.expect("bf16 sequential control peak") - 52.1).abs() < 1e-6);
     assert_eq!(decode_tile_save_gb(entry, "bf16"), None);
     assert_eq!(
         fit_ladder(
             bf16_peak,
             bf16_sequential,
-            apply_vram_cap(None, Some(52.0 - chunk_save)),
+            apply_vram_cap(None, Some(52.1 - chunk_save)),
             decode_tile_save_gb(entry, "bf16"),
             chunk,
             control_evidence_is_current(entry),
@@ -1526,26 +1468,30 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         }
     );
 
-    // sc-16069: the SHIPPED catalog's unpriced control tiers must produce an EXPLICIT verdict, not the
-    // silent big-card fast path. `vramGbByTier` ships four tiers (q4/q8/bf16/int8-convrot) and the control
-    // block prices three — and `nvfp4` is selectable on a Blackwell host without appearing in either. Any
-    // tier the base can resolve to that the control block does NOT price must come back `Unverified`,
-    // naming itself, on a roomy card AND a starved one (it never rejects on absent evidence).
+    // sc-16013 prices every hosted tier directly. The generic SC-16069 fail-safe still makes a malformed
+    // or future unpriced tier `Unverified`, naming itself on roomy and starved cards alike.
     //
     // Asserted through `fit_ladder_for_entry` — the seam the lane calls — because that is the only place
     // that can tell "no control block" (no signal) from "no row for THIS tier" (a coverage hole). Read via
     // the hand-threaded `fit_ladder` above, both look like the same `None`, which is exactly how the hole
     // stayed invisible.
-    let priced: Vec<&str> = ["q4", "q8", "bf16"]
+    let priced: Vec<&str> = ["q4", "q8", "bf16", "int8-convrot"]
         .into_iter()
         .filter(|tier| predicted_control_peak_gb(entry, tier).is_some())
         .collect();
     assert_eq!(
         priced,
-        vec!["q4", "q8", "bf16"],
-        "the shipped control block must price exactly these three tiers"
+        vec!["q4", "q8", "bf16", "int8-convrot"],
+        "the shipped control block must price every reachable tier"
     );
-    for tier in ["int8-convrot", "nvfp4"] {
+    assert!(
+        (predicted_control_peak_gb(entry, "int8-convrot").unwrap() - 52.7).abs() < 1e-6
+    );
+    assert!(
+        (predicted_control_sequential_peak_gb(entry, "int8-convrot").unwrap() - 37.5).abs()
+            < 1e-6
+    );
+    for tier in ["some-future-tier"] {
         assert!(
             predicted_control_peak_gb(entry, tier).is_none(),
             "{tier} is expected unpriced by the shipped control block — if it gained a row, drop it from \
@@ -1633,9 +1579,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
         },
         "cap at the tiled peak → VAE tiling, no quality cost"
     );
-    // Cap below the chunked peak off the REAL reading → with the branch tier fixed by the user's tier
-    // choice (sc-15799) there is no deeper rung to spend. On the shipped (superseded) block that is a
-    // best-effort admit, not a reject.
+    // Cap below the chunked peak off the REAL reading: current measured evidence rejects before OOM.
     match fit_ladder(
         peak,
         sequential,
@@ -1644,14 +1588,14 @@ async fn krea_control_live_ladder_on_a_real_card() {
         chunk,
         control_evidence_is_current(entry),
     ) {
-        KreaControlFit::BestEffort { needed_gb, .. } => {
+        KreaControlFit::TooBig { needed_gb, .. } => {
             assert!((needed_gb - chunked_peak).abs() < 1e-6);
         }
-        other => panic!("below the chunked peak on superseded evidence → BestEffort, got {other:?}"),
+        other => panic!("below the measured chunked peak → TooBig, got {other:?}"),
     }
     eprintln!(
         "krea control fit ladder on a real card: 96→nothing, tiled-peak→tiling, \
-         below-chunk-peak→best-effort ✓"
+         below-chunk-peak→reject ✓"
     );
 }
 

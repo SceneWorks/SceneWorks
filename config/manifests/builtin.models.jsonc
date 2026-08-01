@@ -4912,26 +4912,9 @@
         // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
         // on an RTX PRO 6000 (Blackwell sm_120).
         //
-        // ── sc-15799 (TIER INTEGRITY): THIS WHOLE BLOCK IS SUPERSEDED EVIDENCE. ───────────────────────
-        // Every peak below was captured with a **bf16** control branch — the branch's projections are
-        // 3.30 B params ≈ **6.6 GB** bf16 (candle-gen-krea/src/control.rs), against ~3.3 GB resident at q8
-        // and ~1.7 GB at q4. The branch now packs to the tier the base tier implies
-        // (`branchTierByBaseTier`), so on q4 and q8 those rows describe a configuration that NO LONGER
-        // SHIPS. `measured` is therefore FALSE and no calibration record may read these as current
-        // evidence: the control lane owes a re-measure on CUDA hardware (sc-16013).
-        // The rows are RENAMED (`bf16Branch*`) rather than deleted because they remain a sound UPPER BOUND
-        // on the packed configuration — a lighter branch can only lower the peak — and the worker reads
-        // them **VERBATIM** as that bound, applying NO correction. Over-predicting adapts a card early;
-        // under-predicting admits an OOM, so the bound is the only safe reading.
-        //
-        // RETRACTED (sc-15799 review): a `branchPackSaveGb` key here published "measured WEIGHT-side"
-        // reductions of q8 −8.4 / q4 −10.2 GB and the worker subtracted them from the rows above. Both
-        // exceed the ENTIRE 6.6 GB branch, so neither can be a weight-side quantity under any reading, and
-        // subtracting them under-predicted the true q4/q8 host by ~5 GB — one-directionally toward an OOM
-        // on a live CUDA admission path (q4 resident predicted 29.8 against a true ~34.9). The key is
-        // deleted and nothing corrects these rows. The real weight-side deltas are bf16→q8 = 3.3 GB and
-        // bf16→q4 = 4.9 GB; what candle-gen #483's 8.4/10.2 actually measured is unreconciled and
-        // sc-16013 owns re-establishing it.
+        // SC-16013 re-measured the complete lane against the branch tier that actually ships, including
+        // the INT8-ConvRot variant. The current rows below are direct probe outputs; the retracted
+        // `branchPackSaveGb` correction remains absent and no worker reader derives one.
         "control": {
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
@@ -4946,17 +4929,6 @@
           //               the retracted 8.4/10.2 figures above.)
           //   bf16 → bf16: already at tier; nothing to pack.
           //
-          // WHAT THIS MAP GIVES UP, on the q8 tier, stated because nothing else in the tree does: the
-          // deleted rung could pack a q8 base's branch to q4 — one tier BELOW the selection, which tier
-          // integrity permits (only ABOVE-tier residency needs an exception). It went because it was a
-          // *rung*, not because the invariant required it. On the shipped rows that rung admitted a q8
-          // control job down to ~28.97 GB free (39.6 staged + 2.0 headroom − 2.43 chunking − 10.2
-          // branch-to-q4) where the tier-integral configuration needs ~30.77 GB; that ~1.8 GB band is a
-          // real capability given up so that no render silently substitutes precision the user did not
-          // select. Both figures come from the retracted branchPackSaveGb; on the corrected weight-side
-          // accounting a q4 branch buys ~1.6 GB, so the true band is slightly narrower. It is not a
-          // *reject* today — with `measured: false` the ladder's floor is a best-effort admit.
-          //
           // COVERAGE: every tier this entry HOSTS must appear as a key here, and
           // `scripts/check-tier-integrity.mjs` enforces that (the checker iterates declared keys, so an
           // undeclared hosted tier would be silently unchecked). `int8-convrot` (sc-9300) is an int8
@@ -4964,52 +4936,28 @@
           // `gen_core::tier_integrity::control_branch_tier` already returns Q8 for it via
           // `quant_for_tier_key`, and declaring it makes that visible rather than implied.
           "branchTierByBaseTier": { "q4": "q8", "q8": "q8", "bf16": "bf16", "int8-convrot": "q8" },
-          // Trusted two-process rendered-device probe (sc-12176), 1024², **bf16 control branch**, no deeper
-          // rungs, idle baseline 0.0 GB. Resident peaks: q4 36.2, q8 45.4, bf16 65.8 GB. Sequential
-          // encode/drops Qwen3-VL before the heavy load: q4 32.5, q8 39.6, bf16 50.0 GB. Raw RGB was
-          // byte-identical within every tier; q4/q8 used one denoise step (the working set is step-count
-          // invariant), bf16 used the production 8 steps. SUPERSEDED for q4/q8 by the branch repack: read
-          // VERBATIM as an UPPER BOUND, never as a current measurement. (An earlier revision of this
-          // comment said "read only through the branch-packing correction" — that instruction is
-          // RETRACTED and contradicted the verbatim/no-correction rule stated ~45 lines above. There is
-          // no correction; a lighter branch can only lower the peak, which is what makes the row a sound
-          // bound. What reading it verbatim costs is quantified per rung in
-          // `crates/sceneworks-worker/src/krea_control_fit.rs`.)
-          //
-          // GAP (sc-16013): there is no `int8-convrot` key here even though `branchTierByBaseTier` above
-          // now declares that tier explicitly. `krea_control_fit::predicted_control_peak_gb` therefore
-          // returns `None` on an int8-convrot base, so the control fit gate is INERT on that tier — it
-          // neither stages, tiles, chunks nor rejects, and the reactive CUDA-OOM backstop is the only
-          // protection. Pre-existing (the tier was implied before sc-15799 made it explicit) and pinned
-          // by a unit test, but the re-measure must cover int8-convrot so the gate stops no-opping there.
-          "bf16BranchPeakGbByTier": { "q4": 36.2, "q8": 45.4, "bf16": 65.8 },
-          "bf16BranchSequentialPeakGbByTier": { "q4": 32.5, "q8": 39.6, "bf16": 50.0 },
-          // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
-          // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost.
-          // GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120), 1024²/8-step: the monolithic decode peaks
-          // at +6.7 GiB over the tiled tail (40.2 → 33.4 GiB whole-render), at a decode cost of +0.14 s
-          // (0.56 → 0.71 s, +26%). Seam-free: the tiled render is bit-near-identical to monolithic (mean
-          // |Δ| 0.05/255, no tile-boundary spike). Keyed to the q4 BASE tier, where the decode spike IS the
-          // render peak. CARRIED ACROSS sc-15799: it is a delta between two arms of the SAME load, so the
-          // resident branch is present in both and cancels; a lighter branch lowers the denoise floor the
-          // spike is measured against, which cannot shrink the delta. Higher tiers omit it (their denoise
-          // steady-state, not the decode, is the peak — tiling there recovers little).
-          "decodeTileSaveGb": { "q4": 6.7 },
-          // DEEPEST rung (sc-11745, candle-gen #496): the peak reduction (GB) from engaging sc-6217-style
-          // query-row attention chunking on the composable base stack + control branch
-          // (`Krea2ControlPaths.chunk_attention`) — a SPEED cost, no quality cost (the chunked forward is
-          // byte-identical to the unchunked one). Bounds the DENOISE-phase activation peak. GPU-MEASURED on
-          // an RTX PRO 6000 (Blackwell sm_120), dense bf16 base, 1024²/8-step: the ~11 GB-of-activations
-          // denoise steady-state peak drops −2.43 GiB, at a cost of +2.6 s (~+6%). A SCALAR (not
-          // tier-keyed): the activation peak is bf16 regardless of the base weight tier, so the saving is
-          // tier-independent — and for the same reason it is unaffected by the branch repack.
-          "chunkAttnSaveGb": 2.43,
-          // FALSE since sc-15799: the peaks above were captured against a branch tier that no longer
-          // ships. Re-measure owed by sc-16013 (needs CUDA hardware). The worker READS this flag
-          // (`krea_control_fit::control_evidence_is_current`): while it is false the fit ladder will not
-          // turn these rows into a hard reject, and records no reclaimable high-water from them.
-          "measured": false,
-          "supersededBy": "sc-15799"
+          // SC-16013 trusted rendered-device calibration on NVIDIA RTX PRO 6000 Blackwell Max-Q
+          // (sm_120), CUDA, 1024², 8 steps, control scale 0.6, seed 42, idle baseline 0.7 GB. Each arm
+          // ran in a fresh process from inference revision
+          // 1899a7228deb99b65535745d09d4a5f5524565c4. Base snapshot revision
+          // d009674080cc1bccf2b629d834c34bf5eccdb723; q4/q8 and INT8-ConvRot carry the shipping q8
+          // branch, bf16 carries the dense branch from control revision
+          // cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac (`control_step5000.safetensors`). ConvRot DiT
+          // revision b25730586dceb84efdc8286df586ba47103dba3f. Resident/staged raw RGB was
+          // byte-identical within every tier (SHA-256 prefixes: q4 f23533e7, q8 33ca8ad3, bf16
+          // fa5db0c8, int8-convrot dae5cbe9). These are the shipping packed-branch peaks and are read
+          // verbatim by `krea_control_fit`; no derived branch correction exists.
+          "peakGbByTier": { "q4": 33.5, "q8": 41.9, "bf16": 65.8, "int8-convrot": 50.7 },
+          "sequentialPeakGbByTier": { "q4": 29.6, "q8": 36.1, "bf16": 50.1, "int8-convrot": 35.5 },
+          // Same q4 staged load, forcing seam-free tiled VAE decode: 29.6 → 22.4 GB, a 7.2 GB
+          // whole-render peak saving. Higher tiers omit this rung because their denoise working set,
+          // not the decode tail, determines the measured peak.
+          "decodeTileSaveGb": { "q4": 7.2 },
+          // Same q4 staged+tiled load with query-row attention chunking: 22.4 → 19.6 GB, a 2.8 GB
+          // saving. Raw RGB remained byte-identical (SHA-256 e98a9c3c) with chunking toggled. Scalar:
+          // this prices the bf16 activation working set independently of the base weight tier.
+          "chunkAttnSaveGb": 2.8,
+          "measured": true
         }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",

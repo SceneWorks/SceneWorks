@@ -346,18 +346,16 @@ Krea branch-quant rung removed two configurations that used to fit:
   real capability traded away so that no render silently substitutes precision the user did not select.
   (Both figures come from the retracted `candle.control.branchPackSaveGb`; on the corrected weight-side
   accounting — the branch is 6.6 GB bf16, ~3.3 GB at q8, ~1.7 GB at q4 — a q4 branch buys ~1.6 GB, so the
-  true band is slightly narrower. SC-16013's re-measure pins it.)
-
-Neither is a *reject* today: while `candle.control.measured` is `false` the control fit ladder's floor is
-a best-effort admit, because a reject computed from a superseded upper bound can refuse a job that would
-actually run — and refusing a job that fits is the failure an admission gate is least allowed to have.
+  true band is slightly narrower. The direct SC-16013 measurements intentionally do not restore that
+  below-tier branch choice.)
 
 **Repacking invalidates measurements.** A component's resident precision is an input to every peak
 measured against it, so changing it makes those peaks stale even though every provenance field still
 looks valid. Evidence captured before a repack must be renamed or fingerprint-bumped so it cannot read
-as green — SC-15799 renamed the Krea control-lane rows to `bf16Branch*` and set
-`candle.control.measured: false` for exactly this reason. **Tier integrity therefore precedes
-calibration**: calibrating first means paying for those measurements twice.
+as green. SC-15799 withdrew the old Krea control-lane rows and set
+`candle.control.measured: false` for exactly this reason; SC-16013 then replaced them with direct
+measurements against every packed branch configuration that ships and restored `measured: true`.
+**Tier integrity therefore precedes calibration**: calibrating first means paying twice.
 
 **And renaming is not enough on its own — the reader has to honour the flag.** A superseded row may be
 read as an **upper bound** and nothing more. It may not be "corrected" into the shipping configuration by
@@ -368,25 +366,17 @@ not produce a hard reject, since an upper bound cannot rule a job out. And it ma
 reclaimable high-water, since over-stating a pool lets the next gate over-admit. `measured: false` is a
 field the code reads, not a note to a future human.
 
-**Reading an upper bound verbatim is the safe direction, not the free one — so quantify what it costs.**
-"Over-predicting adapts a card early" is a disclosure only if *how* early is written down. For the Krea
-control lane the answer is: **zero reject bands** (the only entry with a `candle.control` block has
-superseded evidence, so a hard reject is unreachable) and a bounded set of **premature rung engagement**
-bands, which cost render *speed* and nothing else. On a q4 base the gate stages instead of staying
-resident across `[34.9, 38.2)` GB free, tiles its VAE decode unnecessarily across `[31.2, 34.5)`
-(+26% decode), chunks attention unnecessarily across `[24.5, 27.8)` (~+6% render), and returns
-`BestEffort`-with-warn where a clean `Fits` held across `[22.07, 25.37)`; on a q8 base (which has no
-tiling rung) the bands are `[44.1, 47.4)`, `[39.17, 41.6)` and `[35.87, 39.17)`; on a bf16 base the
-over-prediction is zero and so is every band, because the branch is already at tier. None of it is
-user-visible — the `BestEffort` warning is a `tracing` event that reaches no response, record or UI. The
-derivation and the per-rung arithmetic live in `crates/sceneworks-worker/src/krea_control_fit.rs`
-("The remaining cost of reading the rows verbatim"); SC-16013's re-measure collapses the bands to zero.
+SC-16013 collapses those stale-evidence bands to zero. On an RTX PRO 6000 Blackwell at 1024², 8 steps,
+and control scale 0.6, the current direct resident/staged peaks are q4 33.5/29.6 GB, q8 41.9/36.1 GB,
+bf16 65.8/50.1 GB, and INT8-ConvRot 50.7/35.5 GB. The q4 staged decode-tiling saving is 7.2 GB and the
+additional attention-chunking saving is 2.8 GB. The worker reads those rows verbatim, adds only standard
+admission headroom, and can hard-reject below the deepest measured rung.
 
 ## Overlay coverage: declared unmeasured, not quietly absent (SC-16069)
 
 An **overlay** is a second network held resident beside the base for one render — a strict-pose
-ControlNet branch, an IP-Adapter, a face-identity encoder. **No overlay cell has ever been measured, and
-that is now a recorded decision rather than a gap you have to notice.**
+ControlNet branch, an IP-Adapter, a face-identity encoder. Krea strict-pose is the measured exception;
+the remaining unmeasured cells are recorded decisions rather than gaps you have to notice.
 
 The state of the evidence, stated plainly:
 
@@ -415,9 +405,9 @@ cell.
 
 An unpriced **tier** on an otherwise-measured overlay lane is a distinct hole and is no longer silent: the
 Krea control ladder returns an explicit, logged `Unverified` for it (stages residency, never rejects)
-rather than collapsing into the no-signal `Unknown` that took the zero-adaptation path. The reachable
-instance today is `nvfp4`, not the `int8-convrot` SC-16069 named — the control lane's tier resolver cannot
-currently produce that string.
+rather than collapsing into the no-signal `Unknown` that took the zero-adaptation path. SC-16013 now
+prices every hosted Krea tier, including INT8-ConvRot, so this verdict is a fail-safe for malformed
+catalog entries and future tiers rather than a known shipping hole.
 
 ## Fresh-process five-rung oracle (SC-16402)
 
