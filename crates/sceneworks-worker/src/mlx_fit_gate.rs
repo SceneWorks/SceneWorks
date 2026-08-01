@@ -129,6 +129,18 @@ impl MlxRequestPlan {
             },
             None => (spec_tier, MlxCalibrationConfig::Absent),
         };
+        // Request budgeting already removes the legacy 2 GiB unified reserve from the available
+        // envelope. Keep the remainder of the 4 GiB OS/app reserve fixed, and source only the bare
+        // 1024² activation term from the provider's exact-tier measurement. An absent measurement
+        // retains the load allowance's conservative activation component.
+        let fixed_reserve_bytes = gib_to_bytes(
+            (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+        );
+        let activation_anchor_bytes = crate::inference_runtime::media()
+            .activation_memory_bytes_1024(engine_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0)));
         Self {
             engine_id,
             model_id: model_id.to_owned(),
@@ -136,20 +148,10 @@ impl MlxRequestPlan {
             asset_bytes,
             folded_control_bytes,
             folded_adapter_bytes,
-            // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
-            // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
-            // the activation allowance here. Exact evidence supplies its own measured envelope.
-            activation_headroom_bytes: gib_to_bytes(
-                (headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
-            ),
-            // Whatever remains of this family's OS/app reserve once budgeting has taken the legacy
-            // unified reserve out separately. ZERO for an allowance measured as a bare transient —
-            // see [`HeadroomAllowance`] for why holding a reserve out of one of those would make the
-            // estimator less conservative, not more.
-            fixed_reserve_bytes: gib_to_bytes(
-                (headroom.os_reserve_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
-                    .max(0.0),
-            ),
+            // This field remains the combined request allowance so the generic formula can hold the
+            // fixed slice out before scaling: fixed reserve + provider activation anchor.
+            activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
+            fixed_reserve_bytes,
             calibration,
         }
     }
@@ -202,9 +204,9 @@ impl MlxRequestPlan {
     /// pixels, but it does not run more copies of macOS. See [`request_batch`]: on this lane it is
     /// always 1, because a multi-image job is a sequential loop (sc-16194).
     ///
-    /// Families whose allowance carries no OS reserve (see [`HeadroomAllowance`]) hold
-    /// `fixed_reserve_bytes == 0` and are therefore left EXACTLY as they were — the whole allowance
-    /// stays in the area term.
+    /// Provider anchors are bare activation measurements. The request planner adds the remaining
+    /// fixed OS/app reserve separately, so even an anchor larger than the generic fallback (Lens
+    /// dense) keeps its whole measured value in the area term.
     fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
@@ -1855,9 +1857,11 @@ const OS_APP_RESERVE_GB: f64 = 4.0;
 /// 2.5 GiB at 1152×2048 and 6 GiB at 2048², on a path that sc-11924 already records as
 /// under-predicting. That is the opposite of what this story was for.
 ///
-/// Carrying `os_reserve_gb` alongside the total makes the lens-dense path an exact no-op (reserve 0 ⇒
-/// the whole allowance stays in the area term) and keeps the generic path's 2 + 14 split, so the
-/// change is provably non-regressive for every family rather than only for the measured ones.
+/// Carrying `os_reserve_gb` alongside the load-time total lets the request planner recover a bare
+/// activation fallback without guessing: generic yields 18 − 4 = 14 GiB, while Lens dense yields
+/// 29.88 − 0 = 29.88 GiB. The request estimator then adds the remaining 2 GiB OS/app reserve as a
+/// separate fixed term. Thus Lens dense becomes `2 + 29.88·MP`, never the unsafe
+/// `2 + 27.88·MP` split that would take part of its measured activation out of the area term.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct HeadroomAllowance {
     /// Total GiB the load-time gate adds on top of summed component weights.
@@ -5115,6 +5119,77 @@ mod tests {
         );
     }
 
+    /// sc-16209: the generic fallback must consume Krea's provider-owned, measured 1024²
+    /// activation anchor instead of charging the unrelated 14 GiB worst-case family anchor.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn krea_measured_anchor_admits_the_64_gib_motivating_cell() {
+        let weights = tempfile::tempdir().expect("Krea weights fixture");
+        std::fs::File::create(weights.path().join("fixture.safetensors"))
+            .expect("Krea weights fixture file")
+            .set_len(1024)
+            .expect("Krea weights fixture size");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let mut plan = MlxRequestPlan::for_spec_and_manifest(
+            "krea_2_turbo",
+            "krea_2_turbo",
+            &spec,
+            None,
+            None,
+        );
+        // Preserve the production-selected allowance while pinning the exact asset term from the
+        // measured motivating cell. A tiny sparse fixture is enough to exercise descriptor lookup.
+        plan.asset_bytes = gib_to_bytes(33.22);
+
+        let peak_gb =
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(1152, 2048, 1))) as f64
+                / BYTES_PER_GIB;
+        let expected_gb = 33.22 + 2.0 + 7.67 * 2.25;
+        assert!(
+            (peak_gb - expected_gb).abs() < 1e-5,
+            "Krea's measured 7.67 GiB anchor should model {expected_gb:.4} GiB, got {peak_gb:.4}"
+        );
+        assert!(
+            peak_gb <= 62.0,
+            "a 64 GiB Mac's 62 GiB request budget must admit the measured Krea cell"
+        );
+
+        // Mutation guard: restoring the generic 14 GiB anchor through the production estimator
+        // reproduces the original rejection.
+        plan.activation_headroom_bytes = gib_to_bytes(16.0);
+        plan.fixed_reserve_bytes = gib_to_bytes(2.0);
+        let generic_peak_gb =
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(1152, 2048, 1))) as f64
+                / BYTES_PER_GIB;
+        assert!(
+            generic_peak_gb > 62.0,
+            "the generic fallback must remain a rejecting estimate, got {generic_peak_gb:.4} GiB"
+        );
+    }
+
+    /// An unmeasured route must retain the conservative generic allowance. Krea Turbo's measured
+    /// family anchor cannot silently authorize the distinct Krea Raw graph.
+    #[test]
+    fn unmeasured_krea_route_retains_the_generic_activation_fallback() {
+        let weights = tempfile::tempdir().expect("Krea weights fixture");
+        std::fs::File::create(weights.path().join("fixture.safetensors"))
+            .expect("Krea weights fixture file")
+            .set_len(1024)
+            .expect("Krea weights fixture size");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let plan =
+            MlxRequestPlan::for_spec_and_manifest("krea_2_raw", "krea_2_raw", &spec, None, None);
+
+        assert_eq!(plan.fixed_reserve_bytes, gib_to_bytes(2.0));
+        assert_eq!(plan.activation_headroom_bytes, gib_to_bytes(16.0));
+        assert_eq!(
+            plan.generic_total_peak_bytes(request_geometry(&request_inputs(1152, 2048, 1))),
+            plan.asset_bytes
+                .saturating_add(gib_to_bytes(2.0))
+                .saturating_add(gib_to_bytes(14.0 * 2.25))
+        );
+    }
+
     /// sc-16195: the OS/app reserve inside the flat headroom is FIXED, so only the activation term
     /// may scale with output area.
     ///
@@ -5185,36 +5260,38 @@ mod tests {
         );
     }
 
-    /// sc-16195: a family whose allowance was measured as a BARE activation transient carries no OS
-    /// reserve to hold out, so the split must be an exact no-op for it.
+    /// sc-16209: a family whose allowance was measured as a BARE activation transient keeps that
+    /// whole measurement in the area term, with the request budget's remaining OS reserve added as
+    /// a separate fixed term.
     ///
-    /// This is the lens dense path ([`HeadroomAllowance::LENS_DENSE`], sc-11924). Holding a 2 GiB
-    /// reserve out of its 27.88 GiB allowance would move 2 GiB from the AREA term into a constant —
-    /// `2 + 25.88·MP` instead of `27.88·MP` — which is strictly LESS conservative above 1024², by
-    /// `2·(MP−1)`. On a path sc-11924 already records as under-predicting, and whose permissive-side
-    /// failure mode is an OS Jetsam SIGKILL, that would be a regression rather than a refinement.
+    /// This is the lens dense path ([`HeadroomAllowance::LENS_DENSE`], sc-11924). Subtracting the
+    /// legacy 2 GiB request-budget reserve from its 29.88 GiB BARE activation measurement would
+    /// under-predict above 1024² by `2·MP`. The safe decomposition is fixed 2 + 29.88·MP.
     #[test]
     fn a_bare_transient_allowance_keeps_its_whole_area_term() {
         let asset_gb = 28.43_f64;
-        let plan = |headroom: HeadroomAllowance| MlxRequestPlan {
-            engine_id: "lens_turbo",
-            model_id: "lens_turbo".to_owned(),
-            tier: MemoryNumericTier {
-                precision: gen_core::Precision::Bf16,
-                quant: None,
-                component_precision_floors: &[],
-            },
-            asset_bytes: gib_to_bytes(asset_gb),
-            folded_control_bytes: 0,
-            folded_adapter_bytes: 0,
-            activation_headroom_bytes: gib_to_bytes(
-                headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
-            ),
-            fixed_reserve_bytes: gib_to_bytes(
-                (headroom.os_reserve_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB)
-                    .max(0.0),
-            ),
-            calibration: MlxCalibrationConfig::Absent,
+        let plan = |headroom: HeadroomAllowance| {
+            let fixed_reserve_bytes = gib_to_bytes(
+                (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+            );
+            let activation_anchor_bytes =
+                gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0));
+            MlxRequestPlan {
+                engine_id: "lens_turbo",
+                model_id: "lens_turbo".to_owned(),
+                tier: MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                },
+                asset_bytes: gib_to_bytes(asset_gb),
+                folded_control_bytes: 0,
+                folded_adapter_bytes: 0,
+                activation_headroom_bytes: activation_anchor_bytes
+                    .saturating_add(fixed_reserve_bytes),
+                fixed_reserve_bytes,
+                calibration: MlxCalibrationConfig::Absent,
+            }
         };
         let dense = plan(HeadroomAllowance::LENS_DENSE);
         let peak_gb = |plan: &MlxRequestPlan, width, height| {
@@ -5222,19 +5299,17 @@ mod tests {
                 as f64
                 / BYTES_PER_GIB
         };
-        // LENS_DENSE_HEADROOM_GB 29.88 − the 2 GiB legacy reserve budgeting carries separately.
-        let allowance = LENS_DENSE_HEADROOM_GB - 2.0;
         for (width, height, megapixels) in [
             (1024, 1024, 1.0),
             (1024, 1536, 1.5),
             (1152, 2048, 2.25),
             (2048, 2048, 4.0),
         ] {
-            let expected = asset_gb + allowance * megapixels;
+            let expected = asset_gb + 2.0 + LENS_DENSE_HEADROOM_GB * megapixels;
             assert!(
                 (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
                 "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
-                 expected {expected:.4}, got {:.4}",
+                 expected fixed 2 + {LENS_DENSE_HEADROOM_GB}*{megapixels} = {expected:.4}, got {:.4}",
                 peak_gb(&dense, width, height)
             );
         }
@@ -6025,6 +6100,16 @@ mod tests {
         // sc-16195: a bare measured transient carries NO OS reserve, so the request estimator
         // must leave the whole allowance in its area term for this path.
         assert_eq!(dense_headroom.os_reserve_gb, 0.0);
+        for engine_id in ["lens", "lens_turbo"] {
+            let plan =
+                MlxRequestPlan::for_spec_and_manifest(engine_id, engine_id, &spec, None, None);
+            assert_eq!(plan.fixed_reserve_bytes, gib_to_bytes(2.0));
+            assert_eq!(
+                plan.activation_headroom_bytes,
+                gib_to_bytes(2.0 + LENS_DENSE_HEADROOM_GB),
+                "{engine_id} dense/MXFP4 must preserve the format-aware 29.88 GiB activation fallback"
+            );
+        }
 
         std::fs::write(
             root.join("text_encoder").join("config.json"),
@@ -6053,6 +6138,16 @@ mod tests {
         let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
         assert_eq!((packed_total, packed_te), (27, 13));
         assert_eq!(packed_headroom, HeadroomAllowance::GENERIC);
+        for engine_id in ["lens", "lens_turbo"] {
+            let plan =
+                MlxRequestPlan::for_spec_and_manifest(engine_id, engine_id, &spec, None, None);
+            assert_eq!(plan.fixed_reserve_bytes, gib_to_bytes(2.0));
+            assert_eq!(
+                plan.activation_headroom_bytes,
+                gib_to_bytes(16.0),
+                "{engine_id} packed q4/q8 must preserve the generic 14 GiB activation fallback"
+            );
+        }
         std::fs::remove_dir_all(root).ok();
     }
 
