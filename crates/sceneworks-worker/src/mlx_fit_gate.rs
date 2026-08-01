@@ -6766,6 +6766,299 @@ mod tests {
         );
     }
 
+    /// The REAL shipped `krea_2_turbo` manifest entry, for the two live sc-16482 tests below.
+    ///
+    /// `SCENEWORKS_KREA_MANIFEST_JSON` points at the entry extracted from
+    /// `config/manifests/builtin.models.jsonc` (that file is JSONC; this crate has no JSONC reader,
+    /// and hand-copying the entry into the test would let it drift from what actually ships):
+    /// ```text
+    /// node --input-type=module -e "
+    ///   import { readFileSync, writeFileSync } from 'node:fs';
+    ///   const { stripJsoncComments } = await import('./scripts/lib/jsonc.mjs');
+    ///   const doc = JSON.parse(stripJsoncComments(readFileSync('config/manifests/builtin.models.jsonc','utf8')));
+    ///   const list = Array.isArray(doc) ? doc : (doc.models ?? Object.values(doc).find(Array.isArray));
+    ///   writeFileSync(process.env.OUT, JSON.stringify(list.find(m => m && m.id === 'krea_2_turbo')));
+    /// "
+    /// ```
+    /// Returns `None` (with a SKIP note) rather than panicking, so `--ignored` on a machine without
+    /// the setup reports honestly instead of failing.
+    #[cfg(target_os = "macos")]
+    fn real_krea_manifest_entry() -> Option<JsonObject<String, Value>> {
+        let Ok(path) = std::env::var("SCENEWORKS_KREA_MANIFEST_JSON") else {
+            eprintln!("SKIP: set SCENEWORKS_KREA_MANIFEST_JSON (see doc comment for extraction)");
+            return None;
+        };
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read SCENEWORKS_KREA_MANIFEST_JSON {path}: {error}"));
+        let manifest: JsonObject<String, Value> =
+            serde_json::from_slice(&bytes).expect("manifest entry object");
+        assert_eq!(
+            manifest.get("id").and_then(Value::as_str),
+            Some("krea_2_turbo"),
+            "SCENEWORKS_KREA_MANIFEST_JSON must be the krea_2_turbo entry"
+        );
+        Some(manifest)
+    }
+
+    /// sc-16482 on the REAL install (ignored — needs krea-2-turbo-mlx on disk and its actual receipt).
+    ///
+    /// Reproduces the reported failure end to end against the artifacts that produced it, rather than
+    /// a fixture: the user's own `.sceneworks-download-complete.json` (three `backfilled: true`
+    /// receipts, no `artifactTreeStamp`) plus the real `SceneWorks/krea-2-turbo-mlx` snapshot in the HF
+    /// cache and the real `krea_2_turbo` manifest entry (2 calibrations, both `krea_2_turbo_control`).
+    ///
+    /// The receipt is COPIED into a temp data dir, so running this never mutates the real install.
+    /// `HF_HUB_CACHE` still points at the real cache, so the snapshot and every stat'ed file are real.
+    ///
+    /// Before the fix this returned `Err("... invalid MLX calibration opt-in: the resolver supplied no
+    /// immutable artifact provenance")`. Run explicitly:
+    ///   SCENEWORKS_KREA_MANIFEST_JSON=<extracted entry>.json \
+    ///     cargo test -p sceneworks-worker --lib -- --ignored --nocapture krea_real_install
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs the real krea-2-turbo-mlx install + SCENEWORKS_KREA_MANIFEST_JSON"]
+    fn krea_real_install_backfilled_receipt_now_admits() {
+        let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let real_marker = home
+            .join("SceneWorks/data/models/SceneWorks__krea-2-turbo-mlx")
+            .join(crate::INSTALL_MARKER);
+        let Ok(receipt_bytes) = std::fs::read(&real_marker) else {
+            eprintln!("SKIP: no real receipt at {}", real_marker.display());
+            return;
+        };
+        let Some(manifest) = real_krea_manifest_entry() else {
+            return;
+        };
+        let calibrations = manifest["mlx"]["calibrations"]
+            .as_array()
+            .expect("real manifest still declares mlx.calibrations");
+        assert!(
+            !calibrations.is_empty(),
+            "this test is meaningless if the opt-in was removed"
+        );
+
+        // The real artifact, untouched.
+        let hub = home.join(".cache/huggingface/hub");
+        let snapshots = hub.join("models--SceneWorks--krea-2-turbo-mlx/snapshots");
+        let Some(snapshot) = std::fs::read_dir(&snapshots)
+            .ok()
+            .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.is_dir()))
+        else {
+            eprintln!("SKIP: no krea snapshot under {}", snapshots.display());
+            return;
+        };
+        let q8 = snapshot.join("q8");
+        if !q8.is_dir() {
+            eprintln!("SKIP: no q8 tier at {}", q8.display());
+            return;
+        }
+
+        // Copy-on-read data dir: the receipt is real, the file we may stamp is a throwaway.
+        let data = tempfile::tempdir().expect("data dir");
+        let marker_dir = data
+            .path()
+            .join("models")
+            .join(crate::paths::safe_download_dir(
+                "SceneWorks/krea-2-turbo-mlx",
+            ));
+        std::fs::create_dir_all(&marker_dir).expect("marker dir");
+        std::fs::write(marker_dir.join(crate::INSTALL_MARKER), &receipt_bytes).expect("copy");
+
+        let outcome =
+            crate::test_env::temp_env_var("HF_HUB_CACHE", hub.to_str().expect("hub path"), || {
+                let unrepaired = crate::model_jobs::huggingface_receipt_weights(
+                    data.path(),
+                    "SceneWorks/krea-2-turbo-mlx",
+                    Some("krea_2_turbo"),
+                    Some("q8"),
+                    crate::model_jobs::ProvenanceRepair::Skip,
+                )
+                .expect("the real backfilled receipt still resolves loadable weights");
+                assert_eq!(unrepaired.path, q8, "resolves the real q8 tier");
+                assert_eq!(
+                    unrepaired.provenance, None,
+                    "the real receipt carries no artifactTreeStamp — this IS the reported cause"
+                );
+
+                let repaired = crate::model_jobs::huggingface_receipt_weights(
+                    data.path(),
+                    "SceneWorks/krea-2-turbo-mlx",
+                    Some("krea_2_turbo"),
+                    Some("q8"),
+                    crate::model_jobs::ProvenanceRepair::Allow,
+                )
+                .expect("resolves")
+                .provenance
+                .expect("repair must establish provenance for the real install");
+
+                let spec =
+                    LoadSpec::new(WeightsSource::Dir(q8.clone())).with_quant(gen_core::Quant::Q8);
+                let plan = MlxRequestPlan::for_spec_and_manifest(
+                    "krea_2_turbo",
+                    "krea_2_turbo",
+                    &spec,
+                    Some(&manifest),
+                    Some(repaired.clone()),
+                );
+                (
+                    repaired,
+                    packaged_admission_route(
+                        &plan,
+                        &fixture_inputs(1024, 1024),
+                        "text_to_image",
+                        fixture_budget(128.0),
+                    ),
+                )
+            });
+
+        let (provenance, route) = outcome;
+        eprintln!(
+            "real install → repo={} revision={} variant={} tier={:?}",
+            provenance.identity.repository,
+            provenance.identity.revision,
+            provenance.identity.variant,
+            provenance.fixed_artifact_tier
+        );
+        let route = route.expect("the reported generation must no longer be refused");
+        eprintln!(
+            "admission → path={:?} fallback={:?}",
+            route.path, route.fallback_reason
+        );
+        // The base t2i lane has no bindings of its own (every calibration names
+        // `krea_2_turbo_control`), so legacy is the CORRECT route here. What matters is that it is
+        // reached by evaluation rather than by a refusal.
+        assert_eq!(route.path, AdmissionPath::Legacy);
+        assert_ne!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::NoProvenance),
+            "provenance was repaired, so the route must not still report it missing"
+        );
+    }
+
+    /// sc-16482 FULL end-to-end on real weights (ignored — needs the krea-2-turbo-mlx q8 turnkey).
+    ///
+    /// The sibling test above proves the admission route stops refusing. This one closes the last gap:
+    /// it drives the REAL production seam — `evaluate_request`, the call `image_jobs/base.rs` makes
+    /// immediately before generation, against a live loaded generator — and then actually renders. The
+    /// base `krea_2_turbo` text-to-image lane at q8/1024² is the exact configuration that was reported
+    /// broken, so a written PNG is the end of the causal chain the bug report started.
+    ///
+    ///   SCENEWORKS_KREA_MANIFEST_JSON=<entry>.json KREA_BASE_OUT_DIR=<dir> \
+    ///     cargo test -p sceneworks-worker --lib -- --ignored --nocapture krea_real_install_renders
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight MLX render; needs the krea-2-turbo-mlx q8 turnkey + SCENEWORKS_KREA_MANIFEST_JSON"]
+    fn krea_real_install_renders_through_the_live_gate() {
+        let home = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let hub = home.join(".cache/huggingface/hub");
+        let snapshots = hub.join("models--SceneWorks--krea-2-turbo-mlx/snapshots");
+        let Some(q8) = std::fs::read_dir(&snapshots).ok().and_then(|entries| {
+            entries.flatten().map(|e| e.path().join("q8")).find(|p| {
+                p.join("transformer/diffusion_pytorch_model.safetensors")
+                    .is_file()
+            })
+        }) else {
+            eprintln!("SKIP: no krea q8 turnkey under {}", snapshots.display());
+            return;
+        };
+        let Some(manifest) = real_krea_manifest_entry() else {
+            return;
+        };
+        let out_dir = std::path::PathBuf::from(crate::smoke_support::env_or(
+            "KREA_BASE_OUT_DIR",
+            "/tmp/krea_base_smoke",
+        ));
+        std::fs::create_dir_all(&out_dir).expect("out dir");
+
+        // Real receipt, copied so the real install is never mutated.
+        let data = tempfile::tempdir().expect("data dir");
+        let marker_dir = data
+            .path()
+            .join("models")
+            .join(crate::paths::safe_download_dir(
+                "SceneWorks/krea-2-turbo-mlx",
+            ));
+        std::fs::create_dir_all(&marker_dir).expect("marker dir");
+        std::fs::copy(
+            home.join("SceneWorks/data/models/SceneWorks__krea-2-turbo-mlx")
+                .join(crate::INSTALL_MARKER),
+            marker_dir.join(crate::INSTALL_MARKER),
+        )
+        .expect("copy real receipt");
+
+        let provenance =
+            crate::test_env::temp_env_var("HF_HUB_CACHE", hub.to_str().expect("hub path"), || {
+                crate::model_jobs::huggingface_receipt_weights(
+                    data.path(),
+                    "SceneWorks/krea-2-turbo-mlx",
+                    Some("krea_2_turbo"),
+                    Some("q8"),
+                    crate::model_jobs::ProvenanceRepair::Allow,
+                )
+                .expect("resolves")
+                .provenance
+                .expect("repair establishes provenance for the real install")
+            });
+
+        let spec = LoadSpec::new(WeightsSource::Dir(q8.clone())).with_quant(gen_core::Quant::Q8);
+        let plan = MlxRequestPlan::for_spec_and_manifest(
+            "krea_2_turbo",
+            "krea_2_turbo",
+            &spec,
+            Some(&manifest),
+            Some(provenance),
+        );
+        eprintln!("[smoke] loading krea_2_turbo q8 from {}", q8.display());
+        let generator =
+            crate::inference_runtime::load("krea_2_turbo", &spec).expect("load krea_2_turbo");
+
+        // THE production call: exactly what base.rs runs per generation, on a live generator.
+        let evaluation = evaluate_request(
+            &*generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Warm,
+            OffloadPolicy::Resident,
+            0,
+        )
+        .expect("the reported generation must be admitted, not refused");
+        eprintln!("[smoke] gate admitted: {evaluation:?}");
+
+        let request = gen_core::GenerationRequest {
+            prompt: "a windswept basalt sea stack at dawn, low mist, long exposure water"
+                .to_owned(),
+            width: 1024,
+            height: 1024,
+            count: 1,
+            seed: Some(20260801),
+            steps: Some(8),
+            // Krea Turbo is CFG-free (distilled).
+            guidance: None,
+            cancel: gen_core::CancelFlag::new(),
+            ..Default::default()
+        };
+        let image = match generator
+            .generate(&request, &mut |_| {})
+            .expect("krea_2_turbo generate")
+        {
+            gen_core::GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        let path = out_dir.join("krea_base_q8_1024.png");
+        crate::smoke_support::save_png(&image, &path);
+        let std_dev = crate::smoke_support::image_std(&image);
+        eprintln!("[smoke] rendered {} (std {std_dev:.2})", path.display());
+        assert_eq!((image.width, image.height), (1024, 1024));
+        assert!(
+            !crate::smoke_support::is_all_zero(&image),
+            "render is entirely black"
+        );
+        assert!(
+            std_dev > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
+            "render looks degenerate (std {std_dev:.2})"
+        );
+    }
+
     /// sc-10894 end-to-end: a non-zero footprint text encoder flips the residency decision from Reject to
     /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
     /// of the seam — the staged working set is only real when the text-encoder split is measured. Post
