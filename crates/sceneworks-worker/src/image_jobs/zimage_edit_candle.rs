@@ -1,11 +1,11 @@
 use super::{
-    advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir, standard_tier_subdir,
+    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
+    non_empty, resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient,
+    CandleBaseEvidence, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
+    Settings, Value, WorkerError, WorkerResult, ZImageEdit, ZImageEditPaths, ZImageEditRequest,
 };
 use super::{
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, non_empty,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult, ZImageEdit, ZImageEditPaths, ZImageEditRequest,
+    advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir, standard_tier_subdir,
 };
 use serde_json::json;
 
@@ -153,6 +153,20 @@ pub(super) async fn generate_candle_zimage_edit_stream(
     let base = resolve_zimage_edit_candle_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Z-Image base (Z-Image-Turbo) weights not found".to_owned())
     })?;
+    admit_candle_base(
+        request,
+        settings,
+        &base,
+        "Z-Image edit",
+        if request.model == "z_image_edit" {
+            CandleBaseEvidence::Alias("z_image_turbo")
+        } else {
+            CandleBaseEvidence::Catalog
+        },
+        0,
+        false,
+    )
+    .await?;
 
     let (width, height) = (request.width, request.height);
     // Load + fit the source to the render geometry honoring `fit_mode` (crop/pad/stretch — the provider

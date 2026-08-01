@@ -1,12 +1,13 @@
-use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use super::{
-    consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image, load_reference_image,
-    non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_sdxl_components, resolve_seed,
-    standard_tier_subdir, start_gen_stream, uses_standard_tier_layout, ApiClient, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest,
-    Settings, Value, WorkerError, WorkerResult,
+    admit_candle_base, consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image,
+    load_reference_image, non_empty, pid_effective_dims, pid_output_tier,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_sdxl_components, resolve_seed, standard_tier_subdir, start_gen_stream,
+    uses_standard_tier_layout, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
+    JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest, Settings,
+    Value, WorkerError, WorkerResult,
 };
+use super::{advanced, huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
 
 // Candle (Windows/CUDA) SDXL img2img / inpaint / outpaint edit route (sc-5487, epic 5480) — pixel-
@@ -226,6 +227,18 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
+    admit_candle_base(
+        request,
+        settings,
+        &sdxl_base,
+        "SDXL edit",
+        CandleBaseEvidence::Ungateable(
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+        ),
+        0,
+        false,
+    )
+    .await?;
     // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
     // source/mask fit so a 2K tier sizes the effective base and the edit source + mask are fit to THAT
     // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.

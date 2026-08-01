@@ -1,8 +1,9 @@
 use super::resolve_seed;
 use super::{
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_text_style_gain,
-    resolve_weights_dir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_text_style_gain, resolve_weights_dir, safetensors_tensor_bytes_with_prefixes,
+    start_gen_stream, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest, JobSnapshot,
     JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
@@ -237,6 +238,34 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // The selected LoRAs → adapter specs (the edit LoRA + any user LoRAs), folded into the DiT at load.
     let adapters = resolve_adapters(request, settings)?;
     let adapter_count = adapters.len();
+    let adapter_resident_bytes = adapters
+        .iter()
+        .fold(0_u64, |total, adapter| {
+            total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
+        })
+        // Edit additionally materializes the Qwen3-VL `visual.*` tower at f32 from dense bf16
+        // source tensors, so charge twice their on-disk bytes. The base catalog peak already prices
+        // the language model; prefix accounting avoids charging that large subtree again.
+        .saturating_add(
+            safetensors_tensor_bytes_with_prefixes(&weights_dir.join("text_encoder"), &["visual."])
+                .saturating_mul(2),
+        )
+        // The edit-only Qwen VAE encoder stays f32 like its source. The base peak already includes
+        // the decoder, so count only the encoder and its input quantization convolution.
+        .saturating_add(safetensors_tensor_bytes_with_prefixes(
+            &weights_dir.join("vae"),
+            &["encoder.", "quant_conv."],
+        ));
+    admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea edit",
+        CandleBaseEvidence::Catalog,
+        adapter_resident_bytes,
+        false,
+    )
+    .await?;
     // Telemetry `repo` — the manifest `repo` else the Krea 2 Raw default.
     let repo = request
         .model_manifest_entry

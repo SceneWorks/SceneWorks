@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
-    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
+    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -147,6 +147,17 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    admit_candle_base_floor(
+        &request.model,
+        "ComfyUI Z-Image",
+        settings,
+        &[
+            paths.transformer.as_path(),
+            paths.text_encoder.as_path(),
+            paths.vae.as_path(),
+        ],
+    )
+    .await?;
 
     let (width, height) = (request.width, request.height);
     let steps =
