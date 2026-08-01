@@ -681,9 +681,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         };
         let engaged_composition = manifest_rung.map_or_else(
             || provider_contract.engaged_composition(selection.strategy),
-            |rung| {
-                evidence_record
-                    .and_then(|record| record.get("measuredCompositions"))
+            |rung| match evidence_record {
+                Some(record) => record
+                    .get("measuredCompositions")
                     .and_then(|compositions| compositions.get(rung))
                     .and_then(Value::as_array)
                     .and_then(|composition| {
@@ -701,7 +701,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                             })
                             .collect::<Option<Vec<_>>>()
                     })
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                None => provider_contract.engaged_composition(selection.strategy),
             },
         );
         let predicted_peak_gb =
