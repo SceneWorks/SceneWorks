@@ -9,14 +9,14 @@ publish = false
 serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "656a38bf25138c92a82e07ec0f8d0804d07b3dbb", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "656a38bf25138c92a82e07ec0f8d0804d07b3dbb", optional = true }
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "c1c61a920ac9f22ff2e3980e3f048c0ad2b840d9", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "c1c61a920ac9f22ff2e3980e3f048c0ad2b840d9", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "932beb4e60db44d378ffa1fe648defea59b5cbd0", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "656a38bf25138c92a82e07ec0f8d0804d07b3dbb", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "c1c61a920ac9f22ff2e3980e3f048c0ad2b840d9", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "656a38bf25138c92a82e07ec0f8d0804d07b3dbb", features = ["cuda", "testkit"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "656a38bf25138c92a82e07ec0f8d0804d07b3dbb", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "c1c61a920ac9f22ff2e3980e3f048c0ad2b840d9", features = ["cuda", "testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "c1c61a920ac9f22ff2e3980e3f048c0ad2b840d9", optional = true }
 
 [features]
 default = []
