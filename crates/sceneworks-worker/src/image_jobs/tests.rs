@@ -8011,6 +8011,57 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-16453: strict-pose routing must preserve the selected ConvRot DiT identity even before the
+/// shared bf16 tokenizer / text-encoder / VAE surface has been fetched. The immutable ConvRot file
+/// alone is enough to claim the bespoke control route; generation fetches the shared surface and the
+/// provider replaces its transformer with this file. Requiring a standard q8/bf16 base here silently
+/// dropped `convRot` by either refusing the route or substituting the ordinary transformer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_convrot_pose_route_is_claimed_by_the_immutable_dit_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    let snapshot = hub
+        .join("models--SceneWorks--krea-2-turbo-int8-convrot")
+        .join("snapshots")
+        .join("installed");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(
+        snapshot.join("krea2_turbo_int8_convrot.safetensors"),
+        b"convrot-identity",
+    )
+    .unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_2_turbo",
+        "advanced": {
+            "convRot": true,
+            "poses": [{ "id": "pose-1" }]
+        }
+    }));
+
+    assert!(
+        krea_control_candle_available(&req, &settings),
+        "the immutable ConvRot file must claim strict pose before the shared bf16 surface is fetched"
+    );
+    assert_eq!(
+        resolve_candle_image_route(&req, &settings),
+        Some(CandleImageRoute::KreaControl),
+        "ConvRot strict pose must not fall through to ordinary Krea txt2img"
+    );
+    assert!(
+        resolve_krea_control_base(&req, &settings)
+            .expect("controlled resolver")
+            .is_none(),
+        "route availability must not substitute a standard q8/bf16 transformer for ConvRot"
+    );
+}
+
 /// sc-14249: the SenseNova q8 floor keeps the CAPABILITY DOWNTIER off q4, without taking q4 away
 /// from a user who asks for it.
 ///

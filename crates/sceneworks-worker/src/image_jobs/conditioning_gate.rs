@@ -50,7 +50,7 @@ use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint};
 /// (a later gate credits it, so an over-count over-admits an OOM), and this gate's number is a weights
 /// FLOOR — it under-states the real peak by every unpriced transient, which is the safe direction for
 /// admission and would be the unsafe direction here. The same reasoning
-/// `krea_control_fit::incurred_peak_gb` applies to its superseded rows. The cost is bounded and is a
+/// `krea_control_fit::incurred_peak_gb` applies when control evidence is not current. The cost is bounded and is a
 /// *speed* cost only: a following gate under-credits the pool and may stage needlessly. Once an overlay
 /// cell is measured there is a peak honest enough to record.
 pub(super) async fn admit_conditioning_overlay(
