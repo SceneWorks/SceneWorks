@@ -31,7 +31,7 @@ import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
 import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
-import { WorkflowEmbedNotice } from "./components/WorkflowEmbedNotice.jsx";
+import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
 import {
   persistWorkflowEmbedPreference,
   readEmbedWorkflowInImages,
@@ -748,15 +748,20 @@ export function App() {
   // origin wipes localStorage, so a preference stored only there would silently revert to the ON
   // default on the next launch — turning a deliberate privacy opt-out back on.
   const [embedWorkflow, setEmbedWorkflow] = useState(readEmbedWorkflowInImages);
-  // Whether the one-time disclosure has been shown and dismissed, and whether it is on screen now.
-  // `seen` is durable for the same reason; `open` is this session's.
+  // `workflowEmbedNoticeSeen` is the legacy persisted key, now used as the durable "choice made"
+  // marker. Keeping the key preserves every prior decision across upgrades.
   const [workflowEmbedNoticeSeen, setWorkflowEmbedNoticeSeen] = useState(
     readWorkflowEmbedNoticeSeen,
   );
   const [workflowEmbedNoticeOpen, setWorkflowEmbedNoticeOpen] = useState(false);
-  // Read by the generation trigger below, which is memoized and would otherwise close over stale
-  // values — and gated on the durable GET having landed, so a generation submitted in the first
-  // few hundred milliseconds after a desktop relaunch cannot re-show a notice already dismissed.
+  const [workflowEmbedDecisionSaving, setWorkflowEmbedDecisionSaving] = useState(false);
+  const [workflowEmbedDecisionError, setWorkflowEmbedDecisionError] = useState("");
+  const [settingsSharingFocusRequest, setSettingsSharingFocusRequest] = useState(0);
+  const pendingWorkflowGenerationRef = useRef(null);
+  const workflowEmbedHydrationWaitersRef = useRef([]);
+  const workflowEmbedDecisionSavingRef = useRef(false);
+  // Read by the generation gate below, which is memoized and would otherwise close over stale
+  // values. The gate waits for durable hydration before it decides whether the modal is needed.
   const workflowEmbedRef = useRef({ hydrated: false, embed: true, seen: false });
   workflowEmbedRef.current.embed = embedWorkflow;
   workflowEmbedRef.current.seen = workflowEmbedNoticeSeen;
@@ -779,20 +784,53 @@ export function App() {
     },
     [pushNotice],
   );
-  const dismissWorkflowEmbedNotice = useCallback(() => {
+  const settlePendingWorkflowGeneration = useCallback((allow) => {
+    const pending = pendingWorkflowGenerationRef.current;
+    if (!pending) return;
+    pendingWorkflowGenerationRef.current = null;
+    pending(Boolean(allow));
+  }, []);
+
+  const chooseWorkflowEmbedding = useCallback(
+    async (next) => {
+      if (workflowEmbedDecisionSavingRef.current) return;
+      workflowEmbedDecisionSavingRef.current = true;
+      setWorkflowEmbedDecisionSaving(true);
+      setWorkflowEmbedDecisionError("");
+      try {
+        await persistWorkflowEmbedPreference({
+          embedWorkflowInImages: Boolean(next),
+          workflowEmbedNoticeSeen: true,
+        });
+        workflowEmbedRef.current.embed = Boolean(next);
+        workflowEmbedRef.current.seen = true;
+        setEmbedWorkflow(Boolean(next));
+        setWorkflowEmbedNoticeSeen(true);
+        writeEmbedWorkflowInImages(Boolean(next));
+        writeWorkflowEmbedNoticeSeen(true);
+        setWorkflowEmbedNoticeOpen(false);
+        settlePendingWorkflowGeneration(true);
+      } catch {
+        setWorkflowEmbedDecisionError(
+          "SceneWorks could not save your choice. Check the connection and try again.",
+        );
+      } finally {
+        workflowEmbedDecisionSavingRef.current = false;
+        setWorkflowEmbedDecisionSaving(false);
+      }
+    },
+    [settlePendingWorkflowGeneration],
+  );
+
+  const openWorkflowSharingSettings = useCallback(() => {
     setWorkflowEmbedNoticeOpen(false);
-    setWorkflowEmbedNoticeSeen(true);
-    writeWorkflowEmbedNoticeSeen(true);
-    persistWorkflowEmbedPreference({ workflowEmbedNoticeSeen: true }).catch(() => {
-      pushNotice(
-        "workflow-embed",
-        "Could not record that this notice was dismissed, so it may appear again.",
-      );
-    });
-  }, [pushNotice]);
-  // A second tab that was already mounted when the notice was dismissed holds `seen: false` and
-  // would show the disclosure again on its own next generation — "once" being per tab rather than
-  // per user. The mirror write raises a `storage` event in every other tab, so they follow.
+    setWorkflowEmbedDecisionError("");
+    settlePendingWorkflowGeneration(false);
+    setSettingsSharingFocusRequest((request) => request + 1);
+    setSimpleActiveScreen("settings");
+    setActiveView("Settings");
+  }, [settlePendingWorkflowGeneration]);
+  // A completed choice is mirrored to other mounted tabs so they cannot ask independently.
   useEffect(
     () =>
       subscribeWorkflowEmbedFlags(({ embed, seen }) => {
@@ -800,21 +838,34 @@ export function App() {
         // One-way: see `subscribeWorkflowEmbedFlags`. `seen` is a record that something was said,
         // and another tab clearing its storage is not evidence it never was.
         if (seen) {
+          workflowEmbedRef.current.seen = true;
           setWorkflowEmbedNoticeSeen(true);
           setWorkflowEmbedNoticeOpen(false);
+          settlePendingWorkflowGeneration(true);
         }
       }),
-    [],
+    [settlePendingWorkflowGeneration],
   );
-  // The observable event the disclosure hangs off: a generation was accepted while embedding is
-  // on. Submission rather than completion, so the user is told BEFORE the files with their prompt
-  // in them exist — and only on a job the API actually took, so a failed POST does not burn it.
-  const noteGenerationForWorkflowEmbed = useCallback((job) => {
-    const state = workflowEmbedRef.current;
-    if (!job || !state.hydrated || !state.embed || state.seen) {
-      return;
+  // The first undecided generation is held before its POST. A choice resumes that one request;
+  // Settings cancels it so no image can be written with an unresolved preference.
+  const confirmWorkflowEmbeddingBeforeGeneration = useCallback(async () => {
+    if (!workflowEmbedRef.current.hydrated) {
+      await new Promise((resolve) => {
+        workflowEmbedHydrationWaitersRef.current.push(resolve);
+      });
     }
+    const state = workflowEmbedRef.current;
+    if (state.seen) {
+      return true;
+    }
+    if (pendingWorkflowGenerationRef.current) {
+      return false;
+    }
+    setWorkflowEmbedDecisionError("");
     setWorkflowEmbedNoticeOpen(true);
+    return new Promise((resolve) => {
+      pendingWorkflowGenerationRef.current = resolve;
+    });
   }, []);
   const activeProjectRef = useRef(null);
   const activeViewRef = useRef(activeView);
@@ -1475,13 +1526,26 @@ export function App() {
         // worker's own reader agrees), and an absent notice flag means the user has never been
         // told — which is exactly the state an install upgrading into this build is in, so the
         // disclosure fires once for them rather than only for fresh installs.
-        if (typeof prefs?.embedWorkflowInImages === "boolean") {
+        // A choice may finish while this launch GET is still in flight. Once `seen` has moved
+        // true locally, an older response must not roll either half of that atomic choice back.
+        if (
+          !workflowEmbedRef.current.seen &&
+          typeof prefs?.embedWorkflowInImages === "boolean"
+        ) {
           setEmbedWorkflow(prefs.embedWorkflowInImages);
           writeEmbedWorkflowInImages(prefs.embedWorkflowInImages);
         }
-        if (typeof prefs?.workflowEmbedNoticeSeen === "boolean") {
+        if (
+          !workflowEmbedRef.current.seen &&
+          typeof prefs?.workflowEmbedNoticeSeen === "boolean"
+        ) {
           setWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
           writeWorkflowEmbedNoticeSeen(prefs.workflowEmbedNoticeSeen);
+          if (prefs.workflowEmbedNoticeSeen) {
+            workflowEmbedRef.current.seen = true;
+            setWorkflowEmbedNoticeOpen(false);
+            settlePendingWorkflowGeneration(true);
+          }
         }
         const persistedView = prefs?.activeView;
         if (navSections.some((section) => section.items.some((item) => item.id === persistedView))) {
@@ -1494,13 +1558,16 @@ export function App() {
           // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
           // which on the desktop shell is a fresh empty store every launch.
           workflowEmbedRef.current.hydrated = true;
+          for (const resolve of workflowEmbedHydrationWaitersRef.current.splice(0)) {
+            resolve();
+          }
           setNavigationHydrated(true);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settlePendingWorkflowGeneration]);
 
   const refreshHealth = useCallback(() => {
     healthRequestRef.current?.abort();
@@ -2250,12 +2317,11 @@ export function App() {
         requestedGpu,
         setJobs,
         setError,
-        // sc-15953: the one image-generation choke point every studio goes through (Image Studio,
-        // Simple, and the Character studio's angle/pose forms all call this), so the first-run
-        // disclosure hangs off it rather than off each lane's submit button.
-        afterCreate: noteGenerationForWorkflowEmbed,
+        // Every image-producing studio shares this preflight. The first undecided request waits
+        // here, before the POST, until the recipe-sharing choice is durably saved.
+        beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
       }),
-    [token, activeProject, requestedGpu, setError, noteGenerationForWorkflowEmbed],
+    [token, activeProject, requestedGpu, setError, confirmWorkflowEmbeddingBeforeGeneration],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -3438,12 +3504,22 @@ export function App() {
             onModeChange={setUiModeOverride}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
+            requestedScreen={simpleActiveScreen}
+            settingsSharingFocusRequest={settingsSharingFocusRequest}
             /* The same flag that gates the durable `activeView` write: until the
                ui-preferences GET has landed, the Simple studios must neither restore from
                a possibly-empty cache nor write their catalog defaults over the stored copy. */
             preferencesHydrated={navigationHydrated}
             simpleDefault={simpleUiDefault}
           />
+          {workflowEmbedNoticeOpen ? (
+            <WorkflowEmbedDecisionModal
+              error={workflowEmbedDecisionError}
+              onChoose={chooseWorkflowEmbedding}
+              onOpenSettings={openWorkflowSharingSettings}
+              saving={workflowEmbedDecisionSaving}
+            />
+          ) : null}
           {/* The dropped-workflow offer (sc-15951). The drop guard is installed at App level
               and therefore runs in BOTH shells, so the panel it opens has to render in both
               too — otherwise a Simple-UI user's drop would be inspected and then answered by
@@ -3577,12 +3653,11 @@ export function App() {
         ))}
 
         {workflowEmbedNoticeOpen ? (
-          <WorkflowEmbedNotice
-            onDismiss={dismissWorkflowEmbedNotice}
-            onOpenSettings={() => {
-              dismissWorkflowEmbedNotice();
-              setActiveView("Settings");
-            }}
+          <WorkflowEmbedDecisionModal
+            error={workflowEmbedDecisionError}
+            onChoose={chooseWorkflowEmbedding}
+            onOpenSettings={openWorkflowSharingSettings}
+            saving={workflowEmbedDecisionSaving}
           />
         ) : null}
 
@@ -3618,6 +3693,7 @@ export function App() {
             onAccentChange={changeAccent}
             onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
+            sharingFocusRequest={settingsSharingFocusRequest}
             simpleDefault={simpleUiDefault}
           />
         ) : null}

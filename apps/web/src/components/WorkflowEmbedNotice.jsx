@@ -1,5 +1,5 @@
 import React from "react";
-import { Icon } from "./Icons.jsx";
+import { Modal } from "./Modal.jsx";
 import {
   GALLERY_READABLE_COPY,
   SAVE_WITHOUT_WORKFLOW_LABEL,
@@ -29,8 +29,8 @@ import {
 // path is caught, and it says the switch applies to the NEXT generation rather than implying
 // anything about images already on disk.
 
-// The paragraphs under the Settings toggle. Also rendered inside the first-run notice, so the two
-// surfaces cannot drift.
+// The detailed paragraphs under the Settings toggle. The first-run modal deliberately uses a
+// concise summary so the decision is readable on phones.
 export function WorkflowEmbedDetails() {
   return (
     <>
@@ -74,38 +74,51 @@ export function WorkflowEmbedDetails() {
   );
 }
 
-// The one-time disclosure. Rendered the first time a generation is submitted while embedding is on
-// and the user has never been told; dismissing it records a durable server-side flag, so it does
-// not come back on the next launch (the desktop shell's per-launch origin makes a localStorage-only
-// flag useless for this).
-//
-// Deliberately NOT a modal. It is a disclosure, not a decision — blocking a generation the user
-// already asked for to make them read a paragraph would train them to dismiss it unread, which is
-// the opposite of the point.
-export function WorkflowEmbedNotice({ onDismiss, onOpenSettings }) {
+// The one-time decision surface. The first undecided generation waits behind it, and only an
+// explicit yes/no choice records the durable decision. The detailed sharing envelope remains in
+// Settings; this modal intentionally keeps only the context needed to choose.
+export function WorkflowEmbedDecisionModal({ error, onChoose, onOpenSettings, saving }) {
   return (
-    <section
-      aria-labelledby="workflow-embed-notice-title"
-      className="settings-notice workflow-embed-notice"
-      role="region"
+    <Modal
+      className="workflow-embed-decision-modal"
+      describedBy="workflow-embed-decision-description"
+      labelledBy="workflow-embed-decision-title"
+      onClose={() => {}}
     >
-      <Icon.Warning size={16} />
-      <div>
-        <div className="workflow-embed-notice-title" id="workflow-embed-notice-title">
-          Your generated images carry their recipe
-        </div>
-        <WorkflowEmbedDetails />
-        <div className="settings-button-row">
-          {onOpenSettings ? (
-            <button className="settings-btn" onClick={onOpenSettings} type="button">
-              Open settings
-            </button>
-          ) : null}
-          <button className="settings-btn" onClick={onDismiss} type="button">
-            Got it
-          </button>
-        </div>
+      <div className="workflow-embed-decision-copy">
+        <h2 id="workflow-embed-decision-title">Include the recipe in generated images?</h2>
+        <p id="workflow-embed-decision-description">
+          SceneWorks can embed the prompt, settings, model, and LoRA details used to make an image.
+          That makes recipes reusable and helps galleries such as Civitai identify the resources.
+        </p>
+        <p>You can change this later from Settings.</p>
       </div>
-    </section>
+      {error ? (
+        <p className="workflow-embed-decision-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <div className="workflow-embed-decision-actions">
+        <button className="settings-btn" disabled={saving} onClick={onOpenSettings} type="button">
+          Go to settings
+        </button>
+        <button
+          className="settings-btn"
+          disabled={saving}
+          onClick={() => onChoose(false)}
+          type="button"
+        >
+          No thanks!
+        </button>
+        <button
+          className="settings-btn settings-btn--primary"
+          disabled={saving}
+          onClick={() => onChoose(true)}
+          type="button"
+        >
+          {saving ? "Saving..." : "Ok, got it"}
+        </button>
+      </div>
+    </Modal>
   );
 }

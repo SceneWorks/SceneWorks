@@ -31,7 +31,7 @@ function focusableChildren(dialog) {
 // a direct child of `body`, immune to any such ancestor. React portals preserve
 // synthetic event bubbling, so the Escape / backdrop-click / focus handlers
 // below keep working exactly as before.
-export function Modal({ children, onClose, className, labelledBy, label }) {
+export function Modal({ children, onClose, className, describedBy, labelledBy, label }) {
   const dialogRef = useRef(null);
 
   useEffect(() => {
@@ -51,6 +51,7 @@ export function Modal({ children, onClose, className, labelledBy, label }) {
     >
       <div
         aria-label={label}
+        aria-describedby={describedBy}
         aria-labelledby={labelledBy}
         aria-modal="true"
         className={className}

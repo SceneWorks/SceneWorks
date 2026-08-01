@@ -68,6 +68,7 @@ export function SettingsScreen({
   lockedToSimple = false,
   embedWorkflow = true,
   onEmbedWorkflowChange,
+  sharingFocusRequest = 0,
 }) {
   // theme/changeTheme and the worker registry come from the app context (the same values the
   // topbar toggle and Simple Settings read); accent + the Simple-mode default are drilled from
@@ -83,6 +84,16 @@ export function SettingsScreen({
   const [status, setStatus] = useState("");
   // Which tab is showing. Not persisted — the screen is short-lived.
   const [tab, setTab] = useState("appearance");
+  const sharingHeadingRef = useRef(null);
+  useEffect(() => {
+    if (!sharingFocusRequest) return undefined;
+    setTab("settings");
+    const timer = setTimeout(() => {
+      sharingHeadingRef.current?.scrollIntoView?.({ block: "start" });
+      sharingHeadingRef.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sharingFocusRequest]);
   // LAN remote access (epic 4484 stories 4/11). `remote` is the RemoteAccessStatus
   // snapshot from the shell; only fetched/rendered on desktop.
   const [remote, setRemote] = useState(null);
@@ -496,7 +507,7 @@ export function SettingsScreen({
                 so the change lands on the next generation with no restart. The copy under it is
                 the same block the first-run disclosure shows; see WorkflowEmbedNotice.jsx for why
                 its claims are shaped the way they are. */}
-            <div className="settings-group-title">Sharing</div>
+            <div className="settings-group-title" ref={sharingHeadingRef} tabIndex={-1}>Sharing</div>
             <div className="settings-row">
               <div>
                 <div className="settings-row-title">Include the recipe in generated images</div>

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { putUiPreferences } from "../uiPreferences.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -32,6 +32,7 @@ export function SimpleSettings({
   lockedToSimple,
   embedWorkflow = true,
   onEmbedWorkflowChange,
+  sharingFocusRequest = 0,
 }) {
   const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const { toast } = useSimpleUi();
@@ -40,6 +41,16 @@ export function SimpleSettings({
   const [host, setHost] = useState("");
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
+  const sharingHeadingRef = useRef(null);
+
+  useEffect(() => {
+    if (!sharingFocusRequest) return undefined;
+    const timer = setTimeout(() => {
+      sharingHeadingRef.current?.scrollIntoView?.({ block: "start" });
+      sharingHeadingRef.current?.focus();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [sharingFocusRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -190,7 +201,7 @@ export function SimpleSettings({
           leaving the switch out of it would make "discoverable" untrue for most of the people
           the disclosure is aimed at. */}
       <div className="su-group">
-        <div className="su-group-title">Sharing</div>
+        <div className="su-group-title" ref={sharingHeadingRef} tabIndex={-1}>Sharing</div>
         <div className="su-card su-card--split">
           <div>
             <div className="su-card-title">Include the recipe in generated images</div>

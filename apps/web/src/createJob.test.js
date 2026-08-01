@@ -139,6 +139,25 @@ describe("makeCreateJob", () => {
     );
   });
 
+  it("can hold or cancel a request before the POST", async () => {
+    const beforeCreate = vi.fn(async () => false);
+    const creator = makeCreateJob({
+      definition: CREATE_JOB_DEFINITIONS.image,
+      token: "",
+      project,
+      requestedGpu: "auto",
+      setJobs: vi.fn(),
+      setError: vi.fn(),
+      beforeCreate,
+    });
+    const payload = { prompt: "wait for the decision" };
+
+    await expect(creator(payload)).resolves.toBeNull();
+
+    expect(beforeCreate).toHaveBeenCalledWith(payload);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   it("retains the missing-project and request-error contracts", async () => {
     const setError = vi.fn();
     const missingProjectCreator = makeCreateJob({
