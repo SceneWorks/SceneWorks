@@ -13,7 +13,11 @@ import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import {
   CANDLE_HEADROOM_GB,
+  DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
+  MEASURED_SIBLING_RATIO_TOLERANCE,
+  TRANSIENT_HEADROOM_BYTES,
+  TRANSIENT_HEADROOM_MEASURED_PIXELS,
   blanketFloorGb,
   cheapestDeclaredTierPeakGb,
   hostGbForPeakGb,
@@ -213,6 +217,180 @@ const manifestModels = loadManifestModels();
 const OSES = ["macos", "windows"];
 // The lane each OS runs, matching every consumer's `macGatingActive ? "mlx" : "candle"`.
 const BACKEND_FOR_OS = { macos: "mlx", windows: "candle" };
+const MAX_MEASURED_SIBLING_RATIO_TOLERANCE = 1.05;
+
+function estimateDiskBytes(variant) {
+  return jsonSizeToU64(variant?.footprint?.diskSizeBytes) ?? jsonSizeToU64(variant?.downloadSizeBytes);
+}
+
+function measuredResidentForRatio(variant) {
+  const resident = jsonSizeToU64(variant?.footprint?.residentMemoryBytes);
+  if (resident !== null && resident > 0) {
+    return resident;
+  }
+  const peak = jsonSizeToU64(variant?.footprint?.peakMemoryBytes);
+  return peak !== null &&
+    peak > TRANSIENT_HEADROOM_BYTES &&
+    variant?.footprint?.measuredPixels === TRANSIENT_HEADROOM_MEASURED_PIXELS
+    ? peak - TRANSIENT_HEADROOM_BYTES
+    : null;
+}
+
+describe("catalog memory estimates: measured-sibling upper bound (sc-16046)", () => {
+  it("bounds every estimable MLX tier with a measured sibling and audits the affected model shapes", () => {
+    // The guard owns this ceiling independently of the implementation constant. Raising the production
+    // tolerance therefore makes this test red instead of raising its own upper bound in lockstep.
+    expect(MEASURED_SIBLING_RATIO_TOLERANCE).toBeLessThanOrEqual(
+      MAX_MEASURED_SIBLING_RATIO_TOLERANCE,
+    );
+    const rows = [];
+    for (const manifestModel of manifestModels) {
+      const entry = catalogEntry(manifestModel, "macos", []);
+      for (const target of entry.variants.filter((variant) => tierQuantize(variant.variant) !== null)) {
+        if (measuredResidentForRatio(target) !== null) {
+          continue;
+        }
+        const targetDisk = estimateDiskBytes(target);
+        if (targetDisk === null || targetDisk <= 0) {
+          continue;
+        }
+        const siblingRatios = entry.variants
+          .filter(
+            (sibling) =>
+              sibling.variant !== target.variant && tierQuantize(sibling.variant) !== null,
+          )
+          .map((sibling) => {
+            const disk = estimateDiskBytes(sibling);
+            const resident = measuredResidentForRatio(sibling);
+            return disk !== null && disk > 0 && resident !== null ? resident / disk : null;
+          })
+          .filter((ratio) => ratio !== null && ratio > 0 && Number.isFinite(ratio));
+        if (siblingRatios.length === 0) {
+          continue;
+        }
+
+        const siblingRatio = Math.max(...siblingRatios);
+        const toleratedRatio = Math.min(
+          DISK_TO_RESIDENT_MULTIPLIER,
+          siblingRatio * MAX_MEASURED_SIBLING_RATIO_TOLERANCE,
+        );
+        const upperBound = Math.round(targetDisk * toleratedRatio) + TRANSIENT_HEADROOM_BYTES;
+        const estimate = variantFootprintBytes(target, entry);
+        const optedIn = entry?.mlx?.estimateResidentFromMeasuredSibling === true;
+        const denseBytes =
+          Math.round(targetDisk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES;
+
+        expect(estimate, `${entry.id}/${target.variant} must remain estimable`).not.toBeNull();
+        expect(estimate.measured, `${entry.id}/${target.variant} is still an estimate`).toBe(false);
+        if (optedIn) {
+          expect(
+            estimate.bytes,
+            `${entry.id}/${target.variant} exceeds its measured-sibling upper bound`,
+          ).toBeLessThanOrEqual(upperBound);
+        } else {
+          expect(estimate.bytes, `${entry.id}/${target.variant} lacks compatible-topology opt-in`).toBe(
+            denseBytes,
+          );
+        }
+        rows.push({
+          id: entry.id,
+          tier: target.variant,
+          estimate,
+          denseBytes,
+          optedIn,
+        });
+      }
+    }
+
+    // Pin the complete current corpus so a newly-measured matrix model forces an explicit audit instead
+    // of silently entering (or evading) this upper-bound contract. Lens carries a packed MoE text encoder;
+    // the two Wan A14B entries are the catalog's expert-swapped dual-transformer shapes. The dense Z-Image
+    // and SDXL siblings remain at the 1.0 cap, proving the optimization is evidence-driven rather than a
+    // family-name special case.
+    expect([...new Set(rows.map((row) => row.id))].sort()).toEqual(
+      [
+        "lens_turbo",
+        "sdxl",
+        "wan_2_2_i2v_14b",
+        "wan_2_2_t2v_14b",
+        "z_image",
+        "z_image_edit",
+        "z_image_turbo",
+      ].sort(),
+    );
+    expect(
+      [...new Set(rows.filter((row) => row.estimate.bytes < row.denseBytes).map((row) => row.id))].sort(),
+    ).toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"].sort());
+    expect([...new Set(rows.filter((row) => row.optedIn).map((row) => row.id))].sort()).toEqual(
+      ["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"].sort(),
+    );
+
+    const wanBf16 = rows.filter(
+      (row) => row.tier === "bf16" && row.id.startsWith("wan_2_2_"),
+    );
+    expect(wanBf16).toHaveLength(2);
+    for (const row of wanBf16) {
+      expect(hostGbForPeakGb(row.estimate.bytes / BYTES_PER_GB, "mlx"), row.id).toBe(46);
+      expect(hostGbForPeakGb(row.denseBytes / BYTES_PER_GB, "mlx"), row.id).toBeGreaterThanOrEqual(
+        87,
+      );
+    }
+  });
+
+  it("audits every current MoE-bearing manifest entry, including shapes with no measured sibling", () => {
+    // Source audit of builtin.models.jsonc's MoE/dual-expert declarations. Lens has no measured tier;
+    // Lens Turbo changes the MoE encoder's packing between tiers; Bernini has no measured sibling;
+    // VACE-Fun is one default artifact. All retain the dense/no-sibling behavior. Only the two WAN A14B
+    // matrices explicitly assert tier-compatible one-expert-at-a-time topology.
+    const ids = [
+      "bernini",
+      "bernini_image",
+      "lens",
+      "lens_turbo",
+      "wan_2_2_t2v_14b",
+      "wan_2_2_i2v_14b",
+      "wan_2_2_vace_fun_14b",
+    ];
+    const entries = new Map(
+      ids.map((id) => {
+        const model = manifestModels.find((candidate) => candidate.id === id);
+        expect(model, `${id} must remain in the manifest`).toBeTruthy();
+        return [id, catalogEntry(model, "macos", [])];
+      }),
+    );
+    const relativeResidentScale = (entry, tier) => {
+      const variant = entry.variants.find((candidate) => candidate.variant === tier);
+      const disk = estimateDiskBytes(variant);
+      const estimate = variantFootprintBytes(variant, entry);
+      expect(disk, `${entry.id}/${tier} disk bytes`).toBeGreaterThan(0);
+      expect(estimate, `${entry.id}/${tier} estimate`).not.toBeNull();
+      return (estimate.bytes - TRANSIENT_HEADROOM_BYTES) / disk;
+    };
+
+    for (const tier of ["q4", "q8", "bf16"]) {
+      for (const id of ["bernini", "bernini_image", "lens"]) {
+        expect(relativeResidentScale(entries.get(id), tier), `${id}/${tier}`).toBe(1);
+      }
+    }
+    for (const tier of ["q8", "bf16"]) {
+      expect(relativeResidentScale(entries.get("lens_turbo"), tier), `lens_turbo/${tier}`).toBe(1);
+      for (const id of ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]) {
+        expect(relativeResidentScale(entries.get(id), tier), `${id}/${tier}`).toBeLessThan(0.5);
+      }
+    }
+    expect(
+      manifestModels
+        .filter((model) => model?.mlx?.estimateResidentFromMeasuredSibling === true)
+        .map((model) => model.id)
+        .sort(),
+    ).toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"].sort());
+    expect(
+      entries
+        .get("wan_2_2_vace_fun_14b")
+        .variants.filter((variant) => tierQuantize(variant.variant) !== null),
+    ).toEqual([]);
+  });
+});
 
 describe("convert-at-install memory floors", () => {
   it("derives anima_base's bf16-only label from real catalog inputs instead of its blanket", () => {
@@ -853,7 +1031,7 @@ describe("catalog memory floors: the label never contradicts the module's own pi
       subsetsCovered++;
       const shown = shownGb(row.label);
       const estimable = installed.filter((tier) =>
-        variantFootprintBytes(row.entry.variants.find((v) => v.variant === tier)) !== null,
+        variantFootprintBytes(row.entry.variants.find((v) => v.variant === tier), row.entry) !== null,
       );
       if (shown === null) {
         if (estimable.length > 0) {
@@ -863,13 +1041,15 @@ describe("catalog memory floors: the label never contradicts the module's own pi
       }
       for (const tier of installed) {
         const variant = row.entry.variants.find((v) => v.variant === tier);
-        if (variantFootprintBytes(variant) === null) {
+        if (variantFootprintBytes(variant, row.entry) === null) {
           continue;
         }
         asserted++;
-        if (!tierFits(variant, shown)) {
+        if (!tierFits(variant, shown, { model: row.entry })) {
           const need = Math.ceil(
-            variantFootprintBytes(variant).bytes / BYTES_PER_GB / MEMORY_HEADROOM_FRACTION,
+            variantFootprintBytes(variant, row.entry).bytes /
+              BYTES_PER_GB /
+              MEMORY_HEADROOM_FRACTION,
           );
           violations.push(
             `${row.id} on ${row.os} [${row.subset.join(",")}]: label ` +
@@ -883,8 +1063,13 @@ describe("catalog memory floors: the label never contradicts the module's own pi
       if (estimable.length > 0) {
         const heaviest = estimable
           .map((tier) => row.entry.variants.find((v) => v.variant === tier))
-          .reduce((a, b) => (variantFootprintBytes(a).bytes >= variantFootprintBytes(b).bytes ? a : b));
-        if (!tierFits(heaviest, shown)) {
+          .reduce((a, b) =>
+            variantFootprintBytes(a, row.entry).bytes >=
+            variantFootprintBytes(b, row.entry).bytes
+              ? a
+              : b,
+          );
+        if (!tierFits(heaviest, shown, { model: row.entry })) {
           violations.push(
             `${row.id} on ${row.os} [${row.subset.join(",")}]: suggestTier at ${shown} GB degrades ` +
               `below the installed ${heaviest.variant} (picked ${suggestTier(row.entry, shown)})`,
@@ -1000,7 +1185,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     // Each tier's requirement, derived from the module's own estimator rather than written down.
     const hostFor = (entry, tier) =>
       hostGbForPeakGb(
-        variantFootprintBytes(entry.variants.find((v) => v.variant === tier)).bytes / BYTES_PER_GB,
+        variantFootprintBytes(entry.variants.find((v) => v.variant === tier), entry).bytes /
+          BYTES_PER_GB,
         "mlx",
       );
 
@@ -1013,10 +1199,14 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
       // ...and the picker agrees at that host, in both directions.
       for (const tier of installed) {
         const variant = entry.variants.find((v) => v.variant === tier);
-        expect(tierFits(variant, shown), `[${installed.join(",")}] tierFits(${tier})`).toBe(true);
+        expect(tierFits(variant, shown, { model: entry }), `[${installed.join(",")}] tierFits(${tier})`).toBe(
+          true,
+        );
       }
       const heaviest = installed.reduce((a, b) => (hostFor(entry, a) >= hostFor(entry, b) ? a : b));
-      expect(tierFits(entry.variants.find((v) => v.variant === heaviest), shown - 1)).toBe(false);
+      expect(
+        tierFits(entry.variants.find((v) => v.variant === heaviest), shown - 1, { model: entry }),
+      ).toBe(false);
       // `suggestTier` must not have to degrade below what is installed.
       expect(
         hostFor(entry, suggestTier(entry, shown)),

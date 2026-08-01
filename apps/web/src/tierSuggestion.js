@@ -50,6 +50,13 @@ export const DISK_TO_RESIDENT_MULTIPLIER = 1.0;
 // makes the estimated budget (disk×MULT + transient) track the MEASURED peak the RAM suggestion must
 // actually fit — the true install-time/run ceiling.
 export const TRANSIENT_HEADROOM_BYTES = 14 * 1024 * 1024 * 1024;
+export const TRANSIENT_HEADROOM_MEASURED_PIXELS = 1024 * 1024;
+
+// A measured sibling is still an extrapolation, not a measurement of the target tier. Preserve a
+// small resident-ratio margin before the ordinary 10% host headroom is applied. The multiplier is
+// capped at the dense fallback, so sibling evidence can only correct an over-estimate — it can never
+// make a tier look larger than the existing disk×1 estimate.
+export const MEASURED_SIBLING_RATIO_TOLERANCE = 1.05;
 
 // Fraction of detected unified/GPU memory a tier's peak footprint must fit UNDER to be suggested. The
 // remainder is left for the OS, other apps, and margin. sc-8516 raised this from 0.8 → 0.9: because the
@@ -67,12 +74,15 @@ const BYTES_PER_GB = 1024 * 1024 * 1024;
 //      This is the true ceiling: a tier whose peak OOMs during generation must not be suggested.
 //   2. `footprint.residentMemoryBytes` + TRANSIENT_HEADROOM_BYTES — measured resident weights plus the
 //      fixed transient working set, when resident was measured but peak was not.
-//   3. `footprint.diskSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES — the
-//      estimate (the common case for un-measured tiers): weights ≈ on-disk size, plus the transient.
-//   4. `downloadSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES — last-resort when
-//      the footprint object is absent but the catalog still knows the tier's download size.
+//   3. `footprint.diskSizeBytes` × a model-aware resident multiplier + TRANSIENT_HEADROOM_BYTES — the
+//      estimate (the common case for un-measured tiers). When the model explicitly declares compatible
+//      tier topology and another quant tier has a measured resident (or a peak at the calibrated 1024²
+//      geometry), its resident/disk ratio plus the stated tolerance supplies the multiplier. Otherwise
+//      the calibrated dense-model multiplier remains the fallback.
+//   4. `downloadSizeBytes` × that same multiplier + TRANSIENT_HEADROOM_BYTES — last-resort when the
+//      footprint object is absent but the catalog still knows the tier's download size.
 // `measured` reports whether the value came from a measured field (peak or resident) vs the estimate.
-export function variantFootprintBytes(variant) {
+export function variantFootprintBytes(variant, model = null) {
   const footprint = variant?.footprint;
   const peak = numberOrNull(footprint?.peakMemoryBytes);
   if (peak !== null && peak > 0) {
@@ -82,17 +92,18 @@ export function variantFootprintBytes(variant) {
   if (resident !== null && resident > 0) {
     return { bytes: resident + TRANSIENT_HEADROOM_BYTES, measured: true };
   }
+  const residentMultiplier = measuredSiblingResidentMultiplier(variant, model);
   const disk = numberOrNull(footprint?.diskSizeBytes);
   if (disk !== null && disk > 0) {
     return {
-      bytes: Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+      bytes: Math.round(disk * residentMultiplier) + TRANSIENT_HEADROOM_BYTES,
       measured: false,
     };
   }
   const download = numberOrNull(variant?.downloadSizeBytes);
   if (download !== null && download > 0) {
     return {
-      bytes: Math.round(download * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+      bytes: Math.round(download * residentMultiplier) + TRANSIENT_HEADROOM_BYTES,
       measured: false,
     };
   }
@@ -101,6 +112,73 @@ export function variantFootprintBytes(variant) {
 
 function numberOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function variantDiskBytes(variant) {
+  const disk = numberOrNull(variant?.footprint?.diskSizeBytes);
+  if (disk !== null && disk > 0) {
+    return disk;
+  }
+  const download = numberOrNull(variant?.downloadSizeBytes);
+  return download !== null && download > 0 ? download : null;
+}
+
+function measuredResidentBytes(variant) {
+  const resident = numberOrNull(variant?.footprint?.residentMemoryBytes);
+  if (resident !== null && resident > 0) {
+    return resident;
+  }
+  const peak = numberOrNull(variant?.footprint?.peakMemoryBytes);
+  const measuredPixels = numberOrNull(variant?.footprint?.measuredPixels);
+  if (
+    peak !== null &&
+    peak > TRANSIENT_HEADROOM_BYTES &&
+    measuredPixels === TRANSIENT_HEADROOM_MEASURED_PIXELS
+  ) {
+    return peak - TRANSIENT_HEADROOM_BYTES;
+  }
+  return null;
+}
+
+// Derive an unmeasured quant tier's resident/disk ratio from measured sibling tiers only after the MLX
+// manifest explicitly asserts compatible resident topology. Same-model identity is insufficient:
+// Lens Turbo changes its MoE text-encoder packing between tiers, for example. Peak-only evidence must
+// also use the 1024² geometry that produced TRANSIENT_HEADROOM_BYTES before that transient can be
+// subtracted. Wan A14B opts in because every tier keeps both experts on disk and one resident at a time.
+// Taking the MAX usable sibling ratio is conservative when multiple tiers are measured; the 5%
+// extrapolation tolerance absorbs small tier-to-tier variation. All other models retain 1.0.
+function measuredSiblingResidentMultiplier(variant, model) {
+  const targetTier = variant?.variant;
+  if (
+    model?.mlx?.estimateResidentFromMeasuredSibling !== true ||
+    tierQuantize(targetTier) === null ||
+    !Array.isArray(model?.variants)
+  ) {
+    return DISK_TO_RESIDENT_MULTIPLIER;
+  }
+
+  let ratio = null;
+  for (const sibling of model.variants) {
+    if (sibling === variant || sibling?.variant === targetTier || tierQuantize(sibling?.variant) === null) {
+      continue;
+    }
+    const disk = variantDiskBytes(sibling);
+    const resident = measuredResidentBytes(sibling);
+    if (disk === null || resident === null) {
+      continue;
+    }
+    const candidate = resident / disk;
+    if (candidate > 0 && Number.isFinite(candidate) && (ratio === null || candidate > ratio)) {
+      ratio = candidate;
+    }
+  }
+
+  return ratio === null
+    ? DISK_TO_RESIDENT_MULTIPLIER
+    : Math.min(
+        DISK_TO_RESIDENT_MULTIPLIER,
+        ratio * MEASURED_SIBLING_RATIO_TOLERANCE,
+      );
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -483,7 +561,7 @@ function mlxEstimatedPeakGb(model, tier, options) {
     return null;
   }
   const variant = (model?.variants ?? []).find((entry) => entry?.variant === tier);
-  const footprint = variant ? variantFootprintBytes(variant) : null;
+  const footprint = variant ? variantFootprintBytes(variant, model) : null;
   if (footprint !== null) {
     return footprint.bytes / BYTES_PER_GB;
   }
@@ -669,7 +747,7 @@ export function tierFits(variant, hostMemoryGb, options = {}) {
     // Missing Candle evidence is unknown, never permission to borrow the MLX footprint.
     return peak === null ? true : peak + CANDLE_HEADROOM_GB <= hostMemoryGb;
   }
-  const footprint = variantFootprintBytes(variant);
+  const footprint = variantFootprintBytes(variant, options.model);
   if (footprint === null) {
     return true;
   }

@@ -9199,6 +9199,10 @@
         // mandatory lightx2v 4-step Lightning distill LoRA installs as a `coRequisite` above (sc-10030;
         // ensure_wan_lightning_present also self-heals a pre-coRequisite worker at gen time).
         "minMemoryGb": 133,
+        // All three MLX tiers preserve the same sequential expert-swap topology: both experts are on
+        // disk, but only one is resident at a time. This explicit compatibility assertion lets the web
+        // estimator extrapolate q4's measured resident/disk ratio to the unmeasured q8/bf16 tiers.
+        "estimateResidentFromMeasuredSibling": true,
         "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
         // schedule. No scheduler axis (flow shift = `scheduler_shift`).
@@ -9464,6 +9468,8 @@
         // converter "wan_i2v_14b" (mlx-gen-wan convert_i2v_14b) builds each tier. Its distill LoRA is
         // applied at run time.
         "minMemoryGb": 133,
+        // Same tier-invariant sequential expert-swap topology as the T2V sibling above.
+        "estimateResidentFromMeasuredSibling": true,
         "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
         // schedule. No scheduler axis (flow shift = `scheduler_shift`).

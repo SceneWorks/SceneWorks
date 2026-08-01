@@ -739,6 +739,12 @@
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\")" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
+              "estimateResidentFromMeasuredSibling": {
+                "type": "boolean",
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "estimateResidentFromMeasuredSibling" }],
+                "description": "Opt in only when every selectable MLX quant tier preserves the same resident-load topology (for example, one expert resident at a time while all experts remain on disk). The web estimator may then derive an unmeasured tier's resident/disk ratio from a compatible measured sibling. Absence/false keeps the calibrated dense disk multiplier; a shared model id alone is not proof that tier compositions are compatible."
+              },
               "calibrations": {
                 "type": "array",
                 "minItems": 1,

@@ -6,6 +6,7 @@ import {
   DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
   TRANSIENT_HEADROOM_BYTES,
+  TRANSIENT_HEADROOM_MEASURED_PIXELS,
   blanketFloorGb,
   cheapestDeclaredTierPeakGb,
   declaredFloorHostGb,
@@ -112,6 +113,63 @@ describe("variantFootprintBytes", () => {
     expect(result.bytes).toBe(
       Math.round(4 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
     );
+  });
+
+  it("derives an unmeasured tier from the model's measured sibling instead of assuming dense residency", () => {
+    const q4 = {
+      variant: "q4",
+      footprint: {
+        diskSizeBytes: 26.68 * GB,
+        peakMemoryBytes: 24.5 * GB,
+        measuredPixels: TRANSIENT_HEADROOM_MEASURED_PIXELS,
+      },
+    };
+    const bf16 = {
+      variant: "bf16",
+      footprint: { diskSizeBytes: 64.3 * GB },
+    };
+    const model = { mlx: { estimateResidentFromMeasuredSibling: true }, variants: [q4, bf16] };
+
+    const result = variantFootprintBytes(bf16, model);
+
+    // q4 proves that only ~39.4% of this expert-swap model's on-disk weights are resident at once.
+    // A 5% extrapolation tolerance keeps the estimate conservative, while the existing 10% host
+    // headroom remains outside this peak estimate in tierFits/hostGbForPeakGb.
+    const siblingRatio = (24.5 - 14) / 26.68;
+    const expectedResident = 64.3 * siblingRatio * 1.05;
+    expect(result.measured).toBe(false);
+    expect(result.bytes / GB).toBeCloseTo(expectedResident + 14, 8);
+    expect(hostGbForPeakGb(result.bytes / GB, "mlx")).toBe(46);
+  });
+
+  it("requires an explicit compatible-topology opt-in and the peak calibration geometry", () => {
+    const q4 = {
+      variant: "q4",
+      footprint: {
+        diskSizeBytes: 26.68 * GB,
+        peakMemoryBytes: 24.5 * GB,
+        measuredPixels: TRANSIENT_HEADROOM_MEASURED_PIXELS,
+      },
+    };
+    const bf16 = { variant: "bf16", footprint: { diskSizeBytes: 64.3 * GB } };
+
+    expect(variantFootprintBytes(bf16, { variants: [q4, bf16] }).bytes).toBe(
+      Math.round(64.3 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
+    );
+
+    const wrongGeometry = {
+      ...q4,
+      footprint: {
+        ...q4.footprint,
+        measuredPixels: TRANSIENT_HEADROOM_MEASURED_PIXELS * 2,
+      },
+    };
+    expect(
+      variantFootprintBytes(bf16, {
+        mlx: { estimateResidentFromMeasuredSibling: true },
+        variants: [wrongGeometry, bf16],
+      }).bytes,
+    ).toBe(Math.round(64.3 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES);
   });
 
   it("returns null when nothing is estimable", () => {
