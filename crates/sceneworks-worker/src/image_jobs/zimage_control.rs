@@ -317,6 +317,11 @@ pub(super) struct ZImageStrictControl {
     /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
     /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
     pid: Option<gen_core::PidWeights>,
+    /// Request-scoped lifecycle selected from revision-bound control calibration evidence.
+    memory: gen_core::GenerationMemory,
+    /// An optimized selection already passed the measured selector, replacing the legacy resident
+    /// co-residency floor in the shared strict-control driver.
+    memory_gate_selected: bool,
 }
 
 #[cfg(test)]
@@ -345,6 +350,8 @@ pub(super) fn zimage_strict_control_test_fixture(
             ZIMAGE_CTRL_ENGINE_ID
         },
         pid: None,
+        memory: Default::default(),
+        memory_gate_selected: false,
     }
 }
 
@@ -379,6 +386,11 @@ impl CandleStrictControl for ZImageStrictControl {
     /// The Z-Image base snapshot + the Fun-ControlNet overlay, plus the PiD decoder pair when this
     /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
+        if self.memory_gate_selected {
+            return ConditioningAdmission::GatedInPreamble {
+                gate: "z_image_control_memory_strategy",
+            };
+        }
         let mut overlays = vec![self.controlnet.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
@@ -401,7 +413,7 @@ impl CandleStrictControl for ZImageStrictControl {
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
         };
-        let model = ZImageControl::load(&paths).map_err(|error| {
+        let model = ZImageControl::load_with_memory(&paths, self.memory).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
         })?;
         // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
@@ -438,6 +450,7 @@ impl CandleStrictControl for ZImageStrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
+            memory: self.memory,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -511,6 +524,57 @@ pub(super) async fn generate_candle_zimage_control_stream(
         use_pid,
         pid_output_tier(request),
     );
+
+    // The bespoke strict-control route enters the same revision-bound selector as the registered
+    // Z-Image routes. The load spec names the exact base tier and Fun-ControlNet overlay so evidence
+    // cannot leak across precision or overlay cells.
+    let tier = super::gate_tier_key(
+        false,
+        &base,
+        &request.advanced,
+        &request.model_manifest_entry,
+        false,
+    );
+    let mut contract_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+        .with_control(gen_core::WeightsSource::File(controlnet.clone()));
+    contract_spec = match tier {
+        "q4" => contract_spec.with_quant(gen_core::Quant::Q4),
+        "q8" => contract_spec.with_quant(gen_core::Quant::Q8),
+        _ => contract_spec,
+    };
+    if let Some(pid) = pid_weights.as_ref() {
+        contract_spec = contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    let budget = crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await;
+    let resident_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_z_image(
+        engine_id,
+        &request.model,
+        &contract_spec,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        Some("control"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        true,
+        use_pid,
+        false,
+        budget,
+        resident_peak,
+        gen_core::MemoryCacheState::Cold,
+    )?;
+    let (memory, memory_gate_selected) = match memory_evaluation {
+        Some(evaluation) => (
+            evaluation.memory.unwrap_or_default(),
+            evaluation.context.selection.strategy != gen_core::MemoryStrategy::Resident,
+        ),
+        None => (Default::default(), false),
+    };
     let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,
@@ -536,6 +600,8 @@ pub(super) async fn generate_candle_zimage_control_stream(
         negative_prompt,
         engine_id,
         pid: pid_weights,
+        memory,
+        memory_gate_selected,
     };
 
     run_candle_strict_control(

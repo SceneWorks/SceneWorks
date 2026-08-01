@@ -46,6 +46,7 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
+        "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
@@ -165,10 +166,15 @@ fn rung(value: &str) -> Option<StrategyRung> {
     }
 }
 
+fn evidence_provider(engine_id: &str) -> &str {
+    engine_id.strip_suffix("_control").unwrap_or(engine_id)
+}
+
 fn verified_candidates(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
-    provider: &str,
+    evidence_provider: &str,
+    runtime_provider: &str,
     tier: &str,
     mode: &str,
     overlay: &str,
@@ -200,7 +206,7 @@ fn verified_candidates(
         let Some(item) = value.as_object() else {
             continue;
         };
-        if text(item, "provider") != Some(provider)
+        if text(item, "provider") != Some(evidence_provider)
             || text(item, "tier") != Some(tier)
             || text(item, "mode") != Some(mode)
             || text(item, "overlay") != Some(overlay)
@@ -241,7 +247,7 @@ fn verified_candidates(
         let query = EvidenceQuery {
             backend: CalibrationBackend::Candle,
             model_id: model_id.to_owned(),
-            provider: provider.to_owned(),
+            provider: evidence_provider.to_owned(),
             tier: tier.to_owned(),
             mode: mode.to_owned(),
             overlay: overlay.to_owned(),
@@ -262,7 +268,7 @@ fn verified_candidates(
         let selected_strategy = strategy(rung);
         candidates.push(MemoryEvidence {
             key: MemoryEvidenceKey {
-                resolved_route: provider.to_owned(),
+                resolved_route: runtime_provider.to_owned(),
                 backend: "candle".to_owned(),
                 tier: numeric_tier(tier).expect("validated numeric tier"),
                 mode: mode.to_owned(),
@@ -290,7 +296,16 @@ fn verified_candidates(
                 RequiredNullable::Value(observed) => Some(observed.overall.device_bytes),
                 RequiredNullable::Null => None,
             },
-            parity: MemoryParityContract::Exact,
+            parity: if record.quality.maximum_error_threshold == Some(0.0)
+                && record.quality.mean_error_threshold == Some(0.0)
+            {
+                MemoryParityContract::Exact
+            } else {
+                MemoryParityContract::Tolerance {
+                    metric: "maximum normalized RGB8 error".to_owned(),
+                    maximum_error: record.quality.maximum_error_threshold.unwrap_or_default(),
+                }
+            },
             parity_result: MemoryParityResult::Passed,
         });
     }
@@ -334,7 +349,10 @@ pub(crate) fn evaluate_z_image(
     predicted_peak_gb: Option<f64>,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    if !matches!(engine_id, "z_image" | "z_image_turbo") {
+    if !matches!(
+        engine_id,
+        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control"
+    ) {
         return Ok(None);
     }
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -400,9 +418,15 @@ pub(crate) fn evaluate_z_image(
         parity_result: MemoryParityResult::NotRun,
     };
     let exact_overlay = overlay.unwrap_or("none");
+    // Matrix/evidence overlays remain cells of the advertised base provider (`z_image` or
+    // `z_image_turbo`), while the runtime registers the strict-control implementation under a
+    // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
+    // returned candidate to the exact runtime route expected by the provider contract.
+    let evidence_provider = evidence_provider(engine_id);
     let verified = verified_candidates(
         manifest,
         model_id,
+        evidence_provider,
         engine_id,
         tier_key,
         mode_key,
@@ -514,6 +538,20 @@ mod tests {
     use gen_core::WeightsSource;
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn strict_control_uses_the_advertised_base_provider_evidence_cell() {
+        assert_eq!(evidence_provider("z_image_control"), "z_image");
+        assert_eq!(evidence_provider("z_image_turbo_control"), "z_image_turbo");
+        assert_eq!(evidence_provider("z_image"), "z_image");
+    }
+
+    #[test]
+    fn style_variations_preserves_its_exact_evidence_key() {
+        let (mode, key) = request_mode("style_variations");
+        assert_eq!(mode, MemoryMode::ImageToImage);
+        assert_eq!(key, "style_variations");
+    }
 
     #[test]
     fn edit_alias_enters_turbo_contract_as_an_edit_reference_scope() {

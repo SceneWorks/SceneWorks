@@ -1542,27 +1542,71 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
-      // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024²
-      // with the shipping base and strict-control providers. Base peaks were q4 17.821,
-      // q8 23.256, and bf16 31.981 GB; bf16 strict control raised the family high-water
-      // to 40.573 GB. The provider now stages phases, but no base sequential peak has been calibrated,
-      // so there is no sequentialPeakGb row. Packed q4/q8 strict-control loading is owned by sc-16170;
-      // those control cells remain unverified rather than borrowing the base measurements.
+      // Candle/CUDA ladder certification (sc-16170), measured in fresh processes on an RTX PRO 6000
+      // Blackwell at 1024²/count-1 against the exact hosted base tiers and Fun-Controlnet Union 2.1.
+      // `vramGbByTier` is the conservative resident family envelope (strict control is binding);
+      // `sequentialPeakGb` is the staged strict-control envelope. Bounded decode moves the whole-frame
+      // f32 VAE to host to preserve global normalization, bounded attention uses the shared score
+      // budget, and rung 4 streams one transformer block at a time. Every rung is request-scoped.
       "candle": {
         "supportsSequentialOffload": true,
         "memoryStrategyCapabilities": {
           "bounded_decode": {
             "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
-            "overlays": ["none", "lora"]
+            "overlays": ["none", "lora", "control"]
           },
           "bounded_attention": {
             "parameters": { "attentionChunkSize": 67108864 },
-            "overlays": ["none", "lora"]
+            "overlays": ["none", "lora", "control"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none", "lora", "control"]
           }
         },
-        "minMemoryGb": 20,
-        "vramGbByTier": { "q4": 17.9, "q8": 23.3, "bf16": 40.6 },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        },
+        "minMemoryGb": 30,
+        "vramGbByTier": { "q4": 27.2, "q8": 32.1, "bf16": 40.7 },
         "vramMeasuredPixels": 1048576,
+        "sequentialPeakGb": { "q4": 16.9, "q8": 19.9, "bf16": 25.4 },
         "measured": true
       },
       "ui": {

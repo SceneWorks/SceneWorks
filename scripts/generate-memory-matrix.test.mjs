@@ -907,7 +907,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
+    ["15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
@@ -987,8 +987,8 @@ test("an implemented family is Implemented/unverified only where the provider ac
     "the published window size and default component scope travel with the cell",
   );
 
-  // The Candle half lands independently under SC-15815. It resolves Edit through Turbo, publishes
-  // the same default window/component shape, and refuses to promote adapter/control overlays.
+  // The Candle half lands independently under SC-15815. Base Z-Image's SC-16170 certification adds
+  // adapter and strict-control overlays; Turbo/Edit retain their previously narrower plain surface.
   const zImageCandle = implemented.filter(
     (cell) => cell.backend === "candle" && cell.owningFamilyStory === 15815,
   );
@@ -996,7 +996,15 @@ test("an implemented family is Implemented/unverified only where the provider ac
     [...new Set(zImageCandle.map((cell) => cell.modelId))].sort(),
     ["z_image", "z_image_edit", "z_image_turbo"],
   );
-  assert.ok(zImageCandle.every((cell) => cell.overlay === "none"));
+  assert.deepEqual(
+    [...new Set(zImageCandle.filter((cell) => cell.modelId === "z_image").map((cell) => cell.overlay))].sort(),
+    ["control", "lora", "none"],
+  );
+  assert.ok(
+    zImageCandle
+      .filter((cell) => cell.modelId === "z_image")
+      .every((cell) => ["control", "lora", "none"].includes(cell.overlay)),
+  );
   assert.ok(
     zImageCandle.every(
       (cell) =>
@@ -1014,11 +1022,11 @@ test("an implemented family is Implemented/unverified only where the provider ac
     assert.ok(cells.length > 0);
     assert.ok(
       cells.every((cell) =>
-        cell.overlay === "control"
-          ? cell.state === "Missing"
-          : cell.state === "Implemented/unverified",
+        cell.modelId === "z_image" || cell.overlay !== "control"
+          ? cell.state === "Implemented/unverified"
+          : cell.state === "Missing",
       ),
-      `${rung} must be explicit for plain/adapter loads without leaking to bespoke control`,
+      `${rung} must reach base control without leaking to the Turbo control route`,
     );
   }
 
@@ -1482,7 +1490,7 @@ test("every control-advertising family inventories its control-branch stack", as
   }
 });
 
-test("Z-Image Candle control does not inherit staged residency from the plain provider", async () => {
+test("only the independently wired base Z-Image Candle control route exposes staged residency", async () => {
   const matrix = await buildMatrix();
   const cells = matrix.cells.filter(
     (cell) =>
@@ -1493,9 +1501,11 @@ test("Z-Image Candle control does not inherit staged residency from the plain pr
   );
   assert.ok(cells.length > 0);
   assert.ok(
-    cells.every((cell) => cell.state === "Missing"),
-    "the bespoke eager control provider declares every constrained rung Missing",
+    cells
+      .filter((cell) => cell.modelId === "z_image")
+      .every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
   );
+  assert.ok(cells.filter((cell) => cell.modelId === "z_image_turbo").every((cell) => cell.state === "Missing"));
 });
 
 test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {

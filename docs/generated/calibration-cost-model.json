@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fddcb12267c9e43a68549470dd56bcd6f5aeb69587c8c0910e584bff238739ff",
-    "matrixRevision": "source-tree:8dd0c92c9fc454d5c888f6522adb4f8bdd5df317ce362bcda008bcc0af4b2663",
-    "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+    "sceneWorksRevision": "source-tree:aa77300567c296e7252fdcfcdc5f167df80dc2b66357853e43f2e55c51524e66",
+    "matrixRevision": "source-tree:afd3da9b3447a45800c9a6088e786bd3e4dca98ac8dd21b5afb47775c0b19c05",
+    "inferenceRevision": "9d639b2be8647fe210415d9d8dba98644169f11c",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "a6baba2bbf11b4ba2b9c1e86801f5756163a64b763bba916fa05a9705c5e3976"
+        "sha256": "30a4f58e4b1aecd5d98ed5e9b20db907e5930a4ffb55bdad40d46b6412b95484"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c94092e234e82854dcbf671e9de4541bbce2ed3f83c83f31090e2e887042a010"
+        "sha256": "f3739aaa9cdcc4066157547033c70a6ecbc091b36b68fffaf8624ac67cd0cc32"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -31,7 +31,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "fdab0d8a72fbb296181f6cd648af97693f2c9b8b3bec80bdda90bdec6250b931"
+        "sha256": "0ed6b8c9421d482eabfbd3319e1fcd621539c43a931ac84f23c68c987d71e79c"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -64,9 +64,9 @@
     },
     "completeRecords": 24,
     "matrixSummaryCalibrationRuns": 24,
-    "matrixSummaryCurrentCalibrationRuns": 5,
-    "verifiedCells": 5,
-    "note": "24 complete record(s) exist in the evidence bundle; the matrix reports 5 current calibration run(s) and 5 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "matrixSummaryCurrentCalibrationRuns": 0,
+    "verifiedCells": 0,
+    "note": "24 complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -93,18 +93,18 @@
         "label": "No provider adapter covers this (entry, backend) at all",
         "blockedBy": "provider-adapter code",
         "citation": "config/memory-calibration-plan.json (the shipped plan's provider targets)",
-        "cells": 2640,
+        "cells": 2610,
         "mlx": 1640,
-        "candle": 1000
+        "candle": 970
       },
       {
         "id": "adapter-gated",
         "label": "An adapter exists, but it has never emitted a `complete` record",
         "blockedBy": "provider-adapter code (phase telemetry and lifecycle injection)",
         "citation": "docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); a pair remains gated only while that set has no complete record",
-        "cells": 60,
+        "cells": 90,
         "mlx": 30,
-        "candle": 30
+        "candle": 60
       },
       {
         "id": "producible-today",
@@ -123,18 +123,18 @@
           "overlay-declined"
         ],
         "description": "no-provider-adapter + overlay-declined",
-        "cells": 4360,
+        "cells": 4300,
         "mlx": 2710,
-        "candle": 1650
+        "candle": 1590
       },
       {
         "blockers": [
           "no-provider-adapter"
         ],
         "description": "no-provider-adapter",
-        "cells": 2640,
+        "cells": 2610,
         "mlx": 1640,
-        "candle": 1000
+        "candle": 970
       },
       {
         "blockers": [
@@ -142,9 +142,9 @@
           "overlay-declined"
         ],
         "description": "adapter-gated + overlay-declined",
-        "cells": 114,
+        "cells": 174,
         "mlx": 60,
-        "candle": 54
+        "candle": 114
       },
       {
         "blockers": [],
@@ -155,21 +155,21 @@
       },
       {
         "blockers": [
+          "adapter-gated"
+        ],
+        "description": "adapter-gated",
+        "cells": 90,
+        "mlx": 30,
+        "candle": 60
+      },
+      {
+        "blockers": [
           "overlay-declined"
         ],
         "description": "overlay-declined",
         "cells": 90,
         "mlx": 90,
         "candle": 0
-      },
-      {
-        "blockers": [
-          "adapter-gated"
-        ],
-        "description": "adapter-gated",
-        "cells": 60,
-        "mlx": 30,
-        "candle": 30
       },
       {
         "blockers": [],
@@ -182,12 +182,22 @@
     "independentBlocking": [
       {
         "id": "no-provider-adapter",
-        "cellsTouched": 7000,
-        "soleBlockerCells": 2640,
-        "coBlockedCells": 4360,
-        "coBlockedShare": 0.6229,
+        "cellsTouched": 6910,
+        "soleBlockerCells": 2610,
+        "coBlockedCells": 4300,
+        "coBlockedShare": 0.6223,
         "coBlockedWith": {
-          "overlay-declined": 4360
+          "overlay-declined": 4300
+        }
+      },
+      {
+        "id": "adapter-gated",
+        "cellsTouched": 264,
+        "soleBlockerCells": 90,
+        "coBlockedCells": 174,
+        "coBlockedShare": 0.6591,
+        "coBlockedWith": {
+          "overlay-declined": 174
         }
       },
       {
@@ -197,34 +207,24 @@
         "coBlockedCells": 4474,
         "coBlockedShare": 0.9803,
         "coBlockedWith": {
-          "adapter-gated": 114,
-          "no-provider-adapter": 4360
-        }
-      },
-      {
-        "id": "adapter-gated",
-        "cellsTouched": 174,
-        "soleBlockerCells": 60,
-        "coBlockedCells": 114,
-        "coBlockedShare": 0.6552,
-        "coBlockedWith": {
-          "overlay-declined": 114
+          "adapter-gated": 174,
+          "no-provider-adapter": 4300
         }
       }
     ],
     "gateOrderSensitivity": {
       "shippedOrder": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 2640,
+        "adapter-gated": 90,
+        "no-provider-adapter": 2610,
         "no-run-needed": 6,
         "overlay-declined": 4564,
         "producible-today": 90
       },
       "adapterCoverageFirst": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 7000,
+        "adapter-gated": 90,
+        "no-provider-adapter": 6910,
         "no-run-needed": 6,
-        "overlay-declined": 204,
+        "overlay-declined": 264,
         "producible-today": 90
       },
       "note": "The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'."
@@ -233,14 +233,14 @@
       "rankedBy": "soleBlockerCells — cells this gate is the ONLY thing wrong with",
       "ranking": [
         "no-provider-adapter",
-        "overlay-declined",
-        "adapter-gated"
+        "adapter-gated",
+        "overlay-declined"
       ],
       "overlayChargedByFirstMatch": 4564,
       "overlayAlsoBlockedByAdapterCoverage": 4474,
       "overlayIndependentlyBlocking": 90,
-      "overlayBindingAfterAdapterCoverage": 204,
-      "finding": "`overlay-declined` is charged 4564 cells by the first-match partition, but it is the SOLE blocker on 90 of them. 4360 of them (95.5%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 204 while `no-provider-adapter` rises to 7000. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2640 cells and it touches 7000. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 204 cells, not 4564."
+      "overlayBindingAfterAdapterCoverage": 264,
+      "finding": "`overlay-declined` is charged 4564 cells by the first-match partition, but it is the SOLE blocker on 90 of them. 4300 of them (94.2%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 174 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 264 while `no-provider-adapter` rises to 6910. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2610 cells and it touches 6910. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 264 cells, not 4564."
     },
     "behindProviderCode": 7264,
     "behindProviderCodeShare": 0.987,
@@ -370,22 +370,20 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2695,
-      "Missing": 4654,
-      "Structurally N/A": 6,
-      "Verified": 5
+      "Implemented/unverified": 2748,
+      "Missing": 4606,
+      "Structurally N/A": 6
     },
     "byBackend": {
       "candle": 2740,
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 838,
-      "Implemented/unverified @ mlx": 1857,
-      "Missing @ candle": 1896,
+      "Implemented/unverified @ candle": 886,
+      "Implemented/unverified @ mlx": 1862,
+      "Missing @ candle": 1848,
       "Missing @ mlx": 2758,
-      "Structurally N/A @ candle": 6,
-      "Verified @ mlx": 5
+      "Structurally N/A @ candle": 6
     },
     "byRung": {
       "bounded_attention": 1472,
@@ -728,6 +726,906 @@
         "evidenceScope": "candidate",
         "plannedCases": 2,
         "positiveCases": 2,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-text_to_image-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q4-style_variations-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-text_to_image-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-q8-style_variations-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-text_to_image-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-none-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-none-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-none-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-none-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-none-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-lora-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-lora-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-lora-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-lora-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-lora-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-control-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-control-staged_residency",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-control-bounded_decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-control-bounded_attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-z-image-bf16-style_variations-control-bounded_transformer_residency",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
         "modelLoadPolicy": "fresh_per_case",
         "modelLoadGroup": null
       }
@@ -1397,11 +2295,11 @@
     {
       "gate": "no-provider-adapter",
       "input": "how much provider-adapter work the CATALOG COVERAGE gap needs",
-      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2640 cells and it touches 7000 — 4474 of them jointly with the overlay gap. Only 3 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 7000 cells.",
+      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2610 cells and it touches 6910 — 4474 of them jointly with the overlay gap. Only 4 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 6910 cells.",
       "howToResolve": "Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.",
       "story": 15508,
-      "independentlyBlockingCells": 2640,
-      "cellsTouched": 7000
+      "independentlyBlockingCells": 2610,
+      "cellsTouched": 6910
     },
     {
       "input": "perRunSeconds",
@@ -1411,7 +2309,7 @@
     {
       "gate": "overlay-declined",
       "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4564 cells (62% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 90 of them: 4474 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 204 cells, not 4564. It remains necessary work — those 4564 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4564 cells (62% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 90 of them: 4474 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 264 cells, not 4564. It remains necessary work — those 4564 cells cannot be certified without it — but it is not where the schedule is decided.",
       "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.",
       "story": 16072,
       "independentlyBlockingCells": 90,
@@ -1420,11 +2318,11 @@
     {
       "gate": "adapter-gated",
       "input": "what a `complete` record actually requires from an existing adapter",
-      "why": "60 cells are blocked ONLY by this, and 174 in total. The Krea MLX control adapter has now emitted complete exact records, proving the pipeline can close; this bucket applies only to adapter-covered pairs that still have no complete record.",
+      "why": "90 cells are blocked ONLY by this, and 264 in total. The Krea MLX control adapter has now emitted complete exact records, proving the pipeline can close; this bucket applies only to adapter-covered pairs that still have no complete record.",
       "howToResolve": "Close the harness contract for each remaining adapter-covered pair: real phase telemetry, bounded-output parity, exact-fit/stale/unknown selection, lifecycle recovery, loadability, and a measured negative mutation. Complete records then move those exact targets out of `adapter-gated`.",
       "story": 15508,
-      "independentlyBlockingCells": 60,
-      "cellsTouched": 174
+      "independentlyBlockingCells": 90,
+      "cellsTouched": 264
     },
     {
       "input": "how many geometry points each cell's curve needs",

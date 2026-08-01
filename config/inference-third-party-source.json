@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-  "auditDigest": "21d3c353eae36ffe54470a3d111d6f4c807fdd726d64074c175a780c46ba422d",
+  "inferenceRevision": "9d639b2be8647fe210415d9d8dba98644169f11c",
+  "auditDigest": "ccac5ac78e407a0432e43cf4555668597a8f58dec0155d45dede57d10aa8a33f",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+    "revision": "9d639b2be8647fe210415d9d8dba98644169f11c",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 612,
-    "populationSha256": "092597877af16978509746db13e68a4f4fcb3692a1494eb131a9455df5644bfc"
+    "populationSha256": "db40d90b56348d879032c466f102e60bdc772a8538fbcd450f4955da21f69afe"
   },
   "portedSourceAreas": [
     {
@@ -807,7 +807,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+    "revision": "9d639b2be8647fe210415d9d8dba98644169f11c",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"
