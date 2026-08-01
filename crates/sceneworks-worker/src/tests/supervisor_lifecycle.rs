@@ -771,6 +771,7 @@ async fn writes_hf_download_receipt_with_resolved_manifest_and_variant() {
             tree_stamp: Some(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
+            ..Default::default()
         },
     )
     .await
@@ -849,6 +850,7 @@ async fn receipt_writer_preserves_primary_and_corequisite_default_entries() {
         crate::imports::DownloadArtifactReceipt {
             resolved_tier: Some("q4"),
             tree_stamp: None,
+            ..Default::default()
         },
     )
     .await

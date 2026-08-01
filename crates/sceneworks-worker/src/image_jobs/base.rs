@@ -290,6 +290,30 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
 
 #[cfg(target_os = "macos")]
 impl ImageRoute {
+    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack.
+    fn applies_request_loras(self) -> bool {
+        matches!(
+            self,
+            ImageRoute::ZImageControl
+                | ImageRoute::ZImageBaseControl
+                | ImageRoute::QwenControl
+                | ImageRoute::KolorsControl
+                | ImageRoute::KreaControl
+                | ImageRoute::Flux1DevControl
+                | ImageRoute::Flux2DevControl
+                | ImageRoute::Flux2Edit
+                | ImageRoute::QwenEdit
+                | ImageRoute::KreaEdit
+                | ImageRoute::KreaTurboOnRaw
+                | ImageRoute::KreaMultiPhase
+                | ImageRoute::KreaImported
+                | ImageRoute::SdxlImported
+                | ImageRoute::InstantId
+                | ImageRoute::SdxlAdvanced
+                | ImageRoute::Mlx
+        )
+    }
+
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             ImageRoute::ZImageControl
@@ -483,6 +507,28 @@ const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
+    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Bespoke
+    /// edit, IP-adapter, control, ComfyUI, PuLID and Bernini lanes intentionally carry no user
+    /// adapter seam and therefore must never claim those resources in exported metadata.
+    fn applies_request_loras(self, request: &ImageRequest) -> bool {
+        match self {
+            CandleImageRoute::InstantId
+            | CandleImageRoute::QwenEdit
+            | CandleImageRoute::MageEdit
+            | CandleImageRoute::KreaEdit
+            | CandleImageRoute::KreaTurboOnRaw
+            | CandleImageRoute::KreaMultiPhase
+            | CandleImageRoute::KreaImported
+            | CandleImageRoute::SdxlImported
+            | CandleImageRoute::KreaControl => true,
+            CandleImageRoute::CandleTxt2Img => {
+                !wants_krea_convrot(request)
+                    && mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
+            }
+            _ => false,
+        }
+    }
+
     /// The real image total this candle route produces, baked into the plan's `expectedCount` so the
     /// streamed gallery total matches what actually lands (sc-11171, F-009 — the candle sibling of the
     /// macOS `ImageRoute::image_count`). The strict-pose control lanes each render one image per pose
@@ -2708,49 +2754,6 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
     }
 }
 
-/// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
-/// Shared by the MLX path and the candle Lens lane (sc-5126).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
-    for key in ["installedPath", "sourcePath", "path"] {
-        if let Some(value) = lora
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(PathBuf::from(value));
-        }
-    }
-    lora.get("source")
-        .and_then(|source| source.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// The adapter filename a LoRA record's manifest `files` list declares (its first
-/// entry), if any (sc-10221). When `lora_path` resolves to a record *directory*, this
-/// is the specific adapter to load — e.g. a trained LoRA's final `<stem>.safetensors`
-/// rather than a `<stem>-stepNNN` checkpoint sharing the folder. Untrusted (rides the
-/// job payload); `resolve_adapter_in_dir` re-validates it as a plain in-dir filename.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
-    lora.get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
 /// Classify a LoRA file into the mlx-gen adapter `kind`. SceneWorks peft-LoKr (stamped
 /// `networkType: lokr`) → `Lokr` (the engine's metadata-gated `apply_lokr` peft path). Everything
 /// else → `Lora`, INCLUDING third-party LyCORIS (LoHa / kohya non-peft LoKr): since epic 3641
@@ -2795,39 +2798,9 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
     }
     let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
-        let raw = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        // The path is attacker-controllable payload; confine it to an app-managed
-        // root before any on-disk use (sc-5723 / WKA-002).
-        let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
-        let file = if path.is_dir() {
-            // Prefer the manifest-declared adapter over an arbitrary directory scan so a
-            // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
-            crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "LoRA has no .safetensors under {}",
-                    path.display()
-                ))
-            })?
-        } else {
-            path
-        };
-        if !file.exists() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "LoRA file is missing: {}",
-                file.display()
-            )));
-        }
+        let file = resolve_adapter_file(lora, settings)?;
         let kind = classify_adapter(&file)?;
-        let scale = lora
-            .get("weight")
-            .and_then(|value| {
-                value
-                    .as_f64()
-                    .or_else(|| value.as_str()?.trim().parse().ok())
-            })
-            .unwrap_or(0.8) as f32;
+        let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(file, scale, kind));
     }
     Ok(specs)
