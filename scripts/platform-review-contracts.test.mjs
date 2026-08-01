@@ -30,6 +30,19 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
   );
 });
 
+test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const prepare = workflow.indexOf("uses: ./.github/actions/prepare-rust-runner");
+  const isolate = workflow.indexOf("name: Isolate Cargo dependency checkout");
+  const fetch = workflow.indexOf("name: Fetch the private inference release");
+  assert.ok(prepare >= 0 && prepare < isolate && isolate < fetch);
+  assert.match(workflow, /Join-Path \$env:RUNNER_TEMP 'cargo-home'/);
+  assert.match(
+    workflow,
+    /Add-Content -Path \$env:GITHUB_ENV -Value "CARGO_HOME=\$jobCargoHome"/,
+  );
+});
+
 test("Windows Krea provisioning accepts supported newer Python 3 runtimes", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(workflow, /Python 3\.12 or newer/);

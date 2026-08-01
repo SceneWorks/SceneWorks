@@ -135,6 +135,16 @@ jobs:
       # admin-override merges). The action fails loudly with an actionable message if no
       # usable toolchain is installed. See .github/actions/prepare-rust-runner.
       - uses: ./.github/actions/prepare-rust-runner
+      # Multiple runner services share %USERPROFILE%\.cargo. A sibling job can replace
+      # that global git checkout while rustc is still reading vendored inference sources,
+      # which surfaces as an unrelated missing-path/os-error-267 failure. Keep dependency
+      # state job-local; the verified toolchain remains on PATH from the step above.
+      - name: Isolate Cargo dependency checkout
+        shell: powershell
+        run: |
+          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
+          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"
