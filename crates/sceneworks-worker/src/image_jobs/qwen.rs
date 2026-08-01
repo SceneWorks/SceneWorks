@@ -159,7 +159,10 @@ fn qwen_control_load(
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
-    let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
+    let spec = apply_measured_mlx_load_shape(
+        QWEN_CONTROL_ENGINE_ID,
+        qwen_control_spec(weights_dir, control_weights, quant, adapters),
+    );
     load_control_engine(QWEN_CONTROL_ENGINE_ID, &spec)
 }
 
@@ -334,6 +337,7 @@ async fn generate_qwen_control_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = apply_measured_mlx_load_shape(QWEN_CONTROL_ENGINE_ID, spec);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -834,6 +838,7 @@ async fn generate_qwen_edit_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = apply_measured_mlx_load_shape(engine_id, spec);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
