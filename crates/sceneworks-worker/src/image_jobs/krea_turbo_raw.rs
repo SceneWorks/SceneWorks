@@ -208,9 +208,11 @@ async fn generate_krea_turbo_on_raw_stream(
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let steps = resolve_steps(request, &turbo);
     let adapters = resolve_adapters(request, settings)?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
         total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
     });
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let offload_policy = admit_candle_base(
         request,
         settings,
@@ -237,7 +239,9 @@ async fn generate_krea_turbo_on_raw_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None).with_offload_policy(offload_policy);
+    let spec = load_spec(weights_dir, quant, adapters, None);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let spec = spec.with_offload_policy(offload_policy);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
