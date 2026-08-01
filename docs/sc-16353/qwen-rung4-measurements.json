@@ -1,0 +1,144 @@
+{
+  "story": 16353,
+  "provider": "qwen_image",
+  "backend": "mlx",
+  "inferenceRevision": "2898c3b70ee5d1a4ab16d05d40911b58cc9ecce9",
+  "calibrationFingerprint": "qwen-image-mlx-dit-window-2026-08-01-v2",
+  "scope": {
+    "entry": "qwen_image",
+    "mode": "text_to_image",
+    "overlay": "none",
+    "unmeasured": ["style_variations", "edit", "control", "lora", "lokr"]
+  },
+  "geometry": {
+    "width": 1024,
+    "height": 1024,
+    "count": 1,
+    "steps": 2,
+    "seed": 16353,
+    "trueCfg": true
+  },
+  "method": {
+    "counter": "mlx_rs::memory::get_peak_memory",
+    "requestPeak": "max(conditioning, denoise, decode)",
+    "attributionControl": "Resident + EagerMaterialization",
+    "priorAvailableComposition": "Sequential + EagerMaterialization; not rung 3 because Qwen bounded decode is Missing under SC-15511",
+    "unboundedStreamControl": "Sequential + DeferredMaterialization + shared run_windowed with window 60, equal to the full 60-block stack",
+    "boundedComposition": "Sequential + DeferredMaterialization + shared run_windowed with window 1",
+    "windowSweep": [60, 8, 4, 2, 1],
+    "requestEquivalenceTolerance": "max(1% of the unbounded request peak, 64 MiB)",
+    "outputCheck": "maximum RGB8 channel delta <= 1 against every comparison arm"
+  },
+  "productionDomain": {
+    "transformerWindowComponent": "Dit",
+    "transformerWindowSizes": [1],
+    "decision": "Window 1 is the only bounded published cadence. It reduced denoise residency versus the same-stream unbounded window-60 control on every tier, but did not move the whole-request peak because conditioning dominated. Window 60 is unbounded and is never a production rung-4 setting."
+  },
+  "requestPeakFinding": "does-not-move",
+  "acceptanceBlocker": "The required rung-3-versus-rung-4 comparison cannot be run until SC-15511 implements Qwen bounded decode; the prior available composition below is not rung 3.",
+  "controlRoute": {
+    "baseBlocksWindowed": 60,
+    "residentRemainder": "QwenFunControlBranch",
+    "residentRemainderBlocks": 5,
+    "accounting": "control checkpoint bytes are MemoryAssetFacts.overlay_bytes",
+    "requestPeakMeasurement": "unmeasured"
+  },
+  "tiers": {
+    "q4": {
+      "fullyResident": {
+        "conditioningBytes": 41296,
+        "denoiseBytes": 27637706164,
+        "decodeBytes": 33966742784,
+        "requestPeakBytes": 33966742784,
+        "elapsedSeconds": 17.882
+      },
+      "priorAvailableComposition": {
+        "conditioningBytes": 15907530400,
+        "denoiseBytes": 13441806704,
+        "decodeBytes": 19824594632,
+        "requestPeakBytes": 19824594632,
+        "elapsedSeconds": 16.432
+      },
+      "unboundedWindow60": {
+        "conditioningBytes": 16027281056,
+        "denoiseBytes": 1982959936,
+        "decodeBytes": 8391590984,
+        "requestPeakBytes": 16027281056,
+        "elapsedSeconds": 16.693
+      },
+      "boundedWindow1": {
+        "conditioningBytes": 15975886496,
+        "denoiseBytes": 1523269032,
+        "decodeBytes": 8391592584,
+        "requestPeakBytes": 15975886496,
+        "elapsedSeconds": 25.824
+      },
+      "requestPeakDeltaFromUnboundedBytes": -51394560,
+      "requestPeakFinding": "does-not-move"
+    },
+    "q8": {
+      "fullyResident": {
+        "conditioningBytes": 41296,
+        "denoiseBytes": 37768412972,
+        "decodeBytes": 44136700800,
+        "requestPeakBytes": 44136700800,
+        "elapsedSeconds": 19.156
+      },
+      "priorAvailableComposition": {
+        "conditioningBytes": 15907530400,
+        "denoiseBytes": 23612141936,
+        "decodeBytes": 29994929480,
+        "requestPeakBytes": 29994929480,
+        "elapsedSeconds": 22.276
+      },
+      "unboundedWindow60": {
+        "conditioningBytes": 15975886496,
+        "denoiseBytes": 2224499036,
+        "decodeBytes": 8411857992,
+        "requestPeakBytes": 15975886496,
+        "elapsedSeconds": 19.972
+      },
+      "boundedWindow1": {
+        "conditioningBytes": 15975886496,
+        "denoiseBytes": 1712020840,
+        "decodeBytes": 8411841608,
+        "requestPeakBytes": 15975886496,
+        "elapsedSeconds": 25.126
+      },
+      "requestPeakDeltaFromUnboundedBytes": 0,
+      "requestPeakFinding": "does-not-move"
+    },
+    "bf16": {
+      "fullyResident": {
+        "conditioningBytes": 41296,
+        "denoiseBytes": 57109816708,
+        "decodeBytes": 63204248576,
+        "requestPeakBytes": 63204248576,
+        "elapsedSeconds": 22.494
+      },
+      "priorAvailableComposition": {
+        "conditioningBytes": 16043697824,
+        "denoiseBytes": 42968622956,
+        "decodeBytes": 49063095752,
+        "requestPeakBytes": 49063095752,
+        "elapsedSeconds": 23.131
+      },
+      "unboundedWindow60": {
+        "conditioningBytes": 15975886496,
+        "denoiseBytes": 2615957116,
+        "decodeBytes": 8449795144,
+        "requestPeakBytes": 15975886496,
+        "elapsedSeconds": 21.077
+      },
+      "boundedWindow1": {
+        "conditioningBytes": 15975886496,
+        "denoiseBytes": 2452828368,
+        "decodeBytes": 8449795144,
+        "requestPeakBytes": 15975886496,
+        "elapsedSeconds": 35.611
+      },
+      "requestPeakDeltaFromUnboundedBytes": 0,
+      "requestPeakFinding": "does-not-move"
+    }
+  }
+}
