@@ -60,6 +60,7 @@ export function makeCreateJob({
   requestedGpu,
   setJobs,
   setError,
+  beforeCreate,
   afterCreate,
 }) {
   return async (...args) => {
@@ -68,6 +69,9 @@ export function makeCreateJob({
       return null;
     }
     try {
+      if (beforeCreate && (await beforeCreate(...args)) === false) {
+        return null;
+      }
       const job = await apiFetch(definition.path, token, {
         method: "POST",
         body: JSON.stringify(definition.buildBody(args, project, requestedGpu)),
