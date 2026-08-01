@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:33e830230410ba85b0ae9939244eaf5f960863073f87c055100f5490a59337f7",
-    "matrixRevision": "source-tree:dca080eee957ddf545ab63a00e862fd7a354041491c2cd7e45e179e074f1a2b5",
+    "sceneWorksRevision": "source-tree:b5184fb42379a605078b9f9cdbc2f432dd67ddc77df5a8bddb23ef5ea01a8a25",
+    "matrixRevision": "source-tree:49bbc7b7cfb8fece8ec6ff26745c7db5e73bef3d4b6cae6a0052645b705af611",
     "inferenceRevision": "09aefe3afb125af3f0736d55a438c412d64ec4c2",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "11f75e4443be9e7b47d2a55bfda92e71dcacf301695cacdb8d7f86bed52866f5"
+        "sha256": "9fef9c1ece57cd96c760de6d1e404e78a344d43c0937d127619913ef13c48ccd"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "625c92375e720afe1e7da8089f605325d4c38fe448c93494c0c7671182988399"
+        "sha256": "861b0cc1cade82cc05501772f9567c343fc420557c7d908d707749f443955689"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",

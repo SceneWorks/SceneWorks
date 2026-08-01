@@ -2553,22 +2553,23 @@ mod tests {
     fn q8_and_bf16_768_phase_fit_records_do_not_overclaim_exact_runtime_admission() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         for tier in ["q8", "bf16"] {
+            let fit = krea_turbo_fit(
+                &manifest,
+                tier,
+                768,
+                768,
+                Some(VramBudget {
+                    free_gb: 12.0,
+                    total_gb: 12.0,
+                }),
+                true,
+            );
             assert!(matches!(
-                krea_turbo_fit(
-                    &manifest,
-                    tier,
-                    768,
-                    768,
-                    Some(VramBudget {
-                        free_gb: 12.0,
-                        total_gb: 12.0,
-                    }),
-                    true,
-                ),
+                fit,
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::Missing,
+                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
                 })
-            ));
+            ), "{tier} 768² phase-fit-only evidence must remain outside exact runtime admission; got {fit:?}");
         }
     }
 
