@@ -49,6 +49,15 @@ stdin and expects one JSON response on stdout:
 
 1. `{ "action": "probe" }` → `{ "hardware": ... }`
 2. `{ "action": "run", "planned": ..., "repositories": ..., "hardware": ... }` → record fragment
+3. `{ "action": "run_batch", "planned": [...], ... }` → `{ "modelLoads": 1, "fragments": [...] }`
+4. `{ "action": "assess_batch", "planned": [...] }` → an explicit reuse-eligibility verdict
+
+`modelLoadPolicy: "batch_rungs"` plus a shared `modelLoadGroup` schedules pending cases for one
+target, backend, and fixture in canonical rung order. When multiple parameter points are pending for
+one rung, the runner selects one for the batch; a returned complete sweep can then retire the others.
+The adapter must attest exactly one model load, and every fragment preserves its existing logical and
+resolved identity. After every response the runner recomputes completed logical cases before choosing
+another provider invocation.
 
 The runner resolves both repositories using `git rev-parse HEAD` and `git status --porcelain`, reads
 the generated matrix source-tree identity, and probes them again after hardware probing and after
@@ -102,6 +111,25 @@ the adapter. `--provider <plan-provider-name>` optionally selects one named prov
 to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
 way to execute a multi-rung reference ladder as one reproducible capture.
+`--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's
+rungs into an experimental batch. Compare the two bundles with the committed larger-of tolerance
+(256 MiB absolute or 5% relative for every phase/metric):
+
+```text
+node scripts/memory-calibration-harness.mjs compare-reuse \
+  --fresh .tmp/fresh.json --reused .tmp/reused.json \
+  --output .tmp/reuse-comparison.json
+```
+
+When a backend cannot truthfully execute a batch, record that before measurement:
+
+```text
+node scripts/memory-calibration-harness.mjs assess-reuse \
+  --config config/memory-calibration-plan.json \
+  --backend mlx --fixture <five-rung-fixture> \
+  --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
+  --output .tmp/reuse-assessment.json
+```
 
 Validate or merge captured output:
 

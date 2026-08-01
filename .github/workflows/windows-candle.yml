@@ -180,14 +180,15 @@ jobs:
       # until someone ran Candle calibration on a CUDA host — which is exactly where this epic's
       # downstream Candle stories start (sc-15804 review: an exhaustive
       # `MemoryStrategyParameters` literal here went stale against the inference contract with
-      # nothing to catch it). `cargo check` is enough: this binary is only ever run by hand on a
-      # calibration host, so typechecking the CUDA build is the coverage that was missing.
-      - name: Check the candle memory adapter builds (memory-candle-adapter)
+      # nothing to catch it). Keep both the production typecheck and the binary's CUDA-only unit
+      # tests here: the batching contamination guard cannot be compiled or exercised on macOS.
+      - name: Check and test the candle memory adapter (memory-candle-adapter)
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
       - name: Validate five-rung reference inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
@@ -219,10 +220,17 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         with:
           node-version: 22
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Validate runner Python for Krea provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
-        with:
-          python-version: "3.12"
+        shell: powershell
+        run: |
+          $version = python --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.') {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+          if ([int]$Matches.minor -lt 12) {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
       - name: Provision exact public Krea reference snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
         shell: powershell
@@ -276,7 +284,7 @@ jobs:
         with:
           repository: SceneWorks/inference
           ref: ${{ inputs.inference_revision }}
-          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
       - name: Build and run the authoritative Candle five-rung reference
@@ -290,14 +298,21 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           echo .calibration/>>.git\info\exclude
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16402-candle-fresh.json"
-          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16402-candle-fresh.json"
+          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
+          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
+          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs compare-reuse --fresh "%RUNNER_TEMP%\sc-16059-candle-fresh.json" --reused "%RUNNER_TEMP%\sc-16059-candle-reused.json" --output "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
+          node -e "const a=require(process.argv[1]); console.log(JSON.stringify(a,null,2)); if(!['amortizable','unable_to_amortize'].includes(a.verdict)) throw new Error('unexpected Candle reuse verdict: '+a.verdict)" "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
       - name: Upload raw schema-checked Candle five-rung reference
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-16402-candle-fresh-${{ github.run_id }}
-          path: ${{ runner.temp }}/sc-16402-candle-fresh.json
+          name: sc-16059-candle-reuse-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sc-16059-candle-fresh.json
+            ${{ runner.temp }}/sc-16059-candle-reused.json
+            ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
           if-no-files-found: error
       - name: Clippy (candle worker)
         shell: cmd

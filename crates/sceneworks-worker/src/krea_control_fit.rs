@@ -4,16 +4,16 @@
 //! it loads through the bespoke `Krea2Control` provider, not the shared txt2img path, so the epic-10765
 //! admission check never sees it. This module is its dedicated fit-gate — the SAME live/capped budget
 //! ([`crate::gpu::nvidia_vram_budget_gb`] + `SCENEWORKS_CUDA_VRAM_CAP_GB`) vs a control-lane-specific
-//! predicted peak, walked down a **cheapest-cost-first rung ladder** so the memory optimizations engage
+//! predicted peak, submitted to the shared memory-strategy selector so the memory optimizations engage
 //! only when VRAM is actually constrained: on a 96 GB card no rung engages (zero penalty); on a 24/16 GB
 //! card the minimum set engages to fit. The branch's TIER is not among the rungs (sc-15799) — a q8
 //! selection carries a q8 branch on the 96 GB card too.
 //!
-//! ## The ladder
+//! ## The shared strategy candidates
 //! The control lane's peak is the base tier + the control branch (at the tier
 //! [`gen_core::tier_integrity::control_branch_tier`] assigns it) + activations + the end-of-render
-//! VAE-decode spike. When that peak won't fit, rungs engage in increasing (Δcost) order, stopping as
-//! soon as the predicted peak ≤ budget:
+//! VAE-decode spike. Each directly measured peak is submitted as a candidate. Ordering and the
+//! first-fitting choice are owned exclusively by [`crate::memory_strategy::select_strategy`]:
 //!  1. **packed base** — default, ~free (candle-gen #480, shipped). Always on; the peak below already
 //!     reflects it.
 //!  2. **sequential residency** (sc-12176) — encode/drop Qwen3-VL before loading the heavy phase. The
@@ -39,12 +39,12 @@
 //! fail-safe for malformed catalog entries and future tiers, so it keys on the missing row rather than a
 //! particular tier name.
 //!
-//! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ that rung is skipped — the ladder walks
-//! the rungs it *can* measure and, if even (sequential residency + tiling + chunking) won't fit,
-//! rejects-before-OOM at the honest best-case peak **when the peaks rest on current evidence**. While
-//! `candle.control.measured` is `false` the peaks are stale upper bounds and the floor is
-//! [`KreaControlFit::BestEffort`] instead: a reject derived from an upper bound can refuse a job that
-//! would run (see [`fit_ladder`]).
+//! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ no candidate exists for that rung. The
+//! shared selector will use an earlier measured fit, but it will not turn an incomplete provider ladder
+//! into a hard reject: if nothing measured fits, the outcome is [`KreaControlFit::BestEffort`]. A reject
+//! requires current evidence through the provider's deepest implemented rung. This is also the floor
+//! while `candle.control.measured` is `false`, because a stale upper bound can refuse a job that would
+//! run (see [`fit_ladder`]).
 //!
 //! ## The branch tier is NOT a rung (sc-15799)
 //!
@@ -71,13 +71,27 @@
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
 
 use super::*;
-use gen_core::{OffloadPolicy, Quant};
+use gen_core::{
+    MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
+    MemoryEvidenceVerdict, MemoryGeometry, MemoryNumericTier, MemoryParityContract,
+    MemoryParityResult, MemoryProviderContract, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, OffloadPolicy, Precision, Quant,
+};
 use serde_json::Value;
+
+use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
 /// Fixed transient/runtime headroom (GB) added on top of the control-lane peak
 /// ([`predicted_control_peak_gb`]), mirroring [`crate::vram_gate`]'s `HEADROOM_GB` — covers allocator
 /// slack + activation spikes not captured by the steady peak.
 const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
+
+const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
+const KREA_CONTROL_INFERENCE_REVISION: &str = "1899a7228deb99b65535745d09d4a5f5524565c4";
+const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
+const KREA_CONTROL_ATTN_CHUNK_SIZE: u32 = 128 * 1024 * 1024;
+const KREA_CONTROL_DECODE_TILE_EDGE: u32 = 512;
+const KREA_CONTROL_DECODE_OVERLAP: u32 = 128;
 
 /// The outcome of walking the Krea control fit ladder. `Unknown` = no signal (no `candle.control` block,
 /// or a non-NVIDIA host) ⇒ never block — exactly like [`crate::vram_gate::FitDecision::Unknown`].
@@ -303,30 +317,278 @@ pub(crate) fn chunk_attn_save_gb(manifest_entry: &JsonObject) -> Option<f64> {
         .and_then(json_f64)
 }
 
-/// Walk the fit ladder: given the predicted resident and staged peaks (upper bounds — see
-/// [`predicted_control_peak_gb`]), the (capped) live budget, the measured VAE-decode tiling and
-/// activation-chunking savings, and whether the peaks rest on current evidence
-/// ([`control_evidence_is_current`]), engage the minimal sufficient set of rungs in increasing (Δcost)
-/// order and return the [`KreaControlFit`].
-///
-/// Walk: if the monolithic peak fits, run resident/untiled/unchunked (big-card fast path, no penalty);
-/// else stage text and heavy components sequentially. If the staged peak still exceeds the budget, force
-/// the seam-free tiled decode (sc-11744 — a *speed* cost only); then, keeping tiling on, engage query-row
-/// attention chunking (sc-11745 — a *speed* cost only, byte-identical). Any unmeasured saving (`None`)
-/// skips its rung. Missing resident peak or budget ⇒ [`KreaControlFit::Unknown`] (never block).
-///
-/// **Past the deepest rung the outcome depends on the evidence, not just the numbers.** With current
-/// evidence the honest answer is [`KreaControlFit::TooBig`] — reject-before-OOM. With SUPERSEDED
-/// evidence (`evidence_is_current == false`) it is
-/// [`KreaControlFit::BestEffort`]: the peaks are deliberately *upper bounds* on the packed
-/// configuration, so a reject computed from them can refuse a job that would actually fit, and refusing
-/// a job that fits is the failure this lane is least allowed to have. Adapting maximally and letting the
-/// runtime decide is the only verdict a stale upper bound entitles us to. The shipped Krea block is
-/// current, so its deepest-rung non-fit is a hard reject.
-///
-/// There is no branch-quant rung (sc-15799): the branch's tier is fixed by the base tier before this
-/// runs, so both peaks arrive already priced at it and there is nothing left for the ladder to trade.
+fn control_numeric_tier(tier_key: &str) -> MemoryNumericTier {
+    MemoryNumericTier {
+        precision: Precision::Bf16,
+        quant: quant_for_tier_key(tier_key),
+        component_precision_floors: &[],
+    }
+}
+
+fn control_parameters(
+    contract: &MemoryProviderContract,
+    strategy: MemoryStrategy,
+) -> MemoryStrategyParameters {
+    MemoryStrategyParameters {
+        decode_tile_edge: contract
+            .engages(strategy, MemoryStrategy::BoundedDecode)
+            .then_some(KREA_CONTROL_DECODE_TILE_EDGE),
+        decode_overlap: contract
+            .engages(strategy, MemoryStrategy::BoundedDecode)
+            .then_some(KREA_CONTROL_DECODE_OVERLAP),
+        attention_chunk_size: contract
+            .engages(strategy, MemoryStrategy::BoundedAttention)
+            .then_some(KREA_CONTROL_ATTN_CHUNK_SIZE),
+        ..Default::default()
+    }
+}
+
+/// Submit the Krea control lane's directly measured resident, staged, tiled-decode, and
+/// chunked-attention candidates to the one shared selector. This function reads evidence and maps the
+/// selected shared strategy to the provider's legacy booleans; it does not own strategy order.
+#[allow(clippy::too_many_arguments)]
+fn fit_ladder_for_tier(
+    contract: Option<&MemoryProviderContract>,
+    tier_key: &str,
+    request_geometry: MemoryGeometry,
+    peak_gb: Option<f64>,
+    sequential_peak_gb: Option<f64>,
+    budget: Option<crate::vram_gate::VramBudget>,
+    decode_tile_save_gb: Option<f64>,
+    chunk_attn_save_gb: Option<f64>,
+    evidence_is_current: bool,
+    runtime_verified: bool,
+    adapter_gb: f64,
+) -> KreaControlFit {
+    let (Some(peak), Some(budget)) = (peak_gb, budget) else {
+        return KreaControlFit::Unknown;
+    };
+    let Some(contract) = contract else {
+        return KreaControlFit::Unknown;
+    };
+    let numeric_tier = control_numeric_tier(tier_key);
+    let measured_geometry = MemoryGeometry {
+        width: 1024,
+        height: 1024,
+        batch: 1,
+        frames: 1,
+    };
+    let overlay = if adapter_gb > 0.0 {
+        format!(
+            "control_branch+adapters_bytes={}",
+            (adapter_gb * crate::fit_gate::BYTES_PER_GIB).round() as u64
+        )
+    } else {
+        "control_branch".to_owned()
+    };
+    let request = RequestScope {
+        resolved_route: KREA_CONTROL_ROUTE,
+        backend: "candle",
+        tier: numeric_tier,
+        mode: "pose_control",
+        overlay: Some(&overlay),
+        geometry: request_geometry,
+        expected_inference_revision: KREA_CONTROL_INFERENCE_REVISION,
+    };
+    let bytes = |gb: f64| {
+        (gb.max(0.0) * crate::fit_gate::BYTES_PER_GIB)
+            .round()
+            .clamp(0.0, u64::MAX as f64) as u64
+    };
+    let make_evidence = |selection: MemorySelection, predicted_peak_gb: f64| {
+        let calibration_matches = contract
+            .calibration
+            .as_ref()
+            .is_some_and(|identity| identity.fingerprint == KREA_CONTROL_CALIBRATION);
+        let historical_verified = evidence_is_current && adapter_gb == 0.0;
+        let dimensions = MemoryEvidenceDimensions {
+            static_implementation: if contract.conformance_errors().is_empty()
+                && contract.validate_selection(&selection).is_ok()
+            {
+                MemoryEvidenceVerdict::Satisfied
+            } else {
+                MemoryEvidenceVerdict::Invalid
+            },
+            declared_calibration: if calibration_matches {
+                MemoryEvidenceVerdict::Satisfied
+            } else {
+                MemoryEvidenceVerdict::FingerprintMismatch
+            },
+            historical_verification: if historical_verified {
+                MemoryEvidenceVerdict::Satisfied
+            } else if evidence_is_current {
+                MemoryEvidenceVerdict::OutOfEnvelope
+            } else {
+                MemoryEvidenceVerdict::Stale
+            },
+            current_environment_verification: if historical_verified
+                && runtime_verified
+                && request_geometry == measured_geometry
+            {
+                MemoryEvidenceVerdict::Satisfied
+            } else {
+                MemoryEvidenceVerdict::OutOfEnvelope
+            },
+            canonical_route_loadability: if runtime_verified {
+                MemoryEvidenceVerdict::Satisfied
+            } else {
+                MemoryEvidenceVerdict::Unverified
+            },
+            exact_strategy_parameters: if contract.validate_selection(&selection).is_ok() {
+                MemoryEvidenceVerdict::Satisfied
+            } else {
+                MemoryEvidenceVerdict::OutOfEnvelope
+            },
+        };
+        let verified = dimensions.all_satisfied();
+        MemoryEvidence {
+            key: MemoryEvidenceKey {
+                resolved_route: KREA_CONTROL_ROUTE.to_owned(),
+                backend: "candle".to_owned(),
+                tier: numeric_tier,
+                mode: "pose_control".to_owned(),
+                overlay: Some(overlay.clone()),
+                geometry: measured_geometry,
+                strategy: selection.strategy,
+                engaged_composition: contract.engaged_composition(selection.strategy),
+                parameters: selection.parameters,
+            },
+            conformance: if verified {
+                MemoryConformanceState::Verified
+            } else {
+                MemoryConformanceState::ImplementedUnverified
+            },
+            dimensions,
+            calibration_abi: contract
+                .calibration
+                .as_ref()
+                .expect("control calibration")
+                .abi,
+            calibration_fingerprint: KREA_CONTROL_CALIBRATION.to_owned(),
+            sceneworks_revision: "sc-16013".to_owned(),
+            inference_revision: KREA_CONTROL_INFERENCE_REVISION.to_owned(),
+            harness_version: "krea-control-cuda-direct-v1".to_owned(),
+            predicted_peak_bytes: bytes(predicted_peak_gb),
+            // The manifest records the no-adapter rendered-device observation. Adapter bytes may extend
+            // the prediction through the declared OverlayBytes variable, but never rewrite observation.
+            observed_peak_bytes: Some(bytes((predicted_peak_gb - adapter_gb).max(0.0))),
+            parity: MemoryParityContract::Exact,
+            parity_result: if verified {
+                MemoryParityResult::Passed
+            } else {
+                MemoryParityResult::NotRun
+            },
+        }
+    };
+
+    // Catalog helpers retain their legacy admission numbers (raw observation + HEADROOM_GB). Evidence
+    // stores the raw rendered-device peak; the shared Budget removes headroom exactly once.
+    let mut measured = vec![(MemoryStrategy::Resident, (peak - HEADROOM_GB).max(0.0))];
+    if let Some(staged) = sequential_peak_gb {
+        let staged = (staged - HEADROOM_GB).max(0.0);
+        measured.push((MemoryStrategy::StagedResidency, staged));
+        if let Some(tile_save) = decode_tile_save_gb {
+            measured.push((MemoryStrategy::BoundedDecode, staged - tile_save));
+        }
+        if let Some(chunk_save) = chunk_attn_save_gb {
+            let decode_save = if contract.engages(
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedDecode,
+            ) {
+                // Q4's provider contract composes attention chunking over tiled decode. Without the
+                // decode row, the full engaged composition is not measured and must not become a
+                // falsely verified attention candidate. Dense/Q8 contracts exclude that default edge,
+                // so their independently measured chunking candidate remains valid without tiling.
+                decode_tile_save_gb
+            } else {
+                Some(0.0)
+            };
+            if let Some(decode_save) = decode_save {
+                measured.push((
+                    MemoryStrategy::BoundedAttention,
+                    staged - decode_save - chunk_save,
+                ));
+            }
+        }
+    }
+    let selections = measured
+        .iter()
+        .map(|(strategy, _)| MemorySelection {
+            strategy: *strategy,
+            parameters: control_parameters(contract, *strategy),
+            tier: numeric_tier,
+        })
+        .collect::<Vec<_>>();
+    let evidence = selections
+        .iter()
+        .zip(&measured)
+        .map(|(selection, (_, measured_peak_gb))| make_evidence(*selection, *measured_peak_gb))
+        .collect::<Vec<_>>();
+    let candidates = selections
+        .iter()
+        .zip(&evidence)
+        .map(|(selection, evidence)| Candidate {
+            selection: *selection,
+            evidence,
+        })
+        .collect::<Vec<_>>();
+    match crate::memory_strategy::select_strategy(
+        request,
+        contract,
+        Some(Budget {
+            available_gb: budget.free_gb,
+            reclaimable_gb: 0.0,
+            // A zero-free synthetic test budget still represents a real device whose total is not
+            // zero. Preserve the old starved-card behavior while satisfying the shared budget type's
+            // physical-total invariant.
+            total_gb: budget.total_gb.max(f64::EPSILON),
+            reserved_headroom_gb: HEADROOM_GB,
+        }),
+        &candidates,
+    ) {
+        Selection::Selected { selection, .. } => KreaControlFit::Fits {
+            offload_policy: if selection.strategy == MemoryStrategy::Resident {
+                OffloadPolicy::Resident
+            } else {
+                OffloadPolicy::Sequential
+            },
+            tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
+            chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+        },
+        Selection::Reject {
+            needed_gb,
+            available_gb,
+        } => KreaControlFit::TooBig {
+            // Preserve the legacy outward-facing admission numbers while shared Budget arithmetic
+            // models the same headroom explicitly.
+            needed_gb: needed_gb + HEADROOM_GB,
+            available_gb: available_gb + HEADROOM_GB,
+        },
+        Selection::Unverified { .. } if sequential_peak_gb.is_none() => KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Sequential,
+            tile_vae_decode: false,
+            chunk_attention: false,
+        },
+        Selection::Unverified { .. } => {
+            let (strategy, measured_peak_gb) = measured
+                .iter()
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+                .copied()
+                .expect("resident evidence is always present");
+            KreaControlFit::BestEffort {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: contract.engages(strategy, MemoryStrategy::BoundedDecode),
+                chunk_attention: contract.engages(strategy, MemoryStrategy::BoundedAttention),
+                needed_gb: measured_peak_gb + HEADROOM_GB,
+                available_gb: budget.free_gb,
+            }
+        }
+    }
+}
+
+#[cfg(any(test, doc))]
 pub(crate) fn fit_ladder(
+    tier_key: &str,
     peak_gb: Option<f64>,
     sequential_peak_gb: Option<f64>,
     budget: Option<crate::vram_gate::VramBudget>,
@@ -334,86 +596,34 @@ pub(crate) fn fit_ladder(
     chunk_attn_save_gb: Option<f64>,
     evidence_is_current: bool,
 ) -> KreaControlFit {
-    let (Some(peak), Some(budget)) = (peak_gb, budget) else {
-        return KreaControlFit::Unknown;
-    };
-    let free = budget.free_gb;
-    let fits = |needed: f64| free + f64::EPSILON >= needed;
-
-    // Rung 1 (packed base, always on) — big-card fast path: the monolithic peak already fits, so nothing
-    // engages: full-speed decode, unchunked attention, zero penalty.
-    if fits(peak) {
-        return KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Resident,
-            tile_vae_decode: false,
-            chunk_attention: false,
-        };
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+        "/nonexistent/krea-control-test".into(),
+    ));
+    if let Some(quant) = quant_for_tier_key(tier_key) {
+        spec = spec.with_quant(quant);
     }
-
-    // Rung 2 (sequential residency, sc-12176) — the cheapest adaptation. If its measured peak is
-    // absent, preserve the shared gate's best-effort contract: stage anyway and rely on the reactive
-    // CUDA-OOM backstop rather than engaging costlier rungs from an unknown baseline.
-    let Some(peak) = sequential_peak_gb else {
-        return KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: false,
-            chunk_attention: false,
-        };
-    };
-    if fits(peak) {
-        return KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: false,
-            chunk_attention: false,
-        };
-    }
-    // Rung 3 (VAE-decode tiling, sc-11744) — a *speed* cost, no quality loss (seam-free). An
-    // unmeasured tier saving (None) leaves this rung unavailable.
-    if let Some(tile_save) = decode_tile_save_gb {
-        if fits(peak - tile_save) {
-            return KreaControlFit::Fits {
-                offload_policy: OffloadPolicy::Sequential,
-                tile_vae_decode: true,
-                chunk_attention: false,
-            };
-        }
-    }
-    // Past here tiling alone was insufficient, so keep it on beneath the deeper rung (it is cheaper than
-    // chunking and every GB helps); if it was unmeasured, `tile_on` stays false / the peak unreduced.
-    let tile_on = decode_tile_save_gb.is_some();
-    let peak_after_tile = peak - decode_tile_save_gb.unwrap_or(0.0);
-
-    // Rung 4 (activation chunking, sc-11745, candle-gen #496) — a *speed* cost (~+6%), byte-identical
-    // output (the chunked forward is numerically identical). The DEEPEST rung this lane has, now that the
-    // branch tier is not a rung (sc-15799). An unmeasured saving (None) leaves it unavailable.
-    if let Some(chunk_save) = chunk_attn_save_gb {
-        if fits(peak_after_tile - chunk_save) {
-            return KreaControlFit::Fits {
-                offload_policy: OffloadPolicy::Sequential,
-                tile_vae_decode: tile_on,
-                chunk_attention: true,
-            };
-        }
-    }
-    // Won't fit even at (staged + tiling + chunking). Report the best-case peak (every rung on) so the
-    // message is honest about what still overflows.
-    let best_case = peak_after_tile - chunk_attn_save_gb.unwrap_or(0.0);
-    if !evidence_is_current {
-        // Superseded evidence: the peaks are UPPER BOUNDS, so this shortfall may not be real. Engage
-        // every speed-only rung that is measured and let the reactive CUDA-OOM backstop decide, rather
-        // than rejecting a job that might fit (sc-15799 / sc-16013).
-        return KreaControlFit::BestEffort {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: tile_on,
-            chunk_attention: chunk_attn_save_gb.is_some(),
-            needed_gb: best_case,
-            available_gb: free,
-        };
-    }
-    KreaControlFit::TooBig {
-        needed_gb: best_case,
-        available_gb: free,
-    }
+    let contract = crate::inference_runtime::media()
+        .memory_strategy_contract(KREA_CONTROL_ROUTE, &spec)
+        .ok()
+        .flatten();
+    fit_ladder_for_tier(
+        contract.as_ref(),
+        tier_key,
+        MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+        },
+        peak_gb,
+        sequential_peak_gb,
+        budget,
+        decode_tile_save_gb,
+        chunk_attn_save_gb,
+        evidence_is_current,
+        true,
+        0.0,
+    )
 }
 
 /// Walk the ladder for one catalog entry at one resolved BASE tier — **the seam the lane calls**
@@ -443,11 +653,49 @@ pub(crate) fn fit_ladder_for_entry(
 }
 
 /// Adapter-aware control ladder. Krea retains adapter overlays independently at every residency rung.
+#[cfg(any(test, doc))]
 pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
     manifest_entry: &JsonObject,
     tier_key: &str,
     budget: Option<crate::vram_gate::VramBudget>,
     adapter_bytes: u64,
+) -> KreaControlFit {
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+        "/nonexistent/krea-control-test".into(),
+    ));
+    if let Some(quant) = quant_for_tier_key(tier_key) {
+        spec = spec.with_quant(quant);
+    }
+    let contract = crate::inference_runtime::media()
+        .memory_strategy_contract(KREA_CONTROL_ROUTE, &spec)
+        .ok()
+        .flatten();
+    fit_ladder_for_entry_with_runtime(
+        manifest_entry,
+        tier_key,
+        budget,
+        adapter_bytes,
+        MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+        },
+        contract.as_ref(),
+        true,
+    )
+}
+
+/// Production Krea-control selector seam. Provider capabilities come from inference's registered
+/// contract; the caller supplies actual request geometry and an artifact/GPU loadability verdict.
+pub(crate) fn fit_ladder_for_entry_with_runtime(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+    adapter_bytes: u64,
+    geometry: MemoryGeometry,
+    contract: Option<&MemoryProviderContract>,
+    runtime_verified: bool,
 ) -> KreaControlFit {
     let adapter_gb = adapter_bytes as f64 / crate::fit_gate::BYTES_PER_GIB;
     let peak = predicted_control_peak_gb(manifest_entry, tier_key).map(|gb| gb + adapter_gb);
@@ -459,13 +707,18 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
             tier_key: tier_key.to_owned(),
         };
     }
-    fit_ladder(
+    fit_ladder_for_tier(
+        contract,
+        tier_key,
+        geometry,
         peak,
         predicted_control_sequential_peak_gb(manifest_entry, tier_key).map(|gb| gb + adapter_gb),
         budget,
         decode_tile_save_gb(manifest_entry, tier_key),
         chunk_attn_save_gb(manifest_entry),
         control_evidence_is_current(manifest_entry),
+        runtime_verified,
+        adapter_gb,
     )
 }
 
@@ -581,8 +834,8 @@ mod tests {
     }
 
     /// [`krea_manifest`] with the control block declaring CURRENT evidence — what sc-16013's re-measure
-    /// will ship. The only behavioral difference is at the bottom of the ladder (a hard reject becomes
-    /// available) and in [`incurred_peak_gb`] (a reclaim credit becomes recordable).
+    /// will ship. A hard reject becomes available only when the fixture also carries evidence through
+    /// the deepest implemented rung; current evidence also makes [`incurred_peak_gb`] recordable.
     fn krea_manifest_measured() -> JsonObject {
         current_evidence(krea_manifest())
     }
@@ -621,15 +874,15 @@ mod tests {
     }
 
     /// Keep the rung tests focused on tiling/chunking by modeling a staged peak equal to the resident
-    /// peak, against CURRENT evidence so the ladder's floor is the hard reject the rung tests assert.
-    /// Dedicated tests below cover the residency reduction and the superseded-evidence floor.
+    /// peak, against CURRENT evidence. Fully measured fixtures can hard-reject; incomplete provider
+    /// ladders remain best-effort. Dedicated tests below cover both floors.
     fn fit_ladder(
         peak: Option<f64>,
         budget: Option<VramBudget>,
         tile: Option<f64>,
         chunk: Option<f64>,
     ) -> KreaControlFit {
-        super::fit_ladder(peak, peak, budget, tile, chunk, true)
+        super::fit_ladder("q4", peak, peak, budget, tile, chunk, true)
     }
 
     /// The big-card fast path: monolithic decode, unchunked attention, nothing engaged.
@@ -831,7 +1084,7 @@ mod tests {
         let chunk = Some(2.0);
         let starved = Some(budget(10.0)); // below every rung: 40 − 5 − 2 = 33
         assert_eq!(
-            super::fit_ladder(peak, peak, starved, tile, chunk, false),
+            super::fit_ladder("q4", peak, peak, starved, tile, chunk, false),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
@@ -842,7 +1095,7 @@ mod tests {
             "superseded evidence must adapt maximally, never assert a non-fit"
         );
         assert_too_big(
-            super::fit_ladder(peak, peak, starved, tile, chunk, true),
+            super::fit_ladder("q4", peak, peak, starved, tile, chunk, true),
             33.0,
             10.0,
         );
@@ -853,7 +1106,15 @@ mod tests {
     #[test]
     fn best_effort_engages_only_measured_rungs() {
         assert_eq!(
-            super::fit_ladder(Some(40.0), Some(40.0), Some(budget(1.0)), None, None, false),
+            super::fit_ladder(
+                "q4",
+                Some(40.0),
+                Some(40.0),
+                Some(budget(1.0)),
+                None,
+                None,
+                false,
+            ),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -907,22 +1168,43 @@ mod tests {
     // ── The ladder: staged residency → decode tiling → attention chunking, then reject. ─────────────
 
     #[test]
-    fn sequential_is_the_first_rung_and_has_a_clean_second_stage_reject() {
+    fn sequential_is_the_first_rung_and_missing_deeper_evidence_is_best_effort() {
         let resident = Some(40.0);
         let sequential = Some(30.0);
 
         assert_eq!(
-            super::fit_ladder(resident, sequential, Some(budget(35.0)), None, None, true),
+            super::fit_ladder(
+                "q4",
+                resident,
+                sequential,
+                Some(budget(35.0)),
+                None,
+                None,
+                true,
+            ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: false,
             }
         );
-        assert_too_big(
-            super::fit_ladder(resident, sequential, Some(budget(29.0)), None, None, true),
-            30.0,
-            29.0,
+        assert_eq!(
+            super::fit_ladder(
+                "q4",
+                resident,
+                sequential,
+                Some(budget(29.0)),
+                None,
+                None,
+                true,
+            ),
+            KreaControlFit::BestEffort {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                needed_gb: 30.0,
+                available_gb: 29.0,
+            }
         );
     }
 
@@ -930,6 +1212,7 @@ mod tests {
     fn missing_sequential_measurement_keeps_best_effort_staging() {
         assert_eq!(
             super::fit_ladder(
+                "q4",
                 Some(40.0),
                 None,
                 Some(budget(20.0)),
@@ -1041,12 +1324,40 @@ mod tests {
         let tile = decode_tile_save_gb(&m, "bf16"); // None
         let chunk = chunk_attn_save_gb(&m); // Some(2.43)
         assert_eq!(
-            fit_ladder(peak, Some(budget(46.0)), tile, chunk),
+            super::fit_ladder("bf16", peak, peak, Some(budget(46.0)), tile, chunk, true,),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: true,
             }
+        );
+    }
+
+    #[test]
+    fn q4_chunk_evidence_cannot_skip_its_missing_decode_composition_row() {
+        let resident = Some(40.0);
+        let staged = Some(40.0);
+        let budget = Some(budget(36.0));
+
+        assert_eq!(
+            super::fit_ladder("q4", resident, staged, budget, None, Some(5.0), true),
+            KreaControlFit::BestEffort {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                needed_gb: 40.0,
+                available_gb: 36.0,
+            },
+            "Q4 attention engages decode, so missing decode evidence must remove the full candidate"
+        );
+        assert_eq!(
+            super::fit_ladder("bf16", resident, staged, budget, None, Some(5.0), true),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: true,
+            },
+            "dense attention is independently measured and excludes the default decode edge"
         );
     }
 
@@ -1066,12 +1377,22 @@ mod tests {
     }
 
     #[test]
-    fn unmeasured_rungs_can_only_reject_at_the_raw_peak() {
+    fn unmeasured_provider_rungs_cannot_harden_into_a_reject() {
         let m = krea_manifest();
-        let peak = predicted_control_peak_gb(&m, "q4"); // 32.9
-                                                        // No tiling and no chunking measured ⇒ no rung is available, so a too-small card rejects
-                                                        // reporting the raw peak itself (nothing to subtract).
-        assert_too_big(fit_ladder(peak, Some(budget(20.0)), None, None), 32.9, 20.0);
+        let peak = predicted_control_peak_gb(&m, "q4");
+        // The provider implements tiling and chunking, but this synthetic cell measures neither. The
+        // shared selector must not infer that no deeper fit exists and hard-reject from an incomplete
+        // ladder; it stages best-effort and reports the raw measured peak (32.9 GiB).
+        assert_eq!(
+            fit_ladder(peak, Some(budget(20.0)), None, None),
+            KreaControlFit::BestEffort {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                needed_gb: 32.9,
+                available_gb: 20.0,
+            }
+        );
     }
 
     /// sc-13960: [`incurred_peak_gb`] records the peak a control render actually leaves in the cudarc
@@ -1140,6 +1461,7 @@ mod tests {
         // admitted against — so the pool the load leaves behind is never over-reported.
         let b = budget(24.0);
         let fit = super::fit_ladder(
+            tier,
             predicted_control_peak_gb(&m, tier),
             predicted_control_sequential_peak_gb(&m, tier),
             Some(b),
@@ -1222,7 +1544,11 @@ mod tests {
         // Contrast: the SAME starved card on a PRICED tier with current evidence does reject, so this is
         // a property of the missing row, not of the budget being ignored everywhere.
         assert!(matches!(
-            fit_ladder_for_entry(&krea_manifest_measured(), "q4", Some(budget(0.0))),
+            fit_ladder_for_entry(
+                &current_evidence(krea_manifest_with_chunking()),
+                "q4",
+                Some(budget(0.0))
+            ),
             KreaControlFit::TooBig { .. }
         ));
     }
@@ -1276,6 +1602,7 @@ mod tests {
                         fit_ladder_for_entry(&m, tier, b),
                         // `super::` — the module's real 6-arg ladder, not this test module's 4-arg helper.
                         super::fit_ladder(
+                            tier,
                             predicted_control_peak_gb(&m, tier),
                             predicted_control_sequential_peak_gb(&m, tier),
                             b,
@@ -1311,7 +1638,7 @@ mod tests {
             total_gb: 96.0,
         };
         assert_eq!(
-            super::fit_ladder(peak, seq, Some(raw), tile, chunk, true),
+            super::fit_ladder("q4", peak, seq, Some(raw), tile, chunk, true),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -1321,7 +1648,7 @@ mod tests {
         // Crediting the 48.2 GB the first render left in-pool readmits it at the big-card fast path.
         let reclaimed = crate::vram_gate::with_reclaimable(raw, 48.2);
         assert_eq!(
-            super::fit_ladder(peak, seq, Some(reclaimed), tile, chunk, true),
+            super::fit_ladder("q4", peak, seq, Some(reclaimed), tile, chunk, true),
             fits_nothing_engaged()
         );
 
@@ -1329,8 +1656,8 @@ mod tests {
         // constrained card is gated exactly as before).
         let reclaimed_cold = crate::vram_gate::with_reclaimable(raw, 0.0);
         assert_eq!(
-            super::fit_ladder(peak, seq, Some(reclaimed_cold), tile, chunk, true),
-            super::fit_ladder(peak, seq, Some(raw), tile, chunk, true)
+            super::fit_ladder("q4", peak, seq, Some(reclaimed_cold), tile, chunk, true),
+            super::fit_ladder("q4", peak, seq, Some(raw), tile, chunk, true)
         );
     }
 }

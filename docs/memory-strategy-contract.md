@@ -409,10 +409,10 @@ rather than collapsing into the no-signal `Unknown` that took the zero-adaptatio
 prices every hosted Krea tier, including INT8-ConvRot, so this verdict is a fail-safe for malformed
 catalog entries and future tiers rather than a known shipping hole.
 
-## Fresh-process five-rung oracle (SC-16402)
+## Five-rung load reuse (SC-16059, oracle from SC-16402)
 
-`config/memory-calibration-plan.json` contains two same-target reference ladders used only as the
-fresh-process side of SC-16059's reused-vs-fresh comparison:
+`config/memory-calibration-plan.json` contains two same-target reference ladders used for the
+fresh/reused decision:
 
 - MLX/Metal: `z_image_turbo`, q4, 768×768 text-to-image, no overlay, seed 16402, two steps. Rungs 0–3
   use the eager provider fingerprint; rung 4 uses the provider-required deferred-materialization
@@ -423,7 +423,19 @@ fresh-process side of SC-16059's reused-vs-fresh comparison:
   through Krea's physical three-stage loader; the plain staged rung uses its one-boundary residency
   path.
 
-The harness starts one adapter process per planned case, so every row below is a fresh-process capture.
+The harness preserves a forced fresh-per-case oracle for both backends. Candle can execute its five
+cases as one diagnostic `run_batch` invocation; the adapter loads Krea once, returns five ordinary
+record fragments, and attests `modelLoads: 1`. A comparison passes only when every phase's active,
+allocator, device, wired, and reclaimable metric is within the larger of 256 MiB and 5% of its fresh
+value. The authoritative CUDA comparison returned `unable_to_amortize`, so the shipped plan keeps
+Candle fresh-per-case rather than changing the recorded peaks. MLX also remains fresh-per-case:
+rungs 0–3 require the eager calibration fingerprint while rung 4
+requires the deferred fingerprint, so one loaded Z-Image generator cannot preserve all five
+calibrated identities. `assess-reuse` reads both identities from the pinned provider contracts for
+the exact eager and deferred load specs and rejects any plan mismatch; it does not trust the plan's
+strings as capability evidence. The structured verdict records this backend as
+`unable_to_amortize`; it is not treated as a failed measurement or silently averaged.
+
 Two denoise steps are load-bearing for phase measurement: providers with an explicit loading boundary
 close conditioning there, while resident providers use the first Step callback as a conservative
 conditioning envelope and measure the second step as a denoise-only interval. Decoding always starts a
@@ -439,9 +451,15 @@ cargo build --release --locked -p sceneworks-memory-adapter --features mlx --bin
 node scripts/memory-calibration-harness.mjs run \
   --config config/memory-calibration-plan.json --backend mlx \
   --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
+  --fresh-per-case \
   --provider-command '["target/release/memory-mlx-adapter"]' \
   --sceneworks-repo "$PWD" --inference-repo /absolute/path/to/inference-pin \
-  --output /tmp/sc-16402-mlx-fresh.json
+  --output /tmp/sc-16059-mlx-fresh.json
+node scripts/memory-calibration-harness.mjs assess-reuse \
+  --config config/memory-calibration-plan.json --backend mlx \
+  --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
+  --provider-command '["target/release/memory-mlx-adapter"]' \
+  --output /tmp/sc-16059-mlx-reuse-assessment.json
 
 # Windows / NVIDIA CUDA (PowerShell; use target\release\memory-candle-adapter.exe)
 $env:SCENEWORKS_KREA_REPOSITORY='SceneWorks/krea-2-turbo-mlx'
@@ -450,14 +468,24 @@ $env:SCENEWORKS_KREA_ROOT='C:\absolute\path\to\models--SceneWorks--krea-2-turbo-
 cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
 node scripts/memory-calibration-harness.mjs run --config config/memory-calibration-plan.json --backend candle `
   --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 `
+  --fresh-per-case `
   --provider-command '["target/release/memory-candle-adapter.exe"]' `
   --sceneworks-repo $PWD --inference-repo C:\absolute\path\to\inference-pin `
-  --output $env:TEMP\sc-16402-candle-fresh.json
+  --output $env:TEMP\sc-16059-candle-fresh.json
+node scripts/memory-calibration-harness.mjs run --config config/memory-calibration-plan.json --backend candle `
+  --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs `
+  --provider-command '["target/release/memory-candle-adapter.exe"]' `
+  --sceneworks-repo $PWD --inference-repo C:\absolute\path\to\inference-pin `
+  --output $env:TEMP\sc-16059-candle-reused.json
+node scripts/memory-calibration-harness.mjs compare-reuse `
+  --fresh $env:TEMP\sc-16059-candle-fresh.json `
+  --reused $env:TEMP\sc-16059-candle-reused.json `
+  --output $env:TEMP\sc-16059-candle-reuse-comparison.json
 ```
 
 Validate either capture with `node scripts/memory-calibration-harness.mjs check --input <file>`.
 These authoritative records deliberately remain `gated`: they contain exact strategy identity and
-observed conditioning/denoise/decode/overall memory for SC-16059's oracle, but do not pretend that a
+observed conditioning/denoise/decode/overall memory for the reuse oracle, but do not pretend that a
 single reference render also completed the promotion-quality sweep, negative mutation, or lifecycle
 fault suite. They therefore cannot become current calibration evidence or update the cost model.
 

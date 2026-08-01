@@ -5747,8 +5747,8 @@
       // ~93 GB (down from ~104 GB un-chunked, sc-5923) — so the canonical multi-reference edit is
       // now a first-class sub-96 GB mode, reachable via the Image-Studio multi-image picker
       // (ui.multiReference). minMemoryGb stays 96 (inflating it would gate the common 74 GB T2I
-      // path behind 128 GB-only). The edit is still activation-bound, so the worker
-      // `flux2_dev_edit_memory_guard` (re-anchored on the chunked curve) rejects the genuinely
+      // path behind 128 GB-only). The edit is still activation-bound, so the FLUX.2 provider's
+      // calibrated safety contract (re-anchored on the chunked curve) rejects the genuinely
       // over-budget combinations (≥3 references / higher resolution that exceed the machine's
       // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {
@@ -9199,6 +9199,10 @@
         // mandatory lightx2v 4-step Lightning distill LoRA installs as a `coRequisite` above (sc-10030;
         // ensure_wan_lightning_present also self-heals a pre-coRequisite worker at gen time).
         "minMemoryGb": 133,
+        // All three MLX tiers preserve the same sequential expert-swap topology: both equal experts are
+        // on disk, but only one is resident at a time. Scale only half of the precision-dependent disk
+        // growth above q4's measured peak; shared components and activations stay in that peak anchor.
+        "measuredSiblingActiveDiskFraction": 0.5,
         "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
         // schedule. No scheduler axis (flow shift = `scheduler_shift`).
@@ -9329,11 +9333,11 @@
           "files": ["q4/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 28645879665,
-          // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043): q4 I2V Lightning-on 4-step peaked
-          // 22.71 GiB (get_peak_memory). Recorded at the 24.5 GiB shared-with-T2V worst case (identical
-          // packed-additive MoE path, headroom for a user LoRA). Far below diskSizeBytes: A14B is MoE, one
-          // 14B expert resident at a time — the reason the model-level minMemoryGb 133 over-warned.
-          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688, "measuredPixels": 1048576 }
+          // peakMemoryBytes derives the adapter-free base from the sc-10049 I2V Lightning-on 4-step
+          // measurement (22.71 GiB) by subtracting the exact 2,453,954,848-byte co-requisite stack.
+          // sc-16068 established that packed MLX adapters are independently additive at load time, so
+          // retaining the old shared 24.5 GiB Lightning + user-LoRA ceiling here would double-count them.
+          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 21930721975, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
@@ -9464,6 +9468,8 @@
         // converter "wan_i2v_14b" (mlx-gen-wan convert_i2v_14b) builds each tier. Its distill LoRA is
         // applied at run time.
         "minMemoryGb": 133,
+        // Same tier-invariant sequential expert-swap topology as the T2V sibling above.
+        "measuredSiblingActiveDiskFraction": 0.5,
         "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
         // schedule. No scheduler axis (flow shift = `scheduler_shift`).

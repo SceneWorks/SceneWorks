@@ -1345,6 +1345,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // 96 GB card: the monolithic peak fits outright — nothing engages, untiled full-speed decode.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(96.0)),
@@ -1362,6 +1363,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // peak, so sequential residency is sufficient without tiled decode.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(32.0)),
@@ -1379,6 +1381,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // A card that fits the measured Sequential peak but not Resident engages residency only.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(sequential_peak)),
@@ -1395,6 +1398,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // A card at the staged+tiled peak engages Sequential then VAE tiling — both speed-only.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(tiled_peak)),
@@ -1411,6 +1415,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // Just below the tiled peak: the deepest rung (chunking) engages, still with zero quality cost.
     assert_eq!(
         fit_ladder(
+            "q4",
             q4_peak,
             q4_sequential,
             apply_vram_cap(None, Some(tiled_peak - 0.5)),
@@ -1427,6 +1432,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // Below the chunked peak there is nothing left to trade. Current measured evidence makes this a
     // reject-before-OOM rather than a best-effort runtime attempt.
     match fit_ladder(
+        "q4",
         q4_peak,
         q4_sequential,
         apply_vram_cap(None, Some(chunked_peak - 0.5)),
@@ -1454,6 +1460,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     assert_eq!(decode_tile_save_gb(entry, "bf16"), None);
     assert_eq!(
         fit_ladder(
+            "bf16",
             bf16_peak,
             bf16_sequential,
             apply_vram_cap(None, Some(52.1 - chunk_save)),
@@ -1548,6 +1555,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
     // Uncapped real 96 GB card → untiled monolithic decode, unchunked, no rung engages.
     assert_eq!(
         fit_ladder(
+            "q4",
             peak,
             sequential,
             apply_vram_cap(Some(real), None),
@@ -1565,6 +1573,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
     // Cap just at the tiled peak (off the REAL reading) → residency and the first speed-cost rung engage.
     assert_eq!(
         fit_ladder(
+            "q4",
             peak,
             sequential,
             apply_vram_cap(Some(real), Some(tiled_peak)),
@@ -1581,6 +1590,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
     );
     // Cap below the chunked peak off the REAL reading: current measured evidence rejects before OOM.
     match fit_ladder(
+        "q4",
         peak,
         sequential,
         apply_vram_cap(Some(real), Some(chunked_peak - 0.5)),
