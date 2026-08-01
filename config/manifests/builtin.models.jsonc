@@ -4558,6 +4558,15 @@
         //                    1024²                         8.526/27.652/26.413
         //   streamedBlocks   768²                          8.535/8.533/2.130;
         //                    1024²                         8.526/8.526/3.629
+        // sc-16514 recovered the already-captured 768² cells into machine-readable evidence from
+        // sc-15205 activity 15272 (Q8) and sc-15206 activity 15314 (BF16), then independently fitted
+        // every tier from its own 768²→1024² delta. Q8's three-stage/tiled-VAE denoise slope happens
+        // to equal Q4's 7.98 GiB/MP because both measured deltas are 3.658 GiB; it is not borrowed.
+        // Retained zero slopes are measured flat/decreasing phases: Q8 three-stage decode 16.514→
+        // 16.514, tiled decode 16.548→16.514, chunked decode 16.514→16.512, and streamed decode
+        // 4.837→4.132; BF16 tiled decode 26.446→26.446, chunked decode 26.414→26.413, and streamed
+        // text/denoise 8.535→8.526 / 8.533→8.526. BF16 three-stage decode 26.413→26.446 is positive,
+        // so its former zero slope is replaced by the independently fitted 0.08 GiB/MP curve below.
         // Tiled decode is a measured no-op for the denoise-owned Q8/BF16 peaks, so those curves
         // intentionally cannot displace the cheaper three-stage rung.
         "turboFit": {
@@ -4583,13 +4592,14 @@
             "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB",
             "outputParity": "ordinary CUDA text-to-image retains tier and output bytes"
           },
-          // Machine-readable evidence cells. These are exact request envelopes, not permission to
-          // interpolate: a geometry absent here is Implemented/unverified even when a phase curve can
-          // predict it. Observed peaks and parity metrics come from the cited Shortcut activities;
-          // artifact revisions are the merged SceneWorks/provider revisions that carry the calibrated
-          // path. Runtime provider fingerprint/loadability checks remain mandatory.
+          // Machine-readable evidence cells. `exact_request` rows carry geometry-specific output
+          // parity and may admit that exact request after runtime fingerprint/loadability checks.
+          // `phase_fit_only` rows carry direct per-phase measurements that determine a bounded curve,
+          // but cannot authorize runtime admission without parity for that same geometry. Observed
+          // values come from the cited Shortcut activities; artifact revisions name the merged path.
           "evidenceRecords": [
             {
+              "evidenceScope": "exact_request",
               "tier": "q4",
               "width": 768,
               "height": 768,
@@ -4643,6 +4653,7 @@
               }
             },
             {
+              "evidenceScope": "exact_request",
               "tier": "q4",
               "width": 1024,
               "height": 1024,
@@ -4696,6 +4707,60 @@
               }
             },
             {
+              "evidenceScope": "phase_fit_only",
+              "tier": "q8",
+              "width": 768,
+              "height": 768,
+              "capturedAt": "2026-07-27T03:22:43Z",
+              "harnessVersion": "sc-15205-activity-15272",
+              "sourceStory": "sc-15205",
+              "sourceActivity": 15272,
+              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "q8",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
+              "predictedPeaksGb": {
+                "threeStage": 18.46679552,
+                "tiledVae": 18.46679552,
+                "chunkedAttention": 17.72599232,
+                "streamedBlocks": 6.4488064
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 6.45, "denoise": 18.46679552, "decode": 16.62 },
+                "tiledVae": { "text": 6.45, "denoise": 18.46679552, "decode": 16.65 },
+                "chunkedAttention": { "text": 6.45, "denoise": 17.72599232, "decode": 16.62 },
+                "streamedBlocks": { "text": 6.4488064, "denoise": 6.3177888, "decode": 4.94 }
+              },
+              "observedPhasesGb": {
+                "threeStage": { "text": 6.345, "denoise": 18.357, "decode": 16.514 },
+                "tiledVae": { "text": 6.345, "denoise": 18.357, "decode": 16.548 },
+                "chunkedAttention": { "text": 6.345, "denoise": 17.619, "decode": 16.514 },
+                "streamedBlocks": { "text": 6.345, "denoise": 6.211, "decode": 4.837 }
+              },
+              "observedPeaksGb": {
+                "threeStage": 18.357,
+                "tiledVae": 18.357,
+                "chunkedAttention": 17.619,
+                "streamedBlocks": 6.345
+              },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+              }
+            },
+            {
+              "evidenceScope": "exact_request",
               "tier": "q8",
               "width": 1024,
               "height": 1024,
@@ -4728,6 +4793,12 @@
                 "chunkedAttention": { "text": 6.45, "denoise": 18.26731968, "decode": 16.62 },
                 "streamedBlocks": { "text": 6.9534336, "denoise": 6.8682912, "decode": 4.94 }
               },
+              "observedPhasesGb": {
+                "threeStage": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
+                "tiledVae": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
+                "chunkedAttention": { "text": 6.345, "denoise": 18.156, "decode": 16.512 },
+                "streamedBlocks": { "text": 6.847, "denoise": 6.757, "decode": 4.132 }
+              },
               "observedPeaksGb": {
                 "threeStage": 22.015,
                 "tiledVae": 22.015,
@@ -4749,6 +4820,60 @@
               }
             },
             {
+              "evidenceScope": "phase_fit_only",
+              "tier": "bf16",
+              "width": 768,
+              "height": 768,
+              "capturedAt": "2026-07-27T11:24:32Z",
+              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+              "sourceStory": "sc-15206",
+              "sourceActivity": 15314,
+              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
+              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "compatibleSceneWorksRevision": "sc-15449-contract-v1",
+              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "loadability": {
+                "provider": "huggingface",
+                "repository": "SceneWorks/krea-2-turbo-mlx",
+                "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+                "tierRoot": "bf16",
+                "route": "krea_2_turbo",
+                "backend": "candle",
+                "computeCapability": 12.0
+              },
+              "predictedPeaksGb": {
+                "threeStage": 28.4896096,
+                "tiledVae": 28.4896096,
+                "chunkedAttention": 27.65976128,
+                "streamedBlocks": 8.64
+              },
+              "predictedPhasesGb": {
+                "threeStage": { "text": 8.8, "denoise": 28.4896096, "decode": 26.51718592 },
+                "tiledVae": { "text": 8.8, "denoise": 28.4896096, "decode": 26.55 },
+                "chunkedAttention": { "text": 8.63, "denoise": 27.65976128, "decode": 26.52 },
+                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 2.22872448 }
+              },
+              "observedPhasesGb": {
+                "threeStage": { "text": 8.694, "denoise": 28.390, "decode": 26.413 },
+                "tiledVae": { "text": 8.694, "denoise": 28.390, "decode": 26.446 },
+                "chunkedAttention": { "text": 8.527, "denoise": 27.552, "decode": 26.414 },
+                "streamedBlocks": { "text": 8.535, "denoise": 8.533, "decode": 2.130 }
+              },
+              "observedPeaksGb": {
+                "threeStage": 28.390,
+                "tiledVae": 28.390,
+                "chunkedAttention": 27.552,
+                "streamedBlocks": 8.535
+              },
+              "measuredCompositions": {
+                "threeStage": ["resident", "staged_residency"],
+                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
+                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+              }
+            },
+            {
+              "evidenceScope": "exact_request",
               "tier": "bf16",
               "width": 1024,
               "height": 1024,
@@ -4776,10 +4901,16 @@
                 "streamedBlocks": 8.64
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
+                "threeStage": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55388608 },
                 "tiledVae": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
                 "chunkedAttention": { "text": 8.63, "denoise": 27.76068672, "decode": 26.52 },
                 "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 3.72884352 }
+              },
+              "observedPhasesGb": {
+                "threeStage": { "text": 8.694, "denoise": 32.014, "decode": 26.446 },
+                "tiledVae": { "text": 8.560, "denoise": 32.014, "decode": 26.446 },
+                "chunkedAttention": { "text": 8.526, "denoise": 27.652, "decode": 26.413 },
+                "streamedBlocks": { "text": 8.526, "denoise": 8.526, "decode": 3.629 }
               },
               "observedPeaksGb": {
                 "threeStage": 32.014,
@@ -4832,8 +4963,10 @@
               "transformerWindowSize": 1
             }
           },
-          // Do not extrapolate these curves into unvalidated attention shapes. In particular, 2048²
-          // requires per-head query-row fallback whose CUDA byte identity has not been established.
+          // sc-16514 considered widening this bound after recovering the second point and retained it:
+          // both fitted points are at or below 1024², while larger advertised shapes exercise
+          // unvalidated attention geometry (2048² requires per-head query-row fallback whose CUDA byte
+          // identity has not been established). A wider fit spread does not authorize extrapolation.
           "maxMeasuredPixels": 1048576,
           "phaseCurvesByTier": {
             "q4": {
@@ -4884,7 +5017,7 @@
               "threeStage": {
                 "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
                 "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
-                "decode": { "fixedGb": 26.55, "perMpxGb": 0.00 }
+                "decode": { "fixedGb": 26.47, "perMpxGb": 0.08 }
               },
               "tiledVae": {
                 "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },

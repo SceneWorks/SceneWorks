@@ -479,16 +479,16 @@ impl KreaRuntimeEvidenceContext {
 /// incomplete evidence fails closed to `None`; callers retain the established sequential gate
 /// instead of inventing a fit.
 ///
-/// SC-16060: this comment used to claim the slope was fitted from real renders at multiple
-/// resolutions. That is true of **q4 only**. `turboFit.evidenceRecords` carries two geometries for
-/// q4 and exactly one each for q8 and bf16, so those two tiers' slopes cannot have been fitted — and
-/// the data shows it: their `threeStage`/`tiledVae` denoise slopes (7.980 / 7.900) match q4's 7.980
-/// rather than being independently derived, while 4 of 8 geometry-sensitive curves on each ship a
-/// zero slope against 1 of 8 on q4. A zero slope is conservative below the measured point and the
-/// `maxMeasuredPixels` bound blocks anything above it, so this is a coverage defect rather than an
-/// admission hazard — but a reader must not take the sentence as evidence the artifact does not
-/// carry. `docs/generated/memory-matrix.json` now reports the same fact per cell:
-/// `memoryCharacterization` reads fitted for q4 and point for q8 and bf16.
+/// SC-16514 recovered the q8/bf16 768² captures from SC-15205 activity 15272 and SC-15206 activity
+/// 15314 into `turboFit.evidenceRecords`. Every tier now carries 768² and 1024² phase cells, and every
+/// `perMpxGb` is fitted from that tier's own phase delta. The recovered cells are explicitly
+/// `phase_fit_only`: the cited activities do not establish geometry-specific 768² output parity, so
+/// they characterize the bounded curve without authorizing exact runtime admission. Q8's 7.98
+/// denoise slope equals q4's because both measured rises are 3.658 GiB, not because the coefficient
+/// was borrowed. Zero geometry-sensitive slopes remain only where the two samples are flat or
+/// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
+/// attention shapes have not been validated, so the curve is fitted within that bound rather than
+/// extrapolated beyond it.
 fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
@@ -658,7 +658,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         .as_array()?
         .iter()
         .find(|record| {
-            record.get("tier").and_then(Value::as_str) == Some(tier)
+            record.get("evidenceScope").and_then(Value::as_str) == Some("exact_request")
+                && record.get("tier").and_then(Value::as_str) == Some(tier)
                 && record.get("width").and_then(Value::as_u64) == Some(u64::from(width))
                 && record.get("height").and_then(Value::as_u64) == Some(u64::from(height))
         });
@@ -1637,6 +1638,7 @@ mod tests {
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
                     "evidenceRecords": [{
+                        "evidenceScope": "exact_request",
                         "tier": "q4",
                         "width": 1024,
                         "height": 1024,
@@ -2548,7 +2550,7 @@ mod tests {
     }
 
     #[test]
-    fn q8_and_bf16_768_measurements_reject_missing_composition_keys_as_invalid() {
+    fn q8_and_bf16_768_phase_fit_records_do_not_overclaim_exact_runtime_admission() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         for tier in ["q8", "bf16"] {
             assert!(matches!(
@@ -2564,9 +2566,92 @@ mod tests {
                     true,
                 ),
                 Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::Invalid,
+                    reason: gen_core::MemoryEvidenceVerdict::Missing,
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn builtin_krea_q8_and_bf16_slopes_are_fitted_from_same_tier_samples() {
+        let manifest = builtin_krea_turbo_manifest();
+        let turbo_fit = &manifest["candle"]["turboFit"];
+        let samples = [
+            ("q8", "threeStage", MemoryStrategy::StagedResidency),
+            ("q8", "tiledVae", MemoryStrategy::BoundedDecode),
+            ("q8", "chunkedAttention", MemoryStrategy::BoundedAttention),
+            (
+                "q8",
+                "streamedBlocks",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            ("bf16", "threeStage", MemoryStrategy::StagedResidency),
+            ("bf16", "tiledVae", MemoryStrategy::BoundedDecode),
+            ("bf16", "chunkedAttention", MemoryStrategy::BoundedAttention),
+            (
+                "bf16",
+                "streamedBlocks",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+        ];
+        let megapixel_delta = (1024_f64.powi(2) - 768_f64.powi(2)) / 1_000_000.0;
+
+        for (tier, manifest_rung, rung) in samples {
+            let record = |edge| {
+                turbo_fit["evidenceRecords"]
+                    .as_array()
+                    .expect("evidence records")
+                    .iter()
+                    .find(|record| {
+                        record["tier"] == tier
+                            && record["width"] == edge
+                            && record["height"] == edge
+                    })
+                    .expect("same-tier geometry record")
+            };
+            let measured_phase = |record: &Value, phase| {
+                record["observedPhasesGb"][manifest_rung][phase]
+                    .as_f64()
+                    .expect("machine-readable measured phase")
+            };
+            let measured_768 = record(768);
+            let measured_1024 = record(1024);
+            let predicted_768 = krea_rung_phase_peaks(&manifest, tier, rung, 768, 768)
+                .expect("768² fitted phase vector");
+            let predicted_1024 = krea_rung_phase_peaks(&manifest, tier, rung, 1024, 1024)
+                .expect("1024² fitted phase vector");
+            for (phase, lower_prediction, upper_prediction, lower_measured, upper_measured) in [
+                (
+                    "text",
+                    predicted_768.text_gb,
+                    predicted_1024.text_gb,
+                    measured_phase(measured_768, "text"),
+                    measured_phase(measured_1024, "text"),
+                ),
+                (
+                    "denoise",
+                    predicted_768.denoise_gb,
+                    predicted_1024.denoise_gb,
+                    measured_phase(measured_768, "denoise"),
+                    measured_phase(measured_1024, "denoise"),
+                ),
+                (
+                    "decode",
+                    predicted_768.decode_gb,
+                    predicted_1024.decode_gb,
+                    measured_phase(measured_768, "decode"),
+                    measured_phase(measured_1024, "decode"),
+                ),
+            ] {
+                let fitted_slope = (upper_prediction - lower_prediction) / megapixel_delta;
+                let measured_slope = ((upper_measured - lower_measured) / megapixel_delta).max(0.0);
+                assert!(
+                    fitted_slope + 1e-9 >= measured_slope && fitted_slope < measured_slope + 0.02,
+                    "{tier} {rung:?} {phase}: slope {fitted_slope:.4} must be the conservative \
+                     two-decimal fit of this tier's measured {measured_slope:.4}, not another \
+                     tier's coefficient"
+                );
+            }
         }
     }
 

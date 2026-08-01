@@ -370,6 +370,48 @@ test("Krea bounded-decode and bounded-attention matrix identities match their cu
     ),
     "all six catalog cells must publish the exact cumulative identity while remaining runtime-unverified",
   );
+
+  const characterized = matrix.cells.filter(
+    (cell) =>
+      cell.modelId === "krea_2_turbo" &&
+      cell.backend === "candle" &&
+      cell.mode === "text_to_image" &&
+      cell.overlay === "none" &&
+      ["q4", "q8", "bf16"].includes(cell.tier) &&
+      [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ].includes(cell.rung),
+  );
+  assert.equal(characterized.length, 15);
+  assert.ok(
+    characterized.every(
+      (cell) =>
+        cell.memoryCharacterization.status === "fitted" &&
+        cell.memoryCharacterization.coveredPixelBound === 1024 * 1024 &&
+        cell.memoryCharacterization.measuredGeometries.length === 2 &&
+        cell.memoryCharacterization.measuredGeometries.includes("768x768") &&
+        cell.memoryCharacterization.measuredGeometries.includes("1024x1024"),
+    ),
+    "all three Krea CUDA tiers and five measured rungs must publish two-point fitted characterization",
+  );
+  for (const cell of characterized.filter((candidate) => ["q8", "bf16"].includes(candidate.tier))) {
+    const lower = cell.evidence.historicalVerification.find(
+      (record) => record.geometry === "768x768",
+    );
+    const upper = cell.evidence.historicalVerification.find(
+      (record) => record.geometry === "1024x1024",
+    );
+    assert.equal(lower.evidenceScope, "phase_fit_only");
+    assert.equal(lower.runtimeAdmission, false);
+    assert.equal(lower.parity, undefined);
+    assert.equal(upper.evidenceScope, "exact_request");
+    assert.equal(upper.runtimeAdmission, true);
+    assert.equal(upper.parity.result, "passed");
+  }
 });
 
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
@@ -1602,10 +1644,10 @@ test("a second geometry is what makes a curve determinable (sc-16060)", async ()
   );
 });
 
-test("the shipped manifest curves report their own under-determination (sc-16060)", async () => {
-  // Krea's q8 and bf16 carry ONE geometry point each while `vram_gate.rs#krea_phase_curve` documents
-  // its slopes as "fitted from real renders at multiple resolutions". The artifact now says which
-  // tiers that sentence is true of, rather than leaving a reader to trust the comment.
+test("the shipped Krea tiers report their recovered two-point fits (sc-16514)", async () => {
+  // SC-16514 recovered the 768² q8/bf16 captures into the manifest records, so the generated claim
+  // must promote all three tier curves together. Dropping either recovered record mutates this back
+  // to `point` through the general one-vs-two-point test above.
   const matrix = await buildMatrix();
   const status = (tier) =>
     matrix.cells.find(
@@ -1613,8 +1655,8 @@ test("the shipped manifest curves report their own under-determination (sc-16060
     ).memoryCharacterization.status;
 
   assert.equal(status("q4"), "fitted", "q4 carries 768x768 and 1024x1024");
-  assert.equal(status("q8"), "point", "q8 carries one geometry point");
-  assert.equal(status("bf16"), "point", "bf16 carries one geometry point");
+  assert.equal(status("q8"), "fitted", "q8 carries 768x768 and 1024x1024");
+  assert.equal(status("bf16"), "fitted", "bf16 carries 768x768 and 1024x1024");
 });
 
 test("promotion is available only to an implemented cell (sc-16060)", async () => {
