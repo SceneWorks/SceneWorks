@@ -1708,12 +1708,12 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     shippedCell.state,
     "Implemented/unverified",
-    "the shipped Krea records are historical even though current Qwen evidence is promoted",
+    "the shipped Krea records are historical",
   );
   assert.equal(
     shipped.cells.filter((cell) => cell.state === "Verified").length,
-    5,
-    "the five exact current Qwen ladder selectors are promoted",
+    0,
+    "the Qwen captures become historical when the inference runtime pin advances",
   );
 
   // MUTATION: the same two records, re-stamped onto the current pin. If the producer were absent —
