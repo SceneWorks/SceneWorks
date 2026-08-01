@@ -739,6 +739,14 @@
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/ModelManagerScreen.jsx", "anchor": "blanketFloorGb(model, \"mlx\")" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
+              "measuredSiblingActiveDiskFraction": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1,
+                "x-sceneworks-contract": "advisory",
+                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "measuredSiblingActiveDiskFraction" }],
+                "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The web estimator anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
+              },
               "calibrations": {
                 "type": "array",
                 "minItems": 1,

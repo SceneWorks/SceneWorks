@@ -1,12 +1,12 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:832358e1a6c5a3719df83722155772c323af75d3327602dcc76f8c4f327c0dd1",
+    "sceneWorksRevision": "source-tree:9327502682d3d2e44acaa61b0767e7bb7f03e190f937a7f0cc9c9d7610f4d169",
     "inferenceRevision": "b23ffc1adf8711ab3e9a2d7215a8ff860f2a750d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2e3f76066b23266d1d11513b6305b6ad304877d05c62321f118a41213a3fe409"
+        "sha256": "e8886ec9f6fbf8b107f0cf18cba7512eae55e81464c5e1ddf0e019258370d491"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
