@@ -2018,9 +2018,13 @@ mod tests {
                 .expect("system clock")
                 .as_nanos()
         );
-        let token = "sc-10378-secret-service-round-trip";
+        // Derived from the per-run account rather than spelled out as a literal:
+        // a string literal handed to `set_password` reads as a checked-in
+        // credential to secret scanners, and this payload only ever gets written
+        // to the local Secret Service and read back.
+        let token = format!("round-trip-payload-for-{account}");
         let entry = keyring::Entry::new(KEYRING_SERVICE, &account).expect("create entry");
-        entry.set_password(token).expect("save to Secret Service");
+        entry.set_password(&token).expect("save to Secret Service");
 
         // A newly constructed Entry mirrors a later app process resolving the same
         // service/account pair instead of reading an in-memory value.
