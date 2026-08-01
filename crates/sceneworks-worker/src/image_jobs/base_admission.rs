@@ -137,33 +137,12 @@ fn has_tier_peak_row(entry: &JsonObject, tier: &str) -> bool {
     numeric(tier).is_some() || (tier == NVFP4_TIER && numeric("q8").is_some())
 }
 
-fn builtin_model_entry(id: &str) -> Option<&'static JsonObject> {
-    static MANIFEST: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    let manifest = MANIFEST.get_or_init(|| {
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc is embedded");
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-            .expect("embedded builtin.models.jsonc parses")
-    });
-    manifest
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(id))?
-        .as_object()
-}
-
 /// Gate one built-in bespoke route on the catalog peak for the tier that its resolved
 /// directory actually names. Returns the residency policy the caller must carry into
 /// its `LoadSpec`; direct resident-only providers pass `sequential_capable = false` and
-/// ignore the returned (necessarily resident) value. An `Alias` records the canonical
-/// builtin whose identical base weights supply an alias route's evidence.
+/// ignore the returned (necessarily resident) value.
 pub(super) enum CandleBaseEvidence {
     Catalog,
-    Alias(&'static str),
     Ungateable(&'static str),
 }
 
@@ -177,12 +156,6 @@ pub(super) async fn admit_candle_base(
     sequential_capable: bool,
 ) -> WorkerResult<gen_core::OffloadPolicy> {
     let (evidence_entry, unmeasured_reason) = match evidence {
-        CandleBaseEvidence::Alias(id) => (builtin_model_entry(id).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "{model} cannot run through the {lane} lane because its catalog evidence alias {id} is missing",
-                model = request.model,
-            ))
-        })?, None),
         CandleBaseEvidence::Catalog => (&request.model_manifest_entry, None),
         CandleBaseEvidence::Ungateable(reason) => (&request.model_manifest_entry, Some(reason)),
     };

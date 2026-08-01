@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f0b8ddae10c52c36017c44086aed919979ae0d4ac4064c2e1741f727c2d7e113",
-    "matrixRevision": "source-tree:e165aed8a3ac6773534419305ec9c66711ec932cc764de131570a466c2c7bb1b",
+    "sceneWorksRevision": "source-tree:30a2228f3f98e272732f8f4e4bdbbcd9d3383e6ae41a2a3c612b1da6401f36ee",
+    "matrixRevision": "source-tree:7010c84910709b69f92246b31734f2bd0928ccfb93543ed9a28d7aeaf6632106",
     "inferenceRevision": "09aefe3afb125af3f0736d55a438c412d64ec4c2",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "6fe5eddec722e6dab59b7197efc501949e6b009ff9bf39aff63d23c6a300299e"
+        "sha256": "c0378df2509f7d8fc8ae09791c7f42bbf373e6d06b44862dcbf8cdca4d10ba5e"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "e8886ec9f6fbf8b107f0cf18cba7512eae55e81464c5e1ddf0e019258370d491"
+        "sha256": "3cc87208ff5d2757f8ba93f782b993eab18ec824db5661f168fd7f826617bfc3"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "33710ea1fb3a1584ff861cb5dd360cc496ba3f9aee424a8cd628551aa6dbc8e9"
+        "sha256": "951065e084b1777d3fa78aae0b99e0c62bfe2d2356981ab041d063af8ad24786"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -370,8 +370,8 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2502,
-      "Missing": 4852,
+      "Implemented/unverified": 2610,
+      "Missing": 4744,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -379,9 +379,9 @@
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 730,
+      "Implemented/unverified @ candle": 838,
       "Implemented/unverified @ mlx": 1772,
-      "Missing @ candle": 2004,
+      "Missing @ candle": 1896,
       "Missing @ mlx": 2848,
       "Structurally N/A @ candle": 6
     },

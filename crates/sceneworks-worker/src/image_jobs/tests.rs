@@ -8442,7 +8442,7 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
         (
             CandleImageRoute::ZimageEdit,
             "z_image_turbo",
-            "candle_zimage_edit",
+            "candle_z_image",
         ),
         (CandleImageRoute::KreaEdit, "krea_2_raw", "candle_krea_edit"),
         (CandleImageRoute::KreaTurboOnRaw, "krea_2_raw", "mlx_krea"),
@@ -14685,7 +14685,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // This list remains only the overlay classification. The edit / imported / ComfyUI / Bernini routes
     // that load a single base are ALSO enumerated in BASE_ADMITTED below: built-in tiered models use the
     // catalog per-tier gate when evidenced (or a pinned, reasoned exception), while user-owned
-    // checkpoints use the explicitly weaker weights floor.
+    // checkpoints use the explicitly weaker weights floor. Z-Image Edit is the exception: its catalog
+    // alias enters the generic provider path, whose shared selector owns base admission.
     // Keeping the classifications separate prevents an overlay floor from being substituted for catalog
     // base evidence while ensuring "not conditioning" can no longer disguise an ungated base lane.
     const NOT_CONDITIONING: &[&str] = &[
@@ -14710,7 +14711,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // The two reject arms error before any generation, so they never allocate.
         "PoseReject",
         "PoseControlBaseMissing",
-        // The generic arm — the one route that DOES reach the shared `generate_candle_stream` gate.
+        // Generic provider arms — both reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
     ];
 
@@ -14735,12 +14736,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "qwen_edit_candle.rs",
             include_str!("qwen_edit_candle.rs"),
             "crate::vram_gate::load_plan(",
-        ),
-        (
-            "ZimageEdit",
-            "zimage_edit_candle.rs",
-            include_str!("zimage_edit_candle.rs"),
-            "admit_candle_base(",
         ),
         (
             "KreaEdit",

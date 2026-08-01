@@ -195,8 +195,20 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "Same five-stack DiT as the MLX twin — 2 noise refiners, 2 context refiners, 30 unified layers, plus the control route's 15-block control stack and 2-block control refiner; the Candle port has no block-window path.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "z_image",
+            "z_image_edit",
+            "z_image_turbo"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "Candle now windows the 30-block packed or dense main DiT through the shared block-window primitive; the 2-block refiners remain resident. The bespoke control providers declare their constrained rungs Missing rather than inheriting the plain provider contract, and adapter-bearing loads keep lower rungs but do not advertise streamed blocks.",
           "blockStacks": [
             {
               "name": "noise_refiner",
@@ -234,16 +246,16 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
-              "reason": "The Candle Z-Image provider declares no memory_strategy_contract and carries no streamed-block loader, so rung 4 has no implementation to select."
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+              "reason": "The CUDA provider contract publishes the full ladder, exact tile/chunk/window candidate ranges, calibration identity, explicit PiD refusal, adapter exclusion for rung 4, and separate Missing contracts for the bespoke control routes."
             },
             {
-              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
-              "reason": "Candle implements the shared BlockWindowBackend adapter, but the Candle Z-Image provider has no streamed-block loader wired to candle_gen::block_window::run_windowed, so this family cannot drive it."
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/packed_dit.rs",
+              "reason": "The streamed packed DiT retains its host-backed transformer view, materializes one whole main-layer window, and drives candle_gen::block_window::run_windowed with synchronized release and ragged-final-window coverage."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/control_transformer.rs",
-              "reason": "The control route adds `control_layers: Vec<ZImageControlBlock>` (15 blocks at base places 0,2,...,28) and arms rung 4 for it with the `control_layers` prefix, so the streamer covers the control stack too. The 2-block `control_noise_refiner` is deliberately left resident: at ~97 MiB/block it is 2 blocks against the base stack's 30."
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/packed_tier_validate.rs",
+              "reason": "The ignored CUDA real-weight conformance exercises the representative Base Q4 provider across all five rungs with fixed seed and exact image equality; the packed-DiT production unit sweep covers every published transformer-window candidate, including a ragged tail."
             }
           ],
           "requestPeak": {

@@ -1053,10 +1053,27 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
  * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
  * reporting rung 4 as unreachable.
  */
-function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines }) {
+function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
   return backend === "mlx"
     ? sequentialEngines.has(route.engine)
-    : model.candle?.sequentialPeakGb !== undefined || model.candle?.turboFit !== undefined;
+    : declaredModel.candle?.supportsSequentialOffload === true ||
+        declaredModel.candle?.sequentialPeakGb !== undefined ||
+        declaredModel.candle?.turboFit !== undefined;
+}
+
+function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
+  if (overlay === "none") return true;
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
+  const capabilities = Object.values(declaredModel.candle?.memoryStrategyCapabilities ?? {});
+  if (!capabilities.length) return true;
+  return capabilities.some((capability) => (capability.overlays ?? ["none"]).includes(overlay));
 }
 
 function declaredEvidence(model, backend, tier) {
@@ -1064,6 +1081,8 @@ function declaredEvidence(model, backend, tier) {
   const keys = [
     "minMemoryGb",
     "vramGbByTier",
+    "supportsSequentialOffload",
+    "memoryStrategyCapabilities",
     "sequentialPeakGb",
     "turboFit",
     "measured",
@@ -1087,6 +1106,7 @@ function strategyStatus({
   mode,
   overlay,
   rung4Survey,
+  manifestById,
 }) {
   const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
@@ -1113,6 +1133,18 @@ function strategyStatus({
       calibrationFingerprint: fingerprints[0],
     };
   }
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
+  const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
+  if (staticCapability?.overlays?.includes(overlay)) {
+    return {
+      state: "Implemented/unverified",
+      source: `config/manifests/builtin.models.jsonc#models/${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,
+      parameters: staticCapability.parameters,
+    };
+  }
   if (
     rung === "resident" &&
     !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image")
@@ -1126,7 +1158,9 @@ function strategyStatus({
   if (
     rung === "staged_residency" &&
     !(model.id === "krea_2_turbo" && backend === "candle") &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines })
+    (backend !== "candle" ||
+      staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
+    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
   ) {
     return {
       state: "Implemented/unverified",
@@ -1221,7 +1255,7 @@ function strategyStatus({
       (verdict.implementedModes ?? [mode]).includes(mode) &&
       (verdict.implementedTiers ?? [tier]).includes(tier) &&
       (verdict.implementedOverlays ?? [overlay]).includes(overlay) &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines });
+      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
     if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",
@@ -1497,6 +1531,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 mode,
                 overlay,
                 rung4Survey,
+                manifestById,
               });
               const fingerprint =
                 status.state === "Missing"

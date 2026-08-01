@@ -507,13 +507,14 @@ const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
-    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Bespoke
-    /// edit, IP-adapter, control, ComfyUI, PuLID and Bernini lanes intentionally carry no user
-    /// adapter seam and therefore must never claim those resources in exported metadata.
+    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Z-Image
+    /// edit is the registered Turbo alias and therefore participates; the remaining bespoke edit,
+    /// IP-adapter, control, ComfyUI, PuLID and Bernini lanes intentionally do not.
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
             | CandleImageRoute::QwenEdit
+            | CandleImageRoute::ZimageEdit
             | CandleImageRoute::MageEdit
             | CandleImageRoute::KreaEdit
             | CandleImageRoute::KreaTurboOnRaw
@@ -557,7 +558,7 @@ impl CandleImageRoute {
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
-            CandleImageRoute::ZimageEdit => zimage_edit_candle::ZIMAGE_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::ZimageEdit => candle_adapter_label(&request.model),
             CandleImageRoute::KreaEdit => krea_edit_candle::KREA_EDIT_CANDLE_ENGINE,
             CandleImageRoute::KreaTurboOnRaw | CandleImageRoute::KreaMultiPhase => {
                 mlx_model(&request.model)
@@ -4881,6 +4882,54 @@ fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
     }
 }
 
+/// True when an Image-Edit source should be fitted to the requested output geometry before it is
+/// handed to an img2img provider. This lives in the cross-backend base lane because both the MLX
+/// edit routes and the Candle Z-Image alias consume it.
+fn should_fit_edit_source(request: &ImageRequest) -> bool {
+    let has_source = request
+        .source_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    let no_reference = !request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
+    request.mode == "edit_image" && has_source && no_reference && request.fit_mode != "stretch"
+}
+
+/// Resolve the Z-Image Turbo provider's shared img2img init. Both backends map `z_image_edit` to
+/// the registered `z_image_turbo` generator, so this resolver must live in the cross-backend lane.
+fn resolve_zimage_edit_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    if request.mode != "edit_image" {
+        return Ok(None);
+    }
+    let Some(asset_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let image = if should_fit_edit_source(request) {
+        fit_engine_image(source, request.width, request.height, &request.fit_mode)?
+    } else {
+        source
+    };
+    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0);
+    Ok(Some((image, strength)))
+}
+
 /// Per-family reference conditioning for the generic MLX lane (`generate_stream`), resolved once
 /// (constant across the generation set). Bundles the four values the family dispatch produces so the
 /// caller does one `resolve_generic_lane_conditioning(..)` call instead of the inline 5-way match —
@@ -5637,7 +5686,7 @@ fn is_candle_engine(model: &str) -> bool {
 fn candle_adapter_label(model: &str) -> &'static str {
     match model {
         // Base z_image (sc-8679) shares the candle z-image family label with Turbo.
-        "z_image_turbo" | "z_image" => "candle_z_image",
+        "z_image_turbo" | "z_image" | "z_image_edit" => "candle_z_image",
         "flux_schnell" | "flux_dev" => "candle_flux",
         // The base klein + its `_kv` / `_true_v2` weight variants (sc-7459) + dev all run candle FLUX.2.
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
@@ -5776,6 +5825,17 @@ fn apply_request_scoped_candle_residency(
     if use_sequential {
         memory.get_or_insert_with(Default::default).stage_residency = true;
     }
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn rejects_unverified_zimage_optimized_fallback(
+    zimage_memory_contract_route: bool,
+    optimized_strategy_selected: bool,
+) -> bool {
+    zimage_memory_contract_route && !optimized_strategy_selected
 }
 
 /// Caller-visible explanation for the one Krea memory decision whose latency would otherwise look
@@ -5939,6 +5999,13 @@ mod candle_request_residency_tests {
         let composed = composed.expect("existing rung memory is preserved");
         assert!(composed.stage_residency);
         assert!(composed.tile_vae_decode);
+    }
+
+    #[test]
+    fn zimage_never_falls_back_to_an_unverified_optimized_strategy() {
+        assert!(rejects_unverified_zimage_optimized_fallback(true, false));
+        assert!(!rejects_unverified_zimage_optimized_fallback(true, true));
+        assert!(!rejects_unverified_zimage_optimized_fallback(false, false));
     }
 
     #[test]
@@ -6715,6 +6782,10 @@ async fn generate_candle_stream(
             Some((source, strength, mask)) => (Some((source, strength)), mask),
             None => (None, None),
         }
+    } else if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
+        // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
+        (resolve_zimage_edit_init(request, settings, project_path)?, None)
     } else {
         (None, None)
     };
@@ -7122,7 +7193,48 @@ async fn generate_candle_stream(
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
+    let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
     let mut adapted_peak_gb: Option<f64> = None;
+    let zimage_memory_contract_route = matches!(engine_id, "z_image" | "z_image_turbo");
+    // Z-Image uses the same worker-owned selector as every adopting provider. Static
+    // Implemented/unverified declarations do not authorize optimized execution: this bridge always
+    // submits the conservative resident estimate and adds deeper candidates only when an exact
+    // authoritative record exists in the packaged evidence bundle.
+    let mut zimage_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None);
+    if let Some(pid) = pid_weights.as_ref() {
+        zimage_contract_spec = zimage_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    let zimage_memory = crate::candle_memory_strategy::evaluate_z_image(
+        engine_id,
+        &request.model,
+        &zimage_contract_spec,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        (adapter_count > 0).then_some("lora"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        edit_reference.is_some() || img2img_reference.is_some(),
+        use_pid,
+        hires_fix.is_some(),
+        budget,
+        needed,
+        if reclaimable_gb > 0.0 {
+            gen_core::MemoryCacheState::Warm
+        } else {
+            gen_core::MemoryCacheState::Cold
+        },
+    )?;
+    if let Some(evaluation) = zimage_memory {
+        memory_strategy_selection = Some(evaluation.context.selection);
+        generation_memory = evaluation.memory;
+        adapted_peak_gb = Some(evaluation.predicted_peak_gb);
+        selected_memory_strategy_context = Some(evaluation.context);
+    }
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
     // unverified path; only then may the established gate remain as provider-safe fallback.
@@ -7363,7 +7475,24 @@ async fn generate_candle_stream(
                 } else {
                     false
                 };
-                if !krea_selected {
+                let zimage_selected = memory_strategy_selection
+                    .is_some_and(|selection| selection.strategy.is_optimized());
+                if rejects_unverified_zimage_optimized_fallback(
+                    zimage_memory_contract_route,
+                    zimage_selected,
+                ) {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{needed} GB of resident VRAM, but GPU \
+                         {gpu} has ~{available} GB available and no exact verified Z-Image memory \
+                         strategy fits this request. Install or verify matching calibration evidence, \
+                         select a smaller tier or resolution, or use a GPU with more VRAM.",
+                        model = request.model,
+                        needed = needed_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
+                if !krea_selected && !zimage_selected {
                     if let Some(seq_gb) =
                         crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
                     {
@@ -7461,7 +7590,7 @@ async fn generate_candle_stream(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let memory_strategy_context = memory_strategy_selection.and_then(|selection| {
+    let memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
         let budget = budget?;
         let predicted_peak_gb = adapted_peak_gb?;
         let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
@@ -7517,7 +7646,7 @@ async fn generate_candle_stream(
             evidence_revision:
                 "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
         })
-    });
+    }));
     apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if use_sequential {

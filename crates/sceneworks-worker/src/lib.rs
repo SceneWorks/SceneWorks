@@ -134,6 +134,8 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_memory_strategy;
 mod fit_gate;
 pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
