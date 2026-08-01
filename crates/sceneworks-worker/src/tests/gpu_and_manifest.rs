@@ -1708,6 +1708,96 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-16093: every built-in model that a bespoke single-base Candle route can load either carries a
+/// live per-tier peak row or is pinned here as an explicit unmeasured exception. This is the data half
+/// of the source guard in `image_jobs/tests.rs`: deleting a handler call fails there; deleting a row
+/// that makes an evidenced call effective fails here. Adding evidence to an exception also fails so
+/// its call site cannot quietly keep bypassing newly available evidence.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
+    const EVIDENCED: &[&str] = &[
+        "flux2_klein_9b",
+        "flux2_dev",
+        "z_image_turbo",
+        "krea_2_raw",
+        "krea_2_turbo",
+    ];
+    const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
+        (
+            "sdxl",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "realvisxl",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "illustrious_xl_v1",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "illustrious_xl_v2",
+            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
+            include_str!("../image_jobs/sdxl_edit_candle.rs"),
+        ),
+        (
+            "flux2_klein_9b_true_v2",
+            "the local True V2 converted fine-tune has no CUDA calibration row",
+            include_str!("../image_jobs/flux2_edit_candle.rs"),
+        ),
+        (
+            "bernini_image",
+            "Bernini still-image tiers have not been CUDA-calibrated",
+            include_str!("../image_jobs/bernini.rs"),
+        ),
+    ];
+
+    let assert_resident_rows = |id: &str| {
+        let model = builtin_model_entry(id);
+        let tiers = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{id}: bespoke Candle base route requires vramGbByTier"));
+        assert!(!tiers.is_empty(), "{id}: vramGbByTier must not be empty");
+        let default = default_tier_key(&model);
+        assert!(
+            tiers.get(default).and_then(Value::as_f64).is_some(),
+            "{id}: resolved/default tier {default} has no numeric resident peak"
+        );
+        tiers.clone()
+    };
+
+    for id in EVIDENCED {
+        assert_resident_rows(id);
+    }
+    assert!(
+        include_str!("../image_jobs/zimage_edit_candle.rs")
+            .contains("CandleBaseEvidence::Alias(\"z_image_turbo\")"),
+        "z_image_edit loads the identical Turbo base and must name z_image_turbo as its evidence alias"
+    );
+    for (id, reason, source) in EXPLICITLY_UNMEASURED {
+        let model = builtin_model_entry(id);
+        let resident = model
+            .get("candle")
+            .and_then(|candle| candle.get("vramGbByTier"))
+            .and_then(Value::as_object);
+        assert!(
+            resident.is_none_or(serde_json::Map::is_empty),
+            "{id}: now has catalog rows; remove its explicit unmeasured reason from the route and this guard"
+        );
+        assert!(!reason.trim().is_empty(), "{id}: unmeasured exception needs a recorded reason");
+        assert!(
+            source.contains(reason),
+            "{id}: its unmeasured reason must remain recorded at the live route call site"
+        );
+    }
+}
+
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
 /// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
 /// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),

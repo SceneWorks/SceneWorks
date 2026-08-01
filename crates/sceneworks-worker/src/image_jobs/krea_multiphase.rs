@@ -465,6 +465,19 @@ async fn generate_krea_multiphase_stream(
     // per `request.loras` entry, in order, so `LoadSpec::adapters[i]` is `request.loras[i]` and a
     // phase's lora `index` selects it directly.
     let adapters = resolve_adapters(request, settings)?;
+    let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
+        total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
+    });
+    let offload_policy = admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea multi-phase",
+        CandleBaseEvidence::Catalog,
+        adapter_resident_bytes,
+        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+    )
+    .await?;
     let repo = model_repo(request, &raw_model);
     let adapter_label = raw_model.adapter_label();
     let text_style_gain = resolve_text_style_gain(request);
@@ -486,7 +499,7 @@ async fn generate_krea_multiphase_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    let spec = load_spec(weights_dir, quant, adapters, None).with_offload_policy(offload_policy);
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),

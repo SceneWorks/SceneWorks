@@ -446,6 +446,18 @@ async fn generate_krea_imported_stream(
     })?;
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let text_encoder = base_dir.join("text_encoder");
+        let vae = base_dir.join("vae");
+        admit_candle_base_floor(
+            &request.model,
+            "Krea imported",
+            settings,
+            &[dit.as_path(), text_encoder.as_path(), vae.as_path()],
+        )
+        .await?;
+    }
 
     let is_edit = request.mode == "edit_image";
 

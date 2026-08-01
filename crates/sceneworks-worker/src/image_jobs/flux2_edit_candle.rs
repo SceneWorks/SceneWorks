@@ -1,10 +1,11 @@
 use super::{
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
-    model_repo, non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
-    resolve_weights_dir, start_gen_stream, ApiClient, Flux2Edit, Flux2EditPaths, Flux2EditRequest,
-    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value,
-    WorkerError, WorkerResult,
+    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
+    mlx_model, model_repo, non_empty, pid_effective_dims, pid_output_tier,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_quant, resolve_seed, resolve_weights_dir, start_gen_stream, ApiClient,
+    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
+    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -244,6 +245,22 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             "FLUX.2 edit requires edit_image mode + a source image".to_owned(),
         ));
     }
+    admit_candle_base(
+        request,
+        settings,
+        &flux2_base,
+        "FLUX.2 edit",
+        if request.model == "flux2_klein_9b_true_v2" {
+            CandleBaseEvidence::Ungateable(
+                "the local True V2 converted fine-tune has no CUDA calibration row",
+            )
+        } else {
+            CandleBaseEvidence::Catalog
+        },
+        0,
+        false,
+    )
+    .await?;
     let is_dev = is_flux2_edit_candle_dev(&request.model);
     // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
     // references are loaded/fit so a 2K tier sizes the effective base and the edit references land at THAT
