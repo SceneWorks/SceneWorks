@@ -2174,6 +2174,18 @@ mod tests {
                     record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
                 })
                 .expect("1024 evidence record");
+            for manifest_rung in [
+                "threeStage",
+                "tiledVae",
+                "chunkedAttention",
+                "streamedBlocks",
+            ] {
+                assert_eq!(
+                    turbo_fit["engagedCompositions"][manifest_rung],
+                    measured["measuredCompositions"][manifest_rung],
+                    "{tier} {manifest_rung} matrix identity must match its measured composition"
+                );
+            }
             assert_eq!(
                 measured["measuredCompositions"]["tiledVae"],
                 json!(["resident", "staged_residency", "bounded_decode"])
@@ -2187,43 +2199,65 @@ mod tests {
                     "bounded_attention"
                 ])
             );
-            assert!(
-                provider_contract.engages(
-                    gen_core::MemoryStrategy::BoundedDecode,
-                    gen_core::MemoryStrategy::StagedResidency,
-                ),
-                "the provider contract must preserve the staged-residency coupling in its measured row"
+        }
+
+        use gen_core::MemoryStrategy::{
+            BoundedAttention, BoundedDecode, BoundedTransformerResidency, Resident, StagedResidency,
+        };
+        for (strategy, expected) in [
+            (Resident, vec![Resident]),
+            (StagedResidency, vec![Resident, StagedResidency]),
+            (
+                BoundedDecode,
+                vec![Resident, StagedResidency, BoundedDecode],
+            ),
+            (
+                BoundedAttention,
+                vec![Resident, StagedResidency, BoundedDecode, BoundedAttention],
+            ),
+            (
+                BoundedTransformerResidency,
+                vec![
+                    Resident,
+                    StagedResidency,
+                    BoundedDecode,
+                    BoundedAttention,
+                    BoundedTransformerResidency,
+                ],
+            ),
+        ] {
+            assert_eq!(
+                provider_contract.engaged_composition(strategy),
+                expected,
+                "provider composition must match the measured and published ladder for {strategy:?}"
             );
         }
 
-        for tier in ["q4", "q8", "bf16"] {
-            let tiled_phases =
-                krea_rung_phase_peaks(&manifest, tier, KreaTurboRung::TiledVae, 1024, 1024)
-                    .expect("tiled-VAE phase peaks");
-            // This test exercises composition identity, not the f64-to-byte rounding boundary.
-            let tiled_required = tiled_phases.peak_gb() + HEADROOM_GB + 0.01;
-            let fit = krea_turbo_fit(
+        for (tier, probe_rung) in [
+            ("q4", KreaTurboRung::TiledVae),
+            ("q8", KreaTurboRung::ChunkedAttention),
+            ("bf16", KreaTurboRung::ChunkedAttention),
+        ] {
+            let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024)
+                .expect("probed rung phase peaks");
+            let required = phases.peak_gb() + HEADROOM_GB + 0.01;
+            match krea_turbo_fit(
                 &manifest,
                 tier,
                 1024,
                 1024,
                 Some(VramBudget {
-                    free_gb: tiled_required,
-                    total_gb: tiled_required,
+                    free_gb: required,
+                    total_gb: required,
                 }),
                 true,
-            );
-            let expected_rung = if tier == "q4" {
-                KreaTurboRung::TiledVae
-            } else {
-                // Q8 and BF16 measured no peak reduction from tiling at this geometry, so the
-                // cheaper three-stage rung must win even though the tiled row is now eligible.
-                KreaTurboRung::ThreeStage
-            };
-            assert!(
-                matches!(fit, Some(KreaTurboFit::Fits { rung, .. }) if rung == expected_rung),
-                "{tier}: expected {expected_rung:?} fit, got {fit:?}"
-            );
+            ) {
+                Some(KreaTurboFit::Fits { rung, .. }) => assert_eq!(
+                    rung, probe_rung,
+                    "{tier} must select the least-cost useful rung at its measured boundary"
+                ),
+                other => panic!("{tier} expected {probe_rung:?}, got {other:?}"),
+            }
 
             let mut no_compatible_deeper_row = manifest.clone();
             let record = no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
@@ -2234,12 +2268,15 @@ mod tests {
                     record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
                 })
                 .expect("1024 evidence record");
-            record["measuredCompositions"]["streamedBlocks"] =
-                json!(["resident", "bounded_transformer_residency"]);
-            let streamed_phases =
-                krea_rung_phase_peaks(&manifest, tier, KreaTurboRung::StreamedBlocks, 1024, 1024)
-                    .expect("streamed-blocks phase peaks");
-            let streamed_required = streamed_phases.peak_gb() + HEADROOM_GB + 0.01;
+            record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
+            record["measuredCompositions"]["chunkedAttention"] =
+                json!(["resident", "bounded_decode", "bounded_attention"]);
+            record["measuredCompositions"]["streamedBlocks"] = json!([
+                "resident",
+                "bounded_decode",
+                "bounded_attention",
+                "bounded_transformer_residency"
+            ]);
             assert_eq!(
                 krea_turbo_fit(
                     &no_compatible_deeper_row,
@@ -2247,8 +2284,8 @@ mod tests {
                     1024,
                     1024,
                     Some(VramBudget {
-                        free_gb: streamed_required,
-                        total_gb: streamed_required,
+                        free_gb: required,
+                        total_gb: required,
                     }),
                     true,
                 ),

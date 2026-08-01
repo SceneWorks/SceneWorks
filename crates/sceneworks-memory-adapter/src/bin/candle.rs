@@ -3,10 +3,10 @@ compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
 use candle_gen::testkit::VramProbe;
 use runtime_cuda::gen_core::{
-    GenerationRequest, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySelection,
-    MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant,
-    TransformerComponent, WeightsSource,
+    GenerationRequest, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry,
+    MemoryMode, MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome,
+    MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
@@ -501,6 +501,54 @@ fn strategy_name(strategy: MemoryStrategy) -> &'static str {
     }
 }
 
+fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
+    match protocol::planned_rung(request)? {
+        "resident" => Ok(MemoryStrategy::Resident),
+        "staged_residency" => Ok(MemoryStrategy::StagedResidency),
+        "bounded_decode" => Ok(MemoryStrategy::BoundedDecode),
+        "bounded_attention" => Ok(MemoryStrategy::BoundedAttention),
+        "bounded_transformer_residency" => Ok(MemoryStrategy::BoundedTransformerResidency),
+        other => Err(format!("unsupported Candle fresh-reference rung {other:?}")),
+    }
+}
+
+fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
+    let strategy = planned_memory_strategy(request)?;
+    let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    Ok(MemorySelection {
+        strategy,
+        parameters: MemoryStrategyParameters {
+            decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
+            decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
+            attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
+            transformer_window_size,
+            transformer_window_component: transformer_window_size
+                .map(|_| TransformerComponent::Dit),
+        },
+        tier: MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: Some(Quant::Q4),
+            component_precision_floors: &[],
+        },
+    })
+}
+
+fn reference_phase(phase: MemoryPhase) -> protocol::ReferencePhase {
+    match phase {
+        MemoryPhase::Conditioning => protocol::ReferencePhase::Conditioning,
+        MemoryPhase::Denoise => protocol::ReferencePhase::Denoise,
+        MemoryPhase::Decode => protocol::ReferencePhase::Decode,
+    }
+}
+
+fn memory_phase(phase: protocol::ReferencePhase) -> MemoryPhase {
+    match phase {
+        protocol::ReferencePhase::Conditioning => MemoryPhase::Conditioning,
+        protocol::ReferencePhase::Denoise => MemoryPhase::Denoise,
+        protocol::ReferencePhase::Decode => MemoryPhase::Decode,
+    }
+}
+
 fn measured_strategy(
     request: &Value,
     selection: &MemorySelection,
@@ -522,6 +570,267 @@ fn measured_strategy(
     Ok(measured)
 }
 
+fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        "q4",
+        protocol::KREA_REPOSITORY,
+    )?;
+    let spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_quant(Quant::Q4)
+        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    let catalog =
+        runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
+    let contract = catalog
+        .media()
+        .memory_strategy_contract(KREA_ID, &spec)
+        .map_err(|error| format!("read {KREA_ID} memory-strategy contract: {error}"))?
+        .ok_or_else(|| format!("{KREA_ID} has no memory-strategy contract"))?;
+    let selection = planned_selection(request)?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned Krea provider rejected planned selection: {error}"))?;
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Krea provider has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes: hardware_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-16402@{}", protocol::INFERENCE_PIN),
+    };
+    let mut vram = VramProbe::start_rendered().assert_idle(1.0);
+    let load_sample = vram.phase();
+    let generator = catalog
+        .media()
+        .load(KREA_ID, &spec)
+        .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
+    vram.end_load(load_sample);
+    let mut scope = generator
+        .begin_memory_strategy_request(&context)
+        .map_err(|error| format!("begin Krea fresh-reference scope: {error}"))?
+        .ok_or_else(|| {
+            "Krea fresh-reference selection did not create a provider scope".to_owned()
+        })?;
+    let parameters = context.selection.parameters;
+    match (parameters.decode_tile_edge, parameters.decode_overlap) {
+        (Some(edge), Some(overlap)) => scope
+            .configure_decode(edge, overlap, context.geometry)
+            .map_err(|error| format!("configure Krea fresh-reference decode: {error}"))?,
+        (None, None) => {}
+        _ => return Err("Krea decode edge and overlap must be selected together".to_owned()),
+    }
+    if let Some(attention) = parameters.attention_chunk_size {
+        scope
+            .configure_attention(attention)
+            .map_err(|error| format!("configure Krea fresh-reference attention: {error}"))?;
+    }
+    if let Some(window) = parameters.transformer_window_size {
+        scope
+            .materialize_transformer_window(0, window)
+            .map_err(|error| format!("configure Krea fresh-reference transformer: {error}"))?;
+    }
+    let mut generation = GenerationRequest {
+        prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(16402),
+        // Two steps are intentional: resident Krea has no provider loading boundary between text
+        // encode and denoise. The first Step callback closes a conservative conditioning envelope;
+        // the second step then gives denoise its own measured interval before Decoding.
+        steps: Some(2),
+        ..Default::default()
+    };
+    scope
+        .configure_request(&mut generation)
+        .map_err(|error| format!("apply Krea fresh-reference strategy: {error}"))?;
+    scope
+        .enter_phase(MemoryPhase::Conditioning)
+        .map_err(|error| format!("enter Krea fresh-reference conditioning: {error}"))?;
+    let generation_sample = vram.phase();
+    let mut phase_sample = Some(vram.phase());
+    let mut phase = MemoryPhase::Conditioning;
+    let mut conditioning_peak_gb = None;
+    let mut denoise_peak_gb = None;
+    let mut decode_peak_gb = None;
+    let mut phase_error = None;
+    let result = generator.generate(&generation, &mut |progress| {
+        if phase_error.is_some() {
+            return;
+        }
+        let boundary = match progress {
+            Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer) => {
+                protocol::ReferenceBoundary::RendererLoad
+            }
+            Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
+            Progress::Decoding => protocol::ReferenceBoundary::Decoding,
+            _ => return,
+        };
+        let Some(next) = protocol::next_reference_phase(reference_phase(phase), boundary) else {
+            return;
+        };
+        let peak = phase_sample.take().map(|sample| vram.end_observed(sample));
+        match phase {
+            MemoryPhase::Conditioning => conditioning_peak_gb = peak,
+            MemoryPhase::Denoise => denoise_peak_gb = peak,
+            MemoryPhase::Decode => decode_peak_gb = peak,
+        }
+        if let Err(error) = scope.leave_phase(phase) {
+            phase_error = Some(format!("leave Krea {phase:?}: {error}"));
+            return;
+        }
+        let next = memory_phase(next);
+        if let Err(error) = scope.enter_phase(next) {
+            phase_error = Some(format!("enter Krea {next:?}: {error}"));
+            return;
+        }
+        phase = next;
+        phase_sample = Some(vram.phase());
+    });
+    if let Some(sample) = phase_sample.take() {
+        let terminal_peak_gb = vram.end_observed(sample);
+        match phase {
+            MemoryPhase::Conditioning => conditioning_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Denoise => denoise_peak_gb = Some(terminal_peak_gb),
+            MemoryPhase::Decode => decode_peak_gb = Some(terminal_peak_gb),
+        }
+    }
+    vram.end_gen(generation_sample);
+    let report = vram.report();
+    if let Some(message) = phase_error {
+        let _ = scope.finish(MemoryRunOutcome::Error {
+            message: message.clone(),
+        });
+        return Err(message);
+    }
+    match result {
+        Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) if images.len() == 1 => {}
+        Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) => {
+            return Err(format!(
+                "Krea fresh reference returned {} images",
+                images.len()
+            ));
+        }
+        Ok(_) => return Err("Krea fresh reference returned non-image output".to_owned()),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = scope.finish(MemoryRunOutcome::Error {
+                message: message.clone(),
+            });
+            return Err(format!("Krea fresh-reference generation failed: {message}"));
+        }
+    }
+    scope
+        .leave_phase(phase)
+        .map_err(|error| format!("leave Krea fresh-reference terminal phase: {error}"))?;
+    scope
+        .finish(MemoryRunOutcome::Complete)
+        .map_err(|error| format!("finish Krea fresh-reference scope: {error}"))?;
+    let conditioning_bytes =
+        decimal_gb_to_bytes(conditioning_peak_gb.ok_or_else(|| {
+            "Krea fresh reference did not expose conditioning boundary".to_owned()
+        })?);
+    let denoise_bytes = decimal_gb_to_bytes(
+        denoise_peak_gb
+            .ok_or_else(|| "Krea fresh reference did not expose denoise boundary".to_owned())?,
+    );
+    let decode_bytes = decimal_gb_to_bytes(
+        decode_peak_gb.ok_or_else(|| "Krea fresh reference did not complete decode".to_owned())?,
+    );
+    let overall_bytes = decimal_gb_to_bytes(report.peak_gb);
+    let blocker = concat!(
+        "fresh-process oracle capture measures exact per-rung memory and strategy identity for ",
+        "sc-16059; it intentionally remains gated because this run does not repeat the full ",
+        "promotion-quality, negative-mutation, and lifecycle scenario suite"
+    );
+    let mut fragment = protocol::plain_gated_fragment(
+        request,
+        KREA_PLAIN_EXECUTION_PATH,
+        protocol::PlainGatedFragment {
+            artifact: artifact(&repository, &revision),
+            sweep: protocol::reference_sweep(request, "passed")?,
+            blocker,
+            quality: json!({ "result": "not_run" }),
+            negative_mutation: Value::Null,
+            loadability: json!({
+                "result": "passed",
+                "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
+            }),
+            diagnostics: protocol::diagnostics(
+                "memory-candle-adapter:krea-five-rung-reference",
+                "executed",
+                [blocker.to_owned()],
+                [
+                    ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                    ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                    ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                    ("overallDevicePeakDelta", "bytes", overall_bytes),
+                ],
+            ),
+        },
+    )?;
+    fragment["strategy"] = strategy;
+    fragment["observedMemory"] = json!({
+        "conditioning": cuda_phase_metrics(conditioning_bytes),
+        "denoise": cuda_phase_metrics(denoise_bytes),
+        "decode": cuda_phase_metrics(decode_bytes),
+        "overall": cuda_phase_metrics(overall_bytes),
+    });
+    Ok(fragment)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     if protocol::planned(request)?
         .get("backend")
@@ -534,6 +843,13 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    let is_five_rung_reference = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .is_some_and(|fixture| fixture.starts_with("fresh-five-rung-"));
+    if is_five_rung_reference {
+        return run_five_rung_reference(request);
+    }
     let parameters = protocol::strategy_parameters(request)?;
     let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;

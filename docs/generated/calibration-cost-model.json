@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c152ffc5c2e7266b8fc1869494687cbf73afa0316480035b3faa9592057feb97",
-    "matrixRevision": "source-tree:ed53ea6eab65d347d7b616e0122060957589f63a13993f3433d447e8768ae45e",
+    "sceneWorksRevision": "source-tree:9ad6df056baf7d8e2526f62cb5a51177ce6fbb8983bbb2f089a8b8e791ae69ef",
+    "matrixRevision": "source-tree:35d9132f5e2b223a43e0e53bcb306288c82797f51abe76dd27b494376cec68f3",
     "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "a2e81c39d892a08aeb165041e2b0057cef4329f9646ae47dad1ef1519f6e8fa3"
+        "sha256": "f38e67e810d28ff8c0aaa984d5dedfd9ed466757ff4958620df5527d39a82e1d"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -15,7 +15,7 @@
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "13e1331e9d3c4a736d62b1a380f0c6d6971a02b077be6eadf2e8a9fe85118587"
+        "sha256": "a5a3a460e9bd28729e98c0a2966c34efb38e65f041a136b2ba86bc3ac2411411"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
@@ -31,11 +31,11 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "1ab8a1240c92e99886bc166f71b37fece543aeed22b68b8639fc212a568f18bf"
+        "sha256": "52fa9737bcfa93e8f752347fafbbd847e805a6fb555c77ed86d91abd129313c7"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "42837116826ed41433c2a57123c7615db49c9ed7481510ffc0ee9d339492a14b"
+        "sha256": "8ddbc193034ddf4c1a0b61818dac082e58f7df365fbc0b5fc66e1c05ec03db8d"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "43d4b52af2a33e765b3e9eb01a5ea5b3a9979d051c375978423de5394dc93a37"
+        "sha256": "f8e474f6d266d9696074fbcfe773d7ee87bc35ad5c3b10a251906c45f77d2dc9"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "2b3a3b279d461eb5b1223e34316fa378975cc731fc0f2ad3182867097d9e5134"
+        "sha256": "a190ba5498e96dfbe413a269bad53180884159b52e9bfd4fa26b5d0043739973"
       }
     }
   },
@@ -93,8 +93,8 @@
         "label": "No provider adapter covers this (entry, backend) at all",
         "blockedBy": "provider-adapter code",
         "citation": "config/memory-calibration-plan.json (the shipped plan's provider targets)",
-        "cells": 2670,
-        "mlx": 1670,
+        "cells": 2640,
+        "mlx": 1640,
         "candle": 1000
       },
       {
@@ -102,8 +102,8 @@
         "label": "An adapter exists, but it has never emitted a `complete` record",
         "blockedBy": "provider-adapter code (phase telemetry and lifecycle injection)",
         "citation": "docs/generated/memory-calibration-evidence.json (records with status `complete`, per (entry, backend)); a pair remains gated only while that set has no complete record",
-        "cells": 60,
-        "mlx": 30,
+        "cells": 90,
+        "mlx": 60,
         "candle": 30
       },
       {
@@ -123,8 +123,8 @@
           "overlay-declined"
         ],
         "description": "no-provider-adapter + overlay-declined",
-        "cells": 4420,
-        "mlx": 2770,
+        "cells": 4360,
+        "mlx": 2710,
         "candle": 1650
       },
       {
@@ -132,8 +132,8 @@
           "no-provider-adapter"
         ],
         "description": "no-provider-adapter",
-        "cells": 2670,
-        "mlx": 1670,
+        "cells": 2640,
+        "mlx": 1640,
         "candle": 1000
       },
       {
@@ -142,9 +142,18 @@
           "overlay-declined"
         ],
         "description": "adapter-gated + overlay-declined",
-        "cells": 114,
-        "mlx": 60,
+        "cells": 174,
+        "mlx": 120,
         "candle": 54
+      },
+      {
+        "blockers": [
+          "adapter-gated"
+        ],
+        "description": "adapter-gated",
+        "cells": 90,
+        "mlx": 60,
+        "candle": 30
       },
       {
         "blockers": [],
@@ -152,15 +161,6 @@
         "cells": 60,
         "mlx": 60,
         "candle": 0
-      },
-      {
-        "blockers": [
-          "adapter-gated"
-        ],
-        "description": "adapter-gated",
-        "cells": 60,
-        "mlx": 30,
-        "candle": 30
       },
       {
         "blockers": [
@@ -182,22 +182,22 @@
     "independentBlocking": [
       {
         "id": "no-provider-adapter",
-        "cellsTouched": 7090,
-        "soleBlockerCells": 2670,
-        "coBlockedCells": 4420,
-        "coBlockedShare": 0.6234,
+        "cellsTouched": 7000,
+        "soleBlockerCells": 2640,
+        "coBlockedCells": 4360,
+        "coBlockedShare": 0.6229,
         "coBlockedWith": {
-          "overlay-declined": 4420
+          "overlay-declined": 4360
         }
       },
       {
         "id": "adapter-gated",
-        "cellsTouched": 174,
-        "soleBlockerCells": 60,
-        "coBlockedCells": 114,
-        "coBlockedShare": 0.6552,
+        "cellsTouched": 264,
+        "soleBlockerCells": 90,
+        "coBlockedCells": 174,
+        "coBlockedShare": 0.6591,
         "coBlockedWith": {
-          "overlay-declined": 114
+          "overlay-declined": 174
         }
       },
       {
@@ -207,24 +207,24 @@
         "coBlockedCells": 4534,
         "coBlockedShare": 0.9934,
         "coBlockedWith": {
-          "adapter-gated": 114,
-          "no-provider-adapter": 4420
+          "adapter-gated": 174,
+          "no-provider-adapter": 4360
         }
       }
     ],
     "gateOrderSensitivity": {
       "shippedOrder": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 2670,
+        "adapter-gated": 90,
+        "no-provider-adapter": 2640,
         "no-run-needed": 6,
         "overlay-declined": 4564,
         "producible-today": 60
       },
       "adapterCoverageFirst": {
-        "adapter-gated": 60,
-        "no-provider-adapter": 7090,
+        "adapter-gated": 90,
+        "no-provider-adapter": 7000,
         "no-run-needed": 6,
-        "overlay-declined": 144,
+        "overlay-declined": 204,
         "producible-today": 60
       },
       "note": "The shipped order charges `overlay-declined` before `no-provider-adapter`. Both orders partition the matrix exactly; they differ only in which gate is credited for the cells that both block. The reordered column is the honest denominator for 'how much does overlay support move'."
@@ -239,8 +239,8 @@
       "overlayChargedByFirstMatch": 4564,
       "overlayAlsoBlockedByAdapterCoverage": 4534,
       "overlayIndependentlyBlocking": 30,
-      "overlayBindingAfterAdapterCoverage": 144,
-      "finding": "`overlay-declined` is charged 4564 cells by the first-match partition, but it is the SOLE blocker on 30 of them. 4420 of them (96.8%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 114 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 144 while `no-provider-adapter` rises to 7090. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2670 cells and it touches 7090. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 144 cells, not 4564."
+      "overlayBindingAfterAdapterCoverage": 204,
+      "finding": "`overlay-declined` is charged 4564 cells by the first-match partition, but it is the SOLE blocker on 30 of them. 4360 of them (95.5%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 174 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 204 while `no-provider-adapter` rises to 7000. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 2640 cells and it touches 7000. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 204 cells, not 4564."
     },
     "behindProviderCode": 7294,
     "behindProviderCodeShare": 0.991,
@@ -531,6 +531,86 @@
       }
     ],
     "shippedPlan": [
+      {
+        "name": "mlx-z-image-q4-fresh-reference-resident",
+        "backend": "mlx",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "mlx-z-image-q4-fresh-reference-staged",
+        "backend": "mlx",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "mlx-z-image-q4-fresh-reference-bounded-decode",
+        "backend": "mlx",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "mlx-z-image-q4-fresh-reference-bounded-attention",
+        "backend": "mlx",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "mlx-z-image-q4-fresh-reference-bounded-transformer",
+        "backend": "mlx",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "candle-krea-q4-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "candle-krea-q4-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "candle-krea-q4-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "candle-krea-q4-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
+      {
+        "name": "candle-krea-q4-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1
+      },
       {
         "name": "mlx-qwen-vae-decode",
         "backend": "mlx",
@@ -1176,11 +1256,11 @@
     {
       "gate": "no-provider-adapter",
       "input": "how much provider-adapter work the CATALOG COVERAGE gap needs",
-      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2670 cells and it touches 7090 — 4534 of them jointly with the overlay gap. Only 2 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 7090 cells.",
+      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 2640 cells and it touches 7000 — 4534 of them jointly with the overlay gap. Only 3 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 7000 cells.",
       "howToResolve": "Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.",
       "story": 15508,
-      "independentlyBlockingCells": 2670,
-      "cellsTouched": 7090
+      "independentlyBlockingCells": 2640,
+      "cellsTouched": 7000
     },
     {
       "input": "perRunSeconds",
@@ -1190,16 +1270,16 @@
     {
       "gate": "adapter-gated",
       "input": "what a `complete` record actually requires from an existing adapter",
-      "why": "60 cells are blocked ONLY by this, and 174 in total. The Krea MLX control adapter has now emitted complete exact records, proving the pipeline can close; this bucket applies only to adapter-covered pairs that still have no complete record.",
+      "why": "90 cells are blocked ONLY by this, and 264 in total. The Krea MLX control adapter has now emitted complete exact records, proving the pipeline can close; this bucket applies only to adapter-covered pairs that still have no complete record.",
       "howToResolve": "Close the harness contract for each remaining adapter-covered pair: real phase telemetry, bounded-output parity, exact-fit/stale/unknown selection, lifecycle recovery, loadability, and a measured negative mutation. Complete records then move those exact targets out of `adapter-gated`.",
       "story": 15508,
-      "independentlyBlockingCells": 60,
-      "cellsTouched": 174
+      "independentlyBlockingCells": 90,
+      "cellsTouched": 264
     },
     {
       "gate": "overlay-declined",
       "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4564 cells (62% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 30 of them: 4534 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 144 cells, not 4564. It remains necessary work — those 4564 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 4564 cells (62% of the 7360-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 30 of them: 4534 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 204 cells, not 4564. It remains necessary work — those 4564 cells cannot be certified without it — but it is not where the schedule is decided.",
       "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.",
       "story": 16072,
       "independentlyBlockingCells": 30,

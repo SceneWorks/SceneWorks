@@ -419,6 +419,58 @@ rather than collapsing into the no-signal `Unknown` that took the zero-adaptatio
 instance today is `nvfp4`, not the `int8-convrot` SC-16069 named — the control lane's tier resolver cannot
 currently produce that string.
 
+## Fresh-process five-rung oracle (SC-16402)
+
+`config/memory-calibration-plan.json` contains two same-target reference ladders used only as the
+fresh-process side of SC-16059's reused-vs-fresh comparison:
+
+- MLX/Metal: `z_image_turbo`, q4, 768×768 text-to-image, no overlay, seed 16402, two steps. Rungs 0–3
+  use the eager provider fingerprint; rung 4 uses the provider-required deferred-materialization
+  fingerprint. This is intentional provenance, not permission to compare eager measurements against
+  deferred cells as one calibration population.
+- Candle/CUDA: `krea_2_turbo`, q4, 1024×1024 text-to-image, no overlay, seed 16402, two steps. The
+  provider-owned compositions for rungs 2–4 include staged residency because those controls execute
+  through Krea's physical three-stage loader; the plain staged rung uses its one-boundary residency
+  path.
+
+The harness starts one adapter process per planned case, so every row below is a fresh-process capture.
+Two denoise steps are load-bearing for phase measurement: providers with an explicit loading boundary
+close conditioning there, while resident providers use the first Step callback as a conservative
+conditioning envelope and measure the second step as a denoise-only interval. Decoding always starts a
+separate measured interval; no phase value is synthesized from another run or a static estimate.
+Run only from clean checkouts at the exact revisions being recorded:
+
+```bash
+# Apple Silicon / Metal
+SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx \
+SCENEWORKS_Z_IMAGE_REVISION=bb2bc9893b3c49ae96c813350775f791a2e8bc80 \
+SCENEWORKS_Z_IMAGE_ROOT=/absolute/path/to/models--SceneWorks--z-image-turbo-mlx/snapshots/bb2bc9893b3c49ae96c813350775f791a2e8bc80/q4 \
+cargo build --release --locked -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter
+node scripts/memory-calibration-harness.mjs run \
+  --config config/memory-calibration-plan.json --backend mlx \
+  --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
+  --provider-command '["target/release/memory-mlx-adapter"]' \
+  --sceneworks-repo "$PWD" --inference-repo /absolute/path/to/inference-pin \
+  --output /tmp/sc-16402-mlx-fresh.json
+
+# Windows / NVIDIA CUDA (PowerShell; use target\release\memory-candle-adapter.exe)
+$env:SCENEWORKS_KREA_REPOSITORY='SceneWorks/krea-2-turbo-mlx'
+$env:SCENEWORKS_KREA_REVISION='d009674080cc1bccf2b629d834c34bf5eccdb723'
+$env:SCENEWORKS_KREA_ROOT='C:\absolute\path\to\models--SceneWorks--krea-2-turbo-mlx\snapshots\d009674080cc1bccf2b629d834c34bf5eccdb723\q4'
+cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+node scripts/memory-calibration-harness.mjs run --config config/memory-calibration-plan.json --backend candle `
+  --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 `
+  --provider-command '["target/release/memory-candle-adapter.exe"]' `
+  --sceneworks-repo $PWD --inference-repo C:\absolute\path\to\inference-pin `
+  --output $env:TEMP\sc-16402-candle-fresh.json
+```
+
+Validate either capture with `node scripts/memory-calibration-harness.mjs check --input <file>`.
+These authoritative records deliberately remain `gated`: they contain exact strategy identity and
+observed conditioning/denoise/decode/overall memory for SC-16059's oracle, but do not pretend that a
+single reference render also completed the promotion-quality sweep, negative mutation, or lifecycle
+fault suite. They therefore cannot become current calibration evidence or update the cost model.
+
 ## Lifecycle and telemetry
 
 A provider capability declaration is selectable only when cancel and error transitions are safe:

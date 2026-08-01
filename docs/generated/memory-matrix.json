@@ -1,7 +1,7 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ed53ea6eab65d347d7b616e0122060957589f63a13993f3433d447e8768ae45e",
+    "sceneWorksRevision": "source-tree:35d9132f5e2b223a43e0e53bcb306288c82797f51abe76dd27b494376cec68f3",
     "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "manifest": {
@@ -14,7 +14,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "36e2d44429939d3004f590e6f16553f48b78b607c6404dd113c2c0d32046c8cc"
+        "sha256": "42c32c1c0e1688fb6e4b753196a8a8afd87f5709d055879b1caaccd40ff6b1fb"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -26,7 +26,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "42837116826ed41433c2a57123c7615db49c9ed7481510ffc0ee9d339492a14b"
+        "sha256": "8ddbc193034ddf4c1a0b61818dac082e58f7df365fbc0b5fc66e1c05ec03db8d"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -38,7 +38,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "1ab8a1240c92e99886bc166f71b37fece543aeed22b68b8639fc212a568f18bf"
+        "sha256": "52fa9737bcfa93e8f752347fafbbd847e805a6fb555c77ed86d91abd129313c7"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -464172,7 +464172,11 @@
         ]
       },
       "strategyParameters": {},
-      "engagedRungs": null,
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
       "state": "Missing",
       "calibrationFingerprint": null,
       "owningFamilyStory": 15510,
@@ -464226,7 +464230,10 @@
         ]
       },
       "strategyParameters": {},
-      "engagedRungs": null,
+      "engagedRungs": [
+        "resident",
+        "bounded_decode"
+      ],
       "state": "Missing",
       "calibrationFingerprint": null,
       "owningFamilyStory": 15510,
@@ -464283,7 +464290,12 @@
         "transformerWindowSize": 1,
         "transformerWindowComponent": "Dit"
       },
-      "engagedRungs": null,
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
       "state": "Implemented/unverified",
       "calibrationFingerprint": "c93d2b8abf2e2fd69124b8e52d111a24b5816d2e658671553d5ff65a2cc74a2a",
       "owningFamilyStory": 15510,
@@ -464456,7 +464468,10 @@
           "decode"
         ]
       },
-      "engagedRungs": null,
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
       "state": "Implemented/unverified",
       "calibrationFingerprint": "1d4011bd9015e7623657de78e045540fe9c8240382216a5416eb087b5c51c321",
       "owningFamilyStory": 15510,
