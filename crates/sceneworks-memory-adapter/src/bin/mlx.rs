@@ -663,9 +663,11 @@ fn attested_strategy(
     Ok(measured)
 }
 
-fn run_z_image_reference(request: &Value) -> Result<Value, String> {
+fn z_image_load_spec(
+    request: &Value,
+    load_shape: LoadShape,
+) -> Result<(String, String, LoadSpec), String> {
     protocol::validate_plain_overlay_target(request, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
-    let (width, height) = protocol::target_geometry(request)?;
     let repository = protocol::required_env("SCENEWORKS_Z_IMAGE_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_Z_IMAGE_REVISION")?;
     protocol::validate_artifact_identity(&repository, &revision, protocol::Z_IMAGE_REPOSITORY)?;
@@ -681,23 +683,40 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
         protocol::Z_IMAGE_REPOSITORY,
     )?;
 
-    let selection = planned_selection(request)?;
-    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
-        LoadShape::DeferredMaterialization
-    } else {
-        LoadShape::EagerMaterialization
-    };
     let spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_quant(Quant::Q4)
         .with_offload_policy(OffloadPolicy::Resident)
         .with_load_shape(load_shape);
+    Ok((repository, revision, spec))
+}
+
+fn load_z_image_generator(
+    request: &Value,
+    load_shape: LoadShape,
+) -> Result<(String, String, Box<dyn Generator>), String> {
+    let (repository, revision, spec) = z_image_load_spec(request, load_shape)?;
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
-    let contract = catalog
+    let generator = catalog
         .media()
-        .memory_strategy_contract(Z_IMAGE_PROVIDER, &spec)
-        .map_err(|error| format!("read {Z_IMAGE_PROVIDER} memory-strategy contract: {error}"))?
-        .ok_or_else(|| format!("{Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
+        .load(Z_IMAGE_PROVIDER, &spec)
+        .map_err(|error| format!("load real Z-Image Turbo q4 provider: {error}"))?;
+    Ok((repository, revision, generator))
+}
+
+fn run_z_image_reference_loaded(
+    request: &Value,
+    generator: &dyn Generator,
+    repository: &str,
+    revision: &str,
+    load_shape: LoadShape,
+) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let selection = planned_selection(request)?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
     contract
         .validate_selection(&selection)
         .map_err(|error| format!("pinned Z-Image provider rejected planned selection: {error}"))?;
@@ -749,10 +768,6 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
         cache_state: MemoryCacheState::Cold,
         evidence_revision: format!("sc-16402@{}", protocol::INFERENCE_PIN),
     };
-    let generator = catalog
-        .media()
-        .load(Z_IMAGE_PROVIDER, &spec)
-        .map_err(|error| format!("load real Z-Image Turbo q4 provider: {error}"))?;
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
@@ -763,8 +778,11 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     });
     clear_cache();
     reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let peak_after_reset = get_peak_memory() as u64;
     one_image(scoped_generate(
-        generator.as_ref(),
+        generator,
         GenerationRequest {
             prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
             width,
@@ -800,7 +818,7 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
     let blocker = concat!(
-        "fresh-process oracle capture measures exact per-rung memory and strategy identity for ",
+        "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
         "sc-16059; it intentionally remains gated because this run does not repeat the full ",
         "promotion-quality, negative-mutation, and lifecycle scenario suite"
     );
@@ -827,6 +845,9 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
                 "executed",
                 [blocker.to_owned()],
                 [
+                    ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                    ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                    ("peakAfterReset", "bytes", peak_after_reset),
                     ("conditioningActivePeak", "bytes", conditioning.active),
                     ("denoiseActivePeak", "bytes", denoise.active),
                     ("decodeActivePeak", "bytes", decode.active),
@@ -846,7 +867,139 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
         "decode": decode.json(),
         "overall": overall.json(),
     });
+    fragment["diagnostics"]["measurements"]
+        .as_array_mut()
+        .ok_or_else(|| "Z-Image diagnostics.measurements must be an array".to_owned())?
+        .push(json!({
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": u64::from(load_shape == LoadShape::DeferredMaterialization),
+        }));
     Ok(fragment)
+}
+
+fn run_z_image_reference(request: &Value) -> Result<Value, String> {
+    let selection = planned_selection(request)?;
+    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
+        LoadShape::DeferredMaterialization
+    } else {
+        LoadShape::EagerMaterialization
+    };
+    let (repository, revision, generator) = load_z_image_generator(request, load_shape)?;
+    run_z_image_reference_loaded(
+        request,
+        generator.as_ref(),
+        &repository,
+        &revision,
+        load_shape,
+    )
+}
+
+fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
+    let planned = request
+        .get("planned")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "assess_batch request.planned must be an array".to_owned())?;
+    let expected = [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+    ];
+    if planned.len() != expected.len() {
+        return Err(format!(
+            "Z-Image rung batch must contain exactly {} cases, got {}",
+            expected.len(),
+            planned.len()
+        ));
+    }
+    let target = planned[0]
+        .get("target")
+        .ok_or_else(|| "assess_batch planned target must be present".to_owned())?;
+    for (index, (item, expected_rung)) in planned.iter().zip(expected).enumerate() {
+        let rung = item
+            .pointer("/strategy/rung")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!("assess_batch planned[{index}].strategy.rung must be a string")
+            })?;
+        if rung != expected_rung {
+            return Err(format!(
+                "Z-Image rung batch must use canonical order; index {index} is {rung:?}, expected {expected_rung:?}"
+            ));
+        }
+        if item.get("target") != Some(target) {
+            return Err("Z-Image rung batch must keep one exact target tuple".to_owned());
+        }
+    }
+    Ok(planned)
+}
+
+fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
+    let planned = validate_z_image_batch(request)?;
+    let mut representative = request.clone();
+    representative["action"] = json!("run");
+    representative["planned"] = planned[0].clone();
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let mut actual_fingerprints = Vec::new();
+    for load_shape in [
+        LoadShape::EagerMaterialization,
+        LoadShape::DeferredMaterialization,
+    ] {
+        let (_, _, spec) = z_image_load_spec(&representative, load_shape)?;
+        let contract = catalog
+            .media()
+            .memory_strategy_contract(Z_IMAGE_PROVIDER, &spec)
+            .map_err(|error| format!("read {Z_IMAGE_PROVIDER} memory-strategy contract: {error}"))?
+            .ok_or_else(|| format!("{Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
+        actual_fingerprints.push(
+            contract
+                .calibration
+                .as_ref()
+                .ok_or_else(|| "pinned Z-Image provider has no calibration identity".to_owned())?
+                .fingerprint
+                .clone(),
+        );
+    }
+    for item in planned {
+        let planned_fingerprint = item
+            .get("calibrationFingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "batch calibrationFingerprint must be a string".to_owned())?;
+        let expected = if item.pointer("/strategy/rung").and_then(Value::as_str)
+            == Some("bounded_transformer_residency")
+        {
+            &actual_fingerprints[1]
+        } else {
+            &actual_fingerprints[0]
+        };
+        if planned_fingerprint != expected {
+            return Err(format!(
+                "plan/provider calibration mismatch in reuse assessment: plan={planned_fingerprint}, pinned provider={expected}"
+            ));
+        }
+    }
+    actual_fingerprints.sort_unstable();
+    actual_fingerprints.dedup();
+    if actual_fingerprints.len() > 1 {
+        return Ok(json!({
+            "verdict": "unable_to_amortize",
+            "reason": format!(
+                "one MLX model load cannot preserve the distinct calibrated load-shape identities required by the five rungs: {}",
+                actual_fingerprints.join(", ")
+            ),
+            "calibrationFingerprints": actual_fingerprints,
+            "evidence": "pinned provider contracts for eager and deferred load specs",
+        }));
+    }
+    Ok(json!({
+        "verdict": "eligible_for_measurement",
+        "reason": "all MLX rungs share one calibrated load-shape identity",
+        "calibrationFingerprints": actual_fingerprints,
+        "evidence": "pinned provider contracts for eager and deferred load specs",
+    }))
 }
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
@@ -1457,6 +1610,7 @@ fn main() {
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
         "run" => run(&request),
+        "assess_batch" => assess_z_image_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));

@@ -180,6 +180,34 @@ function keyOf(cell, fields) {
   return fields.map((field) => cell[field]).join("\u0000");
 }
 
+export function batchedSessionKeysFromPlan(plan) {
+  const groups = new Map();
+  for (const provider of plan.providers.filter((item) => item.modelLoadPolicy === "batch_rungs")) {
+    if (!provider.modelLoadGroup) throw new Error("batch_rungs provider requires modelLoadGroup");
+    if (!groups.has(provider.modelLoadGroup)) groups.set(provider.modelLoadGroup, []);
+    groups.get(provider.modelLoadGroup).push(provider);
+  }
+  const keys = [];
+  for (const [group, providers] of groups) {
+    const rungs = providers.map((provider) => provider.rung).sort(
+      (left, right) => RUNG_ORDER.indexOf(left) - RUNG_ORDER.indexOf(right),
+    );
+    if (JSON.stringify(rungs) !== JSON.stringify(RUNG_ORDER)) {
+      throw new Error(`${group}: batched cost coverage requires one provider for every canonical rung`);
+    }
+    const sessions = new Set(providers.map((provider) => keyOf({
+      modelId: provider.target.modelId,
+      backend: provider.backend,
+      tier: provider.target.tier,
+      mode: provider.target.mode,
+      overlay: provider.target.overlay.replace(/^control:\d+$/, "control"),
+    }, SESSION_KEY_FIELDS)));
+    if (sessions.size !== 1) throw new Error(`${group}: batched providers must share one session key`);
+    keys.push(...sessions);
+  }
+  return [...new Set(keys)].sort();
+}
+
 function tally(values) {
   const counts = new Map();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
@@ -293,61 +321,37 @@ export const COLLAPSING_AXES = [
       "to its own logicalCaseId) and #validateComplete (every declared axis range must be derived " +
       "from passed executed cases)",
     caveat:
-      "Realised only ACROSS resumed invocations. `runProviderPlan` computes its skip set once from " +
-      "`--resume` and then spawns the provider command once per planned case, without feeding " +
-      "incoming records back into the skip set — so within a single invocation an N-point sweep " +
-      "still costs N process spawns.",
+      "`runProviderPlan` recomputes completed logical identities after every provider response. A " +
+      "complete record whose passed sweep covers other pending points retires those points before " +
+      "the runner chooses its next invocation, so the collapse is now realised both within one run " +
+      "and across `--resume` runs.",
   },
   {
     axis: "rung",
-    verdict: "not collapsed by the harness; UNPROVEN in principle",
-    factor: "5 (every session key spans exactly 5 rungs) — a CEILING, not a demonstrated saving",
+    verdict: "fresh per rung on both measured backends",
+    factor: "1 record per model load; the 5-record warm floor remains counterfactual",
     rule:
       "A record names ONE rung (`strategy.rung` is a single enum and is part of the record " +
       "identity), and the matrix binds a record to exactly one cell on the " +
-      "(modelId, provider, backend, tier, mode, overlay, rung) key. So the schema forces one " +
-      "record per rung. Whether the PHYSICS also forces it is OPEN: nothing in this repository " +
-      "measures five rung peaks from one load, and the sources previously cited for it do not " +
-      "establish it. The 5x is therefore the size of a prize nobody has shown is collectable, not " +
-      "a saving being left on the table.",
-    // Downgraded to what each source actually proves. Every one of these was previously cited as
-    // establishing the five-rung collapse; none of them does.
+      "(modelId, provider, backend, tier, mode, overlay, rung) key, so records remain one-per-rung. " +
+      "The harness and Candle adapter can execute Krea's five-rung group as one `run_batch` provider " +
+      "invocation with `modelLoads: 1`, but the authoritative fresh/reused comparison exceeded the " +
+      "committed tolerance, so the shipped plan keeps Candle fresh-per-rung. MLX also stays fresh: its Z-Image " +
+      "ladder spans distinct eager and deferred calibration fingerprints, so one loaded generator " +
+      "cannot preserve every rung's calibrated identity. No target is priced as batched.",
     citation:
-      "SCHEMA SIDE (established): scripts/memory-calibration-harness.mjs#recordId + #validateRecord " +
-      "(rung is in the identity); scripts/generate-memory-matrix.mjs (record->cell match includes " +
-      "`rung`). " +
-      "PHYSICS SIDE (does NOT establish the collapse): " +
-      "docs/memory-calibration-harness.md 'one loaded generator' covers four memory PHASES " +
-      "(conditioning, denoise, decode, overall) at ONE strategy — phases are not rungs; " +
-      "its warm-repeat A->B->A and crates/sceneworks-memory-adapter/src/bin/candle.rs" +
-      "#execute_parity_request compare PIXEL output across two strategies and sample no memory at " +
-      "all (the function returns an Image and never touches the VramProbe); and the Krea " +
-      "turboFit evidence records say only " +
-      '"exclusive rendered-device phase peaks at 768x768 and 1024x1024" in verification.method — ' +
-      "'exclusive' means exclusive HARDWARE, and no field in the record schema names a process, " +
-      "load or session, so one record cannot evidence one process. Those peaks also cover FOUR " +
-      "rungs, not five: packages/schemas/model-manifest.schema.json caps `observedPeaksGb` at " +
-      "threeStage/tiledVae/chunkedAttention/streamedBlocks with additionalProperties false, so the " +
-      "manifest cannot express a `resident` peak — the one rung that is the irreducible floor.",
+      "scripts/memory-calibration-harness.mjs#runProviderPlan (canonical `run_batch`, one-load " +
+      "attestation, and within-invocation sweep retirement); " +
+      "crates/sceneworks-memory-adapter/src/bin/candle.rs#run_five_rung_batch; " +
+      "crates/sceneworks-memory-adapter/src/bin/mlx.rs#assess_z_image_batch; " +
+      ".github/workflows/windows-candle.yml (fresh/reused evidence gate) and macos-mlx.yml " +
+      "(fresh capture plus provider-contract inability gate)",
     caveat:
-      "The harness spawns a FRESH process per planned case, so today the model load is paid once " +
-      "per rung. Capturing this 5x needs either a warm provider daemon behind the argv command or " +
-      "a runner that batches a target's rungs into one invocation. Neither exists — AND neither is " +
-      "purely scheduling work, because reusing a process risks CONTAMINATING the measurement, " +
-      "asymmetrically across backends. " +
-      "CANDLE has partial protection: the adapter enforces a 64 MiB post-fault cleanup-growth " +
-      "tolerance and asserts `cudaCachingAllocatorPresent = 0`, so freed device bytes return to the " +
-      "device rather than into an allocator cache (though that constant is a hardcoded diagnostic, " +
-      "not a probe of live allocator state). " +
-      "MLX has NO equivalent structural guarantee: a buffer cache is present and is itself measured " +
-      "and published, and the adapter must call `clear_cache()` + `reset_peak_memory()` explicitly " +
-      "between measurements. That is not sufficient — `clear_cache()` reclaims only allocator-cache " +
-      "buffers and cannot release LIVE weight arrays, which is precisely the residue a multi-rung " +
-      "campaign accumulates, because rungs 1 and 4 change residency. SceneWorks' own MLX footprint " +
-      "harness (crates/sceneworks-worker/src/footprint_measure.rs) therefore mandates ONE TIER PER " +
-      "PROCESS and enforces it with a runtime assert, having found that process-global counters let " +
-      "a heavier earlier measurement leak into a lighter later one. A rung-batching runner must " +
-      "prove it beats that, on both backends. Tracked as SC-16059.",
+      "The committed equivalence gate is the larger of 256 MiB absolute drift and 5% of the fresh " +
+      "metric, applied to every phase and allocator/device/wired/reclaimable metric. Candle's measured " +
+      "verdict and MLX's structural verdict are both `unable_to_amortize`. MLX's inability is structural, not " +
+      "an inferred timing result: the eager and deferred fingerprints differ before a reused process " +
+      "can truthfully execute all five identities, so the backend retains fresh-per-rung cost.",
   },
   {
     axis: "overlay",
@@ -405,6 +409,16 @@ function collapsingAxesFor(census, runs) {
   const overlayCells = census.total - (census.byOverlay.none ?? 0);
   const overlayShare = round((overlayCells / census.total) * 100, 1);
   return COLLAPSING_AXES.map((axis) => {
+    if (axis.axis === "rung") {
+      return {
+        ...axis,
+        factor:
+          `${runs.shippedBatchCoverage.records} records in ${runs.shippedBatchCoverage.sessions} ` +
+          `explicit group(s) save ${runs.shippedBatchCoverage.savedLoads} loads; combined ` +
+          `${runs.certifyingRecords.total} -> ${runs.shippedModelLoads.total} ` +
+          `(${runs.shippedLoadCollapseFactor}x)`,
+      };
+    }
     if (axis.axis !== "overlay") return axis;
     return {
       ...axis,
@@ -701,6 +715,14 @@ export function cellCensus(cells) {
       total: sessions.size,
       byBackend: tally(sessionList.map((session) => session.backend)),
       geometryExpanded: sessionList.reduce((sum, session) => sum + session.geometryPoints, 0),
+      geometryExpandedByBackend: Object.fromEntries(
+        ["mlx", "candle"].map((backend) => [
+          backend,
+          sessionList
+            .filter((session) => session.backend === backend)
+            .reduce((sum, session) => sum + session.geometryPoints, 0),
+        ]),
+      ),
       // If this is not exactly [5] the rung collapse factor below is not a constant and the
       // model must not report one.
       rungsPerSession: [...rungSpans].sort((left, right) => left - right),
@@ -709,6 +731,14 @@ export function cellCensus(cells) {
       total: fitGroups.size,
       byBackend: tally([...fitGroups.values()].map((group) => group.backend)),
       tierSum: [...fitGroups.values()].reduce((sum, group) => sum + group.tiers.size, 0),
+      tierSumByBackend: Object.fromEntries(
+        ["mlx", "candle"].map((backend) => [
+          backend,
+          [...fitGroups.values()]
+            .filter((group) => group.backend === backend)
+            .reduce((sum, group) => sum + group.tiers.size, 0),
+        ]),
+      ),
     },
   };
 }
@@ -718,7 +748,7 @@ export function cellCensus(cells) {
  * each realisable strategy, split by hardware because MLX/Metal runs on a Mac and Candle/CUDA
  * needs rented CUDA — completely different cost structures.
  */
-export function collapseToRuns(cells, parameters = DEFAULT_PARAMETERS) {
+export function collapseToRuns(cells, parameters = DEFAULT_PARAMETERS, coverage = {}) {
   const naFractions = {
     ...DEFAULT_PARAMETERS.structurallyNotApplicableFractionByRung,
     ...(parameters.structurallyNotApplicableFractionByRung ?? {}),
@@ -780,6 +810,24 @@ export function collapseToRuns(cells, parameters = DEFAULT_PARAMETERS) {
   const census = cellCensus(cells);
   const rungCollapse =
     census.sessions.rungsPerSession.length === 1 ? census.sessions.rungsPerSession[0] : null;
+  const eligibleBatchKeys = new Set(coverage.batchedSessionKeys ?? []);
+  const batchCounts = new Map();
+  for (const cell of surviving) {
+    const key = keyOf(cell, SESSION_KEY_FIELDS);
+    if (!eligibleBatchKeys.has(key)) continue;
+    const current = batchCounts.get(key) ?? { backend: cell.backend, records: 0 };
+    current.records += 1;
+    batchCounts.set(key, current);
+  }
+  const savedLoads = { mlx: 0, candle: 0 };
+  for (const session of batchCounts.values()) {
+    savedLoads[session.backend] += Math.max(0, session.records - 1);
+  }
+  const shippedModelLoads = {
+    mlx: certifyingRecords.mlx - savedLoads.mlx,
+    candle: certifyingRecords.candle - savedLoads.candle,
+    total: certifyingRecords.total - savedLoads.mlx - savedLoads.candle,
+  };
 
   return {
     exemptions: {
@@ -791,6 +839,17 @@ export function collapseToRuns(cells, parameters = DEFAULT_PARAMETERS) {
     certifyingRecords,
     // The unit that costs a model load, IF a provider amortises one across a target's rungs.
     warmSessions,
+    shippedModelLoads,
+    shippedBatchCoverage: {
+      sessionKeys: [...batchCounts.keys()].sort(),
+      sessions: batchCounts.size,
+      records: [...batchCounts.values()].reduce((sum, session) => sum + session.records, 0),
+      savedLoads: savedLoads.mlx + savedLoads.candle,
+    },
+    shippedLoadCollapseFactor:
+      shippedModelLoads.total === 0
+        ? null
+        : round(certifyingRecords.total / shippedModelLoads.total, 3),
     unavailableOverlayLoadPriceTag: {
       availability: "unavailable",
       disposition: "counterfactual metadata only; excluded from campaign and wall-clock columns",
@@ -845,7 +904,7 @@ function proportionalExemptions(cells, fractions) {
  * N/A sensitivity. SC-15969 has not run, so the honest output is a curve, not a number.
  * The scenarios below are labelled projections; only `current` is a fact.
  */
-export function naSensitivity(cells) {
+export function naSensitivity(cells, coverage = {}) {
   const scenarios = [
     {
       name: "current",
@@ -896,7 +955,7 @@ export function naSensitivity(cells) {
     },
   ];
 
-  const baseline = collapseToRuns(cells, DEFAULT_PARAMETERS).certifyingRecords;
+  const baseline = collapseToRuns(cells, DEFAULT_PARAMETERS, coverage).certifyingRecords;
 
   return scenarios.map((scenario) => {
     const runs = collapseToRuns(cells, {
@@ -905,7 +964,7 @@ export function naSensitivity(cells) {
         ...DEFAULT_PARAMETERS.structurallyNotApplicableFractionByRung,
         ...scenario.fractions,
       },
-    });
+    }, coverage);
     const exemptedByBackend = {
       mlx: baseline.mlx - runs.certifyingRecords.mlx,
       candle: baseline.candle - runs.certifyingRecords.candle,
@@ -916,6 +975,7 @@ export function naSensitivity(cells) {
       kind: scenario.kind,
       note: scenario.note,
       certifyingRecords: runs.certifyingRecords,
+      shippedModelLoads: runs.shippedModelLoads,
       warmSessions: runs.warmSessions,
       // Emitted so a projection's per-backend column is never mistaken for a finding. See
       // NA_SELECTION_RULE.
@@ -990,6 +1050,11 @@ export function wallClock(runs, parameters = DEFAULT_PARAMETERS) {
         mlx: hours(runs.certifyingRecords.mlx, seconds),
         candle: hours(runs.certifyingRecords.candle, seconds),
       },
+      shippedModelLoadHours: {
+        total: hours(runs.shippedModelLoads.total, seconds),
+        mlx: hours(runs.shippedModelLoads.mlx, seconds),
+        candle: hours(runs.shippedModelLoads.candle, seconds),
+      },
       warmSessionHours: {
         total: hours(runs.warmSessions.total, seconds),
         mlx: hours(runs.warmSessions.mlx, seconds),
@@ -1016,7 +1081,7 @@ export function wallClock(runs, parameters = DEFAULT_PARAMETERS) {
  * The INVERSION IS ROBUST: fit/per-cell stays above 1 at every grid point, so "fitting costs more
  * than the per-cell campaign" does not depend on the defaults. Only the magnitude moves.
  */
-export function fitSensitivity(cells, grid = FIT_SENSITIVITY_GRID) {
+export function fitSensitivity(cells, grid = FIT_SENSITIVITY_GRID, coverage = {}) {
   const precedentStub = { measurementRecords: 0, tiers: [], curves: 0, coefficients: 0 };
   const rows = [];
   for (const points of grid.geometryPointsPerFit) {
@@ -1027,7 +1092,7 @@ export function fitSensitivity(cells, grid = FIT_SENSITIVITY_GRID) {
           geometryPointsPerFit: points,
           slopeSharedAcrossTiers: shared,
           validationSampleFraction: fraction,
-        });
+        }, coverage);
         const fit = result.strategies.find((strategy) => strategy.name === "fit-then-validate");
         rows.push({
           geometryPointsPerFit: points,
@@ -1067,12 +1132,12 @@ export function fitSensitivity(cells, grid = FIT_SENSITIVITY_GRID) {
   };
 }
 
-export function fitVersusExhaustive(cells, kreaPrecedent, parameters = DEFAULT_PARAMETERS) {
+export function fitVersusExhaustive(cells, kreaPrecedent, parameters = DEFAULT_PARAMETERS, coverage = {}) {
   const census = cellCensus(cells);
-  const runs = collapseToRuns(cells, parameters);
+  const runs = collapseToRuns(cells, parameters, coverage);
   const points = Math.max(1, Math.trunc(parameters.geometryPointsPerFit ?? 2));
-  // Under the harness as written every rung costs its own provider invocation, so a session-level
-  // count must be restated in invocations before it can be compared to a wall-clock budget.
+  // Only explicitly planned batch groups reduce provider invocations. The exact-geometry and fit
+  // campaigns include unplanned geometry points, so they retain the conservative fresh-rung count.
   const rungSpan = runs.rungCollapseFactor ?? 1;
 
   // Exhaustive at the exact geometry the manifest's own policy demands ("not permission to
@@ -1087,9 +1152,8 @@ export function fitVersusExhaustive(cells, kreaPrecedent, parameters = DEFAULT_P
   const fitSessions = parameters.slopeSharedAcrossTiers
     ? census.fitGroups.tierSum + census.fitGroups.total * (points - 1)
     : census.fitGroups.tierSum * points;
-  const validationSessions = Math.ceil(
-    census.sessions.total * Math.min(Math.max(parameters.validationSampleFraction ?? 0, 0), 1),
-  );
+  const validationFraction = Math.min(Math.max(parameters.validationSampleFraction ?? 0, 0), 1);
+  const validationSessions = Math.ceil(census.sessions.total * validationFraction);
 
   return {
     formula: {
@@ -1112,7 +1176,7 @@ export function fitVersusExhaustive(cells, kreaPrecedent, parameters = DEFAULT_P
       {
         name: "exhaustive-per-cell",
         sessions: exhaustivePerCell,
-        providerInvocations: runs.certifyingRecords.total,
+        providerInvocations: runs.shippedModelLoads.total,
         policy:
           "One measurement per cell at one geometry, relying on the binding logic accepting any " +
           "resolution inside the envelope. Cheaper, but it certifies an envelope from a point.",
@@ -1369,24 +1433,6 @@ export function rankUncertainties(
     perRunSeconds,
     ...codeGated.slice(1),
     {
-      input: "whether the harness can amortise a model load across a target's rungs",
-      why:
-        "A potential 5x on the whole campaign, currently NOT realised: the runner spawns a fresh " +
-        "process per planned case. Unlike the overlay load collapse this one is not ruled out by the " +
-        "load contract — but it is NOT established either. Nothing in the repository measures five " +
-        "rung peaks from one load, and the manifest cannot even express a `resident` peak alongside " +
-        "the other four. It is also not purely scheduling work: reusing a process risks contaminating " +
-        "the measurement, and the two backends have asymmetric protection (Candle asserts no caching " +
-        "allocator; MLX has a live buffer cache and its own footprint harness mandates one tier per " +
-        "process). See the `rung` axis for the full evidence review.",
-      howToResolve:
-        "Either batch a target's rungs into one provider invocation, or run the provider as a warm " +
-        "daemon behind the argv command — and in either case demonstrate that a rung measured in a " +
-        "reused process matches the fresh-process measurement within a stated tolerance, ON BOTH " +
-        "BACKENDS, before believing the 5x. Tracked as SC-16059.",
-      story: 16059,
-    },
-    {
       input: "which geometry policy is true",
       why:
         "The binding logic accepts any resolution inside the envelope; the manifest says exactly the " +
@@ -1451,7 +1497,8 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
 
   const cells = matrix.cells;
   const census = cellCensus(cells);
-  const runs = collapseToRuns(cells, DEFAULT_PARAMETERS);
+  const batchCoverage = { batchedSessionKeys: batchedSessionKeysFromPlan(plan) };
+  const runs = collapseToRuns(cells, DEFAULT_PARAMETERS, batchCoverage);
   const precedent = kreaFitPrecedent(manifest);
 
   // Completed work is derived rather than assumed, from two independent places that must agree:
@@ -1543,6 +1590,8 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     evidenceScope: provider.evidenceScope,
     plannedCases: provider.cases.length,
     positiveCases: provider.cases.filter((item) => item.expectedResult === "passed").length,
+    modelLoadPolicy: provider.modelLoadPolicy ?? "fresh_per_case",
+    modelLoadGroup: provider.modelLoadGroup ?? null,
   }));
 
   const model = {
@@ -1577,8 +1626,9 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     overlayLoadContract: OVERLAY_LOAD_CONTRACT,
     collapsing: {
       runUnit:
-        "One `action:\"run\"` provider invocation. `runProviderPlan` spawns the provider command " +
-        "once per planned case, so this is the unit that costs a model load.",
+        "One provider invocation. `runProviderPlan` uses `action:\"run\"` for a fresh case and " +
+        "`action:\"run_batch\"` for a compatible Candle five-rung group; either invocation attests " +
+        "one model load.",
       runUnitCitation: "scripts/memory-calibration-harness.mjs#runProviderPlan",
       requiredScenariosPerRecord: REQUIRED_SCENARIOS.length,
       requiredScenarios: [...REQUIRED_SCENARIOS].sort(),
@@ -1598,14 +1648,14 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
           "Rung 0 is the unoptimised baseline every model has by definition, so it can never be " +
           "Structurally N/A. No survey outcome can remove these cells from the campaign.",
       },
-      scenarios: naSensitivity(cells),
+      scenarios: naSensitivity(cells, batchCoverage),
     },
     wallClock: wallClock(runs, DEFAULT_PARAMETERS),
     fitVersusExhaustive: {
-      ...fitVersusExhaustive(cells, precedent, DEFAULT_PARAMETERS),
+      ...fitVersusExhaustive(cells, precedent, DEFAULT_PARAMETERS, batchCoverage),
       // Attached here rather than inside `fitVersusExhaustive` because the sweep calls that function
       // once per grid point and nesting it would recurse.
-      sensitivity: fitSensitivity(cells),
+      sensitivity: fitSensitivity(cells, FIT_SENSITIVITY_GRID, batchCoverage),
     },
     parameters: DEFAULT_PARAMETERS,
     biggestUncertainties: rankUncertainties(producible, {
@@ -1744,7 +1794,7 @@ function renderMarkdown(model) {
     "",
     "## 2. The collapsing rule (derived)",
     "",
-    `The run unit is one \`action:"run"\` provider invocation — ${model.collapsing.runUnitCitation} spawns the provider command once per planned case, so that is what costs a model load. A \`complete\` record must pass all ${model.collapsing.requiredScenariosPerRecord} required scenarios plus quality and a measured negative mutation.`,
+    `${model.collapsing.runUnit} A \`complete\` record must pass all ${model.collapsing.requiredScenariosPerRecord} required scenarios plus quality and a measured negative mutation.`,
     "",
     ...markdownTable(
       ["Axis", "Verdict", "Factor"],
@@ -1771,7 +1821,13 @@ function renderMarkdown(model) {
           String(runs.certifyingRecords.candle),
         ],
         [
-          `Warm sessions (model loads, ${runs.rungCollapseFactor} rungs each)`,
+          "Shipped model loads (explicit groups only)",
+          String(runs.shippedModelLoads.total),
+          String(runs.shippedModelLoads.mlx),
+          String(runs.shippedModelLoads.candle),
+        ],
+        [
+          `All-backend warm-session floor (${runs.rungCollapseFactor} rungs each)`,
           String(runs.warmSessions.total),
           String(runs.warmSessions.mlx),
           String(runs.warmSessions.candle),
@@ -1803,7 +1859,7 @@ function renderMarkdown(model) {
     "",
     `Excluded: ${runs.exemptions.alreadyStructurallyNotApplicable} cells already classified \`Structurally N/A\`, which the epic exempts from measurement. Nothing else is excluded — \`Missing\` cells still need a run, they just need an implementation first.`,
     "",
-    `The warm-session row is **not currently achievable**. It is what the campaign would cost if one loaded generator covered a target's ${runs.rungCollapseFactor} rungs, at ${runs.recordsPerWarmSession} records per load; the harness spawns a fresh process per planned case today, so every rung pays its own model load.`,
+    `The shipped campaign now costs **${runs.shippedModelLoads.total} model loads**. Exactly ${runs.shippedBatchCoverage.records} records in ${runs.shippedBatchCoverage.sessions} groups are configured for batching, saving ${runs.shippedBatchCoverage.savedLoads} loads; every record remains fresh. That is a **${runs.shippedLoadCollapseFactor}x** reduction from ${runs.certifyingRecords.total} fresh-per-record loads. The ${runs.warmSessions.total}-load floor remains counterfactual because MLX is structurally unable and Candle failed the committed fresh/reused tolerance.`,
     "",
     "## 4. Structurally N/A sensitivity",
     "",
@@ -1812,13 +1868,14 @@ function renderMarkdown(model) {
     `Irreducible floor: the **${model.naSensitivity.irreducibleFloor.cells}** \`${model.naSensitivity.irreducibleFloor.rung}\` cells. ${model.naSensitivity.irreducibleFloor.reason}`,
     "",
     ...markdownTable(
-      ["Scenario", "Kind", "Records", "MLX", "Candle", "Warm sessions", "Exempted MLX/Candle", "...if proportional"],
+      ["Scenario", "Kind", "Records", "MLX", "Candle", "Shipped loads", "Warm floor", "Exempted MLX/Candle", "...if proportional"],
       model.naSensitivity.scenarios.map((scenario) => [
         `\`${scenario.name}\``,
         scenario.kind,
         String(scenario.certifyingRecords.total),
         String(scenario.certifyingRecords.mlx),
         String(scenario.certifyingRecords.candle),
+        String(scenario.shippedModelLoads.total),
         String(scenario.warmSessions.total),
         `${scenario.exemptedByBackend.mlx}/${scenario.exemptedByBackend.candle}`,
         scenario.kind === "fact"
@@ -1831,7 +1888,7 @@ function renderMarkdown(model) {
     "",
     `Rows marked ⚠ have a per-backend split that differs from proportional allocation — that gap is the selection rule showing through, not a property of the projection. Only the \`current\` row's split is a fact.`,
     "",
-    `**The warm-session column does not move.** A session survives as long as any one of its rungs still needs measuring, and the resident baseline always does — so reclassifying rungs as \`Structurally N/A\` removes records but removes no model loads. If model load dominates the per-run cost, SC-15969's outcome changes the campaign's duration by far less than the record column suggests.`,
+    `**The all-backend warm floor does not move.** A session survives as long as any one rung still needs measuring, and the resident baseline always does. The shipped-load column can move because both backends still pay per surviving rung; only the counterfactual warm floor is one load per surviving session.`,
     "",
     "## 5. Wall clock (parameterised)",
     "",
@@ -1855,18 +1912,20 @@ function renderMarkdown(model) {
         "Record-hours (total)",
         "MLX",
         "Candle",
-        "Rungs amortised",
+        "Shipped load-hours",
+        "All-backend warm floor",
       ],
       model.wallClock.sweep.map((row) => [
         String(row.perRunSeconds),
         String(row.recordHours.total),
         String(row.recordHours.mlx),
         String(row.recordHours.candle),
+        String(row.shippedModelLoadHours.total),
         String(row.warmSessionHours.total),
       ]),
     ),
     "",
-    "Only the first three columns are achievable with the harness as written; the final column prices the unimplemented rung collapse. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.",
+    "The shipped load-hours column amortises only plan-declared, evidence-gated groups; all other records stay fresh. The final column is the unavailable all-backend warm floor. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.",
     "",
     "## 6. Fit coefficients versus measure every cell",
     "",
@@ -1877,7 +1936,7 @@ function renderMarkdown(model) {
     `> ${fit.kreaPrecedent.honestyNote}`,
     "",
     ...markdownTable(
-      ["Strategy", "Model loads", "Provider invocations (harness as written)"],
+      ["Strategy", "Session points", "Provider invocations (explicit batches only)"],
       fit.strategies.map((strategy) => [
         `\`${strategy.name}\``,
         String(strategy.sessions),

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f902a6b1f97f98b31e011741457c861eb56385d1921a8271931e4d9996385f66",
+    "sceneWorksRevision": "source-tree:4e7ab3b071a6c0c7a20e71628d2a6ade2ab6da11900f2918f0fc167f51b30ce3",
     "matrixRevision": "source-tree:9bd7b5e07e4e5226751ba693ba6a9fc7bc1a8afcb7531f5bf8f94053f7aef1d1",
     "inferenceRevision": "656a38bf25138c92a82e07ec0f8d0804d07b3dbb",
     "sources": {
@@ -15,7 +15,7 @@
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "a5a3a460e9bd28729e98c0a2966c34efb38e65f041a136b2ba86bc3ac2411411"
+        "sha256": "8f723f6b51b18099404b4c84872ebfdf8b05410838a3df838fa78bd9daef6a0a"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "f8e474f6d266d9696074fbcfe773d7ee87bc35ad5c3b10a251906c45f77d2dc9"
+        "sha256": "248c89989e1b6b8a1f8ef4579da8b39d694febe1aec0668ff039ba8fd1d9ed68"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "a190ba5498e96dfbe413a269bad53180884159b52e9bfd4fa26b5d0043739973"
+        "sha256": "dc93243d87980b3ec11ed13f186adfe174b37ed9f51c74d6c4ef5613286cb67e"
       }
     }
   },
@@ -421,6 +421,10 @@
         "mlx": 924
       },
       "geometryExpanded": 8970,
+      "geometryExpandedByBackend": {
+        "mlx": 5616,
+        "candle": 3354
+      },
       "rungsPerSession": [
         5
       ]
@@ -431,7 +435,11 @@
         "candle": 192,
         "mlx": 324
       },
-      "tierSum": 1472
+      "tierSum": 1472,
+      "tierSumByBackend": {
+        "mlx": 924,
+        "candle": 548
+      }
     }
   },
   "overlayLoadContract": {
@@ -475,7 +483,7 @@
     "counterfactualPriceTagDisposition": "SC-16072 needs to know what the capability would be worth before deciding whether to build it. The counterfactual count is retained as structured metadata, but the unavailable overlay-amortised COLUMN is dropped from campaign and wall-clock tables. It is not pursued as an achievable campaign shape."
   },
   "collapsing": {
-    "runUnit": "One `action:\"run\"` provider invocation. `runProviderPlan` spawns the provider command once per planned case, so this is the unit that costs a model load.",
+    "runUnit": "One provider invocation. `runProviderPlan` uses `action:\"run\"` for a fresh case and `action:\"run_batch\"` for a compatible Candle five-rung group; either invocation attests one model load.",
     "runUnitCitation": "scripts/memory-calibration-harness.mjs#runProviderPlan",
     "requiredScenariosPerRecord": 8,
     "requiredScenarios": [
@@ -503,15 +511,15 @@
         "factor": "one record retires every passed sweep point",
         "rule": "One `complete` record carries a `sweep` whose passed cases each retire a distinct planned logical case, so a provider that sweeps its parameter domain internally needs one record for the whole domain rather than one per point.",
         "citation": "scripts/memory-calibration-harness.mjs#completedLogicalIds (maps every passed sweep case to its own logicalCaseId) and #validateComplete (every declared axis range must be derived from passed executed cases)",
-        "caveat": "Realised only ACROSS resumed invocations. `runProviderPlan` computes its skip set once from `--resume` and then spawns the provider command once per planned case, without feeding incoming records back into the skip set — so within a single invocation an N-point sweep still costs N process spawns."
+        "caveat": "`runProviderPlan` recomputes completed logical identities after every provider response. A complete record whose passed sweep covers other pending points retires those points before the runner chooses its next invocation, so the collapse is now realised both within one run and across `--resume` runs."
       },
       {
         "axis": "rung",
-        "verdict": "not collapsed by the harness; UNPROVEN in principle",
-        "factor": "5 (every session key spans exactly 5 rungs) — a CEILING, not a demonstrated saving",
-        "rule": "A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key. So the schema forces one record per rung. Whether the PHYSICS also forces it is OPEN: nothing in this repository measures five rung peaks from one load, and the sources previously cited for it do not establish it. The 5x is therefore the size of a prize nobody has shown is collectable, not a saving being left on the table.",
-        "citation": "SCHEMA SIDE (established): scripts/memory-calibration-harness.mjs#recordId + #validateRecord (rung is in the identity); scripts/generate-memory-matrix.mjs (record->cell match includes `rung`). PHYSICS SIDE (does NOT establish the collapse): docs/memory-calibration-harness.md 'one loaded generator' covers four memory PHASES (conditioning, denoise, decode, overall) at ONE strategy — phases are not rungs; its warm-repeat A->B->A and crates/sceneworks-memory-adapter/src/bin/candle.rs#execute_parity_request compare PIXEL output across two strategies and sample no memory at all (the function returns an Image and never touches the VramProbe); and the Krea turboFit evidence records say only \"exclusive rendered-device phase peaks at 768x768 and 1024x1024\" in verification.method — 'exclusive' means exclusive HARDWARE, and no field in the record schema names a process, load or session, so one record cannot evidence one process. Those peaks also cover FOUR rungs, not five: packages/schemas/model-manifest.schema.json caps `observedPeaksGb` at threeStage/tiledVae/chunkedAttention/streamedBlocks with additionalProperties false, so the manifest cannot express a `resident` peak — the one rung that is the irreducible floor.",
-        "caveat": "The harness spawns a FRESH process per planned case, so today the model load is paid once per rung. Capturing this 5x needs either a warm provider daemon behind the argv command or a runner that batches a target's rungs into one invocation. Neither exists — AND neither is purely scheduling work, because reusing a process risks CONTAMINATING the measurement, asymmetrically across backends. CANDLE has partial protection: the adapter enforces a 64 MiB post-fault cleanup-growth tolerance and asserts `cudaCachingAllocatorPresent = 0`, so freed device bytes return to the device rather than into an allocator cache (though that constant is a hardcoded diagnostic, not a probe of live allocator state). MLX has NO equivalent structural guarantee: a buffer cache is present and is itself measured and published, and the adapter must call `clear_cache()` + `reset_peak_memory()` explicitly between measurements. That is not sufficient — `clear_cache()` reclaims only allocator-cache buffers and cannot release LIVE weight arrays, which is precisely the residue a multi-rung campaign accumulates, because rungs 1 and 4 change residency. SceneWorks' own MLX footprint harness (crates/sceneworks-worker/src/footprint_measure.rs) therefore mandates ONE TIER PER PROCESS and enforces it with a runtime assert, having found that process-global counters let a heavier earlier measurement leak into a lighter later one. A rung-batching runner must prove it beats that, on both backends. Tracked as SC-16059."
+        "verdict": "fresh per rung on both measured backends",
+        "factor": "0 records in 0 explicit group(s) save 0 loads; combined 7354 -> 7354 (1x)",
+        "rule": "A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key, so records remain one-per-rung. The harness and Candle adapter can execute Krea's five-rung group as one `run_batch` provider invocation with `modelLoads: 1`, but the authoritative fresh/reused comparison exceeded the committed tolerance, so the shipped plan keeps Candle fresh-per-rung. MLX also stays fresh: its Z-Image ladder spans distinct eager and deferred calibration fingerprints, so one loaded generator cannot preserve every rung's calibrated identity. No target is priced as batched.",
+        "citation": "scripts/memory-calibration-harness.mjs#runProviderPlan (canonical `run_batch`, one-load attestation, and within-invocation sweep retirement); crates/sceneworks-memory-adapter/src/bin/candle.rs#run_five_rung_batch; crates/sceneworks-memory-adapter/src/bin/mlx.rs#assess_z_image_batch; .github/workflows/windows-candle.yml (fresh/reused evidence gate) and macos-mlx.yml (fresh capture plus provider-contract inability gate)",
+        "caveat": "The committed equivalence gate is the larger of 256 MiB absolute drift and 5% of the fresh metric, applied to every phase and allocator/device/wired/reclaimable metric. Candle's measured verdict and MLX's structural verdict are both `unable_to_amortize`. MLX's inability is structural, not an inferred timing result: the eager and deferred fingerprints differ before a reused process can truthfully execute all five identities, so the backend retains fresh-per-rung cost."
       },
       {
         "axis": "overlay",
@@ -537,7 +545,9 @@
         "rung": "resident",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-z-image-q4-fresh-reference-staged",
@@ -545,7 +555,9 @@
         "rung": "staged_residency",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-z-image-q4-fresh-reference-bounded-decode",
@@ -553,7 +565,9 @@
         "rung": "bounded_decode",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-z-image-q4-fresh-reference-bounded-attention",
@@ -561,7 +575,9 @@
         "rung": "bounded_attention",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-z-image-q4-fresh-reference-bounded-transformer",
@@ -569,7 +585,9 @@
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-q4-fresh-reference-resident",
@@ -577,7 +595,9 @@
         "rung": "resident",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-q4-fresh-reference-staged",
@@ -585,7 +605,9 @@
         "rung": "staged_residency",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-q4-fresh-reference-bounded-decode",
@@ -593,7 +615,9 @@
         "rung": "bounded_decode",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-q4-fresh-reference-bounded-attention",
@@ -601,7 +625,9 @@
         "rung": "bounded_attention",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-q4-fresh-reference-bounded-transformer",
@@ -609,7 +635,9 @@
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-qwen-vae-decode",
@@ -617,7 +645,9 @@
         "rung": "bounded_decode",
         "evidenceScope": "authoritative",
         "plannedCases": 8,
-        "positiveCases": 7
+        "positiveCases": 7,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-krea-pose-control-q4-768",
@@ -625,7 +655,9 @@
         "rung": "bounded_decode",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "mlx-krea-pose-control-q4-896",
@@ -633,7 +665,9 @@
         "rung": "bounded_decode",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-production-current-v1",
@@ -641,7 +675,9 @@
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",
         "plannedCases": 1,
-        "positiveCases": 1
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       },
       {
         "name": "candle-krea-v2-candidates",
@@ -649,7 +685,9 @@
         "rung": "bounded_transformer_residency",
         "evidenceScope": "candidate",
         "plannedCases": 2,
-        "positiveCases": 2
+        "positiveCases": 2,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
       }
     ]
   },
@@ -675,6 +713,18 @@
       "mlx": 924,
       "candle": 548
     },
+    "shippedModelLoads": {
+      "mlx": 4620,
+      "candle": 2734,
+      "total": 7354
+    },
+    "shippedBatchCoverage": {
+      "sessionKeys": [],
+      "sessions": 0,
+      "records": 0,
+      "savedLoads": 0
+    },
+    "shippedLoadCollapseFactor": 1,
     "unavailableOverlayLoadPriceTag": {
       "availability": "unavailable",
       "disposition": "counterfactual metadata only; excluded from campaign and wall-clock columns",
@@ -706,6 +756,11 @@
           "mlx": 4620,
           "candle": 2734
         },
+        "shippedModelLoads": {
+          "mlx": 4620,
+          "candle": 2734,
+          "total": 7354
+        },
         "warmSessions": {
           "total": 1472,
           "mlx": 924,
@@ -729,6 +784,11 @@
           "total": 6621,
           "mlx": 4132,
           "candle": 2489
+        },
+        "shippedModelLoads": {
+          "mlx": 4132,
+          "candle": 2489,
+          "total": 6621
         },
         "warmSessions": {
           "total": 1472,
@@ -754,6 +814,11 @@
           "mlx": 3696,
           "candle": 2192
         },
+        "shippedModelLoads": {
+          "mlx": 3696,
+          "candle": 2192,
+          "total": 5888
+        },
         "warmSessions": {
           "total": 1472,
           "mlx": 924,
@@ -778,6 +843,11 @@
           "mlx": 3160,
           "candle": 1989
         },
+        "shippedModelLoads": {
+          "mlx": 3160,
+          "candle": 1989,
+          "total": 5149
+        },
         "warmSessions": {
           "total": 1472,
           "mlx": 924,
@@ -801,6 +871,11 @@
           "total": 1472,
           "mlx": 924,
           "candle": 548
+        },
+        "shippedModelLoads": {
+          "mlx": 924,
+          "candle": 548,
+          "total": 1472
         },
         "warmSessions": {
           "total": 1472,
@@ -850,6 +925,11 @@
           "mlx": 38.5,
           "candle": 22.8
         },
+        "shippedModelLoadHours": {
+          "total": 61.3,
+          "mlx": 38.5,
+          "candle": 22.8
+        },
         "warmSessionHours": {
           "total": 12.3,
           "mlx": 7.7,
@@ -859,6 +939,11 @@
       {
         "perRunSeconds": 60,
         "recordHours": {
+          "total": 122.6,
+          "mlx": 77,
+          "candle": 45.6
+        },
+        "shippedModelLoadHours": {
           "total": 122.6,
           "mlx": 77,
           "candle": 45.6
@@ -876,6 +961,11 @@
           "mlx": 154,
           "candle": 91.1
         },
+        "shippedModelLoadHours": {
+          "total": 245.1,
+          "mlx": 154,
+          "candle": 91.1
+        },
         "warmSessionHours": {
           "total": 49.1,
           "mlx": 30.8,
@@ -885,6 +975,11 @@
       {
         "perRunSeconds": 300,
         "recordHours": {
+          "total": 612.8,
+          "mlx": 385,
+          "candle": 227.8
+        },
+        "shippedModelLoadHours": {
           "total": 612.8,
           "mlx": 385,
           "candle": 227.8
@@ -902,6 +997,11 @@
           "mlx": 770,
           "candle": 455.7
         },
+        "shippedModelLoadHours": {
+          "total": 1225.7,
+          "mlx": 770,
+          "candle": 455.7
+        },
         "warmSessionHours": {
           "total": 245.3,
           "mlx": 154,
@@ -911,6 +1011,11 @@
       {
         "perRunSeconds": 1200,
         "recordHours": {
+          "total": 2451.3,
+          "mlx": 1540,
+          "candle": 911.3
+        },
+        "shippedModelLoadHours": {
           "total": 2451.3,
           "mlx": 1540,
           "candle": 911.3
@@ -1284,12 +1389,6 @@
       "story": 16072,
       "independentlyBlockingCells": 30,
       "cellsTouched": 4564
-    },
-    {
-      "input": "whether the harness can amortise a model load across a target's rungs",
-      "why": "A potential 5x on the whole campaign, currently NOT realised: the runner spawns a fresh process per planned case. Unlike the overlay load collapse this one is not ruled out by the load contract — but it is NOT established either. Nothing in the repository measures five rung peaks from one load, and the manifest cannot even express a `resident` peak alongside the other four. It is also not purely scheduling work: reusing a process risks contaminating the measurement, and the two backends have asymmetric protection (Candle asserts no caching allocator; MLX has a live buffer cache and its own footprint harness mandates one tier per process). See the `rung` axis for the full evidence review.",
-      "howToResolve": "Either batch a target's rungs into one provider invocation, or run the provider as a warm daemon behind the argv command — and in either case demonstrate that a rung measured in a reused process matches the fresh-process measurement within a stated tolerance, ON BOTH BACKENDS, before believing the 5x. Tracked as SC-16059.",
-      "story": 16059
     },
     {
       "input": "which geometry policy is true",

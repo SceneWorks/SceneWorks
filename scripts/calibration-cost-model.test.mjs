@@ -9,6 +9,7 @@ import {
   OVERLAY_LOAD_CONTRACT,
   PRODUCIBILITY_GATES,
   SOURCE_PATHS,
+  batchedSessionKeysFromPlan,
   buildCostModel,
   cellCensus,
   collapseToRuns,
@@ -130,6 +131,31 @@ test("control coverage follows CONTROL_LANE_MODELS, not backend measurement bloc
   );
 });
 
+test("shipped batch coverage is empty while complete opted-in groups remain derivable", () => {
+  const plan = JSON.parse(readFileSync(
+    new URL("../config/memory-calibration-plan.json", import.meta.url),
+    "utf8",
+  ));
+  assert.deepEqual(batchedSessionKeysFromPlan(plan), []);
+
+  const optedIn = structuredClone(plan);
+  for (const provider of optedIn.providers.filter(
+    (item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2",
+  )) {
+    provider.modelLoadPolicy = "batch_rungs";
+    provider.modelLoadGroup = "synthetic-complete-krea-group";
+  }
+  assert.deepEqual(batchedSessionKeysFromPlan(optedIn), [[
+    "krea_2_turbo", "candle", "q4", "text_to_image", "none",
+  ].join("\0")]);
+
+  const incomplete = structuredClone(optedIn);
+  incomplete.providers = incomplete.providers.filter(
+    (provider) => provider.name !== "candle-krea-q4-fresh-reference-resident",
+  );
+  assert.throws(() => batchedSessionKeysFromPlan(incomplete), /every canonical rung/);
+});
+
 test("published overlay prose derives its census and load ratio from the current matrix", async () => {
   const model = await buildCostModel();
   const overlayCells = model.cells.total - model.cells.byOverlay.none;
@@ -230,6 +256,8 @@ test("the collapsing rule maps cells 1:1 to records and counts sessions rather t
 
   // Model loads: all three session keys still have work, including beta's (4 of 5 rungs survive).
   assert.deepEqual(runs.warmSessions, { total: 3, mlx: 2, candle: 1 });
+  assert.deepEqual(runs.shippedModelLoads, { total: 14, mlx: 10, candle: 4 });
+  assert.equal(runs.shippedLoadCollapseFactor, 1);
   assert.equal(runs.rungCollapseFactor, 5);
   // 14 records over 3 loads — NOT the rung span, because one cell is already exempt. Reported to
   // three places precisely so an exempt cell cannot round away into a clean "5".
@@ -264,6 +292,20 @@ test("mutation: a tier-collapsing rule disagrees with the shipped rule", () => {
     tierCollapsed.size,
     "tier must not collapse — a q4 record cannot certify a q8 cell",
   );
+});
+
+test("only an explicitly covered complete rung group reduces shipped model loads", () => {
+  const betaKey = ["beta", "candle", "q4", "text_to_image", "none"].join("\0");
+  const runs = collapseToRuns(syntheticCells(), DEFAULT_PARAMETERS, {
+    batchedSessionKeys: [betaKey],
+  });
+  assert.deepEqual(runs.shippedModelLoads, { total: 11, mlx: 10, candle: 1 });
+  assert.deepEqual(runs.shippedBatchCoverage, {
+    sessionKeys: [betaKey],
+    sessions: 1,
+    records: 4,
+    savedLoads: 3,
+  });
 });
 
 /**
@@ -596,40 +638,23 @@ test("the overlay load-axis collapse is recorded as unavailable in the shipped l
 });
 
 /**
- * MAJOR 4, pinned. The rung collapse was cited to four sources, none of which establishes that one
- * load can measure five rung peaks: two docs lines describe PHASES at one strategy and pixel parity
- * across two strategies, `execute_parity_request` samples no memory at all, and one manifest record
- * is not evidence of one process. The verdict must be UNPROVEN, and the backend asymmetry in
- * measurement contamination must be recorded because it is what makes SC-16059 more than scheduling.
+ * SC-16059 resolves the rung uncertainty per backend. Candle proves a one-load batch can execute but
+ * fails the fresh/reused tolerance gate. MLX remains fresh because its eager and deferred rungs carry
+ * distinct calibration identities.
  */
-test("the rung axis is UNPROVEN, with its citations downgraded and the MLX/Candle asymmetry recorded", () => {
+test("the rung axis records both backends' explicit inability to amortize", () => {
   const rung = COLLAPSING_AXES.find((axis) => axis.axis === "rung");
 
-  assert.equal(rung.verdict, "not collapsed by the harness; UNPROVEN in principle");
-  assert.match(rung.factor, /CEILING/);
-
-  // The claim itself must be stated as open rather than as physics.
-  assert.match(rung.rule, /OPEN/);
-  assert.doesNotMatch(rung.rule, /The PHYSICS does not/);
-
-  // Citations split into what IS established (schema) and what is NOT (physics).
-  assert.match(rung.citation, /SCHEMA SIDE \(established\)/);
-  assert.match(rung.citation, /PHYSICS SIDE \(does NOT establish the collapse\)/);
-  // Phases are not rungs.
-  assert.match(rung.citation, /phases are not rungs/);
-  // The parity path measures pixels, not memory.
-  assert.match(rung.citation, /returns an Image and never touches the VramProbe/);
-  // "exclusive" means exclusive hardware, not one process.
-  assert.match(rung.citation, /exclusive HARDWARE/);
-  // The manifest cannot even express the fifth rung's peak.
-  assert.match(rung.citation, /cannot express a `resident` peak/);
-
-  // The asymmetry: Candle asserts no caching allocator; MLX has a live cache and its own footprint
-  // harness mandates one tier per process because clear_cache() cannot free live weights.
-  assert.match(rung.caveat, /cudaCachingAllocatorPresent = 0/);
-  assert.match(rung.caveat, /MLX has NO equivalent structural guarantee/);
-  assert.match(rung.caveat, /ONE TIER PER\s+PROCESS/);
-  assert.match(rung.caveat, /cannot release LIVE weight arrays/);
+  assert.equal(rung.verdict, "fresh per rung on both measured backends");
+  assert.match(rung.factor, /warm floor remains counterfactual/);
+  assert.match(rung.rule, /run_batch/);
+  assert.match(rung.rule, /exceeded the/);
+  assert.match(rung.rule, /eager and deferred calibration fingerprints/);
+  assert.match(rung.rule, /No target is priced as batched/);
+  assert.match(rung.citation, /run_five_rung_batch/);
+  assert.match(rung.citation, /assess_z_image_batch/);
+  assert.match(rung.caveat, /256 MiB/);
+  assert.match(rung.caveat, /5%/);
 });
 
 test("the perRunSeconds remediation derives current completion counts and asks for timing", () => {
@@ -1029,8 +1054,7 @@ test("fit-versus-exhaustive is sensitive to the geometry points parameter, not h
 
   // Exhaustive strategies are geometry-policy facts and must not move with a fit parameter.
   // Session-level, not cell-level: alpha's two session keys advertise 2 resolutions each and
-  // beta's advertises 1, so measuring every advertised resolution is 5 model loads (25 provider
-  // invocations once each load's five rungs are counted).
+  // beta's advertises 1. Both backends pay five fresh invocations per session point.
   assert.equal(twoPoints["exhaustive-exact-geometry"], 5);
   assert.equal(threePoints["exhaustive-exact-geometry"], 5);
   assert.equal(twoPoints["exhaustive-per-cell"], 3);

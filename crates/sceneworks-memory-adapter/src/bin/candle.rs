@@ -570,8 +570,15 @@ fn measured_strategy(
     Ok(measured)
 }
 
-fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
-    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+fn load_five_rung_generator() -> Result<
+    (
+        String,
+        String,
+        Box<dyn runtime_cuda::gen_core::Generator>,
+        VramProbe,
+    ),
+    String,
+> {
     let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
     protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
@@ -592,11 +599,27 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
         .with_load_shape(LoadShape::DeferredMaterialization);
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
-    let contract = catalog
+    let mut vram = VramProbe::start_rendered().assert_idle(1.0);
+    let load_sample = vram.phase();
+    let generator = catalog
         .media()
-        .memory_strategy_contract(KREA_ID, &spec)
-        .map_err(|error| format!("read {KREA_ID} memory-strategy contract: {error}"))?
-        .ok_or_else(|| format!("{KREA_ID} has no memory-strategy contract"))?;
+        .load(KREA_ID, &spec)
+        .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
+    vram.end_load(load_sample);
+    Ok((repository, revision, generator, vram))
+}
+
+fn run_five_rung_reference_loaded(
+    request: &Value,
+    generator: &dyn runtime_cuda::gen_core::Generator,
+    vram: &mut VramProbe,
+    repository: &str,
+    revision: &str,
+) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| format!("loaded {KREA_ID} has no memory-strategy contract"))?;
     let selection = planned_selection(request)?;
     contract
         .validate_selection(&selection)
@@ -650,13 +673,6 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
         cache_state: MemoryCacheState::Cold,
         evidence_revision: format!("sc-16402@{}", protocol::INFERENCE_PIN),
     };
-    let mut vram = VramProbe::start_rendered().assert_idle(1.0);
-    let load_sample = vram.phase();
-    let generator = catalog
-        .media()
-        .load(KREA_ID, &spec)
-        .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
-    vram.end_load(load_sample);
     let mut scope = generator
         .begin_memory_strategy_request(&context)
         .map_err(|error| format!("begin Krea fresh-reference scope: {error}"))?
@@ -748,7 +764,6 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
         }
     }
     vram.end_gen(generation_sample);
-    let report = vram.report();
     if let Some(message) = phase_error {
         let _ = scope.finish(MemoryRunOutcome::Error {
             message: message.clone(),
@@ -789,9 +804,9 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
     let decode_bytes = decimal_gb_to_bytes(
         decode_peak_gb.ok_or_else(|| "Krea fresh reference did not complete decode".to_owned())?,
     );
-    let overall_bytes = decimal_gb_to_bytes(report.peak_gb);
+    let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
     let blocker = concat!(
-        "fresh-process oracle capture measures exact per-rung memory and strategy identity for ",
+        "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
         "sc-16059; it intentionally remains gated because this run does not repeat the full ",
         "promotion-quality, negative-mutation, and lifecycle scenario suite"
     );
@@ -799,14 +814,14 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
         request,
         KREA_PLAIN_EXECUTION_PATH,
         protocol::PlainGatedFragment {
-            artifact: artifact(&repository, &revision),
+            artifact: artifact(repository, revision),
             sweep: protocol::reference_sweep(request, "passed")?,
             blocker,
             quality: json!({ "result": "not_run" }),
             negative_mutation: Value::Null,
             loadability: json!({
                 "result": "passed",
-                "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
+                "resolvedPathFingerprint": loadability_fingerprint(repository, revision),
             }),
             diagnostics: protocol::diagnostics(
                 "memory-candle-adapter:krea-five-rung-reference",
@@ -829,6 +844,101 @@ fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
         "overall": cuda_phase_metrics(overall_bytes),
     });
     Ok(fragment)
+}
+
+fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    let (repository, revision, generator, mut vram) = load_five_rung_generator()?;
+    run_five_rung_reference_loaded(
+        request,
+        generator.as_ref(),
+        &mut vram,
+        &repository,
+        &revision,
+    )
+}
+
+fn update_warmed_retention_baseline(
+    settled_after_resident: &mut Option<u64>,
+    after: u64,
+) -> Result<(), String> {
+    if let Some(baseline) = *settled_after_resident {
+        if after > baseline.saturating_add(64 * MIB) {
+            return Err(format!(
+                "reused Krea rung retained {} bytes above the warmed resident baseline; refusing contaminated batching",
+                after - baseline
+            ));
+        }
+    } else {
+        *settled_after_resident = Some(after);
+    }
+    Ok(())
+}
+
+fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
+    let planned = request
+        .get("planned")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "run_batch request.planned must be an array".to_owned())?;
+    let expected_rungs = [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+    ];
+    let actual_rungs = planned
+        .iter()
+        .map(|item| {
+            item.pointer("/strategy/rung")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "batched planned strategy.rung must be a string".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if actual_rungs != expected_rungs {
+        return Err(format!(
+            "run_batch requires one canonical five-rung target, got {actual_rungs:?}"
+        ));
+    }
+    let first_target = planned[0]
+        .get("target")
+        .ok_or_else(|| "batched planned target is missing".to_owned())?;
+    if planned
+        .iter()
+        .any(|item| item.get("target") != Some(first_target))
+    {
+        return Err("run_batch cannot mix calibration targets in one model load".to_owned());
+    }
+    for item in planned {
+        let mut per_rung_request = request.clone();
+        per_rung_request["action"] = json!("run");
+        per_rung_request["planned"] = item.clone();
+        protocol::validate_plain_overlay_target(&per_rung_request, KREA_PLAIN_EXECUTION_PATH)?;
+    }
+
+    let (repository, revision, generator, mut vram) = load_five_rung_generator()?;
+    let smi = NvidiaSmi::resolve()?;
+    // Krea uses DeferredMaterialization, so loading the generator does not establish its
+    // steady-state device residency. The canonical batch starts with `resident`; use the
+    // memory retained after that first rung as the contamination baseline, then require every
+    // later rung to release its transient allocations back to that warmed state.
+    let mut settled_after_resident = None;
+    let mut fragments = Vec::with_capacity(planned.len());
+    for item in planned {
+        let mut per_rung_request = request.clone();
+        per_rung_request["action"] = json!("run");
+        per_rung_request["planned"] = item.clone();
+        fragments.push(run_five_rung_reference_loaded(
+            &per_rung_request,
+            generator.as_ref(),
+            &mut vram,
+            &repository,
+            &revision,
+        )?);
+        let after = smi.used_bytes()?;
+        update_warmed_retention_baseline(&mut settled_after_resident, after)?;
+    }
+    Ok(json!({ "modelLoads": 1, "fragments": fragments }))
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -1304,8 +1414,30 @@ fn main() {
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
         "run" => run(&request),
+        "run_batch" => run_five_rung_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
     protocol::write_response(&response).unwrap_or_else(|error| protocol::fail(error));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_materialization_establishes_retention_baseline_after_resident_rung() {
+        let mut baseline = None;
+        update_warmed_retention_baseline(&mut baseline, 12 * GIB).unwrap();
+        assert_eq!(baseline, Some(12 * GIB));
+        update_warmed_retention_baseline(&mut baseline, 12 * GIB + 64 * MIB).unwrap();
+    }
+
+    #[test]
+    fn warmed_retention_baseline_rejects_later_growth() {
+        let mut baseline = Some(12 * GIB);
+        let error =
+            update_warmed_retention_baseline(&mut baseline, 12 * GIB + 64 * MIB + 1).unwrap_err();
+        assert!(error.contains("above the warmed resident baseline"));
+    }
 }

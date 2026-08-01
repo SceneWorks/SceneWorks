@@ -405,20 +405,31 @@ jobs:
           printf '.calibration/\n' >> .git/info/exclude
           cargo build --release --locked -p sceneworks-memory-adapter \
             --features mlx --bin memory-mlx-adapter
-          node scripts/memory-calibration-harness.mjs run \
+          node scripts/memory-calibration-harness.mjs assess-reuse \
             --config config/memory-calibration-plan.json \
             --backend mlx \
             --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
             --provider-command '["target/release/memory-mlx-adapter"]' \
+            --output "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
+          node -e 'const a=require(process.argv[1]); if(a.verdict!=="unable_to_amortize") throw new Error(`unexpected MLX reuse verdict: ${a.verdict}`)' \
+            "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
+          node scripts/memory-calibration-harness.mjs run \
+            --config config/memory-calibration-plan.json \
+            --backend mlx \
+            --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
+            --fresh-per-case \
+            --provider-command '["target/release/memory-mlx-adapter"]' \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
-            --output "$RUNNER_TEMP/sc-16402-mlx-fresh.json"
+            --output "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
           node scripts/memory-calibration-harness.mjs check \
-            --input "$RUNNER_TEMP/sc-16402-mlx-fresh.json"
+            --input "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
       - name: Upload raw schema-checked MLX five-rung reference
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-16402-mlx-fresh-${{ github.run_id }}
-          path: ${{ runner.temp }}/sc-16402-mlx-fresh.json
+          name: sc-16059-mlx-reuse-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sc-16059-mlx-fresh.json
+            ${{ runner.temp }}/sc-16059-mlx-reuse-assessment.json
           if-no-files-found: error
