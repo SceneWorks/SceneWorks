@@ -184,6 +184,10 @@ unset access_token_trimmed
 SCENEWORKS_VOLUME="${SCENEWORKS_VOLUME:-/workspace}"
 SCENEWORKS_DATA_DIR="${SCENEWORKS_DATA_DIR:-${SCENEWORKS_VOLUME}/data}"
 SCENEWORKS_CONFIG_DIR="${SCENEWORKS_CONFIG_DIR:-${SCENEWORKS_VOLUME}/config}"
+# Download-credential store (sc-16540). Its own directory rather than the config
+# dir: the store holds plaintext tokens and the config dir is a checkout in dev.
+# Must be on the durable volume or tokens vanish when the pod restarts.
+SCENEWORKS_CREDENTIALS_DIR="${SCENEWORKS_CREDENTIALS_DIR:-${SCENEWORKS_VOLUME}/credentials}"
 SCENEWORKS_JOBS_DB_PATH="${SCENEWORKS_JOBS_DB_PATH:-/tmp/sceneworks/cache/jobs.db}"
 HF_HOME="${HF_HOME:-${SCENEWORKS_VOLUME}/cache/huggingface}"
 
@@ -200,7 +204,7 @@ else
   effective_hf_hub_cache="${HF_HUB_CACHE}"
 fi
 
-export SCENEWORKS_VOLUME SCENEWORKS_DATA_DIR SCENEWORKS_CONFIG_DIR
+export SCENEWORKS_VOLUME SCENEWORKS_DATA_DIR SCENEWORKS_CONFIG_DIR SCENEWORKS_CREDENTIALS_DIR
 export SCENEWORKS_JOBS_DB_PATH HF_HOME HF_HUB_CACHE HUGGINGFACE_HUB_CACHE
 
 jobs_db_parent="${SCENEWORKS_JOBS_DB_PATH%/*}"
@@ -216,11 +220,13 @@ fi
 require_absolute_path "SCENEWORKS_VOLUME" "${SCENEWORKS_VOLUME}" || exit 1
 require_absolute_path "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
 require_absolute_path "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
+require_absolute_path "SceneWorks credentials directory" "${SCENEWORKS_CREDENTIALS_DIR}" || exit 1
 require_absolute_path "Hugging Face home" "${HF_HOME}" || exit 1
 require_absolute_path "Hugging Face hub cache" "${effective_hf_hub_cache}" || exit 1
 require_absolute_path "jobs.db parent directory" "${jobs_db_parent}" || exit 1
 ensure_writable_dir "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
 ensure_writable_dir "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
+ensure_writable_dir "SceneWorks credentials directory" "${SCENEWORKS_CREDENTIALS_DIR}" || exit 1
 ensure_writable_dir "Hugging Face home" "${HF_HOME}" || exit 1
 ensure_writable_dir "Hugging Face hub cache" "${effective_hf_hub_cache}" || exit 1
 ensure_writable_dir "jobs.db parent directory" "${jobs_db_parent}" || exit 1

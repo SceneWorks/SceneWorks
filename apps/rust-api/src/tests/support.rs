@@ -151,6 +151,11 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         port: 0,
         data_dir: temp_dir.path().join("data"),
         config_dir: temp_dir.path().join("config"),
+        // Pinned to the tempdir on purpose. Resolving this the way production does
+        // (`credentials::credentials_dir`) would hand tests the developer's REAL OS
+        // app-config dir, so a credential test would read — and `set`/`delete` would
+        // overwrite — their actual tokens (sc-16540).
+        credentials_dir: temp_dir.path().join("credentials"),
         access_token: String::new(),
         cors_origins: vec![
             "http://localhost:5173".to_owned(),

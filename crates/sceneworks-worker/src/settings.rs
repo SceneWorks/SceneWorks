@@ -92,6 +92,7 @@ impl Settings {
     pub fn from_env() -> Self {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
+        let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
         Self {
             api_url: env_string("SCENEWORKS_API_URL", DEFAULT_API_URL),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
@@ -127,7 +128,7 @@ impl Settings {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
-            credentials: load_worker_credentials(&config_dir),
+            credentials: load_worker_credentials(&credentials_dir, &config_dir),
             max_lora_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_LORA_URL_BYTES"],
                 DEFAULT_MAX_LORA_URL_BYTES,

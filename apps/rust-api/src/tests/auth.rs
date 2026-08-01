@@ -1166,6 +1166,18 @@ async fn credentials_routes_store_redact_and_delete() {
         !body.to_string().contains("secret-key"),
         "token leaked in the response"
     );
+    // sc-16540: the token lands in the credentials dir, NOT the config dir. The config
+    // dir is the repo checkout in dev, so a store written there puts a plaintext token
+    // in a git working tree — the regression this asserts against.
+    let filename = sceneworks_core::credentials::CREDENTIALS_FILENAME;
+    assert!(
+        settings.credentials_dir.join(filename).is_file(),
+        "credential store must be written to the credentials dir",
+    );
+    assert!(
+        !settings.config_dir.join(filename).exists(),
+        "no credential store may be created in the config dir",
+    );
 
     // A separate GET is likewise redacted.
     let (status, body) = request(

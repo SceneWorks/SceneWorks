@@ -383,9 +383,12 @@ single `SCENEWORKS_VOLUME` base defaults there and gives the following layout:
 
 Set `SCENEWORKS_VOLUME=/runpod-volume` for a serverless network-volume mount, or
 another absolute container path for a custom mount. Explicit
-`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`, `SCENEWORKS_JOBS_DB_PATH`,
-`HF_HOME`, `HF_HUB_CACHE`, and `HUGGINGFACE_HUB_CACHE` values take precedence
-over derived defaults.
+`SCENEWORKS_DATA_DIR`, `SCENEWORKS_CONFIG_DIR`, `SCENEWORKS_CREDENTIALS_DIR`,
+`SCENEWORKS_JOBS_DB_PATH`, `HF_HOME`, `HF_HUB_CACHE`, and
+`HUGGINGFACE_HUB_CACHE` values take precedence over derived defaults.
+`SCENEWORKS_CREDENTIALS_DIR` defaults to `${SCENEWORKS_VOLUME}/credentials` — the
+download-credential store is kept out of the config dir (sc-16540) because that
+directory is a repo checkout in development and the store is plaintext tokens.
 
 The image intentionally runs as root, matching RunPod's default volume owner.
 At startup it creates and write-probes only the exact managed directories; it

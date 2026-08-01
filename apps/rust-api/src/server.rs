@@ -61,6 +61,11 @@ pub struct Settings {
     pub port: u16,
     pub data_dir: PathBuf,
     pub config_dir: PathBuf,
+    /// Directory holding the `credentials.json` store (sc-16540). Resolved by
+    /// [`sceneworks_core::credentials::credentials_dir`] and deliberately independent
+    /// of `config_dir`, which is pointed at the repo checkout in dev — see that
+    /// function for the precedence and why a plaintext token must not live there.
+    pub credentials_dir: PathBuf,
     pub access_token: String,
     pub cors_origins: Vec<String>,
     pub worker_timeout_seconds: u64,
@@ -161,12 +166,15 @@ impl Settings {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8000);
         let host = env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST);
+        let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
+        let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
         Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: host.clone(),
             port,
             data_dir,
-            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
+            config_dir,
+            credentials_dir,
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .unwrap_or_default()
                 .trim()
@@ -627,10 +635,45 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // HTTP, but a sysadmin or restore could leave the on-disk file group/world
     // readable. Warn (don't fail) at startup so the secret's only at-rest
     // protection — its file mode — is visibly broken instead of silently so.
+    // Move a pre-sc-16540 store out of the config dir before anything reads it. The
+    // API is the file's sole writer, so this is the one place it can happen without a
+    // race. A failure here is logged, not fatal: the worker still falls back to the
+    // legacy path, so an un-migrated install keeps working.
+    match sceneworks_core::credentials::migrate_legacy_store(
+        &settings.config_dir,
+        &settings.credentials_dir,
+    ) {
+        Ok(sceneworks_core::credentials::LegacyMigration::Migrated(from)) => {
+            tracing::info!(
+                event = "credentials_store_migrated",
+                from = %from.display(),
+                to = %settings.credentials_dir.display(),
+                "moved the credential store out of the config dir (sc-16540)",
+            );
+        }
+        Ok(sceneworks_core::credentials::LegacyMigration::BothPresent(legacy)) => {
+            tracing::warn!(
+                event = "credentials_store_duplicate",
+                legacy = %legacy.display(),
+                active = %settings.credentials_dir.display(),
+                "a credential store exists at BOTH the old and new locations; the new one is \
+                 authoritative. Delete the old file — it still holds tokens in plaintext.",
+            );
+        }
+        Ok(sceneworks_core::credentials::LegacyMigration::NotNeeded) => {}
+        Err(error) => {
+            tracing::warn!(
+                event = "credentials_store_migration_failed",
+                error = %error,
+                "could not migrate the credential store out of the config dir; leaving it in \
+                 place (readers fall back to the old path)",
+            );
+        }
+    }
     #[cfg(unix)]
     {
         let creds_path = settings
-            .config_dir
+            .credentials_dir
             .join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
         if let Some(mode) = sceneworks_core::credentials::loose_credentials_mode(&creds_path) {
             tracing::warn!(
