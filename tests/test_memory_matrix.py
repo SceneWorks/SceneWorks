@@ -82,16 +82,29 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         calibration_schema, format_checker=jsonschema.FormatChecker()
     ).validate(calibration)
     matrix = load_matrix()
-    expected_ids = {
-        "imc-265dafd26c0ad92ce367",
-        "imc-2ca548230323b40eece3",
+    evidence_ids = {record["id"] for record in calibration["records"]}
+    assert len(evidence_ids) == len(calibration["records"]) == 24
+    assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
+        "current",
+        "historical",
     }
-    assert {record["id"] for record in calibration["records"]} == expected_ids
-    assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == expected_ids
-    assert all(run["binding"] == {"eligible": True, "reasons": []} for run in matrix["calibrationRuns"])
-    assert all(
-        run["semantics"] == "historical" for run in matrix["calibrationRuns"]
-    ), "a runtime pin change must not relabel prior-runtime hardware evidence as current"
+    current_eligible = [
+        run
+        for run in matrix["calibrationRuns"]
+        if run["semantics"] == "current" and run["binding"]["eligible"]
+    ]
+    assert len(current_eligible) == 5
+    assert all(run["binding"]["reasons"] == [] for run in current_eligible)
+    assert {
+        run["record"]["strategy"]["rung"] for run in current_eligible
+    } == {
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+    }
 
 
 def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
@@ -181,28 +194,32 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     )
     bundle = json.loads(output_path.read_text(encoding="utf-8"))
     validator.validate(bundle)
+    def scenario(record, name):
+        return next(item for item in record["scenarios"] if item["name"] == name)
+
     mutations = [
         lambda record: record["repositories"]["sceneWorks"].update(dirty=True),
-        lambda record: record["scenarios"][3].update(result="not_run"),
-        lambda record: record["scenarios"][4].update(cleanupVerified=False),
+        lambda record: scenario(record, "warm_repeat").update(result="not_run"),
+        lambda record: scenario(record, "cancel").update(cleanupVerified=False),
         lambda record: record["quality"].update(result="not_run"),
         lambda record: record["negativeMutation"].update(measured=False),
         lambda record: record["loadability"].update(resolvedPathFingerprint=""),
         lambda record: record.update(predictedPeakBytes=None),
         lambda record: record["observedMemory"]["decode"].update(activeBytes=-1),
         lambda record: record["repositories"]["sceneWorks"].pop("matrixSourceRevision"),
-        lambda record: record["sweep"].update(axes=[]),
+        lambda record: record["sweep"].update(cases=[]),
         lambda record: record["sweep"]["axes"].append(copy.deepcopy(record["sweep"]["axes"][0])),
         lambda record: record["sweep"]["cases"].append(copy.deepcopy(record["sweep"]["cases"][0])),
         lambda record: record["quality"].update(contract=""),
         lambda record: record["hardware"].update(unexpected="closed"),
         lambda record: record["scenarios"][0].update(unexpected="closed"),
     ]
-    for mutate in mutations:
+    for index, mutate in enumerate(mutations):
         invalid = copy.deepcopy(bundle)
         mutate(invalid["records"][0])
-        with pytest.raises(jsonschema.ValidationError):
-            validator.validate(invalid)
+        assert list(validator.iter_errors(invalid)), (
+            f"adversarial schema mutation {index} was accepted"
+        )
     mutating_provider = ROOT / "scripts/fixtures/memory-provider-mutates-repo-fixture.mjs"
     with pytest.raises(subprocess.CalledProcessError):
         subprocess.run(
@@ -236,7 +253,18 @@ def test_aggregate_cells_do_not_promote_exact_records_to_dynamic_verification():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert verified == []
+    assert len(verified) == 5
+    assert {
+        (cell["modelId"], cell["backend"], cell["tier"], cell["mode"], cell["overlay"])
+        for cell in verified
+    } == {("qwen_image", "mlx", "bf16", "text_to_image", "none")}
+    assert {cell["rung"] for cell in verified} == {
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+    }
     expected_parameters = {
         "resident": {},
         "staged_residency": {},
@@ -368,6 +396,7 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         if row["requestPeak"] == "moves"
     ] == [
         (15510, "mlx"),
+        (15511, "mlx"),
         (15512, "mlx"),
         (15517, "candle"),
         (15517, "mlx"),
