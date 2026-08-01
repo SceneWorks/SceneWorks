@@ -318,6 +318,11 @@ def test_matrix_schema_rejects_malformed_evidence_records():
         )
     )
     rejected(
+        lambda evidence: evidence["historicalVerification"][0].__setitem__(
+            "runtimeAdmission", "unknown"
+        )
+    )
+    rejected(
         lambda evidence: evidence["strategyParameterVerification"][0].__setitem__(
             "geometry", "up to 1024"
         )

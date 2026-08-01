@@ -107,6 +107,15 @@
           "type": "string",
           "minLength": 1
         },
+        "evidenceScope": {
+          "enum": [
+            "exact_request",
+            "phase_fit_only"
+          ]
+        },
+        "runtimeAdmission": {
+          "type": "boolean"
+        },
         "tier": {
           "type": "string",
           "minLength": 1
