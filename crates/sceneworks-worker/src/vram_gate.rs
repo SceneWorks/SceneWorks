@@ -475,9 +475,20 @@ impl KreaRuntimeEvidenceContext {
 }
 
 /// Read a measured phase curve `fixedGb + perMpxGb * megapixels`. The manifest stores fixed weight /
-/// allocator residency separately from the geometry-dependent activation slope, fitted from real
-/// renders at multiple resolutions. Invalid or incomplete evidence fails closed to `None`; callers
-/// retain the established sequential gate instead of inventing a fit.
+/// allocator residency separately from the geometry-dependent activation slope. Invalid or
+/// incomplete evidence fails closed to `None`; callers retain the established sequential gate
+/// instead of inventing a fit.
+///
+/// SC-16060: this comment used to claim the slope was fitted from real renders at multiple
+/// resolutions. That is true of **q4 only**. `turboFit.evidenceRecords` carries two geometries for
+/// q4 and exactly one each for q8 and bf16, so those two tiers' slopes cannot have been fitted — and
+/// the data shows it: their `threeStage`/`tiledVae` denoise slopes (7.980 / 7.900) match q4's 7.980
+/// rather than being independently derived, while 4 of 8 geometry-sensitive curves on each ship a
+/// zero slope against 1 of 8 on q4. A zero slope is conservative below the measured point and the
+/// `maxMeasuredPixels` bound blocks anything above it, so this is a coverage defect rather than an
+/// admission hazard — but a reader must not take the sentence as evidence the artifact does not
+/// carry. `docs/generated/memory-matrix.json` now reports the same fact per cell:
+/// `memoryCharacterization` reads fitted for q4 and point for q8 and bf16.
 fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;

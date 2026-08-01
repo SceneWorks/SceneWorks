@@ -7,12 +7,22 @@
   "$defs": {
     "sourceEvidence": {
       "type": "object",
-      "required": ["source"],
+      "required": [
+        "source"
+      ],
       "additionalProperties": false,
-      "properties": { "source": { "type": "string", "minLength": 1 } }
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "engagedRungs": {
-      "type": ["array", "null"],
+      "type": [
+        "array",
+        "null"
+      ],
       "minItems": 1,
       "uniqueItems": true,
       "items": {
@@ -27,92 +37,218 @@
     },
     "declaredEvidence": {
       "type": "object",
-      "required": ["source", "tier"],
+      "required": [
+        "source",
+        "tier"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source": { "type": "string", "minLength": 1 },
-        "tier": { "type": "string", "minLength": 1 }
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "parityEvidence": {
       "type": "object",
-      "required": ["contract", "result", "metric", "maximumError", "fixture"],
+      "required": [
+        "contract",
+        "result",
+        "metric",
+        "maximumError",
+        "fixture"
+      ],
       "additionalProperties": false,
       "properties": {
-        "contract": { "enum": ["exact", "tolerance", "golden"] },
-        "result": { "enum": ["passed", "failed", "not_run"] },
-        "metric": { "type": "string", "minLength": 1 },
-        "maximumError": { "type": "number", "minimum": 0 },
-        "fixture": { "type": "string", "minLength": 1 }
+        "contract": {
+          "enum": [
+            "exact",
+            "tolerance",
+            "golden"
+          ]
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_run"
+          ]
+        },
+        "metric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maximumError": {
+          "type": "number",
+          "minimum": 0
+        },
+        "fixture": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "historicalEvidence": {
       "type": "object",
-      "required": ["source"],
+      "required": [
+        "source"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source": { "type": "string", "minLength": 1 },
-        "hardware": { "type": "string", "minLength": 1 },
-        "tier": { "type": "string", "minLength": 1 },
-        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
-        "capturedAt": { "type": "string", "format": "date-time" },
-        "harnessVersion": { "type": "string", "minLength": 1 },
-        "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
-        "observedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hardware": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "geometry": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "harnessVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "engagedRungs": {
+          "$ref": "#/$defs/engagedRungs"
+        },
+        "observedPeakGb": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "requiredHostBytes": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991,
           "description": "Exact MLX host requirement: max(predicted peak, observed non-reclaimable wired peak) plus the captured foreign unified-memory reserve."
         },
-        "parity": { "$ref": "#/$defs/parityEvidence" }
+        "parity": {
+          "$ref": "#/$defs/parityEvidence"
+        }
       }
     },
     "loadabilityEvidence": {
       "type": "object",
-      "required": ["repository", "revision", "variant"],
+      "required": [
+        "repository",
+        "revision",
+        "variant"
+      ],
       "additionalProperties": false,
       "properties": {
-        "repository": { "type": ["string", "null"] },
-        "revision": { "type": ["string", "null"] },
-        "variant": { "type": ["string", "null"] }
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "strategyEvidence": {
       "type": "object",
-      "required": ["source", "tier", "geometry", "predictedPeakGb", "exactParameters"],
+      "required": [
+        "source",
+        "tier",
+        "geometry",
+        "predictedPeakGb",
+        "exactParameters"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source": { "type": "string", "minLength": 1 },
-        "tier": { "type": "string", "minLength": 1 },
-        "geometry": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
-        "predictedPeakGb": { "type": "number", "exclusiveMinimum": 0 },
-        "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
-        "exactParameters": { "type": "object" }
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "geometry": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+        },
+        "predictedPeakGb": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "engagedRungs": {
+          "$ref": "#/$defs/engagedRungs"
+        },
+        "exactParameters": {
+          "type": "object"
+        }
       }
     },
     "structuralEvidence": {
       "type": "object",
-      "required": ["source", "reason"],
+      "required": [
+        "source",
+        "reason"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source": { "type": "string", "minLength": 1 },
-        "reason": { "type": "string", "minLength": 1 }
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "rung4StructuralApplicability": {
       "description": "How much of the family's transformer trunk `gen_core::block_window` can bound. `partial` is the value the five-state conformance vocabulary cannot express.",
-      "enum": ["full", "partial", "none", "requires-different-primitive"]
+      "enum": [
+        "full",
+        "partial",
+        "none",
+        "requires-different-primitive"
+      ]
     },
     "rung4Implementation": {
-      "enum": ["shared-primitive", "provider-local", "none"]
+      "enum": [
+        "shared-primitive",
+        "provider-local",
+        "none"
+      ]
     },
     "rung4RequestPeak": {
       "description": "Whether bounding the trunk was MEASURED to move the request peak. Separate from applicability on purpose: a strategy that bounds a phase without moving the request peak is not a saving.",
-      "enum": ["moves", "does-not-move", "unmeasured"]
+      "enum": [
+        "moves",
+        "does-not-move",
+        "unmeasured"
+      ]
     },
     "rung4SurveyVerdict": {
-      "description": "SC-15969 per-family rung-4 applicability. `structuralApplicability` and `requestPeak` are two SEPARATE findings by design: a family can be structurally capable and still correctly default to not using the rung, because a strategy that bounds a phase without moving the request peak is not a saving. `partial` is the value the five-state conformance vocabulary cannot express — a trunk that is not one uniform stack. `overlayIncompatible` is deliberately NOT folded into `structuralApplicability`: it is a property of the provider's adapter mechanism, so a family whose stack is perfectly windowable would otherwise publish `none` on its overlay cells.",
+      "description": "SC-15969 per-family rung-4 applicability. `structuralApplicability` and `requestPeak` are two SEPARATE findings by design: a family can be structurally capable and still correctly default to not using the rung, because a strategy that bounds a phase without moving the request peak is not a saving. `partial` is the value the five-state conformance vocabulary cannot express \u2014 a trunk that is not one uniform stack. `overlayIncompatible` is deliberately NOT folded into `structuralApplicability`: it is a property of the provider's adapter mechanism, so a family whose stack is perfectly windowable would otherwise publish `none` on its overlay cells.",
       "type": "object",
       "required": [
         "story",
@@ -126,35 +262,67 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "story": { "const": 15969 },
-        "structuralApplicability": { "$ref": "#/$defs/rung4StructuralApplicability" },
-        "requestPeak": { "$ref": "#/$defs/rung4RequestPeak" },
-        "implementation": { "$ref": "#/$defs/rung4Implementation" },
+        "story": {
+          "const": 15969
+        },
+        "structuralApplicability": {
+          "$ref": "#/$defs/rung4StructuralApplicability"
+        },
+        "requestPeak": {
+          "$ref": "#/$defs/rung4RequestPeak"
+        },
+        "implementation": {
+          "$ref": "#/$defs/rung4Implementation"
+        },
         "overlayIncompatible": {
           "description": "True when THIS cell is exempt because the provider's adapter mechanism cannot carry an overlay onto a rebuilt block. Scoped to cells whose entry and mode actually have the streaming path: on a route with no such path the rung is Missing for the ordinary reason, so a sibling cell of the same provider can read `false` while the provider-level fact still holds.",
           "type": "boolean"
         },
-        "summary": { "type": "string", "minLength": 1 },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
         "blockStacks": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "blocks", "windowable"],
+            "required": [
+              "name",
+              "blocks",
+              "windowable"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "blocks": { "type": "string", "minLength": 1 },
-              "windowable": { "type": "boolean" },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "blocks": {
+                "type": "string",
+                "minLength": 1
+              },
+              "windowable": {
+                "type": "boolean"
+              },
               "entries": {
                 "description": "Present when the stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict. Every id is checked to belong to the owning family at generation time.",
                 "type": "array",
                 "minItems": 1,
-                "items": { "type": "string", "minLength": 1 }
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               }
             }
           }
         },
-        "findings": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "backendScopedStories": {
@@ -163,8 +331,12 @@
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "mlx": { "type": "integer" },
-        "candle": { "type": "integer" }
+        "mlx": {
+          "type": "integer"
+        },
+        "candle": {
+          "type": "integer"
+        }
       }
     }
   },
@@ -178,27 +350,51 @@
     "rung4SurveyRows",
     "cells",
     "calibrationRuns",
-    "modelSlices"
+    "modelSlices",
+    "claims",
+    "memoryCharacterizationStates"
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed — it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure. 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were added, and both are REQUIRED — the first at the document root, the second on exactly the rung-4 cells. The fields are additive, so a version-3 READER is unaffected; but a version-3 DOCUMENT has neither and therefore no longer validates against this schema, which is what the version number identifies. Bumping is the honest call: leaving it at 3 would mean a schema that rejects documents legitimately stamped 3.",
-      "const": 4
+      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed \u2014 it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure. 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were added, and both are REQUIRED \u2014 the first at the document root, the second on exactly the rung-4 cells. The fields are additive, so a version-3 READER is unaffected; but a version-3 DOCUMENT has neither and therefore no longer validates against this schema, which is what the version number identifies. Bumping is the honest call: leaving it at 3 would mean a schema that rejects documents legitimately stamped 3. 5 (SC-16060): `claims`, `memoryCharacterizationStates`, and `cells[].memoryCharacterization` were added and are REQUIRED, and `conformanceStates` changed SHAPE from bare strings to `{state, definition}` objects. That last one is not additive \u2014 a version-4 reader indexing `conformanceStates` for a string now gets an object \u2014 and it is the point of the change: the states carried no definitions, which is how the pipeline came to hold two contradictory answers to whether one measured geometry certifies a whole envelope.",
+      "const": 5
     },
-    "generatedFrom": { "type": "object" },
+    "generatedFrom": {
+      "type": "object"
+    },
     "conformanceStates": {
       "type": "array",
+      "minItems": 5,
       "items": {
-        "enum": [
-          "Verified",
-          "Implemented/unverified",
-          "Structurally N/A",
-          "Missing",
-          "Route unavailable/broken"
-        ]
+        "type": "object",
+        "required": [
+          "state",
+          "definition"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "enum": [
+              "Verified",
+              "Implemented/unverified",
+              "Structurally N/A",
+              "Missing",
+              "Route unavailable/broken"
+            ]
+          },
+          "definition": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
-    "evidenceDimensions": { "type": "array", "items": { "type": "string" } },
+    "evidenceDimensions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "summary": {
       "type": "object",
       "required": [
@@ -220,8 +416,13 @@
             "implementation"
           ],
           "properties": {
-            "story": { "const": 15969 },
-            "surveyedFamilyBackends": { "type": "integer", "minimum": 1 }
+            "story": {
+              "const": 15969
+            },
+            "surveyedFamilyBackends": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         }
       }
@@ -241,11 +442,24 @@
         ],
         "additionalProperties": false,
         "properties": {
-          "familyStory": { "type": "integer" },
-          "backend": { "enum": ["mlx", "candle"] },
-          "structuralApplicability": { "$ref": "#/$defs/rung4StructuralApplicability" },
-          "requestPeak": { "$ref": "#/$defs/rung4RequestPeak" },
-          "implementation": { "$ref": "#/$defs/rung4Implementation" }
+          "familyStory": {
+            "type": "integer"
+          },
+          "backend": {
+            "enum": [
+              "mlx",
+              "candle"
+            ]
+          },
+          "structuralApplicability": {
+            "$ref": "#/$defs/rung4StructuralApplicability"
+          },
+          "requestPeak": {
+            "$ref": "#/$defs/rung4RequestPeak"
+          },
+          "implementation": {
+            "$ref": "#/$defs/rung4Implementation"
+          }
         }
       }
     },
@@ -267,19 +481,44 @@
           "owningModelStories"
         ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "family": { "type": ["string", "null"] },
-          "resolvedRoute": { "type": "string" },
-          "routeKind": { "enum": ["registry", "bespoke"] },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolvedRoute": {
+            "type": "string"
+          },
+          "routeKind": {
+            "enum": [
+              "registry",
+              "bespoke"
+            ]
+          },
           "backends": {
             "type": "array",
             "minItems": 1,
-            "items": { "enum": ["mlx", "candle"] },
+            "items": {
+              "enum": [
+                "mlx",
+                "candle"
+              ]
+            },
             "uniqueItems": true
           },
-          "owningFamilyStories": { "$ref": "#/$defs/backendScopedStories" },
-          "owningModelStories": { "$ref": "#/$defs/backendScopedStories" }
+          "owningFamilyStories": {
+            "$ref": "#/$defs/backendScopedStories"
+          },
+          "owningModelStories": {
+            "$ref": "#/$defs/backendScopedStories"
+          }
         }
       }
     },
@@ -307,17 +546,37 @@
           "calibrationFingerprint",
           "owningFamilyStory",
           "owningModelStory",
-          "evidence"
+          "evidence",
+          "memoryCharacterization"
         ],
         "properties": {
-          "id": { "type": "string" },
-          "modelId": { "type": "string" },
-          "resolvedRoute": { "type": "string" },
-          "provider": { "type": "string" },
-          "backend": { "enum": ["mlx", "candle"] },
-          "tier": { "type": "string" },
-          "mode": { "type": "string" },
-          "overlay": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "resolvedRoute": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "backend": {
+            "enum": [
+              "mlx",
+              "candle"
+            ]
+          },
+          "tier": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "overlay": {
+            "type": "string"
+          },
           "rung": {
             "enum": [
               "resident",
@@ -327,9 +586,15 @@
               "bounded_transformer_residency"
             ]
           },
-          "geometryEnvelope": { "type": "object" },
-          "strategyParameters": { "type": "object" },
-          "engagedRungs": { "$ref": "#/$defs/engagedRungs" },
+          "geometryEnvelope": {
+            "type": "object"
+          },
+          "strategyParameters": {
+            "type": "object"
+          },
+          "engagedRungs": {
+            "$ref": "#/$defs/engagedRungs"
+          },
           "state": {
             "enum": [
               "Verified",
@@ -339,10 +604,21 @@
               "Route unavailable/broken"
             ]
           },
-          "calibrationFingerprint": { "type": ["string", "null"] },
-          "owningFamilyStory": { "type": "integer" },
-          "owningModelStory": { "type": "integer" },
-          "rung4Survey": { "$ref": "#/$defs/rung4SurveyVerdict" },
+          "calibrationFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owningFamilyStory": {
+            "type": "integer"
+          },
+          "owningModelStory": {
+            "type": "integer"
+          },
+          "rung4Survey": {
+            "$ref": "#/$defs/rung4SurveyVerdict"
+          },
           "evidence": {
             "type": "object",
             "additionalProperties": false,
@@ -358,31 +634,79 @@
             "properties": {
               "staticImplementation": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/sourceEvidence" }
+                "items": {
+                  "$ref": "#/$defs/sourceEvidence"
+                }
               },
               "declaredCalibration": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/declaredEvidence" }
+                "items": {
+                  "$ref": "#/$defs/declaredEvidence"
+                }
               },
               "historicalVerification": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/historicalEvidence" }
+                "items": {
+                  "$ref": "#/$defs/historicalEvidence"
+                }
               },
               "currentEnvironmentVerification": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/historicalEvidence" }
+                "items": {
+                  "$ref": "#/$defs/historicalEvidence"
+                }
               },
               "loadability": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/loadabilityEvidence" }
+                "items": {
+                  "$ref": "#/$defs/loadabilityEvidence"
+                }
               },
               "strategyParameterVerification": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/strategyEvidence" }
+                "items": {
+                  "$ref": "#/$defs/strategyEvidence"
+                }
               },
               "structural": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/structuralEvidence" }
+                "items": {
+                  "$ref": "#/$defs/structuralEvidence"
+                }
+              }
+            }
+          },
+          "memoryCharacterization": {
+            "type": "object",
+            "required": [
+              "status",
+              "measuredGeometries",
+              "coveredPixelBound"
+            ],
+            "additionalProperties": false,
+            "description": "SC-16060. The geometry-sensitive claim, kept separate from `state` so that one measured geometry cannot read as certifying a whole envelope. `coveredPixelBound` is null unless `status` is `fitted`.",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unmeasured",
+                  "point",
+                  "fitted"
+                ]
+              },
+              "measuredGeometries": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*x[1-9][0-9]*$"
+                }
+              },
+              "coveredPixelBound": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "exclusiveMinimum": 0
               }
             }
           }
@@ -391,11 +715,27 @@
           {
             "description": "SC-15969: the survey verdict rides exactly the rung-4 cells. Required there so a cell cannot escape the survey; forbidden elsewhere so the field cannot drift onto another rung and be read as one.",
             "if": {
-              "required": ["rung"],
-              "properties": { "rung": { "const": "bounded_transformer_residency" } }
+              "required": [
+                "rung"
+              ],
+              "properties": {
+                "rung": {
+                  "const": "bounded_transformer_residency"
+                }
+              }
             },
-            "then": { "required": ["rung4Survey"] },
-            "else": { "not": { "required": ["rung4Survey"] } }
+            "then": {
+              "required": [
+                "rung4Survey"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "rung4Survey"
+                ]
+              }
+            }
           }
         ]
       }
@@ -405,20 +745,48 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["cellId", "binding", "semantics", "record"],
+        "required": [
+          "cellId",
+          "binding",
+          "semantics",
+          "record"
+        ],
         "properties": {
-          "cellId": { "type": "string", "minLength": 1 },
+          "cellId": {
+            "type": "string",
+            "minLength": 1
+          },
           "binding": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["eligible", "reasons"],
+            "required": [
+              "eligible",
+              "reasons"
+            ],
             "properties": {
-              "eligible": { "type": "boolean" },
-              "reasons": { "type": "array", "items": { "type": "string" } }
+              "eligible": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
-          "semantics": { "enum": ["current", "historical", "gated", "negative", "fixture"] },
-          "record": { "$ref": "memory-calibration.schema.json#/$defs/record" }
+          "semantics": {
+            "enum": [
+              "current",
+              "historical",
+              "gated",
+              "negative",
+              "fixture"
+            ]
+          },
+          "record": {
+            "$ref": "memory-calibration.schema.json#/$defs/record"
+          }
         }
       }
     },
@@ -427,7 +795,88 @@
       "additionalProperties": {
         "type": "array",
         "minItems": 5,
-        "items": { "type": "string" }
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "claims": {
+      "type": "object",
+      "required": [
+        "state",
+        "memoryCharacterization"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "object",
+          "required": [
+            "asserts",
+            "geometrySensitive",
+            "binding"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "asserts": {
+              "type": "string",
+              "minLength": 1
+            },
+            "geometrySensitive": {
+              "type": "boolean"
+            },
+            "binding": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "memoryCharacterization": {
+          "type": "object",
+          "required": [
+            "asserts",
+            "geometrySensitive",
+            "binding"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "asserts": {
+              "type": "string",
+              "minLength": 1
+            },
+            "geometrySensitive": {
+              "type": "boolean"
+            },
+            "binding": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "memoryCharacterizationStates": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "status",
+          "definition"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "unmeasured",
+              "point",
+              "fitted"
+            ]
+          },
+          "definition": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     }
   }
