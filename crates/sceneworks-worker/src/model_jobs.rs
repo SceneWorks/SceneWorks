@@ -2178,7 +2178,7 @@ fn supported_artifact_tier(tier: &str) -> Option<String> {
     matches!(tier, "q4" | "q8" | "nvfp4" | "bf16" | "fp32").then(|| tier.to_owned())
 }
 
-fn is_sha256_fingerprint(value: &str) -> bool {
+pub(crate) fn is_sha256_fingerprint(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest
@@ -2672,9 +2672,14 @@ mod artifact_provenance_tests {
             Some("q4"),
             &["q4/weights.safetensors"],
         );
-        let tiered_resolved =
-            huggingface_receipt_weights(data.path(), tiered_repo, Some("tiered-model"), Some("q4"))
-                .expect("tiered receipt");
+        let tiered_resolved = huggingface_receipt_weights(
+            data.path(),
+            tiered_repo,
+            Some("tiered-model"),
+            Some("q4"),
+            ProvenanceRepair::Skip,
+        )
+        .expect("tiered receipt");
         assert_eq!(tiered_resolved.path, tiered);
         let tiered_provenance = tiered_resolved.provenance.expect("tiered provenance");
         assert_eq!(tiered_provenance.fixed_artifact_tier.as_deref(), Some("q4"));
@@ -2685,9 +2690,15 @@ mod artifact_provenance_tests {
         )
         .expect("mutate tiered weights");
         assert_eq!(
-            huggingface_receipt_weights(data.path(), tiered_repo, Some("tiered-model"), Some("q4"))
-                .expect("path remains usable")
-                .provenance,
+            huggingface_receipt_weights(
+                data.path(),
+                tiered_repo,
+                Some("tiered-model"),
+                Some("q4"),
+                ProvenanceRepair::Skip
+            )
+            .expect("path remains usable")
+            .provenance,
             None,
             "same-snapshot content-state drift must invalidate HF calibration provenance"
         );
@@ -2712,6 +2723,7 @@ mod artifact_provenance_tests {
             flat_repo,
             Some("flat-model"),
             Some("default"),
+            ProvenanceRepair::Skip,
         )
         .expect("flat receipt");
         assert_eq!(flat_resolved.path, flat);
@@ -2737,7 +2749,8 @@ mod artifact_provenance_tests {
                 data.path(),
                 flat_repo,
                 Some("flat-model"),
-                Some("default")
+                Some("default"),
+                ProvenanceRepair::Skip
             )
             .expect("flat path remains usable")
             .provenance
@@ -2754,7 +2767,8 @@ mod artifact_provenance_tests {
                 data.path(),
                 flat_repo,
                 Some("flat-model"),
-                Some("default")
+                Some("default"),
+                ProvenanceRepair::Skip
             )
             .is_none(),
             "receipt/snapshot revision mismatch must not manufacture provenance"
@@ -2791,16 +2805,23 @@ mod artifact_provenance_tests {
             data.path(),
             repo,
             Some("symlinked-model"),
-            Some("q4")
+            Some("q4"),
+            ProvenanceRepair::Skip
         )
         .expect("receipt path")
         .provenance
         .is_some());
         std::fs::write(&blob, b"mutated-underlying-blob").expect("mutate blob in place");
         assert_eq!(
-            huggingface_receipt_weights(data.path(), repo, Some("symlinked-model"), Some("q4"))
-                .expect("path remains usable")
-                .provenance,
+            huggingface_receipt_weights(
+                data.path(),
+                repo,
+                Some("symlinked-model"),
+                Some("q4"),
+                ProvenanceRepair::Skip
+            )
+            .expect("path remains usable")
+            .provenance,
             None
         );
     }
@@ -2813,7 +2834,10 @@ pub(crate) fn huggingface_receipt_weights_dir(
     model_id: Option<&str>,
     variant: Option<&str>,
 ) -> Option<PathBuf> {
-    huggingface_receipt_weights(data_dir, repo, model_id, variant).map(|resolved| resolved.path)
+    // Path-only callers never read provenance, so they must not trigger a receipt write as a side
+    // effect of locating weights. Repair belongs to the provenance consumer.
+    huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)
+        .map(|resolved| resolved.path)
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -2822,6 +2846,7 @@ pub(crate) fn huggingface_receipt_weights(
     repo: &str,
     model_id: Option<&str>,
     variant: Option<&str>,
+    repair: ProvenanceRepair,
 ) -> Option<ResolvedWeights> {
     let models_dir = data_dir.join("models");
     let repo_marker = models_dir
@@ -2841,7 +2866,7 @@ pub(crate) fn huggingface_receipt_weights(
     // installed model directory; a targeted hit makes this lookup O(1) in the catalog size.
     for marker in &targeted {
         if let Some(weights_dir) =
-            receipt_weights_dir_from_marker(data_dir, marker, repo, model_id, variant)
+            receipt_weights_dir_from_marker(data_dir, marker, repo, model_id, variant, repair)
         {
             return Some(weights_dir);
         }
@@ -2854,12 +2879,92 @@ pub(crate) fn huggingface_receipt_weights(
         .filter(|marker| !targeted.contains(marker))
     {
         if let Some(weights_dir) =
-            receipt_weights_dir_from_marker(data_dir, &marker, repo, model_id, variant)
+            receipt_weights_dir_from_marker(data_dir, &marker, repo, model_id, variant, repair)
         {
             return Some(weights_dir);
         }
     }
     None
+}
+
+/// Whether a resolver call may establish a tree-stamp baseline for an install that never got one.
+///
+/// A receipt written before download-time stamping — every `backfilled` receipt, plus any download
+/// whose payload lacked `memoryCalibrationProvenanceRequired` — resolves a loadable artifact and
+/// yields NO provenance, and nothing else ever recomputes the stamp. That permanently pins the
+/// install to the legacy admission selector, which is not a decision anyone made (sc-16482).
+///
+/// `Allow` stamps the artifact AS IT STANDS and persists that baseline, so mutation is detected from
+/// then on. It cannot prove the artifact was untouched between download and repair — no
+/// after-the-fact check can — but it is the same guarantee shape the download path itself gives
+/// (it stamps what the hub client just wrote, without re-reading content), just anchored later. The
+/// receipt records `artifactTreeStampSource` so the weaker anchor is never mistaken for the original.
+///
+/// A receipt whose stamp is PRESENT but does NOT match is untouched: that is real drift and must
+/// keep failing closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) enum ProvenanceRepair {
+    Allow,
+    Skip,
+}
+
+/// Stamp an unstamped receipt in place and return the baseline that was established.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn establish_receipt_tree_stamp(
+    marker: &Path,
+    receipt: &Value,
+    snapshot: &Path,
+    files: &[&str],
+) -> WorkerResult<String> {
+    let stamp = resolved_files_tree_stamp(snapshot, files)?;
+    let revision = snapshot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("unreadable snapshot name {}", snapshot.display()))
+        })?;
+    let identity = |candidate: &Value| {
+        candidate.get("repo") == receipt.get("repo")
+            && candidate.get("modelId") == receipt.get("modelId")
+            && candidate.get("variant") == receipt.get("variant")
+    };
+    let patch = |entry: &mut Value| {
+        let Some(object) = entry.as_object_mut() else {
+            return;
+        };
+        object.insert("artifactTreeStamp".to_owned(), Value::String(stamp.clone()));
+        object.insert(
+            "artifactTreeStampSource".to_owned(),
+            Value::String("repair".to_owned()),
+        );
+        // A backfilled receipt carries no revision, so resolution leans on the exact file set
+        // identifying exactly one snapshot. Record what we just resolved to remove that ambiguity.
+        object
+            .entry("snapshotRevision".to_owned())
+            .or_insert_with(|| Value::String(revision.to_owned()));
+    };
+
+    let mut top = serde_json::from_slice::<Value>(&std::fs::read(marker)?).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "invalid install receipt at {}: {error}",
+            marker.display()
+        ))
+    })?;
+    // `write_model_download_receipt` mirrors the newest receipt at the top level AND in `receipts`.
+    // Patch both when they name the same artifact, so neither copy contradicts the other.
+    if identity(&top) {
+        patch(&mut top);
+    }
+    if let Some(entries) = top.get_mut("receipts").and_then(Value::as_array_mut) {
+        for entry in entries.iter_mut().filter(|entry| identity(entry)) {
+            patch(entry);
+        }
+    }
+    let temporary = marker.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&top)?)?;
+    std::fs::rename(temporary, marker)?;
+    Ok(stamp)
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -2869,6 +2974,7 @@ fn receipt_weights_dir_from_marker(
     repo: &str,
     model_id: Option<&str>,
     variant: Option<&str>,
+    repair: ProvenanceRepair,
 ) -> Option<ResolvedWeights> {
     #[cfg(test)]
     RECEIPT_MARKERS_READ.with(|count| count.set(count.get() + 1));
@@ -2937,9 +3043,40 @@ fn receipt_weights_dir_from_marker(
                 .get("artifactTreeStamp")
                 .and_then(Value::as_str)
                 .filter(|stamp| is_sha256_fingerprint(stamp));
-            let tree_stamp_matches = receipt_tree_stamp.is_some_and(|expected| {
-                resolved_files_tree_stamp(&snapshot, &files).is_ok_and(|actual| actual == expected)
-            });
+            let tree_stamp_matches = match receipt_tree_stamp {
+                // A stamp exists: it is the baseline, and a mismatch is drift. Never repair over it.
+                Some(expected) => resolved_files_tree_stamp(&snapshot, &files)
+                    .is_ok_and(|actual| actual == expected),
+                // No stamp was ever recorded (sc-16482). Establish one now when the caller allows
+                // it, so this install can reach the evidence path instead of being pinned to legacy
+                // forever. A repair failure is never fatal — it just leaves provenance unproven.
+                None if repair == ProvenanceRepair::Allow => {
+                    match establish_receipt_tree_stamp(marker, &receipt, &snapshot, &files) {
+                        Ok(stamp) => {
+                            tracing::info!(
+                                event = "artifact_tree_stamp_repaired",
+                                repo,
+                                marker = %marker.display(),
+                                snapshot = %snapshot.display(),
+                                stamp,
+                                "established a tree-stamp baseline for a previously unstamped install"
+                            );
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                event = "artifact_tree_stamp_repair_failed",
+                                repo,
+                                marker = %marker.display(),
+                                error = %error,
+                                "left the install unproven; it stays on the legacy selector"
+                            );
+                            false
+                        }
+                    }
+                }
+                None => false,
+            };
             // Tier receipts are self-contained below a tier directory. Only descend when every
             // file belongs to that same recorded tier; otherwise return the snapshot root.
             if let Some(variant) = receipt.get("variant").and_then(Value::as_str) {
