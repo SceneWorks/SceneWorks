@@ -6364,6 +6364,7 @@ mod tests {
             "flux2_klein_9b",
             "qwen_image",
             "z_image_turbo",
+            "z_image",
             "krea_2_turbo",
             "krea_2_raw",
             "krea_2_edit",
