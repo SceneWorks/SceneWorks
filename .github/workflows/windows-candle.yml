@@ -190,7 +190,7 @@ jobs:
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
       - name: Validate five-rung reference inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        shell: pwsh
+        shell: powershell
         env:
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           PROVISION_KREA_SNAPSHOT: ${{ inputs.provision_krea_snapshot }}
@@ -225,7 +225,7 @@ jobs:
           python-version: "3.12"
       - name: Provision exact public Krea reference snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
-        shell: pwsh
+        shell: powershell
         env:
           KREA_REVISION: ${{ inputs.krea_revision }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
@@ -251,7 +251,7 @@ jobs:
           '@ | python -
       - name: Resolve exact Krea reference snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        shell: pwsh
+        shell: powershell
         env:
           KREA_REVISION: ${{ inputs.krea_revision }}
           KREA_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_KREA_ROOT }}
