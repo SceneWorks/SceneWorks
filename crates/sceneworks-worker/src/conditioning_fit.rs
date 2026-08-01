@@ -27,7 +27,7 @@
 //! `Σ(resident base weights) + Σ(overlay weights) + `[`HEADROOM_GB`] vs the live (or capped) free VRAM.
 //! Deliberately crude, and deliberately a **lower bound** on the real peak: it prices no activations, no
 //! denoise steady state and no VAE-decode spike, because nothing has measured an overlay cell (see
-//! `docs/memory-strategy-contract.md`; sc-16013 owns the Krea control-lane re-measure). A floor is the
+//! `docs/memory-strategy-contract.md`). A floor is the
 //! only honest thing available, and for an admission gate the floor's direction is the SAFE one:
 //!
 //! * **It does not false-reject, PROVIDED every declared path is loaded in full.** A reject then means the
@@ -56,12 +56,10 @@
 //! `krea_2_turbo`'s pose-ControlNet lane has the epic's only MEASURED gate ([`crate::krea_control_fit`])
 //! and keeps it. It ALSO runs this floor, in its own preamble rather than through the shared driver — see
 //! [`ConditioningAdmission::GatedInPreamble`] for the ordering reason. The two are not redundant: the
-//! ladder's peaks are superseded upper bounds today (`candle.control.measured == false`), so it
-//! deliberately declines to reject (`KreaControlFit::BestEffort`), and for a tier with no priced row
+//! current measured tiers can reject from transient-aware peaks, and for a tier with no priced row
 //! (`KreaControlFit::Unverified`) it cannot price the render at all — leaving the floor as the only check
-//! that can refuse a host which cannot hold the weights. That lane's footprint counts the BASE only: its
-//! control branch is folded on **packed** at load, so pricing the published bf16 checkpoint would
-//! over-count a packed base by several GB, and an over-count is the one thing this gate must never do.
+//! that can refuse a host which cannot hold the weights. The route declares only the files it actually
+//! loads so the floor does not over-count unused or repacked checkpoints.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and
 //! the per-lane wiring is in `image_jobs/conditioning_gate.rs`.

@@ -605,7 +605,7 @@ function modesFor(model) {
 // ## The blind spot this replaces
 //
 // `overlaysFor` used to emit the `control` overlay only when `model[backend].control` existed — but that
-// key is a MEASUREMENT block (`bf16BranchPeakGbByTier`, `decodeTileSaveGb`, …), and `"control"` appears
+// key is a MEASUREMENT block (`peakGbByTier`, `decodeTileSaveGb`, …), and `"control"` appears
 // exactly once in `config/manifests/builtin.models.jsonc`: inside `krea_2_turbo`'s **candle** block. So a
 // shipping lane with no measurements had **zero cells** — it was invisible to the very matrix that exists
 // to show what is unmeasured. The MLX Krea control lane is the concrete case: `mlx-gen-krea`'s

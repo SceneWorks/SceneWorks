@@ -621,17 +621,17 @@ All three, plus more than the section anticipated.
   its declaration THRESHOLD instead of claiming completeness in the abstract.)
 - Two consequences the section did not name: `mlx.denseTextEncoderTier` is now the only route to a
   dense text encoder (the hardcoded `DENSE_TE_TIER_MODELS` worker registry is deleted), and the
-  control-lane peaks are renamed `bf16Branch*` with `measured: false`, because they were captured
-  against a branch tier that no longer ships. SC-16013 owns the re-measure; SC-16014 owns the
+  old control-lane peaks were withdrawn because they were captured against a branch tier that no longer
+  ships. SC-16013 replaced them with direct packed-branch measurements; SC-16014 owns the
   lens-turbo mxfp4 upcast, which is a backend capability gap and cannot be fixed by repacking.
 - A third the section did not anticipate: **renaming a superseded row is not enough — the reader has to
-  honour it.** The first revision corrected the `bf16Branch*` rows by subtracting
+  honour it.** The first revision corrected the stale rows by subtracting
   `candle.control.branchPackSaveGb` (q8 8.4 / q4 10.2 GB) to "convert" them into the shipping
   configuration. Both figures exceed the ENTIRE 6.6 GB control branch, so neither was ever a weight-side
   quantity, and the correction under-predicted the q4/q8 host by ~5 GB one-directionally toward an OOM on
-  a live CUDA admission path. The key is retracted; the rows are read verbatim as upper bounds; and
-  `measured: false` now gates two behaviours in code (no hard reject, no reclaim credit) rather than
-  sitting beside a reader that ignored it. See "Repacking invalidates measurements" in the contract.
+  a live CUDA admission path. The key remains retracted. Generic stale rows are upper-bound-only (no
+  hard reject, no reclaim credit), while the current Krea rows are direct measurements and need no
+  correction. See "Repacking invalidates measurements" in the contract.
 - The cost of the rule is now stated where the rule is: a q8 base could previously pack its branch to q4,
   one tier BELOW the selection, which tier integrity permits — that band (~28.97-30.77 GB free on the
   shipped rows) is a real capability given up, and it is disclosed in the contract, the manifest and the

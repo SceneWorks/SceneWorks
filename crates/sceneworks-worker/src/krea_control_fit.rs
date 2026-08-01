@@ -30,13 +30,14 @@
 //!
 //! ## An unpriced TIER is not "no signal" (sc-16069)
 //!
-//! A tier with no `bf16BranchPeakGbByTier` row used to collapse into [`KreaControlFit::Unknown`], which
+//! A tier with no `peakGbByTier` row used to collapse into [`KreaControlFit::Unknown`], which
 //! the lane maps to the big-card fast path with no log — so the gate neither staged, nor tiled, nor
 //! chunked, nor rejected, nor left a trace. [`fit_ladder_for_entry`] now separates the two cases: no
 //! `candle.control` block at all is still `Unknown`, while a block that carries no row for the resolved
 //! tier is [`KreaControlFit::Unverified`] — an explicit, named, logged decision that stages residency and
-//! still never rejects. SC-16069 named `int8-convrot`; the tier actually REACHABLE here is `nvfp4` (see
-//! that variant's note), which is why the fix keys on the missing row rather than on a tier name.
+//! still never rejects. SC-16013 now prices every hosted tier, including `int8-convrot`; this remains a
+//! fail-safe for malformed catalog entries and future tiers, so it keys on the missing row rather than a
+//! particular tier name.
 //!
 //! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ that rung is skipped — the ladder walks
 //! the rungs it *can* measure and, if even (sequential residency + tiling + chunking) won't fit,
@@ -57,64 +58,14 @@
 //! time (the branch is 3.30 B params ≈ 6.6 GB bf16, ~3.3 GB at q8, ~1.7 GB at q4).
 //! [`control_branch_tier_for_key`] is now the whole decision, and it reads no budget.
 //!
-//! ### What that costs, stated plainly
+//! ### Current calibration (sc-16013)
 //!
-//! Deleting the rung removes a configuration that used to fit, and it is not only the declared q4 → q8
-//! floor:
-//!
-//! * **q4 base** — the ladder could pack the branch to q4, *at* the selected tier. That is now refused
-//!   on QUALITY grounds (the measured drift), which is the declared exception in
-//!   `config/tier-integrity.jsonc`. Deliberate, and the cost is recorded there.
-//! * **q8 base** — the ladder could pack the branch to q4, one tier **BELOW** the selection. Tier
-//!   integrity permits below-tier residency (only *above*-tier needs an exception), so nothing in the
-//!   invariant required removing it; it went because it was a *rung*, and a component's precision is not
-//!   a budget knob. On the shipped rows that rung admitted a q8-base job down to **~28.97 GB** free
-//!   (39.6 sequential + 2.0 headroom − 2.43 chunking − 10.2 branch-to-q4) where the tier-integral
-//!   configuration needs **~30.77 GB**; that ~1.8 GB band is a real capability this change gives up in
-//!   exchange for never silently substituting precision the user did not select. Those two figures come
-//!   from the retracted `branchPackSaveGb` (see [`predicted_control_peak_gb`]); on the corrected
-//!   weight-side accounting a q4 branch buys ~1.6 GB (3.3 → 1.7) rather than 1.8, so the true band is
-//!   slightly narrower. sc-16013's re-measure pins it.
-//!
-//! Neither loss is a *reject* today: with `candle.control.measured == false` the ladder's floor is
-//! [`KreaControlFit::BestEffort`], not [`KreaControlFit::TooBig`].
-//!
-//! ### The remaining cost of reading the rows verbatim: PREMATURE RUNG ENGAGEMENT (speed only)
-//!
-//! Reading a superseded upper bound verbatim ([`predicted_control_peak_gb`]) is the safe direction, but
-//! it is not free, and the price was previously disclosed only as "over-predicting adapts a card early".
-//! Here is how early. There are **zero reject bands**: `krea_2_turbo` is the only catalog entry with a
-//! `candle.control` block, and while its evidence is superseded [`control_evidence_is_current`] makes
-//! [`KreaControlFit::TooBig`] unreachable, so no job is refused that would have run. The entire residual
-//! cost is engaging a *speed*-costing rung on a card that did not need it.
-//!
-//! Every band below is `[true, predicted)` free-VRAM in GB, and re-derives from the catalog:
-//! `predicted = bf16Branch*Row + HEADROOM_GB(2.0)`, `true = row − 3.3 + 2.0` (the bf16 → q8 weight-side
-//! branch delta: 6.6 GB bf16 → ~3.3 GB packed), then minus `decodeTileSaveGb` (q4: 6.7) and
-//! `chunkAttnSaveGb` (2.43) as each rung engages.
-//!
-//! * **q4 base** (rows 36.2 resident / 32.5 sequential)
-//!   - `[34.9, 38.2)` — staged instead of resident: Qwen3-VL is encoded and dropped, so a re-encode is
-//!     paid on a card where the resident fast path fit.
-//!   - `[31.2, 34.5)` — VAE-decode tiling engaged unnecessarily: **+26% decode** (0.56 → 0.71 s).
-//!   - `[24.5, 27.8)` — attention chunking engaged unnecessarily: **~+6% render**.
-//!   - `[22.07, 25.37)` — [`KreaControlFit::BestEffort`]-with-warn where a clean [`KreaControlFit::Fits`]
-//!     was true. The KNOBS are identical, so this costs nothing at render time; only the verdict differs.
-//!     (This overlaps the chunking band in `[24.5, 25.37)`, where the gate both over-engages and
-//!     mis-labels.)
-//! * **q8 base** (rows 45.4 resident / 39.6 sequential; **no tiling rung** — `decodeTileSaveGb` is keyed
-//!   to q4 only, where the decode spike is the render peak)
-//!   - `[44.1, 47.4)` — staged instead of resident.
-//!   - `[39.17, 41.6)` — attention chunking engaged unnecessarily (~+6% render).
-//!   - `[35.87, 39.17)` — `BestEffort` instead of `Fits`, same knobs.
-//! * **bf16 base** — **zero over-prediction, zero band.** The branch is already bf16 at this tier
-//!   ([`control_branch_tier_for_key`] is the identity here), so the row describes the shipping
-//!   configuration exactly and every rung engages exactly when it is needed.
-//!
-//! **None of this is user-visible today.** The bands cost render time, not correctness or capability, and
-//! the `BestEffort` warning is a `tracing` event only — it reaches no API response, job record or UI
-//! surface. sc-16013's re-measure collapses every band to zero by replacing the `bf16Branch*` rows with
-//! rows captured against the branch that actually ships.
+//! The shipped `peakGbByTier` and `sequentialPeakGbByTier` rows were measured directly against each
+//! tier's shipping branch on RTX PRO 6000 Blackwell at 1024² / 8 steps / control scale 0.6. They include
+//! q4, q8, bf16, and INT8-ConvRot, so every reachable tier has a priced fast path and staged path. The
+//! worker reads those rows verbatim and adds only the shared admission headroom; there is no branch
+//! packing correction. The generic `BestEffort` path remains for any future superseded entry, while the
+//! current Krea evidence is eligible for a hard reject after the deepest measured rung.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
@@ -185,11 +136,9 @@ pub(crate) enum KreaControlFit {
     /// signal about the control lane" — it is a specific, nameable coverage hole, and silently taking the
     /// zero-adaptation path on it is the most permissive choice available.
     ///
-    /// **The reachable instance is `nvfp4`, not `int8-convrot`.** SC-16069 named `int8-convrot`, whose
-    /// `predicted_control_peak_gb` is indeed `None` — but `krea_control_gate_tier` passes
-    /// `convrot_resolved: false` and `tier_key_from_resolved_dir` only ever yields `bf16`/`q4`/`q8`, so
-    /// that string cannot currently reach this ladder. `nvfp4` can (`requested_tier_key` short-circuits to
-    /// it on an NVFP4 host pick) and has no `bf16Branch*` row either. Keying this on "block present, row
+    /// The shipped direct measurements now price every hosted tier, including `int8-convrot`. A future
+    /// or malformed tier such as `nvfp4` can still lack a measured control-peak row. Keying this on
+    /// "block present, row
     /// missing" rather than on a tier NAME covers both, and any future tier added to `vramGbByTier`
     /// without a matching control row.
     ///
@@ -275,9 +224,8 @@ pub(crate) fn control_block_present(manifest_entry: &JsonObject) -> bool {
 /// block that claims `measured: true` while still naming what superseded it is self-contradictory and
 /// must be read the conservative way.
 ///
-/// Today this is `false` for `krea_2_turbo` (sc-15799 repacked the branch; sc-16013 owes the
-/// re-measure), and it is load-bearing at exactly one place: [`fit_ladder`] will not turn a superseded
-/// prediction into a hard **reject**. See that function for why.
+/// The shipped `krea_2_turbo` block is current after sc-16013. This remains load-bearing for future or
+/// synthetic stale entries: [`fit_ladder`] will not turn superseded evidence into a hard **reject**.
 pub(crate) fn control_evidence_is_current(manifest_entry: &JsonObject) -> bool {
     let Some(control) = manifest_entry.get("candle").and_then(|c| c.get("control")) else {
         return false;
@@ -287,46 +235,42 @@ pub(crate) fn control_evidence_is_current(manifest_entry: &JsonObject) -> bool {
 }
 
 /// Predicted control-lane peak VRAM (GB) for `tier_key` (the BASE tier — `bf16`/`q8`/`q4`/…) with no
-/// rungs engaged: `candle.control.bf16BranchPeakGbByTier[tier_key]` **verbatim**, plus [`HEADROOM_GB`];
+/// rungs engaged: `candle.control.peakGbByTier[tier_key]` **verbatim**, plus [`HEADROOM_GB`];
 /// `None` (absent ⇒ the gate no-ops). The control peak exceeds the txt2img `candle.vramGbByTier`
 /// because the control branch is co-resident.
 ///
-/// **The row is read UNCORRECTED, on purpose.** Every control-lane peak in the catalog was captured
-/// with a **bf16** branch (sc-12176's two-process probe). sc-15799 packs the branch to the base tier,
-/// so on q4/q8 those rows describe a configuration that no longer ships — they are renamed
-/// `bf16Branch*` to say so and `candle.control.measured` is `false`. A lighter branch can only *lower*
-/// a peak, so the row is a sound **upper bound** on what actually loads, and an upper bound is the only
-/// safe thing to gate on: over-predicting adapts early, under-predicting admits an OOM.
+/// **The row is read verbatim, on purpose.** sc-16013 measured every reachable tier against the branch
+/// tier that actually ships, so the catalog value is already the complete device peak. The only
+/// arithmetic here is the standard admission headroom.
 ///
-/// **What is deliberately NOT done.** An earlier revision of this module subtracted
+/// **What is deliberately not done.** An earlier revision of this module subtracted
 /// `candle.control.branchPackSaveGb[branch tier]` (q8 8.4 / q4 10.2 GB) to "convert" the row into the
 /// shipping configuration. That is arithmetically unsound and it under-predicted by ~5 GB toward an
 /// OOM: the branch's projections are 3.30 B params ≈ **6.6 GB** bf16 and ~3.3 GB at q8 / ~1.7 GB at q4
 /// (`candle_gen_krea::control::ControlBranch::from_checkpoint_quantized`), so the true weight-side
 /// deltas are 3.3 GB (bf16→q8) and 4.9 GB (bf16→q4). 8.4 exceeds the entire branch, so it was never a
 /// weight-side quantity and cannot be subtracted from a peak. `branchPackSaveGb` is retracted in the
-/// catalog and this module no longer reads it; sc-16013 owns the re-measure that will let these rows
-/// drop their `bf16Branch` prefix.
+/// catalog and this module does not read it. The current direct measurements need no replacement
+/// correction.
 pub(crate) fn predicted_control_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
-    let bf16_branch_row = control_tier_gb(manifest_entry, "bf16BranchPeakGbByTier", tier_key)?;
-    Some(bf16_branch_row.max(0.0) + HEADROOM_GB)
+    let measured_row = control_tier_gb(manifest_entry, "peakGbByTier", tier_key)?;
+    Some(measured_row.max(0.0) + HEADROOM_GB)
 }
 
 /// Predicted Sequential control-lane peak for `tier_key`:
-/// `candle.control.bf16BranchSequentialPeakGbByTier[tier_key]`, read and headroomed exactly like
-/// [`predicted_control_peak_gb`] — uncorrected, as an upper bound. This is the largest single working
+/// `candle.control.sequentialPeakGbByTier[tier_key]`, read and headroomed exactly like
+/// [`predicted_control_peak_gb`] — verbatim. This is the largest single working
 /// set after Qwen3-VL has been encoded and dropped. `None` preserves best-effort offload behavior: the
 /// lane still stages, but cannot perform an honest second-stage reject.
 pub(crate) fn predicted_control_sequential_peak_gb(
     manifest_entry: &JsonObject,
     tier_key: &str,
 ) -> Option<f64> {
-    let bf16_branch_row =
-        control_tier_gb(manifest_entry, "bf16BranchSequentialPeakGbByTier", tier_key)?;
-    Some(bf16_branch_row.max(0.0) + HEADROOM_GB)
+    let measured_row = control_tier_gb(manifest_entry, "sequentialPeakGbByTier", tier_key)?;
+    Some(measured_row.max(0.0) + HEADROOM_GB)
 }
 
 /// Measured peak reduction (GB) from forcing the seam-free tiled VAE decode for BASE tier `tier_key`
@@ -336,11 +280,8 @@ pub(crate) fn predicted_control_sequential_peak_gb(
 /// attention chunking. Tier-keyed like [`predicted_control_peak_gb`] because whether the decode spike
 /// *is* the global peak (and thus how much tiling recovers) depends on the tier's denoise-steady floor.
 ///
-/// Carried across sc-15799 unchanged. It is a DELTA between a monolithic and a tiled decode of the same
-/// load, so the resident branch is present in both arms and cancels; a lighter branch lowers the denoise
-/// floor the spike is measured against, which if anything makes the decode spike *more* dominant, so the
-/// delta does not shrink. (`candle.control.measured` is nonetheless `false` until the control lane is
-/// re-measured — this is a reasoned carry-over, not fresh evidence.)
+/// sc-16013 re-measured this delta on the shipping q4-base/q8-branch staged load: 29.6 → 22.4 GB,
+/// a 7.2 GB whole-render saving.
 pub(crate) fn decode_tile_save_gb(manifest_entry: &JsonObject, tier_key: &str) -> Option<f64> {
     control_tier_gb(manifest_entry, "decodeTileSaveGb", tier_key)
 }
@@ -351,8 +292,9 @@ pub(crate) fn decode_tile_save_gb(manifest_entry: &JsonObject, tier_key: &str) -
 /// numerically identical to the unchunked one, the sc-6217 query-row-independence invariant). Unlike the
 /// tier-keyed [`decode_tile_save_gb`]/[`predicted_control_peak_gb`], this is a SCALAR: the denoise activation
 /// peak is bf16 regardless of the base weight tier, so the saving is tier-independent. `None` when unmeasured
-/// ⇒ the chunking rung is unavailable and the ladder can only reject. Published measured (RTX PRO
-/// 6000, dense bf16 base, 1024²/8-step): −2.43 GiB.
+/// ⇒ the chunking rung is unavailable and the ladder can only reject. sc-16013 re-measured the scalar
+/// on the shipping q4-base/q8-branch staged+tiled load: 22.4 → 19.6 GB, a 2.8 GB saving, with
+/// byte-identical raw RGB.
 pub(crate) fn chunk_attn_save_gb(manifest_entry: &JsonObject) -> Option<f64> {
     manifest_entry
         .get("candle")?
@@ -375,12 +317,12 @@ pub(crate) fn chunk_attn_save_gb(manifest_entry: &JsonObject) -> Option<f64> {
 ///
 /// **Past the deepest rung the outcome depends on the evidence, not just the numbers.** With current
 /// evidence the honest answer is [`KreaControlFit::TooBig`] — reject-before-OOM. With SUPERSEDED
-/// evidence (`evidence_is_current == false`, which is `krea_2_turbo` today) it is
+/// evidence (`evidence_is_current == false`) it is
 /// [`KreaControlFit::BestEffort`]: the peaks are deliberately *upper bounds* on the packed
 /// configuration, so a reject computed from them can refuse a job that would actually fit, and refusing
 /// a job that fits is the failure this lane is least allowed to have. Adapting maximally and letting the
-/// runtime decide is the only verdict a stale upper bound entitles us to. sc-16013's re-measure restores
-/// the hard reject by flipping `candle.control.measured` back to `true`.
+/// runtime decide is the only verdict a stale upper bound entitles us to. The shipped Krea block is
+/// current, so its deepest-rung non-fit is a hard reject.
 ///
 /// There is no branch-quant rung (sc-15799): the branch's tier is fixed by the base tier before this
 /// runs, so both peaks arrive already priced at it and there is nothing left for the ladder to trade.
@@ -540,11 +482,11 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
 ///
 /// **Why superseded evidence records nothing.** This function must never OVER-count the pool the load
 /// leaves behind: [`crate::vram_gate::with_reclaimable`] credits a later gate with it, so an over-count
-/// over-admits an OOM. The `bf16Branch*` rows are read UNCORRECTED (an upper bound — see
+/// over-admits an OOM. Superseded peak rows are read UNCORRECTED (an upper bound — see
 /// [`predicted_control_peak_gb`]), which is the SAFE direction for admission and the UNSAFE direction
 /// here: the load actually holds a packed branch, so the row exceeds the true incurred peak by the
 /// branch-packing delta the catalog cannot yet price. The same number therefore cannot serve both roles,
-/// and the reclaim credit is the one that must yield. The cost is real and bounded: until sc-16013
+/// and the reclaim credit is the one that must yield. The cost is real and bounded: until evidence
 /// re-measures, a repeated control render re-stages instead of crediting the previous render's pooled
 /// pages (needless staging — a *speed* cost), rather than crediting pages that are not there.
 ///
@@ -618,10 +560,10 @@ mod tests {
                 "minMemoryGb": 32,
                 "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0 },
                 "control": {
-                    // Captured with a bf16 branch (sc-12176) — superseded by sc-15799, retained because
+                    // Synthetic stale capture retained to exercise conservative evidence handling.
                     // a lighter branch can only lower a peak, so the row is a sound UPPER BOUND.
-                    "bf16BranchPeakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
-                    "bf16BranchSequentialPeakGbByTier": { "q4": 25.0, "q8": 30.0, "bf16": 40.0 },
+                    "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+                    "sequentialPeakGbByTier": { "q4": 25.0, "q8": 30.0, "bf16": 40.0 },
                     // VAE-decode tiling saving (sc-11744); measured only for the constrained q4 tier here
                     // (the decode spike is the peak there).
                     "decodeTileSaveGb": { "q4": 6.9 },
@@ -777,9 +719,9 @@ mod tests {
         }
     }
 
-    // ── The predicted peaks: the bf16-branch row read VERBATIM, as an upper bound. ──────────────────
+    // ── The predicted peaks: the declared row is read verbatim. ─────────────────────────────────────
 
-    /// The `bf16Branch*` row is the value, on EVERY tier — no branch-packing correction. That is the
+    /// The declared peak row is the value, on EVERY tier — no branch-packing correction. That is the
     /// sc-15799 review fix: subtracting `branchPackSaveGb` (q8 8.4 / q4 10.2) under-predicted the q4 and
     /// q8 hosts by ~5 GB straight into an OOM, because neither number is a weight-side quantity (the
     /// whole branch is 6.6 GB bf16 → ~3.3 GB q8 → ~1.7 GB q4, so the true deltas are 3.3 and 4.9).
@@ -787,7 +729,7 @@ mod tests {
     /// MUTATION PROOF. Reintroducing any correction moves the packed tiers away from their row and this
     /// test goes red. The asserted values are also checked against the physically-true host below.
     #[test]
-    fn predicted_control_peak_reads_the_bf16_branch_row_uncorrected() {
+    fn predicted_control_peak_reads_the_declared_row_without_correction() {
         let m = krea_manifest();
         for (tier, row) in [("q4", 30.9), ("q8", 35.5), ("bf16", 46.2)] {
             assert_eq!(
@@ -858,9 +800,9 @@ mod tests {
 
     #[test]
     fn control_evidence_currency_reads_both_fields() {
-        // The shipped shape: superseded.
+        // Synthetic superseded shape.
         assert!(!control_evidence_is_current(&krea_manifest()));
-        // The post-sc-16013 shape: measured, nothing superseding it.
+        // Current shape: measured, nothing superseding it.
         assert!(control_evidence_is_current(&krea_manifest_measured()));
         // `measured: true` while still naming what superseded it is self-contradictory ⇒ not current.
         let mut contradictory = krea_manifest_measured();
@@ -1019,10 +961,10 @@ mod tests {
     /// What the repack does NOT buy on this lane, pinned so nobody re-asserts it. The catalog's peaks
     /// were captured with a bf16 branch and are read verbatim, so a packed branch is invisible to the
     /// gate: a card sitting between the true packed host and the stale bound (here 26 GB against the
-    /// 32.9 bound) still ladders, and will keep laddering until sc-16013 re-measures. Claiming a benefit
+    /// 32.9 bound) still ladders. Claiming a benefit
     /// here would mean claiming a number the tree does not have.
     #[test]
-    fn the_repack_buys_nothing_until_the_lane_is_re_measured() {
+    fn a_stale_row_does_not_receive_a_derived_repack_credit() {
         let m = krea_manifest();
         let tile = decode_tile_save_gb(&m, "q4");
         let chunk = chunk_attn_save_gb(&m);
@@ -1183,7 +1125,7 @@ mod tests {
         // An admitted-but-unmeasured staged peak → None, not a guess (mirrors base.rs's None ⇒ no-op).
         let no_seq = obj(json!({
             "candle": { "control": {
-                "bf16BranchPeakGbByTier": { "q4": 30.9 },
+                "peakGbByTier": { "q4": 30.9 },
                 "measured": true
             } }
         }));
@@ -1227,9 +1169,9 @@ mod tests {
     #[test]
     fn an_unpriced_tier_on_a_measured_control_lane_is_unverified_not_unknown() {
         let m = krea_manifest();
-        // `nvfp4` is the tier that can actually REACH this ladder unpriced (`requested_tier_key`
-        // short-circuits to it on an NVFP4 host pick); `int8-convrot` is the tier sc-16069 named. Neither
-        // has a `bf16Branch*` row, and both must produce the same explicit verdict.
+        // Synthetic coverage for any control tier that has no measured peak row. The shipped manifest
+        // now prices every hosted tier, but this generic behavior remains important for malformed and
+        // future entries.
         for tier in ["nvfp4", "int8-convrot", "some-future-tier"] {
             assert_eq!(
                 predicted_control_peak_gb(&m, tier),

@@ -88,13 +88,14 @@ pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb4
 /// from the requested bits. Opaque dense roots deliberately fall through to the request key; NVFP4 is
 /// likewise used only when no standard tier basename resolved.
 fn krea_control_gate_tier(
+    convrot_resolved: bool,
     resolved_base: &Path,
     advanced: &JsonObject,
     manifest_entry: &JsonObject,
     nvfp4: bool,
 ) -> &'static str {
     gate_tier_key(
-        /* convrot_resolved */ false,
+        convrot_resolved,
         resolved_base,
         advanced,
         manifest_entry,
@@ -115,6 +116,9 @@ pub(super) fn resolve_krea_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    if super::wants_krea_convrot(request) {
+        return Ok(super::resolve_krea_convrot(request, settings).map(|(root, _)| root));
+    }
     if let Ok(env_dir) = std::env::var(KREA_CONTROL_BASE_ENV) {
         let p = PathBuf::from(env_dir.trim());
         if p.is_dir() {
@@ -175,7 +179,11 @@ pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &S
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
-        && matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
+        && if super::wants_krea_convrot(request) {
+            super::resolve_krea_convrot_dit(settings).is_some()
+        } else {
+            matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
+        }
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
@@ -339,6 +347,8 @@ fn krea_control_candle_raw_settings(
 /// (no quant tier). Moved onto the blocking thread, loaded once, drives every pose.
 struct KreaStrictControl {
     base: PathBuf,
+    /// Immutable INT8-ConvRot DiT selected by the request. `None` loads `base/transformer`.
+    convrot_dit: Option<PathBuf>,
     control: PathBuf,
     /// User LoRA/LoKr adapters applied additively to the frozen base DiT (sc-11721) — a character/style
     /// adapter reshapes the subject while the control branch keeps the pose lock. Empty ⇒ stock control.
@@ -407,11 +417,11 @@ impl CandleStrictControl for KreaStrictControl {
     /// control ever reaches the driver. Re-gating in the driver would add a second `nvidia-smi` probe and
     /// risk a second generator eviction for no new information.
     ///
-    /// The floor and the ladder answer different questions and both are needed here. The ladder's peaks
-    /// are superseded upper bounds today (`candle.control.measured == false`), so it declines to reject
-    /// (`KreaControlFit::BestEffort`); at a tier with no priced row it cannot judge the render at all
+    /// The floor and the ladder answer different questions and both are needed here. Current measured
+    /// tiers use the ladder for transient-aware rejection; at a tier with no priced row it cannot judge
+    /// the render at all
     /// (`KreaControlFit::Unverified`). In both cases the floor is the only check that can still refuse a
-    /// host which cannot hold the weights. Its footprint counts the BASE only — see the preamble.
+    /// host which cannot hold the weights. Its footprint prices the files each route actually loads.
     fn conditioning_admission(&self) -> ConditioningAdmission {
         ConditioningAdmission::GatedInPreamble {
             gate: "krea_control_fit",
@@ -421,6 +431,7 @@ impl CandleStrictControl for KreaStrictControl {
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
             root: self.base.clone(),
+            convrot_dit: self.convrot_dit.clone(),
             control: self.control.clone(),
             adapters: self.adapters.clone(),
             // Tier integrity (sc-15799): the branch's tier is a function of the base tier, decided
@@ -479,9 +490,17 @@ pub(super) async fn generate_candle_krea_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let base = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
+    if super::wants_krea_convrot(request) {
+        super::ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    }
+    let (base, convrot_dit) = if super::wants_krea_convrot(request) {
+        super::resolve_krea_convrot(request, settings).map(|(root, dit)| (root, Some(dit)))
+    } else {
+        resolve_krea_control_base(request, settings)?.map(|root| (root, None))
+    }
+    .ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned(),
+            "Krea 2 Turbo control base weights not found for the selected tier".to_owned(),
         )
     })?;
     let control = ensure_krea_control_weights(api, settings, job, request).await?;
@@ -489,6 +508,12 @@ pub(super) async fn generate_candle_krea_control_stream(
     // resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS + `normalize_app_managed_
     // lora_path`), then installed on the base at load — the pose control branch is never adapted.
     let adapters = resolve_adapters(request, settings)?;
+    if convrot_dit.is_some() && !adapters.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 INT8-ConvRot pose control does not support LoRA/LoKr or diff-patch adapters"
+                .to_owned(),
+        ));
+    }
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -522,12 +547,11 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     // VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane is diverted around the base.rs
     // `generate_candle_stream` fit-gate, so it gets its own here: predict the control-lane peak (base tier
-    // + the ~6.6 GB bf16 control branch + activations + the end-of-render VAE-decode spike) and compare it
-    // against the live/capped free VRAM. On a big card the bf16 branch fits — nothing engages, zero speed/
-    // quality penalty. On a constrained card (or one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder
-    // first stages the text and heavy phases sequentially (sc-12176), then engages VAE-decode tiling
-    // (sc-11744), activation chunking / res-cap (sc-11745), and finally the last-resort branch-quant rung
-    // (q8 near-lossless, then q4 pose-locked) until it fits, else rejects-before-OOM.
+    // + the shipping per-tier control branch + activations + the end-of-render VAE-decode spike) and
+    // compare it against live/capped free VRAM. On a big card nothing engages. On a constrained card (or
+    // one emulated via `SCENEWORKS_CUDA_VRAM_CAP_GB`) the ladder first stages the text and heavy phases
+    // sequentially (sc-12176), then engages VAE-decode tiling (sc-11744) and attention chunking
+    // (sc-11745) until it fits, else rejects-before-OOM. Branch precision is fixed before this ladder.
     //
     // sc-13588 / sc-13960: this lane loads through the UNcached `start_gen_stream` (it never evicts the
     // single-slot generator cache), so a resident txt2img generator stays co-resident and its cudarc pool
@@ -543,6 +567,7 @@ pub(super) async fn generate_candle_krea_control_stream(
     // that loads (for example, requested q4 with only q8 installed). Dense/opaque roots have no tier
     // basename and deliberately retain the request/NVFP4 fallback.
     let tier = krea_control_gate_tier(
+        convrot_dit.is_some(),
         &base,
         &request.advanced,
         &request.model_manifest_entry,
@@ -561,9 +586,8 @@ pub(super) async fn generate_candle_krea_control_stream(
     // `note_loaded_peak` would leave a reclaimable high-water standing for a load that never allocated,
     // over-crediting the pool for the next gate.
     //
-    // It is NOT redundant with the ladder. The shipped `candle.control` rows are superseded upper bounds
-    // (`measured == false`), so the ladder deliberately never rejects — `KreaControlFit::BestEffort` — and
-    // at a tier it cannot price (`Unverified`, reachable today via `nvfp4`) it makes no memory claim at
+    // It is NOT redundant with the ladder. Current measured tiers receive transient-aware admission,
+    // while a future or malformed tier it cannot price (`Unverified`) makes no memory claim at
     // all. Without this floor those paths reach allocation with no hard check, which is exactly the
     // sc-16069 defect the rest of this story removes everywhere else.
     //
@@ -572,7 +596,22 @@ pub(super) async fn generate_candle_krea_control_stream(
     // — so pricing the file would over-count a packed base by several GB and could refuse a render that
     // fits, the one direction this gate must never take. A DENSE branch (`branch_tier == None`, i.e. a
     // bf16 base) loads at exactly the published bytes, so there it is counted and the floor is tighter.
-    {
+    if let Some(convrot_dit) = convrot_dit.as_deref() {
+        // The bf16 surface supplies only tokenizer/Qwen3-VL/VAE on this route; its dense transformer is
+        // not loaded. Price the actual ConvRot DiT plus the two weight-bearing shared component dirs so
+        // the floor neither hides the int8 trunk nor charges the unused bf16 trunk.
+        let shared_components = [base.join("text_encoder"), base.join("vae")];
+        let shared_component_paths: Vec<&Path> =
+            shared_components.iter().map(PathBuf::as_path).collect();
+        admit_conditioning_paths(
+            settings,
+            "Krea 2 INT8-ConvRot",
+            "pose-ControlNet shared components",
+            convrot_dit,
+            &shared_component_paths,
+        )
+        .await?;
+    } else {
         let control_overlay: Vec<&Path> = if branch_tier.is_some() {
             Vec::new()
         } else {
@@ -696,14 +735,13 @@ pub(super) async fn generate_candle_krea_control_stream(
                  quality-free adaptation) and declining to reject on absent evidence. The on-disk \
                  weights floor already applied in this lane's preamble is the only hard check for this \
                  tier until it is measured, so a render whose TRANSIENTS overflow can still reach a \
-                 reactive CUDA OOM. Add a bf16Branch*PeakGbByTier row for it (sc-16013 owns the \
-                 control-lane re-measure)."
+                 reactive CUDA OOM. Add direct peakGbByTier and sequentialPeakGbByTier measurements \
+                 for it."
             );
             (offload_policy, tile, chunk)
         }
-        // Won't fit at the deepest rung, but the peaks are SUPERSEDED upper bounds (sc-15799): rejecting
-        // could refuse a job that runs, so engage every speed-only rung and let the reactive CUDA-OOM
-        // backstop decide. sc-16013's re-measure restores the hard reject.
+        // Generic stale-evidence fallback: engage every speed-only rung and let the reactive CUDA-OOM
+        // backstop decide rather than reject from a superseded upper bound.
         crate::krea_control_fit::KreaControlFit::BestEffort {
             offload_policy,
             tile_vae_decode: tile,
@@ -721,9 +759,8 @@ pub(super) async fn generate_candle_krea_control_stream(
                 needed_gb,
                 available_gb,
                 "Krea control VRAM fit ladder: predicted peak exceeds free VRAM at every rung, but the \
-                 control-lane peaks are superseded by the sc-15799 branch repack (sc-16013 owes the \
-                 re-measure). Admitting best-effort with every speed-only rung engaged rather than \
-                 rejecting a job a stale upper bound cannot rule out."
+                 control-lane evidence is not current. Admitting best-effort with every speed-only rung \
+                 engaged rather than rejecting from stale evidence."
             );
             (offload_policy, tile, chunk)
         }
@@ -753,6 +790,7 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     let provider = KreaStrictControl {
         base,
+        convrot_dit,
         control,
         adapters,
         branch_tier,
@@ -806,6 +844,7 @@ mod krea_control_tier_reconcile_tests {
         // Installed-tier fallback: a q4 request that resolved q8 must budget q8.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -822,6 +861,7 @@ mod krea_control_tier_reconcile_tests {
         // Every recognized resolved tier is authoritative, independent of the requested q4.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q4"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -831,6 +871,7 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/bf16"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -843,6 +884,7 @@ mod krea_control_tier_reconcile_tests {
         // a standard installed fallback remains authoritative.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/nvfp4"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -852,6 +894,7 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/cache/SceneWorks/krea-2-turbo-mlx/q8"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -863,6 +906,7 @@ mod krea_control_tier_reconcile_tests {
         // Bring-your-own dense snapshots have opaque basenames, preserving the request-derived fallback.
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/models/krea-dense-snapshot"),
                 &req.advanced,
                 &req.model_manifest_entry,
@@ -872,12 +916,26 @@ mod krea_control_tier_reconcile_tests {
         );
         assert_eq!(
             krea_control_gate_tier(
+                false,
                 Path::new("/models/krea-dense-snapshot"),
                 &req.advanced,
                 &req.model_manifest_entry,
                 true,
             ),
             NVFP4_TIER
+        );
+
+        // SC-16453: the immutable ConvRot DiT identity wins even though its shared tokenizer/TE/VAE
+        // surface is the `bf16/` directory. Dropping this identity aliases the load back to bf16.
+        assert_eq!(
+            krea_control_gate_tier(
+                true,
+                Path::new("/cache/SceneWorks/krea-2-turbo-mlx/bf16"),
+                &req.advanced,
+                &req.model_manifest_entry,
+                false,
+            ),
+            super::super::tier_resolver::INT8_CONVROT_TIER
         );
     }
 }

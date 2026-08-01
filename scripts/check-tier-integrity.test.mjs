@@ -420,7 +420,7 @@ test("the retracted branchPackSaveGb key is gone from the catalog", async () => 
       entry.candle?.control?.branchPackSaveGb,
       undefined,
       `${entry.id}: branchPackSaveGb published q8 -8.4 / q4 -10.2 GB as a WEIGHT-side delta for a ` +
-        `control branch that is 6.6 GB in total. It is retracted; sc-16013 owes the re-measure.`,
+        `control branch that is 6.6 GB in total. It is retracted; direct measured peaks need no correction.`,
     );
   }
 });
