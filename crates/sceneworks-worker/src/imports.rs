@@ -158,6 +158,8 @@ pub(crate) async fn write_model_install_marker(
 pub(crate) struct DownloadArtifactReceipt<'a> {
     pub(crate) resolved_tier: Option<&'a str>,
     pub(crate) tree_stamp: Option<&'a str>,
+    pub(crate) lora_file_identity: Option<&'a ModelFileIdentity>,
+    pub(crate) lora_file_sha256: Option<&'a str>,
 }
 
 pub(crate) async fn write_model_download_receipt(
@@ -174,7 +176,7 @@ pub(crate) async fn write_model_download_receipt(
         .get("variant")
         .cloned()
         .unwrap_or_else(|| Value::String("default".to_owned()));
-    let receipt = json!({
+    let mut receipt = json!({
         "schemaVersion": 2,
         "repo": repo,
         "modelId": payload.get("modelId").cloned().unwrap_or(Value::Null),
@@ -188,6 +190,22 @@ pub(crate) async fn write_model_download_receipt(
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });
+    if let (Some(identity), Some(hash)) = (artifact.lora_file_identity, artifact.lora_file_sha256) {
+        let object = receipt.as_object_mut().expect("receipt is an object");
+        object.insert(
+            "loraFileName".to_owned(),
+            Value::String(identity.name.clone()),
+        );
+        object.insert(
+            "loraFileBytes".to_owned(),
+            Value::Number(identity.bytes.into()),
+        );
+        object.insert(
+            "loraFileModifiedNanos".to_owned(),
+            Value::String(identity.modified_nanos.clone()),
+        );
+        object.insert("loraFileSha256".to_owned(), Value::String(hash.to_owned()));
+    }
     let marker_path = target_dir.join(INSTALL_MARKER);
     let mut receipts = match tokio::fs::read(&marker_path).await {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes)

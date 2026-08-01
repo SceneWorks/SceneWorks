@@ -155,6 +155,8 @@ pub struct CatalogEntry {
     /// match; a lazier implementation may leave it unset and answer
     /// [`WorkflowCatalogs::lora_by_repo`] however it likes.
     pub repo: Option<String>,
+    /// Exact adapter SHA-256 when this install has worker-verified it.
+    pub hash: Option<String>,
     /// Whether it is usable RIGHT NOW — not merely known. See the module docs.
     pub installed: bool,
     /// The flow that fetches it when `installed` is false. `None` means this install has no way
@@ -192,6 +194,12 @@ impl CatalogEntry {
     }
 
     #[must_use]
+    pub fn with_hash(mut self, hash: impl Into<String>) -> Self {
+        self.hash = Some(hash.into());
+        self
+    }
+
+    #[must_use]
     pub fn with_install(mut self, install: InstallAction) -> Self {
         self.install = Some(install);
         self
@@ -206,6 +214,12 @@ impl CatalogEntry {
 pub trait WorkflowCatalogs {
     /// The model catalog's row for an envelope's `model` slug.
     fn model(&self, slug: &str) -> Option<CatalogEntry>;
+
+    /// The unique LoRA catalog row with this exact full SHA-256. A digest-bearing envelope never
+    /// falls back to repo or name: doing so could silently substitute different bytes.
+    fn lora_by_hash(&self, _hash: &str) -> Option<CatalogEntry> {
+        None
+    }
 
     /// The LoRA catalog row whose Hugging Face repo id is `repo`. Tried FIRST, because a repo id
     /// identifies one adapter and a display name does not.
@@ -396,6 +410,22 @@ impl WorkflowCatalogs for StaticCatalogs {
         find_by_id(&self.models, slug)
     }
 
+    fn lora_by_hash(&self, hash: &str) -> Option<CatalogEntry> {
+        let wanted = hash.trim().to_ascii_lowercase();
+        if wanted.len() != 64 || !wanted.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        match unique_match(&self.loras, |entry| {
+            entry
+                .hash
+                .as_deref()
+                .is_some_and(|candidate| candidate.trim().eq_ignore_ascii_case(&wanted))
+        }) {
+            Match::One(entry) => Some(entry.clone()),
+            Match::None | Match::Ambiguous => None,
+        }
+    }
+
     fn lora_by_repo(&self, repo: &str) -> Option<CatalogEntry> {
         match self.match_lora_repo(repo) {
             Match::One(entry) => Some(entry.clone()),
@@ -492,6 +522,8 @@ pub struct ModelRequirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LoraMatchedBy {
+    /// Exact SHA-256 of the adapter bytes. Strongest identity and therefore tried exclusively.
+    Hash,
     /// The Hugging Face repo id. Unambiguous, so it is tried first.
     Repo,
     /// The display name, normalized by [`normalized_label`].
@@ -841,17 +873,22 @@ fn classify_lora(lora: &WorkflowLora, catalogs: &dyn WorkflowCatalogs) -> LoraRe
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty());
-    let matched = repo
-        .and_then(|repo| catalogs.lora_by_repo(repo))
-        .map(|entry| (LoraMatchedBy::Repo, entry))
-        .or_else(|| {
-            let name = name?;
-            match repo.filter(|_| repo_ambiguous) {
-                Some(repo) => catalogs.lora_by_name_in_repo(name, repo),
-                None => catalogs.lora_by_name(name),
-            }
-            .map(|entry| (LoraMatchedBy::Name, entry))
-        });
+    let matched = if let Some(hash) = lora.hash.as_deref() {
+        catalogs
+            .lora_by_hash(hash)
+            .map(|entry| (LoraMatchedBy::Hash, entry))
+    } else {
+        repo.and_then(|repo| catalogs.lora_by_repo(repo))
+            .map(|entry| (LoraMatchedBy::Repo, entry))
+            .or_else(|| {
+                let name = name?;
+                match repo.filter(|_| repo_ambiguous) {
+                    Some(repo) => catalogs.lora_by_name_in_repo(name, repo),
+                    None => catalogs.lora_by_name(name),
+                }
+                .map(|entry| (LoraMatchedBy::Name, entry))
+            })
+    };
     let entry = matched.as_ref().map(|(_, entry)| entry);
     let state = state_for(entry);
     let install = install_for(entry, state);
@@ -874,6 +911,12 @@ fn classify_lora(lora: &WorkflowLora, catalogs: &dyn WorkflowCatalogs) -> LoraRe
         // Named separately from a plain miss because the user's next move is different: they have
         // the weights, and no amount of downloading will tell this install WHICH of them the file
         // meant.
+        RequirementState::Missing | RequirementState::UserSupplied if lora.hash.is_some() => {
+            format!(
+                "No installed LoRA has the exact adapter hash recorded for {identity}; the entry \
+                 stays unresolved rather than substituting another file with the same name."
+            )
+        }
         RequirementState::Missing | RequirementState::UserSupplied if repo_ambiguous => format!(
             "More than one LoRA installed here comes from Hugging Face repo `{}`, and a shared \
              recipe does not record which adapter file was used — so applying one would be a \
@@ -1210,6 +1253,7 @@ mod tests {
                 name: Some("Union".to_owned()),
                 repo: Some("acme/pack".to_owned()),
                 weight: Some(0.8),
+                hash: None,
             },
             &catalogs,
         );
@@ -1236,6 +1280,7 @@ mod tests {
                 name: Some("Film Grain".to_owned()),
                 repo: Some("acme/pack".to_owned()),
                 weight: Some(0.8),
+                hash: None,
             },
             &catalogs,
         );
@@ -1272,6 +1317,7 @@ mod tests {
                 name: Some("Union".to_owned()),
                 repo: Some("acme/pack".to_owned()),
                 weight: None,
+                hash: None,
             },
             &catalogs,
         );
@@ -1288,6 +1334,7 @@ mod tests {
                 name: None,
                 repo: Some("acme/pack".to_owned()),
                 weight: None,
+                hash: None,
             },
             &catalogs,
         );
@@ -1346,6 +1393,7 @@ mod tests {
                 name: Some("Film Grain".to_owned()),
                 repo: Some("acme/unknown-pack".to_owned()),
                 weight: None,
+                hash: None,
             },
             &catalogs,
         );

@@ -25,8 +25,14 @@ use super::*;
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::workflow_png::write_workflow_chunk;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+use sceneworks_core::workflow_share::trusted_lora_for_share;
 use sceneworks_core::workflow_share::{
-    embeddable_workflow_share, WorkflowAssetFacts, OMITTED_PHASES,
+    embeddable_workflow_share, WorkflowAssetFacts, WorkflowLora, OMITTED_PHASES,
 };
 use std::sync::Arc;
 
@@ -302,6 +308,26 @@ pub(crate) async fn run_image_generate_job(
         Some(request.model.as_str()),
     )
     .map_err(WorkerError::InvalidPayload)?;
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let route_applies_loras = {
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                route.is_some_and(|route| route.applies_request_loras(&request))
+            }
+            #[cfg(target_os = "macos")]
+            {
+                route.is_some_and(ImageRoute::applies_request_loras)
+            }
+        };
+        if plan.workflow_source.is_some() && route_applies_loras {
+            plan.loras = trusted_loras_for_share(api, settings, job, &request).await;
+        }
+    }
 
     let backend = backend_label(&settings.gpu_id);
 
@@ -1253,6 +1279,9 @@ pub(crate) struct ImagePlan {
     /// Worker-proven SHA-256 of the exact imported checkpoint selected by the resolved route.
     /// Never populated from the request payload.
     pub(crate) model_hash: Option<String>,
+    /// Worker-resolved LoRAs in inference order. Names come from exact filenames, weights use the
+    /// same parser as the engine adapter specs, and hashes come from those exact files.
+    pub(crate) loras: Vec<WorkflowLora>,
 }
 
 /// Resolve the exact single-file checkpoint for an imported Krea/SDXL route. The adapter label is
@@ -1323,6 +1352,301 @@ fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String
             .and_then(normalize_sha256)
     })
     .flatten()
+}
+
+/// First non-empty of installedPath/sourcePath/path/source.path on a LoRA spec.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
+    for key in ["installedPath", "sourcePath", "path"] {
+        if let Some(value) = lora
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(PathBuf::from(value));
+        }
+    }
+    lora.get("source")
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The exact adapter filename a manifest declares when its LoRA path is a directory.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Resolve the exact adapter file inference will load. Attribution calls this same function before
+/// hashing, so the digest cannot drift onto a sibling checkpoint or an unconfined client path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathBuf> {
+    let raw = lora_path(lora)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
+    let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
+    let file = if path.is_dir() {
+        crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                path.display()
+            ))
+        })?
+    } else {
+        path
+    };
+    if !file.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA file is missing: {}",
+            file.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn lora_weight(lora: &Value) -> f64 {
+    lora.get("weight")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .unwrap_or(0.8)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) -> Option<PathBuf> {
+    // Explicit HF catalog downloads execute from the shared hub cache, while their durable receipt
+    // lives under data/loras/<catalog-id>. Prefer that trusted app-owned receipt when it names the
+    // same repo; it is also the marker the API reads when resolving imported hashes.
+    let source = lora.get("source").and_then(Value::as_object);
+    let provider = source
+        .and_then(|source| source.get("provider"))
+        .or_else(|| lora.get("provider"))
+        .and_then(Value::as_str);
+    let repo = source
+        .and_then(|source| source.get("repo"))
+        .or_else(|| lora.get("repo"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if provider == Some("huggingface") {
+        if let (Some(id), Some(repo)) = (
+            lora.get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            repo,
+        ) {
+            let candidate = settings
+                .data_dir
+                .join("loras")
+                .join(crate::paths::safe_download_dir(id))
+                .join(INSTALL_MARKER);
+            let matches_repo = std::fs::read(&candidate)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|marker| {
+                    marker
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some(repo);
+            if matches_repo {
+                return Some(candidate);
+            }
+        }
+    }
+    file.ancestors()
+        .take(8)
+        .map(|directory| directory.join(INSTALL_MARKER))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn cached_lora_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String> {
+    let identity = model_file_identity(file)?;
+    (marker.get("loraFileName").and_then(Value::as_str) == Some(identity.name.as_str())
+        && marker.get("loraFileBytes").and_then(Value::as_u64) == Some(identity.bytes)
+        && marker.get("loraFileModifiedNanos").and_then(Value::as_str)
+            == Some(identity.modified_nanos.as_str()))
+    .then(|| {
+        marker
+            .get("loraFileSha256")
+            .and_then(Value::as_str)
+            .and_then(normalize_sha256)
+    })
+    .flatten()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn civitai_lora_key(file: &Path, used: &mut std::collections::HashSet<String>) -> String {
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("lora");
+    let mut base = String::with_capacity(stem.len().min(120));
+    let mut last_was_separator = false;
+    for character in stem.chars().take(120) {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            base.push(character);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            base.push('_');
+            last_was_separator = true;
+        }
+    }
+    let base = base.trim_matches('_');
+    let base = if base.is_empty() { "lora" } else { base };
+    let mut candidate = base.to_owned();
+    let mut suffix = 2_u32;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+/// Hash the exact resolved adapter bytes, using an existing install marker as a cheap cache when
+/// available. A missing/malformed marker or a hashing failure loses attribution only; it never
+/// turns a successful generation into an error.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+async fn trusted_lora_hash(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    lora: &Value,
+    file: &Path,
+) -> Option<String> {
+    let marker_path = existing_lora_install_marker(lora, settings, file);
+    let mut marker = match marker_path.as_ref() {
+        Some(path) => tokio::fs::read(path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
+        None => None,
+    };
+    if let Some(hash) = marker
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| cached_lora_hash_for_file(file, object))
+    {
+        return Some(hash);
+    }
+
+    let identity_before = model_file_identity(file)?;
+    let hash = match sha256_file(api, settings, &job.id, file).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::warn!(path = %file.display(), %error, "LoRA attribution hash failed");
+            return None;
+        }
+    };
+    let identity_after = model_file_identity(file)?;
+    if identity_after != identity_before {
+        tracing::warn!(path = %file.display(), "LoRA changed while attribution hash was being computed");
+        return None;
+    }
+
+    if let (Some(marker_path), Some(object)) =
+        (marker_path, marker.as_mut().and_then(Value::as_object_mut))
+    {
+        object.insert(
+            "loraFileName".to_owned(),
+            Value::String(identity_after.name),
+        );
+        object.insert(
+            "loraFileBytes".to_owned(),
+            Value::Number(identity_after.bytes.into()),
+        );
+        object.insert(
+            "loraFileModifiedNanos".to_owned(),
+            Value::String(identity_after.modified_nanos),
+        );
+        object.insert("loraFileSha256".to_owned(), Value::String(hash.clone()));
+        if let Ok(bytes) = serde_json::to_vec_pretty(&marker) {
+            if let Err(error) = tokio::fs::write(&marker_path, bytes).await {
+                tracing::warn!(path = %marker_path.display(), %error, "could not cache LoRA attribution hash");
+            }
+        }
+    }
+    Some(hash)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+#[cfg_attr(test, allow(dead_code))]
+async fn trusted_loras_for_share(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> Vec<WorkflowLora> {
+    let mut used_names = std::collections::HashSet::new();
+    let mut loras = Vec::with_capacity(request.loras.len());
+    for raw in &request.loras {
+        let file = match resolve_adapter_file(raw, settings) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(%error, "LoRA attribution could not resolve the inference file");
+                continue;
+            }
+        };
+        let name = civitai_lora_key(&file, &mut used_names);
+        let weight = lora_weight(raw);
+        let hash = trusted_lora_hash(api, settings, job, raw, &file).await;
+        if let Some(lora) = trusted_lora_for_share(raw, name, weight, hash) {
+            loras.push(lora);
+        }
+    }
+    loras
 }
 
 /// Read the digest retained by model import, or backfill one legacy marker once. Hashing failure is
@@ -1631,6 +1955,7 @@ impl ImagePlan {
             image_count,
             workflow_source,
             model_hash: None,
+            loras: Vec::new(),
         }
     }
 }
@@ -1746,6 +2071,9 @@ pub(crate) fn write_image_asset(
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
         share.model_hash = plan.model_hash.clone();
+        // Replace request-derived hints with the exact adapter stack the worker resolved. This is
+        // the only seam that can attach hashes, so client-supplied attribution fields never win.
+        share.loras = plan.loras.clone();
         // This function only ever writes a BASE render. The inline-upscale post-pass writes its
         // output through `write_upscaled_asset` and keeps the base as its own retained asset, so a
         // `upscale.enabled: true` from the request would describe, on this file, a pass this file
@@ -2005,6 +2333,7 @@ fn write_upscaled_asset(
         .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
     if let Some(share) = share.as_mut() {
         share.model_hash = plan.model_hash.clone();
+        share.loras = plan.loras.clone();
     }
     write_workflow_chunk(upscaled, &temp_path, share.as_ref())
         .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;

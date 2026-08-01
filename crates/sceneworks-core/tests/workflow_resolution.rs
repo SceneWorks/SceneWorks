@@ -218,6 +218,62 @@ fn a_lora_matches_by_name_when_the_envelope_carried_no_repo() {
 }
 
 #[test]
+fn a_lora_hash_matches_exact_bytes_before_repo_or_name() {
+    let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    let catalogs = StaticCatalogs {
+        loras: vec![
+            CatalogEntry::new("wrong-name-match")
+                .with_name("Film Grain")
+                .with_repo("acme/film-grain")
+                .installed(),
+            CatalogEntry::new("exact-bytes")
+                .with_name("Renamed identical file")
+                .with_hash(hash)
+                .installed(),
+        ],
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{
+            "name": "Film Grain",
+            "repo": "acme/film-grain",
+            "weight": 0.6,
+            "hash": hash
+        }]
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras[0].state, RequirementState::Resolved);
+    assert_eq!(report.loras[0].matched_by, Some(LoraMatchedBy::Hash));
+    assert_eq!(report.loras[0].catalog_id.as_deref(), Some("exact-bytes"));
+}
+
+#[test]
+fn an_unknown_lora_hash_never_falls_back_to_a_same_named_file() {
+    let catalogs = StaticCatalogs {
+        loras: vec![CatalogEntry::new("different-bytes")
+            .with_name("Film Grain")
+            .with_repo("acme/film-grain")
+            .with_hash("2222222222222222222222222222222222222222222222222222222222222222")
+            .installed()],
+        ..model_installed()
+    };
+    let share = envelope(json!({
+        "loras": [{
+            "name": "Film Grain",
+            "repo": "acme/film-grain",
+            "weight": 0.6,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
+        }]
+    }));
+    let report = build_resolution_report(&share, &catalogs);
+    assert_eq!(report.loras[0].state, RequirementState::Missing);
+    assert_eq!(report.loras[0].matched_by, None);
+    assert_eq!(report.loras[0].catalog_id, None);
+    assert!(report.loras[0].detail.contains("stays unresolved"));
+    assert!(!report.runnable);
+}
+
+#[test]
 fn a_name_match_ignores_case_and_separators() {
     // "Film Grain" / "film-grain" / "film_grain" are one name — a display name typed on one
     // install and a catalog id slugged on another are the same LoRA, and refusing to see that

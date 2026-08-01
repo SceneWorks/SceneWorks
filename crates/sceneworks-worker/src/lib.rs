@@ -34,7 +34,13 @@ use sceneworks_core::lora_family::{
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use sceneworks_core::lora_family::{read_safetensors_header, resolve_adapter_in_dir};
+use sceneworks_core::lora_family::read_safetensors_header;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_lora_url_host, validate_public_ip,

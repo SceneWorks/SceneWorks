@@ -256,6 +256,7 @@ pub(crate) async fn run_model_download_job(
         crate::imports::DownloadArtifactReceipt {
             resolved_tier: resolved_tier.as_deref(),
             tree_stamp: artifact_tree_stamp.as_deref(),
+            ..Default::default()
         },
     )
     .await?;
@@ -464,6 +465,36 @@ pub(crate) async fn run_lora_download_job(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    // Persist the exact adapter digest at install time, not only after SceneWorks first generates
+    // with it. That lets an imported image resolve to an already-installed HF LoRA immediately.
+    // The API's receipt resolver selects the first resolved safetensors file in this same order.
+    let selected_lora = snapshot.files.iter().find(|file| {
+        Path::new(&file.path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            == Some("safetensors")
+    });
+    let (lora_file_identity, lora_file_sha256) = if let Some(selected) = selected_lora {
+        let selected_path = safe_join(
+            &repo_dir.join("snapshots").join(&resolved_revision),
+            &selected.path,
+        )?;
+        if let Some(hash) = selected.sha256.as_deref().and_then(normalize_sha256) {
+            let identity = model_file_identity(&selected_path).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "Downloaded LoRA file is missing: {}",
+                    selected_path.display()
+                ))
+            })?;
+            (Some(identity), Some(hash))
+        } else {
+            let (hash, identity) =
+                stable_model_file_sha256(api, settings, &job.id, &selected_path).await?;
+            (Some(identity), Some(hash))
+        }
+    } else {
+        (None, None)
+    };
     let receipt_dir = settings.data_dir.join("loras").join(safe_download_dir(
         optional_payload_string(&job.payload, "loraId").unwrap_or(repo),
     ));
@@ -474,7 +505,11 @@ pub(crate) async fn run_lora_download_job(
         &job.id,
         &resolved_files,
         Some(&resolved_revision),
-        crate::imports::DownloadArtifactReceipt::default(),
+        crate::imports::DownloadArtifactReceipt {
+            lora_file_identity: lora_file_identity.as_ref(),
+            lora_file_sha256: lora_file_sha256.as_deref(),
+            ..Default::default()
+        },
     )
     .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);

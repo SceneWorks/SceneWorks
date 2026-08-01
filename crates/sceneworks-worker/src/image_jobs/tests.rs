@@ -530,6 +530,142 @@ fn cached_checkpoint_hash_is_bound_to_the_file_that_will_execute() {
 }
 
 #[test]
+fn cached_lora_hash_is_invalidated_by_rename_or_changed_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("author_style.safetensors");
+    let bytes = b"exact adapter bytes";
+    std::fs::write(&original, bytes).unwrap();
+    let identity = model_file_identity(&original).unwrap();
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let marker = json!({
+        "loraFileName": identity.name,
+        "loraFileBytes": identity.bytes,
+        "loraFileModifiedNanos": identity.modified_nanos,
+        "loraFileSha256": hash
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    let marker_path = dir.path().join(INSTALL_MARKER);
+    std::fs::write(&marker_path, b"{}").unwrap();
+    let settings = settings_with_config_dir(&dir.path().join("config"));
+    assert_eq!(
+        existing_lora_install_marker(&json!({}), &settings, &original),
+        Some(marker_path)
+    );
+    assert_eq!(
+        cached_lora_hash_for_file(&original, &marker).as_deref(),
+        Some(hash.as_str())
+    );
+
+    let renamed = dir.path().join("renamed-identical.safetensors");
+    std::fs::rename(&original, &renamed).unwrap();
+    assert_eq!(cached_lora_hash_for_file(&renamed, &marker), None);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(std::fs::read(&renamed).unwrap())),
+        hash,
+        "a renamed identical file rehashes to the same Civitai identity"
+    );
+
+    std::fs::write(&renamed, b"changed adapter bytes with a different size").unwrap();
+    assert_eq!(
+        cached_lora_hash_for_file(&renamed, &marker),
+        None,
+        "changed bytes cannot inherit the previous attribution"
+    );
+    assert_ne!(
+        format!("{:x}", Sha256::digest(std::fs::read(&renamed).unwrap())),
+        hash
+    );
+}
+
+#[test]
+fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
+    let mut used = std::collections::HashSet::new();
+    assert_eq!(
+        civitai_lora_key(
+            Path::new("C:/private/user/Author Style v2.safetensors"),
+            &mut used
+        ),
+        "Author_Style_v2"
+    );
+    assert_eq!(
+        civitai_lora_key(
+            Path::new("D:/elsewhere/Author Style v2.safetensors"),
+            &mut used
+        ),
+        "Author_Style_v2_2",
+        "two resources with the same readable stem must not overwrite each other's hash entry"
+    );
+}
+
+#[test]
+fn lora_attribution_resolves_the_manifest_declared_inference_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let install = settings.data_dir.join("loras").join("author-style");
+    std::fs::create_dir_all(&install).unwrap();
+    let final_file = install.join("author-style.safetensors");
+    let checkpoint = install.join("author-style-step0009.safetensors");
+    std::fs::write(&final_file, b"final adapter").unwrap();
+    std::fs::write(&checkpoint, b"training checkpoint").unwrap();
+    let raw = json!({
+        "installedPath": install,
+        "files": ["author-style.safetensors"],
+        "weight": 0.7
+    });
+    assert_eq!(lora_weight(&raw), 0.7);
+    assert_eq!(
+        resolve_adapter_file(&raw, &settings).unwrap(),
+        std::fs::canonicalize(final_file).unwrap(),
+        "attribution and inference must choose the same manifest-declared adapter"
+    );
+}
+
+#[test]
+fn hf_lora_attribution_uses_the_catalog_receipt_beside_data_loras() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&dir.path().join("config"));
+    settings.data_dir = dir.path().join("data");
+    let hub_file = settings
+        .data_dir
+        .join("huggingface")
+        .join("hub")
+        .join("models--author--style")
+        .join("snapshots")
+        .join("revision")
+        .join("style.safetensors");
+    std::fs::create_dir_all(hub_file.parent().unwrap()).unwrap();
+    std::fs::write(&hub_file, b"adapter").unwrap();
+    let receipt = settings
+        .data_dir
+        .join("loras")
+        .join(safe_download_dir("author-style"))
+        .join(INSTALL_MARKER);
+    std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+    std::fs::write(
+        &receipt,
+        serde_json::to_vec(&json!({ "repo": "author/style" })).unwrap(),
+    )
+    .unwrap();
+    let raw = json!({
+        "id": "author-style",
+        "installedPath": hub_file,
+        "source": { "provider": "huggingface", "repo": "author/style" }
+    });
+
+    assert_eq!(
+        existing_lora_install_marker(
+            &raw,
+            &settings,
+            Path::new(raw["installedPath"].as_str().unwrap())
+        ),
+        Some(receipt)
+    );
+}
+
+#[test]
 fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path().join("project");
@@ -541,7 +677,13 @@ fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not()
         "modelHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "prompt": "resource attribution regression",
         "width": 64,
-        "height": 64
+        "height": 64,
+        "loras": [{
+            "name": "forged-client-name",
+            "weight": 0.2,
+            "hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "installedPath": "C:/private/user/path/forged.safetensors"
+        }]
     })
     .as_object()
     .cloned()
@@ -554,6 +696,12 @@ fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not()
     );
     plan.model_hash =
         Some("312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07".to_owned());
+    plan.loras = vec![WorkflowLora {
+        name: Some("exact_adapter_file".to_owned()),
+        weight: Some(0.65),
+        repo: None,
+        hash: Some("d34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33f".to_owned()),
+    }];
 
     let fact = write_image_asset(
         &plan,
@@ -572,10 +720,14 @@ fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not()
         .unwrap()
         .expect("generated PNG carries the workflow");
     assert_eq!(share.model_hash, plan.model_hash);
+    assert_eq!(share.loras, plan.loras);
     let parameters = sceneworks_core::workflow_parameters::parameters_text(&share, (64, 64));
     assert!(parameters
         .contains("Model hash: 312f5ab87eaa1d8109177655d3bb48b711677fbd1b8f1b92129f282cb6011b07"));
     assert!(!parameters.contains("ffffffffffffffff"));
+    assert!(parameters.contains("<lora:exact_adapter_file:0.65>"));
+    assert!(parameters.contains("Lora hashes: \"exact_adapter_file: d34db33f"));
+    assert!(!parameters.contains("forged-client-name"));
     assert!(!parameters.contains(project_path.to_string_lossy().as_ref()));
     let bytes = std::fs::read(media).unwrap();
     assert!(bytes
@@ -657,7 +809,15 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
     let payload = embed_payload();
     let req = ImageRequest::from_payload(&payload);
     // No preference file at all — embedding is ON by default, which is the shape a fresh install has.
-    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let mut plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    // The default-platform test uses the procedural writer rather than an inference backend, so
+    // supply the worker-resolved adapter fact that production obtains before this seam.
+    plan.loras = vec![WorkflowLora {
+        name: Some("grain".to_owned()),
+        weight: Some(0.6),
+        repo: Some("acme/film-grain".to_owned()),
+        hash: Some("1111111111111111111111111111111111111111111111111111111111111111".to_owned()),
+    }];
     // Image index 0 of a two-image batch whose base seed is 100 — so the seed that lands in the
     // envelope has to be this image's, not the batch's `seeds` list.
     let fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);

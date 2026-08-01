@@ -96,14 +96,14 @@ const L_PRODUCER = "the SceneWorks name, project URL and released version of the
 const L_MODE = "the generation mode";
 const L_NAMES = "the model and style names";
 const L_RESOURCE_HASHES =
-  "the exact checkpoint content hash, when available, so galleries can attribute the model version";
+  "the exact checkpoint and LoRA content hashes, when available, so galleries can attribute their versions and authors";
 const L_PROSE = "the prompt fields named above, verbatim";
 const L_SEED = "the seed for this image";
 const L_SIZE = "the image size the run asked for";
 const L_FIT = "how a source image was fitted";
 const L_COUNT = "how many images the run asked for";
 const L_UPSCALE = "any upscale settings";
-const L_LORAS = "LoRA names, weights and Hugging Face repo ids";
+const L_LORAS = "LoRA names, weights, Hugging Face repo ids and exact content hashes";
 const L_SETTINGS =
   "the shared generation settings (sampler, scheduler, steps, guidance, strength and the other numeric knobs)";
 const L_PASSES =
@@ -154,6 +154,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["loras[].name", L_LORAS],
   ["loras[].weight", L_LORAS],
   ["loras[].repo", L_LORAS],
+  ["loras[].hash", L_LORAS],
   ["advanced", L_SETTINGS],
   ["advanced.sampler", L_SETTINGS],
   ["advanced.scheduler", L_SETTINGS],

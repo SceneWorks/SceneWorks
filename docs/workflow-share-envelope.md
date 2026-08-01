@@ -146,9 +146,9 @@ Every embedded PNG carries a **second** text chunk, under the unprefixed keyword
 the layout AUTOMATIC1111's WebUI popularised (sc-15957):
 
 ```
-<prompt>
+<prompt> <lora:readable_file_key:weight>
 Negative prompt: <negative>
-Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Version: <producer.version>, software: SceneWorks
+Steps: N, Sampler: X, CFG scale: N, Seed: N, Size: WxH, Model: <slug>, Model hash: <sha256>, Lora hashes: "readable_file_key: <sha256>", Version: <producer.version>, software: SceneWorks
 ```
 
 Civitai and most galleries and viewers parse that block. They **display** generation settings; they
@@ -175,6 +175,13 @@ the actual `euler` sampler it passes to the runtime. These are execution facts, 
 guessed later. Client-supplied internal telemetry is never promoted, and multi-phase schedules
 remain uncollapsed.
 
+The worker also resolves every selected LoRA through the same exact-file function inference uses,
+hashes those bytes, and replaces request-derived LoRA hints with that proven stack before writing.
+The safe filename stem is only the readable association key shared by the prompt tag and hash map;
+the SHA-256 is the identity Civitai resolves. Renaming identical bytes changes the key but not the
+resource match, while changing the bytes changes the digest. No path or user-entered Civitai id is
+recorded. Hashing failure removes attribution only and never fails an otherwise successful image.
+
 ### Omit rather than approximate
 
 A guessed mapping ships misleading data to a public gallery, and nobody downstream can tell a guess
@@ -185,13 +192,14 @@ anything without a clean equivalent is **left out rather than approximated**.
 
 | Field | What it is |
 | --- | --- |
-| `Steps` | `advanced.steps`, when it is a whole number of at least one and no multi-phase schedule overrides it. This includes the worker-resolved count above when the request omitted its own value. |
+| `Steps` | `advanced.steps` for a single-phase run, or the exact sum of `advanced.phases[].steps` for a recorded multi-phase run. This includes the worker-resolved count above when the request omitted its own value. |
 | `Sampler` | `advanced.sampler`, verbatim — except the literal `default`, which names no sampler and is omitted. For imported Krea, the worker overwrites this with the actual `euler` sampler it executes. |
 | `CFG scale` | `advanced.guidanceScale`, only when `advanced.guidanceMethod` is absent. The studio emits that key only for a method that is not plain CFG, so its presence means the number is not a CFG scale. |
 | `Seed` | `seed`, verbatim — the seed of this image, which is the only one the envelope carries. |
 | `Size` | `width` x `height`, only when they are the dimensions of the file being written. |
 | `Model` | `model`, the safe readable catalog slug, verbatim. |
 | `Model hash` | `modelHash`, only when the worker retained the exact SHA-256 of the imported checkpoint that the resolved route executed. Civitai uses it with `Model` to link the precise model version and author. |
+| `Lora hashes` | A quoted `readable_file_key: SHA-256` map for every exact adapter file the worker resolved and hashed. The same key appears in `<lora:readable_file_key:weight>` for fixed weights, allowing Civitai to associate the hash with the prompt resource. |
 | `Version` | `producer.version` off the envelope's own producer block. |
 | `software` | `producer.name` from the trusted producer block. Civitai displays this canonical lowercase field as the generating-software badge. |
 
@@ -211,14 +219,15 @@ shipping lane clears it unaided; the thinnest, a standalone upscale, emits
 `Seed` + `Model` + `Version` + `software`, one field above the floor. The floor remains a guard
 rather than an observation because malformed foreign producer/model labels can still be reduced.
 
-What is deliberately **not** in the trailer, and why: the multi-phase Krea schedule (a list of
-`(steps, guidance)` pairs has no single-number form — and its presence suppresses `Steps` and `CFG
-scale` too, because a top-level number beside it would describe a run that did not happen);
+What is deliberately **not** in the trailer, and why: the multi-phase Krea guidance schedule (it
+has no single-number form, while `Steps` is safely emitted as the exact sum of contiguous phase
+step counts);
 `textStyleGain`; `scheduler` / `schedulerShift` (A1111's `Schedule type` is a noise schedule, ours
 is closer to its *sampler* — two plausible mappings and no correct one); `strength` (the sense is
 lane-dependent, and the candle fork lane inverts it); `upscale.*` (A1111's hires fix is a specific
-latent second pass, ours is a post-pass on the decoded image); `loras[]` (A1111 carries them by
-rewriting the prompt, and editing the user's prompt to smuggle a resource list in is fabrication);
+latent second pass, ours is a post-pass on the decoded image); unresolved or unhashed `loras[]`
+(a readable name alone is not resource identity), and a single `<lora:...:weight>` tag for any
+adapter whose multi-phase schedule actually varies that weight (its exact hash still travels);
 `count`; the control-overlay fields; `faceRestore` (A1111's field names an engine and ours is a
 boolean); and the tier / kernel / GPU keys, which the allow-list withholds so this rendering could
 not see them if it wanted to.
@@ -292,9 +301,10 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `upscale.factor` | The upscale factor. |
 | `upscale.engine` | The upscale engine label. |
 | `upscale.softness` | The upscale softness. |
-| `loras[].name` | A LoRA's display name, as the user sees it in the catalog. |
+| `loras[].name` | For a generated image, the safe readable stem of the exact adapter filename. It associates the prompt tag with the hash map but is not resource identity. A foreign or unresolved recipe may instead carry its portable display hint. |
 | `loras[].weight` | Its weight. |
 | `loras[].repo` | Its Hugging Face `owner/name`, when the catalog entry resolved to one. Never a path, never a local id. |
+| `loras[].hash` | SHA-256 of the exact adapter bytes inference resolved, when worker-proven. Client payload hashes are ignored; malformed foreign hashes are dropped without breaking import. |
 | `inputs[].kind` | The kind of input image the recipe needs. See [Input images](#input-images-travel-by-shape-not-by-id). |
 | `inputs[].count` | How many of that kind. |
 | `inputs[].controlMode` | For a control input, the conditioning it feeds (`canny`, `depth`, …). |
@@ -335,8 +345,9 @@ in that table is not in the file. Named explicitly because these are the ones pe
   decision written down against its name. Either way the receiving install picks its own.
 - **Local ids that resolve to nothing elsewhere.** Recipe preset ids, control-image asset ids,
   trained-overlay ids and their resolved weights paths, Key Point Library collection ids.
-- **Which adapter FILE a LoRA repo means.** `loras[].repo` is the repo id and there is no
-  `loras[].file` beside it — a filename is a location, and the path guard exists to keep those out.
+- **Where the adapter file lives.** `loras[].repo` is the repo id and there is no `loras[].file` or
+  path beside it. A generated record may use the filename's safe stem as its readable `name`, but
+  that contains no directory and is not identity; `loras[].hash` is the exact content identity.
   The consequence is on the reading side: a receiving install that has two adapters from one repo
   cannot tell from the repo id alone which the sender used. `loras[].name` is then read as a
   tie-break *among those rows only* — both parties installing the same multi-adapter pack is the
