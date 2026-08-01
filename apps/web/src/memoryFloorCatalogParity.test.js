@@ -15,7 +15,7 @@ import {
   CANDLE_HEADROOM_GB,
   DISK_TO_RESIDENT_MULTIPLIER,
   MEMORY_HEADROOM_FRACTION,
-  MEASURED_SIBLING_RATIO_TOLERANCE,
+  MEASURED_SIBLING_DELTA_TOLERANCE,
   TRANSIENT_HEADROOM_BYTES,
   TRANSIENT_HEADROOM_MEASURED_PIXELS,
   blanketFloorGb,
@@ -217,22 +217,17 @@ const manifestModels = loadManifestModels();
 const OSES = ["macos", "windows"];
 // The lane each OS runs, matching every consumer's `macGatingActive ? "mlx" : "candle"`.
 const BACKEND_FOR_OS = { macos: "mlx", windows: "candle" };
-const MAX_MEASURED_SIBLING_RATIO_TOLERANCE = 1.05;
+const MAX_MEASURED_SIBLING_DELTA_TOLERANCE = 1.05;
 
 function estimateDiskBytes(variant) {
   return jsonSizeToU64(variant?.footprint?.diskSizeBytes) ?? jsonSizeToU64(variant?.downloadSizeBytes);
 }
 
-function measuredResidentForRatio(variant) {
-  const resident = jsonSizeToU64(variant?.footprint?.residentMemoryBytes);
-  if (resident !== null && resident > 0) {
-    return resident;
-  }
+function calibratedMeasuredPeak(variant) {
   const peak = jsonSizeToU64(variant?.footprint?.peakMemoryBytes);
-  return peak !== null &&
-    peak > TRANSIENT_HEADROOM_BYTES &&
+  return peak !== null && peak > 0 &&
     variant?.footprint?.measuredPixels === TRANSIENT_HEADROOM_MEASURED_PIXELS
-    ? peak - TRANSIENT_HEADROOM_BYTES
+    ? peak
     : null;
 }
 
@@ -240,49 +235,63 @@ describe("catalog memory estimates: measured-sibling upper bound (sc-16046)", ()
   it("bounds every estimable MLX tier with a measured sibling and audits the affected model shapes", () => {
     // The guard owns this ceiling independently of the implementation constant. Raising the production
     // tolerance therefore makes this test red instead of raising its own upper bound in lockstep.
-    expect(MEASURED_SIBLING_RATIO_TOLERANCE).toBeLessThanOrEqual(
-      MAX_MEASURED_SIBLING_RATIO_TOLERANCE,
+    expect(MEASURED_SIBLING_DELTA_TOLERANCE).toBeLessThanOrEqual(
+      MAX_MEASURED_SIBLING_DELTA_TOLERANCE,
     );
     const rows = [];
     for (const manifestModel of manifestModels) {
       const entry = catalogEntry(manifestModel, "macos", []);
       for (const target of entry.variants.filter((variant) => tierQuantize(variant.variant) !== null)) {
-        if (measuredResidentForRatio(target) !== null) {
+        if (calibratedMeasuredPeak(target) !== null) {
           continue;
         }
         const targetDisk = estimateDiskBytes(target);
         if (targetDisk === null || targetDisk <= 0) {
           continue;
         }
-        const siblingRatios = entry.variants
+        const siblingPeaks = entry.variants
           .filter(
             (sibling) =>
               sibling.variant !== target.variant && tierQuantize(sibling.variant) !== null,
           )
           .map((sibling) => {
             const disk = estimateDiskBytes(sibling);
-            const resident = measuredResidentForRatio(sibling);
-            return disk !== null && disk > 0 && resident !== null ? resident / disk : null;
+            const peak = calibratedMeasuredPeak(sibling);
+            return disk !== null && disk > 0 && disk < targetDisk && peak !== null
+              ? { disk, peak }
+              : null;
           })
-          .filter((ratio) => ratio !== null && ratio > 0 && Number.isFinite(ratio));
-        if (siblingRatios.length === 0) {
+          .filter((sibling) => sibling !== null);
+        if (siblingPeaks.length === 0) {
           continue;
         }
 
-        const siblingRatio = Math.max(...siblingRatios);
-        const toleratedRatio = Math.min(
-          DISK_TO_RESIDENT_MULTIPLIER,
-          siblingRatio * MAX_MEASURED_SIBLING_RATIO_TOLERANCE,
-        );
-        const upperBound = Math.round(targetDisk * toleratedRatio) + TRANSIENT_HEADROOM_BYTES;
         const estimate = variantFootprintBytes(target, entry);
-        const optedIn = entry?.mlx?.estimateResidentFromMeasuredSibling === true;
+        const activeDiskFraction = entry?.mlx?.measuredSiblingActiveDiskFraction;
+        const optedIn =
+          typeof activeDiskFraction === "number" &&
+          activeDiskFraction > 0 &&
+          activeDiskFraction <= 1;
         const denseBytes =
           Math.round(targetDisk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES;
 
         expect(estimate, `${entry.id}/${target.variant} must remain estimable`).not.toBeNull();
         expect(estimate.measured, `${entry.id}/${target.variant} is still an estimate`).toBe(false);
         if (optedIn) {
+          const upperBound = Math.min(
+            denseBytes,
+            Math.max(
+              ...siblingPeaks.map(
+                (sibling) =>
+                  sibling.peak +
+                  Math.round(
+                    (targetDisk - sibling.disk) *
+                      activeDiskFraction *
+                      MAX_MEASURED_SIBLING_DELTA_TOLERANCE,
+                  ),
+              ),
+            ),
+          );
           expect(
             estimate.bytes,
             `${entry.id}/${target.variant} exceeds its measured-sibling upper bound`,
@@ -329,8 +338,21 @@ describe("catalog memory estimates: measured-sibling upper bound (sc-16046)", ()
       (row) => row.tier === "bf16" && row.id.startsWith("wan_2_2_"),
     );
     expect(wanBf16).toHaveLength(2);
+    // sc-16068 separated additive adapters from the base peak. The estimator preserves each corrected
+    // q4 peak and scales only one expert's share of the precision-dependent disk delta, so neither bf16
+    // estimate can fall below one resident expert as the invalid image-transient subtraction did.
+    const expectedHostGb = new Map([
+      ["wan_2_2_t2v_14b", 43],
+      ["wan_2_2_i2v_14b", 45],
+    ]);
+    const oneBf16ExpertBytes = 28_580_000_000;
     for (const row of wanBf16) {
-      expect(hostGbForPeakGb(row.estimate.bytes / BYTES_PER_GB, "mlx"), row.id).toBe(46);
+      expect(row.estimate.bytes, `${row.id} must fit at least one resident bf16 expert`).toBeGreaterThan(
+        oneBf16ExpertBytes,
+      );
+      expect(hostGbForPeakGb(row.estimate.bytes / BYTES_PER_GB, "mlx"), row.id).toBe(
+        expectedHostGb.get(row.id),
+      );
       expect(hostGbForPeakGb(row.denseBytes / BYTES_PER_GB, "mlx"), row.id).toBeGreaterThanOrEqual(
         87,
       );
@@ -358,29 +380,31 @@ describe("catalog memory estimates: measured-sibling upper bound (sc-16046)", ()
         return [id, catalogEntry(model, "macos", [])];
       }),
     );
-    const relativeResidentScale = (entry, tier) => {
+    const relativeDenseFallbackScale = (entry, tier) => {
       const variant = entry.variants.find((candidate) => candidate.variant === tier);
       const disk = estimateDiskBytes(variant);
       const estimate = variantFootprintBytes(variant, entry);
       expect(disk, `${entry.id}/${tier} disk bytes`).toBeGreaterThan(0);
       expect(estimate, `${entry.id}/${tier} estimate`).not.toBeNull();
-      return (estimate.bytes - TRANSIENT_HEADROOM_BYTES) / disk;
+      const denseBytes =
+        Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES;
+      return estimate.bytes / denseBytes;
     };
 
     for (const tier of ["q4", "q8", "bf16"]) {
       for (const id of ["bernini", "bernini_image", "lens"]) {
-        expect(relativeResidentScale(entries.get(id), tier), `${id}/${tier}`).toBe(1);
+        expect(relativeDenseFallbackScale(entries.get(id), tier), `${id}/${tier}`).toBe(1);
       }
     }
     for (const tier of ["q8", "bf16"]) {
-      expect(relativeResidentScale(entries.get("lens_turbo"), tier), `lens_turbo/${tier}`).toBe(1);
+      expect(relativeDenseFallbackScale(entries.get("lens_turbo"), tier), `lens_turbo/${tier}`).toBe(1);
       for (const id of ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]) {
-        expect(relativeResidentScale(entries.get(id), tier), `${id}/${tier}`).toBeLessThan(0.5);
+        expect(relativeDenseFallbackScale(entries.get(id), tier), `${id}/${tier}`).toBeLessThan(1);
       }
     }
     expect(
       manifestModels
-        .filter((model) => model?.mlx?.estimateResidentFromMeasuredSibling === true)
+        .filter((model) => model?.mlx?.measuredSiblingActiveDiskFraction === 0.5)
         .map((model) => model.id)
         .sort(),
     ).toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"].sort());

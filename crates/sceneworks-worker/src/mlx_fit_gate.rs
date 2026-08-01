@@ -64,6 +64,10 @@ pub(crate) struct MlxRequestPlan {
     /// Control checkpoint bytes already folded into `asset_bytes` by the legacy on-disk estimator.
     /// An adopting contract replaces this raw source size with its load-exact typed residency.
     folded_control_bytes: u64,
+    /// Adapter source bytes included by the legacy estimator. An adopting contract replaces this
+    /// raw file size with its load-exact typed residency. Dense Wan adapters are folded into base
+    /// weights and therefore contribute zero here; packed Wan residuals remain additive.
+    folded_adapter_bytes: u64,
     activation_headroom_bytes: u64,
     /// The resolution-INDEPENDENT slice of `activation_headroom_bytes` (sc-16195). Always
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.
@@ -81,6 +85,7 @@ impl MlxRequestPlan {
     ) -> Self {
         let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
+        let folded_adapter_bytes = adapter_source_bytes_for_gate(engine_id, spec);
         let declared_floors = declared_component_floors(engine_id);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
@@ -127,6 +132,7 @@ impl MlxRequestPlan {
             tier,
             asset_bytes,
             folded_control_bytes,
+            folded_adapter_bytes,
             // The historical generic headroom includes the legacy 2 GiB unified reserve. Request
             // budgeting carries that reserve separately on Decision 2 fallback paths, so leave only
             // the activation allowance here. Exact evidence supplies its own measured envelope.
@@ -212,9 +218,9 @@ impl MlxRequestPlan {
     }
 
     /// Convert the legacy whole-spec estimate into the base-only scalar expected by the additive
-    /// component contract. Today `spec_component_bytes` folds only `LoadSpec::control` among the
-    /// typed auxiliary slots, so only a declared control branch needs normalization. Non-adopting
-    /// providers retain the legacy scalar byte-for-byte.
+    /// component contract. `spec_component_bytes` folds raw control and resident adapter sources
+    /// into the legacy scalar. A typed declaration replaces the corresponding raw source bytes with
+    /// the provider's load-exact residency. Non-adopting providers retain the legacy scalar.
     fn contract_base_peak_bytes(
         &self,
         legacy_total_peak_bytes: u64,
@@ -224,11 +230,28 @@ impl MlxRequestPlan {
             .resident_components()
             .iter()
             .any(|component| component.kind == gen_core::MemoryComponentKind::ControlBranch);
-        legacy_total_peak_bytes.saturating_sub(if declares_control_branch {
-            self.folded_control_bytes
-        } else {
-            0
-        })
+        let declares_adapter_stack = contract
+            .resident_components()
+            .iter()
+            .any(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack);
+        // Mage's request estimator is provider-specific and already returns the adapter-free base
+        // peak, unlike the generic legacy estimator whose asset term contains external adapter
+        // files. Do not normalize bytes that were never present or the provider's later additive
+        // declaration would cancel to zero.
+        let legacy_includes_adapter_sources = !self.engine_id.starts_with("mage_flow");
+        legacy_total_peak_bytes
+            .saturating_sub(if declares_control_branch {
+                self.folded_control_bytes
+            } else {
+                0
+            })
+            .saturating_sub(
+                if declares_adapter_stack && legacy_includes_adapter_sources {
+                    self.folded_adapter_bytes
+                } else {
+                    0
+                },
+            )
     }
 }
 
@@ -1188,15 +1211,25 @@ fn evaluate_request_with_budget_using_bundle(
 ) -> WorkerResult<MlxRequestEvaluation> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 
+    // Component precision floors are a provider property, not a manifest guess. Bind them only
+    // after the concrete generator is loaded, then use that tier for every evidence/cache identity
+    // in this request so uniform-q4 measurements cannot authorize a mixed-precision provider.
+    let declared_floors = generator
+        .descriptor()
+        .capabilities
+        .component_precision_floors;
+    let provider_floors = active_component_floors(declared_floors, plan.tier.quant);
+    let mut effective_plan;
+    let plan = if plan.tier.component_precision_floors == provider_floors {
+        plan
+    } else {
+        effective_plan = plan.clone();
+        effective_plan.tier.component_precision_floors = provider_floors;
+        &effective_plan
+    };
+
     let geometry = request_geometry(inputs);
     let (mode, mode_key) = request_mode(&inputs.mode);
-    if plan.engine_id.starts_with("mage_flow") && inputs.adapter_count > 0 {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} request includes {} adapter(s), but Mage's paired memory calibration does not \
-             include LoRA/LoKr tensors; refusing an unbounded MLX request",
-            plan.engine_id, inputs.adapter_count
-        )));
-    }
     let mut fallback_contract;
     let contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
@@ -1213,6 +1246,19 @@ fn evaluate_request_with_budget_using_bundle(
         fallback_contract.asset_facts.base_bytes = plan.asset_bytes;
         &fallback_contract
     };
+    if plan.engine_id.starts_with("mage_flow")
+        && inputs.adapter_count > 0
+        && !contract.resident_components().iter().any(|component| {
+            component.kind == gen_core::MemoryComponentKind::AdapterStack
+                && component.resident_bytes > 0
+        })
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} request includes {} adapter(s), but the loaded provider did not declare \
+             load-exact adapter residency; refusing an unbounded MLX request",
+            plan.engine_id, inputs.adapter_count
+        )));
+    }
     let calibration_fingerprint = contract
         .calibration
         .as_ref()
@@ -1221,9 +1267,25 @@ fn evaluate_request_with_budget_using_bundle(
         .calibration
         .as_ref()
         .map_or(0, |identity| identity.abi);
-    let mut admission = match evidence_bundle {
-        Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
-        None => packaged_admission_route(plan, inputs, mode_key, budget)?,
+    let mut admission = if plan.tier.component_precision_floors.is_empty() {
+        match evidence_bundle {
+            Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
+            None => packaged_admission_route(plan, inputs, mode_key, budget)?,
+        }
+    } else {
+        // Persisted calibration bindings currently identify only the coarse tier token (for
+        // example `q4`). They cannot distinguish uniform q4 from a provider whose descriptor keeps
+        // selected components at q8, so they must not be relabeled with the live descriptor floors.
+        // Until the on-disk evidence schema carries the floors explicitly, fail closed to the
+        // provider's conservative resident estimate.
+        AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+            evidence: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+            lower_alternative: None,
+        }
     };
     let carries_verified_claim =
         admission.path == AdmissionPath::Evidence || admission.lower_alternative.is_some();
@@ -1962,6 +2024,63 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
+fn adapter_source_bytes_for_gate(engine_id: &str, spec: &LoadSpec) -> u64 {
+    adapter_source_bytes_for_gate_where(engine_id, spec, |_| true)
+}
+
+fn external_adapter_source_bytes_for_gate(engine_id: &str, spec: &LoadSpec) -> u64 {
+    adapter_source_bytes_for_gate_where(engine_id, spec, |path| match &spec.weights {
+        WeightsSource::Dir(root) => !path.starts_with(root),
+        WeightsSource::File(_) => true,
+    })
+}
+
+fn adapter_source_bytes_for_gate_where(
+    engine_id: &str,
+    spec: &LoadSpec,
+    include: impl Fn(&Path) -> bool,
+) -> u64 {
+    let source_bytes = spec.adapters.iter().fold(0_u64, |total, adapter| {
+        if !include(&adapter.path) {
+            return total;
+        }
+        let bytes = match std::fs::metadata(&adapter.path) {
+            Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(&adapter.path),
+            Ok(metadata)
+                if adapter
+                    .path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    == Some("safetensors") =>
+            {
+                metadata.len()
+            }
+            _ => 0,
+        };
+        total.saturating_add(bytes)
+    });
+    if matches!(engine_id, "wan_vace" | "wan2_2_vace_fun_14b") {
+        return 0;
+    }
+    if !matches!(
+        engine_id,
+        "wan2_2_ti2v_5b" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b"
+    ) {
+        return source_bytes;
+    }
+
+    // Wan dense loads fold factors into the mutable base before optional load-time quantization, so
+    // the adapter files do not remain independently resident. A pre-packed snapshot declares its
+    // quantization in the root config and installs adapters as forward-time residuals instead.
+    let prepacked = spec.quantize.is_none()
+        && matches!(&spec.weights, WeightsSource::Dir(root) if packed_quant_bits(root, "").is_some());
+    if prepacked {
+        source_bytes
+    } else {
+        0
+    }
+}
+
 /// Resolve the TEXT-ENCODER on-disk bytes for the staged split (sc-10894), preferring the provider-owned
 /// per-component footprint over the `text_encoder*` subdir scan.
 ///
@@ -2557,6 +2676,12 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, Headroom
     if let Some(control) = &spec.control {
         total_bytes += weights_source_bytes(control);
     }
+    // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
+    // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
+    // base and adds zero independent bytes. Other providers conservatively retain the source bytes;
+    // a typed component contract may replace them with a more exact resident measurement below.
+    total_bytes =
+        total_bytes.saturating_add(external_adapter_source_bytes_for_gate(engine_id, spec));
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
     // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
@@ -2962,6 +3087,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(6.0),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -3151,6 +3277,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(3.0),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -3256,6 +3383,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(30.0),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(2.0),
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
@@ -4264,6 +4392,86 @@ mod tests {
     }
 
     #[test]
+    fn persisted_uniform_tier_evidence_cannot_authorize_component_precision_floors() {
+        use gen_core::{ComponentPrecisionFloor, PrecisionFloorComponent};
+
+        const FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
+            component: PrecisionFloorComponent::TransformerHead,
+            selected_tier: gen_core::Quant::Q4,
+            resident_tier: gen_core::Quant::Q8,
+        }];
+        let bundle = fixture_bundle();
+        let mut generator = fixture_generator();
+        generator.descriptor.capabilities.component_precision_floors = FLOORS;
+        let evaluated = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &fixture_plan(),
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(4.0),
+            0,
+            &[],
+            Some(&bundle),
+        )
+        .expect("a mixed-precision provider falls back to its conservative resident estimate");
+
+        assert_eq!(evaluated.process_limit_bytes, None);
+        assert_eq!(
+            evaluated.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "a coarse persisted q4 record must not be relabeled as mixed q4/q8 evidence"
+        );
+        assert_eq!(
+            evaluated.context.selection.tier.component_precision_floors,
+            FLOORS
+        );
+    }
+
+    #[test]
+    fn provider_floor_binding_stays_inactive_for_q8_and_bf16() {
+        use gen_core::{ComponentPrecisionFloor, PrecisionFloorComponent};
+
+        const Q4_ONLY_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
+            component: PrecisionFloorComponent::TransformerHead,
+            selected_tier: gen_core::Quant::Q4,
+            resident_tier: gen_core::Quant::Q8,
+        }];
+        let mut generator = fixture_generator();
+        generator.descriptor.capabilities.component_precision_floors = Q4_ONLY_FLOORS;
+
+        for (quant, label) in [(Some(gen_core::Quant::Q8), "q8"), (None, "bf16")] {
+            let mut plan = fixture_plan();
+            plan.tier.quant = quant;
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let evaluated = evaluate_request_with_budget_using_bundle(
+                &generator,
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(8.0),
+                gib_to_bytes(4.0),
+                0,
+                &[],
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{label} provider binding failed: {error}"));
+
+            assert!(
+                evaluated
+                    .context
+                    .selection
+                    .tier
+                    .component_precision_floors
+                    .is_empty(),
+                "Q4-only component floors must not relabel a {label} request"
+            );
+        }
+    }
+
+    #[test]
     fn target_tier_and_artifact_variant_are_independent_identity_mutations() {
         let bundle = fixture_bundle();
         let inputs = fixture_inputs(1024, 1024);
@@ -4790,6 +4998,7 @@ mod tests {
             },
             asset_bytes: 35_666_644_396,
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -4844,6 +5053,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -4915,6 +5125,7 @@ mod tests {
             },
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(
                 headroom.total_gb - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB,
             ),
@@ -5013,6 +5224,7 @@ mod tests {
             tier: request_plan().tier,
             asset_bytes: gib_to_bytes(6.0),
             folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
             // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
             // sitting exactly on the reserve would model resolution-blind and silently stop
             // exercising the sc-16195 scaling at all.
@@ -5226,12 +5438,34 @@ mod tests {
     }
 
     #[test]
-    fn mage_adapter_requests_fail_closed_outside_the_paired_calibration() {
+    fn mage_adapter_requests_require_and_consume_declared_residency() {
+        use gen_core::{
+            ComponentPrecisionFloor, MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable,
+            MemoryResidentComponent, PrecisionFloorComponent,
+        };
+
         let mut inputs = request_inputs(512, 512, 1);
         inputs.adapter_count = 1;
+        let root =
+            std::env::temp_dir().join(format!("mage-request-adapter-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let base = root.join("base.safetensors");
+        let adapter = root.join("adapter.safetensors");
+        std::fs::write(&base, vec![0_u8; 100]).unwrap();
+        std::fs::write(&adapter, vec![0_u8; 5_750]).unwrap();
+        let spec = LoadSpec::new(WeightsSource::File(base))
+            .with_quant(gen_core::Quant::Q4)
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                adapter,
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )]);
+        let plan =
+            MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &spec, None, None);
+        assert_eq!(plan.folded_adapter_bytes, 5_750);
         let error = evaluate_request_with_budget(
             &request_generator(Some(mage_request_contract())),
-            &request_plan(),
+            &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
@@ -5247,7 +5481,90 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("does not include LoRA/LoKr tensors"));
+        assert!(error.contains("did not declare load-exact adapter residency"));
+
+        const BASE_PEAK_GIB: f64 = 18.73;
+        const ADAPTER_GIB: f64 = 5.75;
+        let mut contract = mage_request_contract();
+        let phases = contract.lifecycle.phases.clone();
+        contract.asset_facts.overlay_bytes = gib_to_bytes(ADAPTER_GIB);
+        contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases,
+            variables: vec![
+                MemoryFormulaVariable::PixelCount,
+                MemoryFormulaVariable::BatchCount,
+                MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components: vec![MemoryResidentComponent {
+                id: "adapter_stack".to_owned(),
+                kind: MemoryComponentKind::AdapterStack,
+                resident_bytes: gib_to_bytes(ADAPTER_GIB),
+                bounded_by: None,
+            }],
+        };
+        const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
+            component: PrecisionFloorComponent::TransformerHead,
+            selected_tier: gen_core::Quant::Q4,
+            resident_tier: gen_core::Quant::Q8,
+        }];
+        let mut generator = request_generator(Some(contract.clone()));
+        generator.descriptor.capabilities.component_precision_floors = PRECISION_FLOORS;
+        let evaluated = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            MemoryBudget {
+                total_bytes: gib_to_bytes(128.0),
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            gib_to_bytes(BASE_PEAK_GIB),
+            0,
+            &[],
+        )
+        .expect("load-exact adapter residency narrows Mage's refusal");
+        assert_eq!(
+            evaluated.context.predicted_peak_bytes,
+            gib_to_bytes(BASE_PEAK_GIB).saturating_add(gib_to_bytes(ADAPTER_GIB)),
+            "the measured 18.73 GiB base must become 24.48 GiB with additive adapters"
+        );
+        assert_eq!(
+            evaluated.context.selection.tier.component_precision_floors, PRECISION_FLOORS,
+            "provider precision floors must participate in the selected evidence identity"
+        );
+
+        contract.asset_facts.overlay_bytes = 0;
+        if let MemoryFormulaKind::ComponentPhaseEnvelope {
+            resident_components,
+            ..
+        } = &mut contract.formula
+        {
+            resident_components[0].resident_bytes = 0;
+        }
+        assert!(
+            evaluate_request_with_budget(
+                &request_generator(Some(contract)),
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(128.0),
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                gib_to_bytes(BASE_PEAK_GIB),
+                0,
+                &[],
+            )
+            .is_err(),
+            "mutation guard: zero adapter bytes must restore the refusal"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -5711,14 +6028,66 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// sc-15154 — a SPLIT-layout tier's staged co-requisites are part of what it loads.
-    ///
-    /// Mage-Flow's per-tier dir holds the DiT alone; the text encoder and VAE are bit-identical
-    /// across the six variants and staged from a shared mirror. Scanning only `spec.weights` scored a
-    /// q4 edit install at the DiT's bytes, so the over-budget message quoted a peak derived from a
-    /// third of the tier, and the permissive legacy override admitted budgets the tier does not
-    /// fit. The pre-fix number is asserted alongside the fixed one — a test that only checked the new
-    /// total could pass on a spec that stages nothing.
+    /// Adapter factors are resident only when the provider keeps them as additive residuals.
+    #[test]
+    fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_adapters_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let weights = root.join("weights");
+        std::fs::create_dir_all(&weights).expect("weights dir");
+        std::fs::write(weights.join("model.safetensors"), vec![0_u8; 1_000]).expect("base weights");
+        let adapter = root.join("adapter.safetensors");
+        std::fs::write(&adapter, vec![0_u8; 250]).expect("adapter weights");
+        let adapter_spec = gen_core::AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora);
+
+        let additive = LoadSpec::new(WeightsSource::Dir(weights.clone()))
+            .with_adapters(vec![adapter_spec.clone()]);
+        assert_eq!(spec_component_bytes("mage_flow", &additive).0, 1_250);
+        assert_eq!(
+            MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &additive, None, None)
+                .folded_adapter_bytes,
+            250
+        );
+
+        let dense_wan = LoadSpec::new(WeightsSource::Dir(weights.clone()))
+            .with_quant(gen_core::Quant::Q4)
+            .with_adapters(vec![adapter_spec.clone()]);
+        assert_eq!(
+            spec_component_bytes("wan2_2_t2v_14b", &dense_wan).0,
+            1_000,
+            "dense Wan folds factors before load-time quantization"
+        );
+        assert_eq!(
+            spec_component_bytes("wan_vace", &dense_wan).0,
+            1_000,
+            "Wan VACE always folds its dense adapter factors"
+        );
+        assert_eq!(
+            spec_component_bytes("wan2_2_vace_fun_14b", &dense_wan).0,
+            1_000,
+            "Wan VACE-Fun folds each expert's factors before quantization"
+        );
+
+        std::fs::write(
+            weights.join("config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .expect("packed marker");
+        let packed_wan =
+            LoadSpec::new(WeightsSource::Dir(weights)).with_adapters(vec![adapter_spec]);
+        assert_eq!(
+            spec_component_bytes("wan2_2_t2v_14b", &packed_wan).0,
+            1_250,
+            "pre-packed Wan retains adapter factors as additive residuals"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// sc-15154: a split-layout tier's staged co-requisites are part of what it loads. Mage-Flow's
+    /// per-tier dir holds the DiT alone; the shared text encoder and VAE must still count.
     #[test]
     fn a_staged_component_counts_toward_the_tier_that_loads_it() {
         let root = std::env::temp_dir().join(format!(

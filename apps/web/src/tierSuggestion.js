@@ -53,10 +53,9 @@ export const TRANSIENT_HEADROOM_BYTES = 14 * 1024 * 1024 * 1024;
 export const TRANSIENT_HEADROOM_MEASURED_PIXELS = 1024 * 1024;
 
 // A measured sibling is still an extrapolation, not a measurement of the target tier. Preserve a
-// small resident-ratio margin before the ordinary 10% host headroom is applied. The multiplier is
-// capped at the dense fallback, so sibling evidence can only correct an over-estimate — it can never
-// make a tier look larger than the existing disk×1 estimate.
-export const MEASURED_SIBLING_RATIO_TOLERANCE = 1.05;
+// small margin on the precision-dependent disk delta before the ordinary 10% host headroom is applied.
+// The result is capped at the dense fallback, so sibling evidence can only correct an over-estimate.
+export const MEASURED_SIBLING_DELTA_TOLERANCE = 1.05;
 
 // Fraction of detected unified/GPU memory a tier's peak footprint must fit UNDER to be suggested. The
 // remainder is left for the OS, other apps, and margin. sc-8516 raised this from 0.8 → 0.9: because the
@@ -74,12 +73,13 @@ const BYTES_PER_GB = 1024 * 1024 * 1024;
 //      This is the true ceiling: a tier whose peak OOMs during generation must not be suggested.
 //   2. `footprint.residentMemoryBytes` + TRANSIENT_HEADROOM_BYTES — measured resident weights plus the
 //      fixed transient working set, when resident was measured but peak was not.
-//   3. `footprint.diskSizeBytes` × a model-aware resident multiplier + TRANSIENT_HEADROOM_BYTES — the
-//      estimate (the common case for un-measured tiers). When the model explicitly declares compatible
-//      tier topology and another quant tier has a measured resident (or a peak at the calibrated 1024²
-//      geometry), its resident/disk ratio plus the stated tolerance supplies the multiplier. Otherwise
-//      the calibrated dense-model multiplier remains the fallback.
-//   4. `downloadSizeBytes` × that same multiplier + TRANSIENT_HEADROOM_BYTES — last-resort when the
+//   3. A compatible measured sibling peak plus the model's active share of the target-vs-sibling disk
+//      delta. This is explicitly opted in by an architecture hint and only extrapolates upward from a
+//      peak measured at the same calibrated geometry. It avoids applying the dense-image 14 GiB
+//      peak/resident decomposition to video models where that decomposition is physically invalid.
+//   4. `footprint.diskSizeBytes` × DISK_TO_RESIDENT_MULTIPLIER + TRANSIENT_HEADROOM_BYTES — the dense
+//      fallback (the common case for unmeasured tiers without a compatible sibling).
+//   5. `downloadSizeBytes` × that same multiplier + TRANSIENT_HEADROOM_BYTES — last-resort when the
 //      footprint object is absent but the catalog still knows the tier's download size.
 // `measured` reports whether the value came from a measured field (peak or resident) vs the estimate.
 export function variantFootprintBytes(variant, model = null) {
@@ -92,18 +92,23 @@ export function variantFootprintBytes(variant, model = null) {
   if (resident !== null && resident > 0) {
     return { bytes: resident + TRANSIENT_HEADROOM_BYTES, measured: true };
   }
-  const residentMultiplier = measuredSiblingResidentMultiplier(variant, model);
   const disk = numberOrNull(footprint?.diskSizeBytes);
   if (disk !== null && disk > 0) {
+    const siblingEstimate = measuredSiblingPeakEstimateBytes(variant, model, disk);
     return {
-      bytes: Math.round(disk * residentMultiplier) + TRANSIENT_HEADROOM_BYTES,
+      bytes:
+        siblingEstimate ??
+        Math.round(disk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
       measured: false,
     };
   }
   const download = numberOrNull(variant?.downloadSizeBytes);
   if (download !== null && download > 0) {
+    const siblingEstimate = measuredSiblingPeakEstimateBytes(variant, model, download);
     return {
-      bytes: Math.round(download * residentMultiplier) + TRANSIENT_HEADROOM_BYTES,
+      bytes:
+        siblingEstimate ??
+        Math.round(download * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES,
       measured: false,
     };
   }
@@ -123,62 +128,59 @@ function variantDiskBytes(variant) {
   return download !== null && download > 0 ? download : null;
 }
 
-function measuredResidentBytes(variant) {
-  const resident = numberOrNull(variant?.footprint?.residentMemoryBytes);
-  if (resident !== null && resident > 0) {
-    return resident;
-  }
+function calibratedMeasuredPeakBytes(variant) {
   const peak = numberOrNull(variant?.footprint?.peakMemoryBytes);
   const measuredPixels = numberOrNull(variant?.footprint?.measuredPixels);
-  if (
-    peak !== null &&
-    peak > TRANSIENT_HEADROOM_BYTES &&
-    measuredPixels === TRANSIENT_HEADROOM_MEASURED_PIXELS
-  ) {
-    return peak - TRANSIENT_HEADROOM_BYTES;
-  }
-  return null;
+  return peak !== null && peak > 0 && measuredPixels === TRANSIENT_HEADROOM_MEASURED_PIXELS
+    ? peak
+    : null;
 }
 
-// Derive an unmeasured quant tier's resident/disk ratio from measured sibling tiers only after the MLX
-// manifest explicitly asserts compatible resident topology. Same-model identity is insufficient:
-// Lens Turbo changes its MoE text-encoder packing between tiers, for example. Peak-only evidence must
-// also use the 1024² geometry that produced TRANSIENT_HEADROOM_BYTES before that transient can be
-// subtracted. Wan A14B opts in because every tier keeps both experts on disk and one resident at a time.
-// Taking the MAX usable sibling ratio is conservative when multiple tiers are measured; the 5%
-// extrapolation tolerance absorbs small tier-to-tier variation. All other models retain 1.0.
-function measuredSiblingResidentMultiplier(variant, model) {
+// Derive an unmeasured quant tier's peak from a smaller measured tier only after the manifest states
+// what fraction of precision-dependent disk growth is active at once. Same-model identity is
+// insufficient: Lens Turbo changes its MoE text-encoder packing between tiers, for example. Wan A14B
+// declares 0.5 because both experts remain on disk while only one is resident. Anchoring the measured
+// PEAK and scaling only the positive disk delta avoids subtracting the 14 GiB dense-image transient from
+// a video peak (which can otherwise produce less memory than one required expert). Taking the MAX usable
+// sibling estimate is conservative when multiple tiers are measured.
+function measuredSiblingPeakEstimateBytes(variant, model, targetDisk) {
   const targetTier = variant?.variant;
+  const activeDiskFraction = numberOrNull(model?.mlx?.measuredSiblingActiveDiskFraction);
   if (
-    model?.mlx?.estimateResidentFromMeasuredSibling !== true ||
+    activeDiskFraction === null ||
+    activeDiskFraction <= 0 ||
+    activeDiskFraction > 1 ||
     tierQuantize(targetTier) === null ||
     !Array.isArray(model?.variants)
   ) {
-    return DISK_TO_RESIDENT_MULTIPLIER;
+    return null;
   }
 
-  let ratio = null;
+  let estimate = null;
   for (const sibling of model.variants) {
     if (sibling === variant || sibling?.variant === targetTier || tierQuantize(sibling?.variant) === null) {
       continue;
     }
     const disk = variantDiskBytes(sibling);
-    const resident = measuredResidentBytes(sibling);
-    if (disk === null || resident === null) {
+    const peak = calibratedMeasuredPeakBytes(sibling);
+    if (disk === null || peak === null || disk >= targetDisk) {
       continue;
     }
-    const candidate = resident / disk;
-    if (candidate > 0 && Number.isFinite(candidate) && (ratio === null || candidate > ratio)) {
-      ratio = candidate;
+    const candidate =
+      peak +
+      Math.round(
+        (targetDisk - disk) *
+          activeDiskFraction *
+          MEASURED_SIBLING_DELTA_TOLERANCE,
+      );
+    if (candidate > 0 && Number.isFinite(candidate) && (estimate === null || candidate > estimate)) {
+      estimate = candidate;
     }
   }
 
-  return ratio === null
-    ? DISK_TO_RESIDENT_MULTIPLIER
-    : Math.min(
-        DISK_TO_RESIDENT_MULTIPLIER,
-        ratio * MEASURED_SIBLING_RATIO_TOLERANCE,
-      );
+  const denseEstimate =
+    Math.round(targetDisk * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES;
+  return estimate === null ? null : Math.min(denseEstimate, estimate);
 }
 
 // ---------------------------------------------------------------------------------------------------

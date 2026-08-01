@@ -2814,6 +2814,36 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
     Ok(specs)
 }
 
+/// Whether Krea may use calibrated streamed blocks, plus the load-exact adapter bytes supporting
+/// that decision. A non-empty stack with unreadable metadata returns `None`; the caller refuses it
+/// rather than inheriting evidence from the adapter-free route.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_streamed_blocks_adapter_evidence(adapters: &[AdapterSpec]) -> (bool, Option<u64>) {
+    if adapters.is_empty() {
+        return (true, Some(0));
+    }
+    let bytes = adapters.iter().try_fold(0_u64, |total, adapter| {
+        let bytes = gen_core::safetensors_path_bytes(&adapter.path);
+        (bytes > 0).then(|| total.saturating_add(bytes))
+    });
+    (false, bytes)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_adapter_resident_bytes(
+    engine_id: &str,
+    tier: &str,
+    measured_source_bytes: u64,
+) -> u64 {
+    // Krea keeps lazily merged adapter overlays on its resident host, including dense tiers. Other
+    // generic Candle providers fold dense factors and retain residuals only on packed tiers.
+    if engine_id.starts_with("krea_2_") || tier != "bf16" {
+        measured_source_bytes
+    } else {
+        0
+    }
+}
+
 fn mlx_raw_settings(
     request: &ImageRequest,
     repo: &str,
@@ -4799,6 +4829,7 @@ fn tier_probe_spec(
     weights_dir: &Path,
     request: &ImageRequest,
     settings: &Settings,
+    adapters: &[AdapterSpec],
 ) -> LoadSpec {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
     attach_required_components(
@@ -4808,6 +4839,7 @@ fn tier_probe_spec(
         settings,
     )
     .unwrap_or(spec)
+    .with_adapters(adapters.to_vec())
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -4842,6 +4874,9 @@ async fn generate_stream(
     // reconcile + spec build (so both the recorded precision and the load follow the downtiered tier).
     let mut weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
+    // Capability downtier probes must carry the exact adapter stack the eventual load sees. Resolving
+    // here lets a lower adapted tier win instead of keeping a base-only fit that the final gate rejects.
+    let adapters = resolve_adapters(request, settings)?;
     // sc-10733 capability downtier (MLX): for a DEFAULT job (no explicit per-(screen,model) pick), if the
     // resolved tier won't fit this machine's unified memory even under sequential residency, step DOWN to
     // the highest installed tier that does — floored at the per-model quality floor — rejecting only when
@@ -4863,8 +4898,13 @@ async fn generate_stream(
                     .filter_map(|cand| {
                         resolve_tier_dir(request, settings, cand)
                             .map(|dir| {
-                                let probe =
-                                    tier_probe_spec(engine_id, &dir, request, settings);
+                                let probe = tier_probe_spec(
+                                    engine_id,
+                                    &dir,
+                                    request,
+                                    settings,
+                                    &adapters,
+                                );
                                 (cand, mlx_tier_fit(engine_id, &probe))
                             })
                     })
@@ -4897,7 +4937,7 @@ async fn generate_stream(
                         .map(|dir| {
                             crate::mlx_fit_gate::spec_weights_gb(
                                 engine_id,
-                                &tier_probe_spec(engine_id, &dir, request, settings),
+                                &tier_probe_spec(engine_id, &dir, request, settings, &adapters),
                             )
                         })
                         .filter(|gb| *gb > 0.0)
@@ -5028,7 +5068,6 @@ async fn generate_stream(
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
-    let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(
         request,
@@ -5439,8 +5478,13 @@ fn candle_tier_fit(
     tier: &'static str,
     budget: Option<crate::vram_gate::VramBudget>,
     sequential_capable: bool,
+    adapter_bytes: u64,
 ) -> TierFit {
-    let needed = crate::vram_gate::predicted_peak_gb(manifest_entry, tier);
+    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        manifest_entry,
+        tier,
+        adapter_bytes,
+    );
     match crate::vram_gate::resolve_offload(
         crate::vram_gate::fit_decision(needed, budget),
         sequential_capable,
@@ -5451,8 +5495,11 @@ fn candle_tier_fit(
         } => {
             // Resident won't fit but the provider stages — fits only if the MEASURED sequential peak
             // fits (unmeasured ⇒ best-effort run, so `sequential_overflow_gb` yields None ⇒ Fits).
-            let seq_needed =
-                crate::vram_gate::predicted_sequential_peak_gb(manifest_entry, tier);
+            let seq_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+                manifest_entry,
+                tier,
+                adapter_bytes,
+            );
             match crate::vram_gate::sequential_overflow_gb(seq_needed, budget) {
                 Some(seq_gb) => TierFit::TooBig {
                     needed_gb: seq_gb,
@@ -5891,7 +5938,8 @@ fn krea_turbo_capability_reject_message(
 ))]
 mod krea_turbo_memory_route_tests {
     use super::{
-        capability_downtier_floor, krea_turbo_capability_reject_message,
+        candle_adapter_resident_bytes, capability_downtier_floor,
+        krea_streamed_blocks_adapter_evidence, krea_turbo_capability_reject_message,
         krea_turbo_memory_route, krea_unverified_resident_decision,
     };
     use serde_json::{Map, Value};
@@ -5947,6 +5995,66 @@ mod krea_turbo_memory_route_tests {
                 engine, false, false, false, false, false, false
             ));
         }
+    }
+
+    #[test]
+    fn adapter_bytes_disable_krea_streaming_and_missing_bytes_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "krea-adapter-evidence-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let adapter = root.join("adapter.safetensors");
+        std::fs::write(&adapter, vec![0_u8; 321]).unwrap();
+        let measured = vec![gen_core::AdapterSpec::new(
+            adapter,
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )];
+        assert_eq!(krea_streamed_blocks_adapter_evidence(&[]), (true, Some(0)));
+        assert_eq!(
+            krea_streamed_blocks_adapter_evidence(&measured),
+            (false, Some(321))
+        );
+        assert_eq!(candle_adapter_resident_bytes("krea_2_turbo", "bf16", 321), 321);
+        assert_eq!(candle_adapter_resident_bytes("sdxl", "bf16", 321), 0);
+        assert_eq!(candle_adapter_resident_bytes("sdxl", "q4", 321), 321);
+
+        let missing = vec![gen_core::AdapterSpec::new(
+            root.join("missing.safetensors"),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )];
+        assert_eq!(
+            krea_streamed_blocks_adapter_evidence(&missing),
+            (false, None),
+            "missing byte evidence must retain the count-based fail-closed fallback"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adapter_bytes_flip_the_candle_resident_fit_boundary() {
+        use crate::vram_gate::{VramBudget, HEADROOM_GB};
+
+        let manifest = serde_json::json!({
+            "candle": { "vramGbByTier": { "q4": 7.0 } }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let budget = Some(VramBudget {
+            free_gb: 7.5 + HEADROOM_GB,
+            total_gb: 16.0,
+        });
+        assert_eq!(
+            super::candle_tier_fit(&manifest, "q4", budget, false, 0),
+            super::TierFit::Fits
+        );
+        assert!(matches!(
+            super::candle_tier_fit(&manifest, "q4", budget, false, 1024 * 1024 * 1024),
+            super::TierFit::TooBig { .. }
+        ));
     }
 
     #[test]
@@ -6537,7 +6645,16 @@ async fn generate_candle_stream(
         edit_mask.is_some(),
         use_pid,
     );
-    let krea_allow_streamed_blocks = adapter_count == 0;
+    let (krea_allow_streamed_blocks, krea_adapter_bytes) =
+        krea_streamed_blocks_adapter_evidence(&adapters);
+    if adapter_count > 0 && krea_adapter_bytes.is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} includes {adapter_count} adapter(s), but their resident bytes are unavailable; \
+             refusing an unbounded Candle request",
+            request.model
+        )));
+    }
+    let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
@@ -6568,7 +6685,12 @@ async fn generate_candle_stream(
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
                 .map(|candidate| {
-                    let fit = if krea_turbo_ladder {
+                    let candidate_adapter_bytes = candle_adapter_resident_bytes(
+                        engine_id,
+                        candidate,
+                        adapter_source_bytes,
+                    );
+                    let fit = if krea_turbo_ladder && adapter_count == 0 {
                         let candidate_runtime = resolve_tier_dir(request, settings, candidate)
                             .and_then(|dir| {
                                 krea_runtime_evidence_context(
@@ -6608,6 +6730,7 @@ async fn generate_candle_stream(
                                     candidate,
                                     budget,
                                     false,
+                                    candidate_adapter_bytes,
                                 )
                             }
                             None => {
@@ -6624,6 +6747,7 @@ async fn generate_candle_stream(
                                     candidate,
                                     budget,
                                     false,
+                                    candidate_adapter_bytes,
                                 )
                             }
                         }
@@ -6633,6 +6757,7 @@ async fn generate_candle_stream(
                             candidate,
                             budget,
                             sequential_capable,
+                            candidate_adapter_bytes,
                         )
                     };
                     (candidate, fit)
@@ -6668,7 +6793,7 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
-                if krea_turbo_ladder {
+                if krea_turbo_ladder && adapter_count == 0 {
                     let smallest_runtime = resolve_tier_dir(request, settings, smallest).and_then(
                         |dir| krea_runtime_evidence_context(request, settings, smallest, &dir),
                     );
@@ -6734,7 +6859,13 @@ async fn generate_candle_stream(
             }
         }
     }
-    let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    let adapter_resident_bytes =
+        candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes);
+    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        adapter_resident_bytes,
+    );
     let krea_runtime_context = krea_turbo_ladder
         .then(|| krea_runtime_evidence_context(request, settings, tier, &weights_dir))
         .flatten();
@@ -6748,7 +6879,7 @@ async fn generate_candle_stream(
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
     // unverified path; only then may the established gate remain as provider-safe fallback.
-    let shared_krea_fit = krea_turbo_ladder
+    let shared_krea_fit = (krea_turbo_ladder && adapter_count == 0)
         .then(|| {
             crate::vram_gate::krea_turbo_fit_with_runtime(
                 &request.model_manifest_entry,
@@ -6845,9 +6976,10 @@ async fn generate_candle_stream(
                 // physically drops the DiT before VAE decode. Other models retain the established
                 // sequential-overflow gate below; unverified Krea evidence reaches the explicit
                 // resident-or-reject path instead of this arm.
-                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
                     &request.model_manifest_entry,
                     tier,
+                    adapter_resident_bytes,
                 );
                 let krea_selected = if krea_turbo_ladder {
                     match shared_krea_fit {
@@ -7095,7 +7227,11 @@ async fn generate_candle_stream(
     // didn't actually attempt to allocate.
     let incurred_peak = if use_sequential {
         adapted_peak_gb.or_else(|| {
-            crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier)
+            crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+                &request.model_manifest_entry,
+                tier,
+                adapter_resident_bytes,
+            )
         })
     } else {
         needed
@@ -10653,8 +10789,8 @@ mod candle_downtier_emulation_tests {
             .cloned()
             .unwrap();
         // Not sequential-capable (krea keeps the resident path) ⇒ resident-or-reject.
-        let q8_fit = candle_tier_fit(&manifest, "q8", budget, false);
-        let q4_fit = candle_tier_fit(&manifest, "q4", budget, false);
+        let q8_fit = candle_tier_fit(&manifest, "q8", budget, false, 0);
+        let q4_fit = candle_tier_fit(&manifest, "q4", budget, false, 0);
         assert!(
             matches!(q8_fit, TierFit::TooBig { .. }),
             "q8 (~38 GB) must exceed the {cap} GB emulated card: {q8_fit:?}"

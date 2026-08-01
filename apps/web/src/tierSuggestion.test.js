@@ -115,12 +115,12 @@ describe("variantFootprintBytes", () => {
     );
   });
 
-  it("derives an unmeasured tier from the model's measured sibling instead of assuming dense residency", () => {
+  it("derives an unmeasured expert-swap tier from the measured peak and active disk delta", () => {
     const q4 = {
       variant: "q4",
       footprint: {
         diskSizeBytes: 26.68 * GB,
-        peakMemoryBytes: 24.5 * GB,
+        peakMemoryBytes: 18.73 * GB,
         measuredPixels: TRANSIENT_HEADROOM_MEASURED_PIXELS,
       },
     };
@@ -128,18 +128,16 @@ describe("variantFootprintBytes", () => {
       variant: "bf16",
       footprint: { diskSizeBytes: 64.3 * GB },
     };
-    const model = { mlx: { estimateResidentFromMeasuredSibling: true }, variants: [q4, bf16] };
+    const model = { mlx: { measuredSiblingActiveDiskFraction: 0.5 }, variants: [q4, bf16] };
 
     const result = variantFootprintBytes(bf16, model);
 
-    // q4 proves that only ~39.4% of this expert-swap model's on-disk weights are resident at once.
-    // A 5% extrapolation tolerance keeps the estimate conservative, while the existing 10% host
-    // headroom remains outside this peak estimate in tierFits/hostGbForPeakGb.
-    const siblingRatio = (24.5 - 14) / 26.68;
-    const expectedResident = 64.3 * siblingRatio * 1.05;
+    // q4 supplies the full measured peak. Only one of two equal experts contributes the additional
+    // precision-dependent bytes in bf16; a 5% extrapolation tolerance applies to that disk delta.
+    const expectedPeak = 18.73 + (64.3 - 26.68) * 0.5 * 1.05;
     expect(result.measured).toBe(false);
-    expect(result.bytes / GB).toBeCloseTo(expectedResident + 14, 8);
-    expect(hostGbForPeakGb(result.bytes / GB, "mlx")).toBe(46);
+    expect(result.bytes / GB).toBeCloseTo(expectedPeak, 8);
+    expect(hostGbForPeakGb(result.bytes / GB, "mlx")).toBe(43);
   });
 
   it("requires an explicit compatible-topology opt-in and the peak calibration geometry", () => {
@@ -166,7 +164,7 @@ describe("variantFootprintBytes", () => {
     };
     expect(
       variantFootprintBytes(bf16, {
-        mlx: { estimateResidentFromMeasuredSibling: true },
+        mlx: { measuredSiblingActiveDiskFraction: 0.5 },
         variants: [wrongGeometry, bf16],
       }).bytes,
     ).toBe(Math.round(64.3 * GB * DISK_TO_RESIDENT_MULTIPLIER) + TRANSIENT_HEADROOM_BYTES);
