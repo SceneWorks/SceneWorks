@@ -852,6 +852,11 @@ test("the two rung-4 findings stay separate: structural applicability never impl
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
     ["15510:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
+  assert.equal(
+    matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
+      .requestPeak,
+    "does-not-move",
+  );
   assert.ok(
     matrix.rung4SurveyRows.every(
       (row) => row.requestPeak === "unmeasured" || row.implementation !== "none",
@@ -1417,8 +1422,8 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   // could rot: recording it with no finding (indistinguishable from a bare Missing), or recording it
   // alongside an implementation claim (a contradiction). Both must fail generation.
   const bare = await surveyFixture();
-  bare.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
-  bare.families["15511"].backends.mlx.findings = [];
+  bare.families["15513"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  bare.families["15513"].backends.mlx.findings = [];
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(bare) } }),
     /must state the shape gap as a finding/,
@@ -1435,14 +1440,14 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   // Stated as a finding, it builds — and the cell reports Missing with the verdict attached, NOT
   // Structurally N/A. That distinction is the whole point of the value.
   const stated = await surveyFixture();
-  stated.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
-  stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
+  stated.families["15513"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  stated.families["15513"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
   const matrix = await buildMatrix({
     sourceOverrides: { rung4Survey: JSON.stringify(stated) },
   });
   const cells = matrix.cells.filter(
     (cell) =>
-      cell.modelId === "qwen_image" &&
+      cell.modelId === "sensenova_u1_8b" &&
       cell.backend === "mlx" &&
       cell.rung === "bounded_transformer_residency",
   );
@@ -1482,6 +1487,47 @@ test("`does-not-move` is carried through to the cell rather than collapsed into 
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
       .requestPeak,
     "does-not-move",
+  );
+});
+
+test("request-peak measurements can be scoped to the exact entry, mode, and overlay exercised", async () => {
+  const survey = await surveyFixture();
+  survey.families["15511"].backends.mlx.requestPeak = {
+    finding: "unmeasured",
+    reason: "fixture",
+    scopes: [
+      {
+        entries: ["qwen_image"],
+        tiers: ["bf16", "q4", "q8"],
+        modes: ["text_to_image"],
+        overlays: ["none"],
+        finding: "does-not-move",
+      },
+    ],
+  };
+  const matrix = await buildMatrix({
+    sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+  });
+  const qwen = matrix.cells.filter(
+    (cell) => cell.backend === "mlx" && cell.rung === "bounded_transformer_residency" &&
+      cell.modelId.startsWith("qwen_image"),
+  );
+  assert.ok(qwen.length > 0);
+  assert.ok(
+    qwen
+      .filter(
+        (cell) =>
+          cell.modelId === "qwen_image" && cell.mode === "text_to_image" && cell.overlay === "none",
+      )
+      .every((cell) => cell.rung4Survey.requestPeak === "does-not-move"),
+  );
+  assert.ok(
+    qwen
+      .filter(
+        (cell) =>
+          cell.modelId !== "qwen_image" || cell.mode !== "text_to_image" || cell.overlay !== "none",
+      )
+      .every((cell) => cell.rung4Survey.requestPeak === "unmeasured"),
   );
 });
 

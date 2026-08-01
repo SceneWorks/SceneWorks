@@ -3039,23 +3039,36 @@ fn load_spec(
     spec
 }
 
-/// Select the independent deferred-materialization shape for the one MLX route whose production
-/// contract has measured it (SC-15800). The fit gate still owns the separate Resident/Sequential
-/// decision: a roomy machine keeps Lens resident, while a constrained machine adds Sequential and
-/// thereby satisfies the provider's exact rung-4 predicate. Keep every overlay exclusion explicit
-/// so an unmeasured load can never inherit the dense, native-decode result.
+/// Select deferred materialization only for the MLX load shapes whose production contracts measured
+/// it (Lens in SC-15800 and Qwen-Image in SC-16353). The fit gate still owns the independent
+/// Resident/Sequential decision; adding Sequential to one of these shaped specs is what satisfies the
+/// provider's exact rung-4 predicate. Keep every family-specific overlay exclusion explicit so an
+/// unmeasured load can never inherit another route's result.
 #[cfg(target_os = "macos")]
 fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let directory_bf16 = matches!(&spec.weights, WeightsSource::Dir(_))
+        && spec.precision == gen_core::Precision::Bf16;
     let lens_dense_native = matches!(engine_id, "lens" | "lens_turbo")
-        && matches!(&spec.weights, WeightsSource::Dir(_))
-        && spec.precision == gen_core::Precision::Bf16
+        && directory_bf16
         && spec.quantize.is_none()
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.adapters.is_empty()
         && spec.pid.is_none();
-    if lens_dense_native {
+    let qwen_native = directory_bf16
+        && matches!(engine_id, "qwen_image" | "qwen_image_edit")
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.pid.is_none();
+    let qwen_control = directory_bf16
+        && engine_id == "qwen_image_control"
+        && matches!(spec.control, Some(WeightsSource::File(_)))
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.pid.is_none();
+    if lens_dense_native || qwen_native || qwen_control {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3063,7 +3076,7 @@ fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod lens_measured_load_shape_tests {
+mod measured_mlx_load_shape_tests {
     use super::*;
     use gen_core::{
         AdapterKind, AdapterSpec, MemoryStrategy, MemoryStrategySupport, OffloadPolicy, Quant,
@@ -3081,6 +3094,11 @@ mod lens_measured_load_shape_tests {
             r#"{"dtype":"bfloat16"}"#,
         )
         .unwrap();
+        std::fs::write(
+            root.join("transformer/config.json"),
+            r#"{"dtype":"bfloat16"}"#,
+        )
+        .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
     }
 
@@ -3088,7 +3106,7 @@ mod lens_measured_load_shape_tests {
         crate::inference_runtime::media()
             .memory_strategy_contract(engine_id, spec)
             .unwrap()
-            .expect("Lens registers a memory-strategy contract")
+            .expect("measured provider registers a memory-strategy contract")
             .capability(MemoryStrategy::BoundedTransformerResidency)
             .expect("compatibility contract contains rung 4")
             .support
@@ -3156,6 +3174,88 @@ mod lens_measured_load_shape_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn worker_qwen_specs_reach_the_measured_native_edit_and_control_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fixture_spec(dir.path());
+        let q4_dir = tempfile::tempdir().unwrap();
+        let q4 = fixture_spec(q4_dir.path());
+        std::fs::write(
+            q4_dir.path().join("transformer/config.json"),
+            r#"{"quantization":{"bits":4}}"#,
+        )
+        .unwrap();
+        let q8_dir = tempfile::tempdir().unwrap();
+        let q8 = fixture_spec(q8_dir.path());
+        std::fs::write(
+            q8_dir.path().join("transformer/config.json"),
+            r#"{"quantization":{"bits":8}}"#,
+        )
+        .unwrap();
+        let adapter = AdapterSpec::new(
+            dir.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        let control = dir.path().join("control.safetensors");
+        std::fs::write(&control, [0_u8; 8]).unwrap();
+
+        let measured = [
+            ("qwen_image", base.clone()),
+            (
+                "qwen_image_edit",
+                q4
+                    .with_quant(Quant::Q4)
+                    .with_adapters(vec![adapter]),
+            ),
+            (
+                "qwen_image_control",
+                q8
+                    .with_quant(Quant::Q8)
+                    .with_control(WeightsSource::File(control)),
+            ),
+        ];
+        for (engine_id, spec) in measured {
+            let shaped = apply_measured_mlx_load_shape(engine_id, spec);
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "{engine_id} must request the Qwen block-stream load shape"
+            );
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(engine_id, &sequential)
+                .unwrap()
+                .expect("Qwen contract");
+            let rung = contract
+                .capability(MemoryStrategy::BoundedTransformerResidency)
+                .expect("rung 4");
+            assert_eq!(rung.support, MemoryStrategySupport::Implemented);
+            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
+            assert_eq!(
+                rung.parameters.transformer_window_components,
+                vec![TransformerComponent::Dit]
+            );
+        }
+
+        let pid = base
+            .clone()
+            .with_pid(
+                WeightsSource::File(dir.path().join("pid.safetensors")),
+                WeightsSource::Dir(dir.path().join("gemma")),
+            );
+        assert_eq!(
+            apply_measured_mlx_load_shape("qwen_image", pid).load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "the native-VAE measurement must not opt PiD into deferred materialization"
+        );
+        assert_eq!(
+            apply_measured_mlx_load_shape("qwen_image_control", base).load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "the control engine requires its measured single-file overlay"
+        );
     }
 }
 
