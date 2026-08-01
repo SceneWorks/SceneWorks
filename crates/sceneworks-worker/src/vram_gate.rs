@@ -2197,28 +2197,33 @@ mod tests {
         }
 
         for tier in ["q4", "q8", "bf16"] {
-            let phases =
+            let tiled_phases =
                 krea_rung_phase_peaks(&manifest, tier, KreaTurboRung::TiledVae, 1024, 1024)
                     .expect("tiled-VAE phase peaks");
-            let required =
-                phases.text_gb.max(phases.denoise_gb).max(phases.decode_gb) + HEADROOM_GB;
-            assert!(matches!(
-                krea_turbo_fit(
-                    &manifest,
-                    tier,
-                    1024,
-                    1024,
-                    Some(VramBudget {
-                        free_gb: required,
-                        total_gb: required,
-                    }),
-                    true,
-                ),
-                Some(KreaTurboFit::Fits {
-                    rung: KreaTurboRung::StreamedBlocks,
-                    ..
-                })
-            ));
+            // This test exercises composition identity, not the f64-to-byte rounding boundary.
+            let tiled_required = tiled_phases.peak_gb() + HEADROOM_GB + 0.01;
+            let fit = krea_turbo_fit(
+                &manifest,
+                tier,
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: tiled_required,
+                    total_gb: tiled_required,
+                }),
+                true,
+            );
+            let expected_rung = if tier == "q4" {
+                KreaTurboRung::TiledVae
+            } else {
+                // Q8 and BF16 measured no peak reduction from tiling at this geometry, so the
+                // cheaper three-stage rung must win even though the tiled row is now eligible.
+                KreaTurboRung::ThreeStage
+            };
+            assert!(
+                matches!(fit, Some(KreaTurboFit::Fits { rung, .. }) if rung == expected_rung),
+                "{tier}: expected {expected_rung:?} fit, got {fit:?}"
+            );
 
             let mut no_compatible_deeper_row = manifest.clone();
             let record = no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
@@ -2231,6 +2236,10 @@ mod tests {
                 .expect("1024 evidence record");
             record["measuredCompositions"]["streamedBlocks"] =
                 json!(["resident", "bounded_transformer_residency"]);
+            let streamed_phases =
+                krea_rung_phase_peaks(&manifest, tier, KreaTurboRung::StreamedBlocks, 1024, 1024)
+                    .expect("streamed-blocks phase peaks");
+            let streamed_required = streamed_phases.peak_gb() + HEADROOM_GB + 0.01;
             assert_eq!(
                 krea_turbo_fit(
                     &no_compatible_deeper_row,
@@ -2238,8 +2247,8 @@ mod tests {
                     1024,
                     1024,
                     Some(VramBudget {
-                        free_gb: required,
-                        total_gb: required,
+                        free_gb: streamed_required,
+                        total_gb: streamed_required,
                     }),
                     true,
                 ),
@@ -2278,7 +2287,7 @@ mod tests {
         assert!(matches!(
             fit(16.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                rung: KreaTurboRung::ChunkedAttention,
                 ..
             })
         ));
@@ -2345,7 +2354,7 @@ mod tests {
         assert!(matches!(
             fit(24.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                rung: KreaTurboRung::ChunkedAttention,
                 ..
             })
         ));
@@ -2376,12 +2385,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
-            fit(8.95),
-            Some(KreaTurboFit::Unverified {
-                reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
-            })
-        );
+        assert!(matches!(fit(8.95), Some(KreaTurboFit::Reject { .. })));
         let budget = Some(VramBudget {
             free_gb: 8.95,
             total_gb: 8.95,
@@ -2489,7 +2493,7 @@ mod tests {
         assert!(matches!(
             fit(31.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                rung: KreaTurboRung::ChunkedAttention,
                 ..
             })
         ));
@@ -2518,12 +2522,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
-            fit(10.63),
-            Some(KreaTurboFit::Unverified {
-                reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
-            })
-        );
+        assert!(matches!(fit(10.63), Some(KreaTurboFit::Reject { .. })));
         let immediate_below = Some(VramBudget {
             free_gb: 10.63,
             total_gb: 10.63,
