@@ -372,6 +372,63 @@ test("Krea bounded-decode and bounded-attention matrix identities match their cu
   );
 });
 
+test("Qwen MLX static ladder contracts expose every shipped entry without claiming verification", async () => {
+  const matrix = await buildMatrix();
+  const qwenEntries = [
+    "qwen_image",
+    "qwen_image_edit_2511",
+    "qwen_image_edit_2511_lightning",
+  ];
+  const boundedRungs = [
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const cells = matrix.cells.filter(
+    (cell) =>
+      qwenEntries.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      boundedRungs.includes(cell.rung) &&
+      cell.evidence.staticImplementation.some((entry) =>
+        entry.source.includes("mlx-gen-qwen-image/src/memory_strategy.rs"),
+      ),
+  );
+
+  assert.deepEqual([...new Set(cells.map((cell) => cell.modelId))].sort(), qwenEntries);
+  assert.ok(cells.length > 0);
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.evidence.currentEnvironmentVerification.length === 0 &&
+        cell.strategyParameters.publishedRanges.decodeTileEdges.join(",") ===
+          "768,640,512,448,384,320,256" &&
+        cell.strategyParameters.publishedRanges.decodeOverlaps.join(",") === "64",
+    ),
+    "a static production contract inventories the ladder but cannot promote any sibling to Verified",
+  );
+  assert.ok(
+    cells
+      .filter((cell) => cell.rung === "bounded_transformer_residency")
+      .every(
+        (cell) =>
+          cell.strategyParameters.transformerWindowSize === 1 &&
+          cell.strategyParameters.transformerWindowComponent === "Dit" &&
+          cell.engagedRungs.includes("staged_residency"),
+      ),
+  );
+  assert.equal(
+    matrix.cells.some(
+      (cell) =>
+        cell.modelId === "qwen_image" &&
+        cell.provider === "qwen_image_control" &&
+        cell.evidence.staticImplementation.length > 0,
+    ),
+    false,
+    "the separate unbounded control provider must not inherit the shared ladder declaration",
+  );
+});
+
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
   const record = {
     backend: "mlx",
@@ -808,12 +865,12 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
+    ["15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
       .requestPeak,
-    "does-not-move",
+    "moves",
   );
   assert.ok(
     matrix.rung4SurveyRows.every(
@@ -1420,8 +1477,13 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   // could rot: recording it with no finding (indistinguishable from a bare Missing), or recording it
   // alongside an implementation claim (a contradiction). Both must fail generation.
   const bare = await surveyFixture();
-  bare.families["15513"].backends.mlx.structuralApplicability = "requires-different-primitive";
-  bare.families["15513"].backends.mlx.findings = [];
+  bare.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  bare.families["15511"].backends.mlx.implementation = "none";
+  delete bare.families["15511"].backends.mlx.implementedEntries;
+  delete bare.families["15511"].backends.mlx.implementedModes;
+  delete bare.families["15511"].backends.mlx.implementedTiers;
+  delete bare.families["15511"].backends.mlx.implementedOverlays;
+  bare.families["15511"].backends.mlx.findings = [];
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(bare) } }),
     /must state the shape gap as a finding/,
@@ -1438,14 +1500,19 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   // Stated as a finding, it builds — and the cell reports Missing with the verdict attached, NOT
   // Structurally N/A. That distinction is the whole point of the value.
   const stated = await surveyFixture();
-  stated.families["15513"].backends.mlx.structuralApplicability = "requires-different-primitive";
-  stated.families["15513"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
+  stated.families["15511"].backends.mlx.structuralApplicability = "requires-different-primitive";
+  stated.families["15511"].backends.mlx.implementation = "none";
+  delete stated.families["15511"].backends.mlx.implementedEntries;
+  delete stated.families["15511"].backends.mlx.implementedModes;
+  delete stated.families["15511"].backends.mlx.implementedTiers;
+  delete stated.families["15511"].backends.mlx.implementedOverlays;
+  stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
   const matrix = await buildMatrix({
     sourceOverrides: { rung4Survey: JSON.stringify(stated) },
   });
   const cells = matrix.cells.filter(
     (cell) =>
-      cell.modelId === "sensenova_u1_8b" &&
+      cell.modelId === "qwen_image" &&
       cell.backend === "mlx" &&
       cell.rung === "bounded_transformer_residency",
   );
@@ -1571,10 +1638,12 @@ async function currentEvidenceFixture({ keepGeometries = null } = {}) {
   parsed.records = parsed.records
     .filter(
       (record) =>
+        record.target.provider !== "krea_2_turbo_control" ||
         !keepGeometries ||
         keepGeometries.includes(`${record.target.geometry.width}x${record.target.geometry.height}`),
     )
     .map((record) => {
+      if (record.target.provider !== "krea_2_turbo_control") return record;
       // `repositories` is part of the record's deterministic identity, so re-stamping the revision
       // without re-deriving the id produces a bundle the harness rejects outright. Recomputing it
       // through the real `recordId` keeps the fixture a VALID record rather than a shape that only
@@ -1597,9 +1666,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     shippedCell.state,
     "Implemented/unverified",
-    "the shipped records are historical, so nothing may be promoted",
+    "the shipped Krea records are historical even though current Qwen evidence is promoted",
   );
-  assert.equal(shipped.cells.filter((cell) => cell.state === "Verified").length, 0);
+  assert.equal(
+    shipped.cells.filter((cell) => cell.state === "Verified").length,
+    5,
+    "the five exact current Qwen ladder selectors are promoted",
+  );
 
   // MUTATION: the same two records, re-stamped onto the current pin. If the producer were absent —
   // the state this story found the generator in — this assertion would fail while every other test

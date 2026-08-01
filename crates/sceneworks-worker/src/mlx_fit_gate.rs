@@ -3006,6 +3006,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shipped_qwen_manifest_binds_all_five_exact_mlx_ladder_rungs() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        let qwen = manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == "qwen_image"))
+            .and_then(Value::as_object)
+            .expect("shipped qwen_image manifest entry");
+        let bindings = MlxCalibrationBinding::from_manifest(qwen)
+            .expect("Qwen calibration bindings are valid")
+            .expect("Qwen declares exact MLX calibration bindings");
+
+        assert_eq!(bindings.len(), 5);
+        assert!(bindings.iter().all(|binding| {
+            binding.provider == "qwen_image"
+                && binding.tier == "bf16"
+                && binding.mode == "text_to_image"
+                && binding.overlay == "none"
+                && binding.geometry
+                    == CalibrationGeometry {
+                        width: 1024,
+                        height: 1024,
+                        batch: 1,
+                        frames: 1,
+                    }
+                && binding.query.inference_revision == "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+        }));
+        let mut rungs = bindings
+            .iter()
+            .map(|binding| format!("{:?}", binding.rung))
+            .collect::<Vec<_>>();
+        rungs.sort();
+        assert_eq!(
+            rungs,
+            [
+                "BoundedAttention",
+                "BoundedDecode",
+                "BoundedTransformerResidency",
+                "Resident",
+                "StagedResidency",
+            ]
+        );
+    }
+
+    #[test]
     fn resident_evidence_is_keyed_by_the_live_contract_composition() {
         use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
 

@@ -237,7 +237,8 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     /x-access-token:\$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}@github\.com\/SceneWorks\/inference\.insteadOf/,
   );
   assert.match(workflow, /--backend mlx/);
-  assert.match(workflow, /--provider mlx-qwen-vae-decode/);
+  assert.match(workflow, /--fixture qwen-image-bf16-seed15511-step2/);
+  assert.match(workflow, /--fresh-per-case/);
   assert.match(
     workflow,
     /memory-calibration-harness\.mjs check/,
@@ -288,7 +289,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const candle = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   const krea = mlx.slice(mlx.indexOf("fn run_krea_control("), mlx.indexOf("fn run_qwen("));
-  const qwen = mlx.slice(mlx.indexOf("fn run_qwen("), mlx.indexOf("fn run(request:"));
+  const qwen = mlx.slice(mlx.indexOf("fn run_qwen_vae_probe("), mlx.indexOf("fn run(request:"));
   const candleReference = candle.slice(
     candle.indexOf("fn run_five_rung_reference("),
     candle.indexOf("fn run(request:"),
@@ -304,6 +305,14 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   );
   assert.equal(qwen.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
   assert.doesNotMatch(qwen, /protocol::gated_fragment\(/);
+  assert.match(
+    qwen,
+    /validate_plain_overlay_target\(request, QWEN_PLAIN_EXECUTION_PATH\)\?/,
+  );
+  assert.match(
+    qwen,
+    /validate_plain_overlay_target\(request, QWEN_PROVIDER_EXECUTION_PATH\)\?/,
+  );
   assert.match(
     candleReference,
     /validate_plain_overlay_target\(request, KREA_PLAIN_EXECUTION_PATH\)\?/,

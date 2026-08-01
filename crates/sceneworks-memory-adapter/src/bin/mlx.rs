@@ -30,6 +30,12 @@ const MEAN_THRESHOLD: f64 = 3e-3;
 // case in mlx-gen-qwen-image's real-weight tiling oracle, not its smoother VAE-encoded fixture.
 const KREA_MAX_THRESHOLD: f64 = 1.5e-1;
 const KREA_MEAN_THRESHOLD: f64 = 5e-3;
+// Qwen's request-scoped attention chunks change Metal kernel shapes across 60 DiT blocks. The
+// real-weight BF16 reference differed by at most 43/255 in a localized channel while averaging
+// 0.113/255 over the image. Bound that amplification to 48 integer levels and, independently, less
+// than half an integer level on average; the mandatory broad-bias mutation must breach both.
+const QWEN_MAX_THRESHOLD: f64 = 48.0 / 255.0;
+const QWEN_MEAN_THRESHOLD: f64 = 0.5 / 255.0;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
@@ -38,6 +44,7 @@ const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
+const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
 const MIB: u64 = 1024 * 1024;
@@ -288,6 +295,44 @@ mod tests {
         assert_eq!(overall.allocator_bytes(), 34);
         assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
     }
+
+    #[test]
+    fn qwen_complete_sweep_verifies_only_the_exact_executed_case() {
+        let request = json!({
+            "planned": {
+                "strategy": {
+                    "parameters": { "decodeTileEdge": 448, "decodeOverlap": 64 }
+                }
+            }
+        });
+        let sweep = qwen_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], true);
+        let axes = sweep["axes"].as_array().unwrap();
+        assert!(axes.iter().any(|axis| {
+            axis["parameter"] == "decodeTileEdge" && axis["testedValues"] == json!([448])
+        }));
+        assert!(axes.iter().any(|axis| {
+            axis["parameter"] == "decodeOverlap" && axis["testedValues"] == json!([64])
+        }));
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+    }
+
+    #[test]
+    fn qwen_parity_envelope_accepts_measured_chunking_and_rejects_mutation() {
+        let measured_maximum = 43.0 / 255.0;
+        let measured_mean = 0.113 / 255.0;
+        assert!(qwen_quality_passes(measured_maximum, measured_mean));
+        assert!(!qwen_quality_passes(
+            measured_maximum + 0.05,
+            measured_mean + 0.05
+        ));
+        assert!(!qwen_quality_passes(49.0 / 255.0, measured_mean));
+        assert!(!qwen_quality_passes(measured_maximum, 0.51 / 255.0));
+    }
 }
 
 fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, String> {
@@ -355,6 +400,18 @@ fn image_max_mean_abs(left: &Image, right: &Image) -> Result<(f64, f64), String>
         sum += difference;
     }
     Ok((maximum, sum / left.pixels.len() as f64))
+}
+
+fn qwen_negative_mutation(image: &Image) -> Image {
+    let mut mutated = image.clone();
+    for channel in &mut mutated.pixels {
+        *channel = channel.wrapping_add(64);
+    }
+    mutated
+}
+
+fn qwen_quality_passes(maximum: f64, mean: f64) -> bool {
+    maximum <= QWEN_MAX_THRESHOLD && mean <= QWEN_MEAN_THRESHOLD
 }
 
 fn fixed_pose_control_image(width: u32, height: u32) -> Image {
@@ -528,11 +585,47 @@ fn scoped_generate(
     if let Some(phase) = error_phase {
         request
             .memory
-            .as_mut()
-            .ok_or_else(|| "calibrated request lost its memory selection".to_owned())?
+            .get_or_insert_with(Default::default)
             .calibration_error_phase = Some(phase);
     }
-    let result = generator.generate(&request, on_progress);
+    scope
+        .enter_phase(MemoryPhase::Conditioning)
+        .map_err(|error| format!("enter conditioning phase: {error}"))?;
+    let mut current_phase = Some(MemoryPhase::Conditioning);
+    let mut phase_error = None;
+    let result = generator.generate(&request, &mut |progress| {
+        let next = match progress {
+            Progress::Step { current: 1, .. } => Some(MemoryPhase::Denoise),
+            Progress::Decoding => Some(MemoryPhase::Decode),
+            _ => None,
+        };
+        if phase_error.is_none() {
+            if let Some(next) = next {
+                if current_phase != Some(next) {
+                    if let Some(current) = current_phase {
+                        if let Err(error) = scope.leave_phase(current) {
+                            phase_error = Some(format!("leave {current:?} phase: {error}"));
+                        }
+                    }
+                    if phase_error.is_none() {
+                        if let Err(error) = scope.enter_phase(next) {
+                            phase_error = Some(format!("enter {next:?} phase: {error}"));
+                        } else {
+                            current_phase = Some(next);
+                        }
+                    }
+                }
+            }
+        }
+        on_progress(progress);
+    });
+    if phase_error.is_none() {
+        if let Some(current) = current_phase {
+            if let Err(error) = scope.leave_phase(current) {
+                phase_error = Some(format!("leave {current:?} phase: {error}"));
+            }
+        }
+    }
     let outcome = match &result {
         Ok(_) => MemoryRunOutcome::Complete,
         Err(mlx_gen::gen_core::Error::Canceled) => MemoryRunOutcome::Canceled,
@@ -541,6 +634,10 @@ fn scoped_generate(
         },
     };
     let finish = scope.finish(outcome);
+    if let Some(error) = phase_error {
+        finish.map_err(|finish| format!("{error}; finish calibrated request: {finish}"))?;
+        return Err(error);
+    }
     match (result, finish) {
         (Ok(output), Ok(())) => Ok(output),
         (Err(error), _) => Err(error.to_string()),
@@ -614,6 +711,16 @@ fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
     let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    let (precision, quant) = match protocol::planned(request)?
+        .pointer("/target/tier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.tier must be a string".to_owned())?
+    {
+        "bf16" => (Precision::Bf16, None),
+        "q4" => (Precision::Bf16, Some(Quant::Q4)),
+        "q8" => (Precision::Bf16, Some(Quant::Q8)),
+        tier => return Err(format!("unsupported MLX numeric tier {tier:?}")),
+    };
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
@@ -625,8 +732,8 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
                 .map(|_| TransformerComponent::Dit),
         },
         tier: MemoryNumericTier {
-            precision: Precision::Bf16,
-            quant: Some(Quant::Q4),
+            precision,
+            quant,
             component_precision_floors: &[],
         },
     })
@@ -1394,7 +1501,7 @@ fn sweep(parameters: &serde_json::Map<String, Value>, passed: bool) -> Value {
     })
 }
 
-fn run_qwen(request: &Value) -> Result<Value, String> {
+fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
     if protocol::planned(request)?
         .get("backend")
         .and_then(Value::as_str)
@@ -1591,6 +1698,392 @@ fn run_qwen(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+fn qwen_provider_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a red fox resting beside a blue ceramic vase, studio photograph".to_owned(),
+        negative_prompt: Some("blurry, distorted, text".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(15511),
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+fn qwen_provider_context(
+    selection: MemorySelection,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: fingerprint.to_owned(),
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-15511@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn qwen_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // The Qwen provider executes the complete promotion-quality scenario suite for this exact plan
+    // case. The plan enumerates every supported decode edge as its own exact record, so no record
+    // claims values it did not execute and the aggregate evidence covers the published range.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+fn run_qwen_provider(request: &Value) -> Result<Value, String> {
+    if protocol::expected_failure(request) {
+        return run_qwen_vae_probe(request);
+    }
+    protocol::validate_plain_overlay_target(request, QWEN_PROVIDER_EXECUTION_PATH)?;
+    let selection = planned_selection(request)?;
+    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
+        LoadShape::DeferredMaterialization
+    } else {
+        LoadShape::EagerMaterialization
+    };
+    let offload = if matches!(
+        selection.strategy,
+        MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
+    ) {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    let (width, height) = protocol::target_geometry(request)?;
+    let repository = protocol::required_env("SCENEWORKS_QWEN_IMAGE_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_QWEN_IMAGE_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::QWEN_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_QWEN_IMAGE_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_QWEN_IMAGE_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        "bf16",
+        protocol::QWEN_REPOSITORY,
+    )?;
+    let spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(load_shape);
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let generator = catalog
+        .media()
+        .load("qwen_image", &spec)
+        .map_err(|error| format!("load real Qwen-Image bf16 provider: {error}"))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded qwen_image has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned Qwen provider rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Qwen provider has no calibration identity".to_owned())?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = qwen_provider_context(
+        selection,
+        calibration.fingerprint.as_str(),
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_provider_request(width, height),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err("a synchronized Qwen lifecycle phase reported a zero active peak".to_owned());
+    }
+    let phases = [conditioning, denoise, decode];
+    let overall = PhaseMemory::overall(&phases);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Qwen provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-qwen-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Qwen provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&qwen_provider_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate unselected Qwen reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !qwen_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Qwen selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_provider_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !qwen_quality_passes(warm_maximum, warm_mean) {
+        return Err("Qwen warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = qwen_provider_request(width, height);
+    let cancel_signal = cancelled.cancel.clone();
+    let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(
+        generator.as_ref(),
+        cancelled,
+        &context,
+        None,
+        &mut |progress| {
+            if cancel_triggered {
+                return;
+            }
+            match progress {
+                // Every denoise-oriented rung has executed its selected attention/block behavior
+                // before the sampler publishes the first completed step.
+                Progress::Step { current: 1, .. } if !cancel_during_decode => {
+                    cancel_triggered = true;
+                    cancel_signal.cancel();
+                }
+                // Let the native tiled decoder enter its physical work before signaling. The
+                // decoder checks the shared flag between tiles, so this interrupts the active rung
+                // instead of short-circuiting before it begins.
+                Progress::Decoding if cancel_during_decode => {
+                    cancel_triggered = true;
+                    let signal = cancel_signal.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        signal.cancel();
+                    });
+                }
+                _ => {}
+            }
+        },
+    )
+    .expect_err("in-flight Qwen cancellation must fail");
+    if !cancel_triggered {
+        return Err("Qwen cancellation probe never reached the active rung boundary".to_owned());
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Qwen cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_provider_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !qwen_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Qwen cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected_phase = if selection.strategy == MemoryStrategy::BoundedDecode {
+        MemoryPhase::Decode
+    } else {
+        MemoryPhase::Denoise
+    };
+    let injected = scoped_generate(
+        generator.as_ref(),
+        qwen_provider_request(width, height),
+        &context,
+        Some(injected_phase),
+        &mut |_| {},
+    )
+    .expect_err("injected Qwen error must fail");
+    if !injected.contains("injected memory-strategy calibration error") {
+        return Err(format!(
+            "Qwen error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator.as_ref(),
+        qwen_provider_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !qwen_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Qwen error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if qwen_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Qwen output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "bf16",
+        },
+        "sweep": qwen_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Qwen target has no overlay" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": QWEN_MAX_THRESHOLD,
+            "meanErrorThreshold": QWEN_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:bf16"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:qwen-shared-ladder",
+            "executed",
+            [],
+            [
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, QWEN_PROVIDER_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -1601,7 +2094,7 @@ fn run(request: &Value) -> Result<Value, String> {
     } else if provider == KREA_PROVIDER {
         run_krea_control(request)
     } else {
-        run_qwen(request)
+        run_qwen_provider(request)
     }
 }
 
@@ -1615,4 +2108,24 @@ fn main() {
     }
     .unwrap_or_else(|error| protocol::fail(error));
     protocol::write_response(&response).unwrap_or_else(|error| protocol::fail(error));
+}
+
+#[cfg(test)]
+mod qwen_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn negative_mutation_changes_pixels_and_is_measured_from_the_changed_image() {
+        let baseline = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 63, 127, 128, 191, 255],
+        };
+        let mutated = qwen_negative_mutation(&baseline);
+        assert_ne!(mutated, baseline);
+        let (maximum, mean) = image_max_mean_abs(&mutated, &baseline).unwrap();
+        assert!(maximum >= 64.0 / 255.0);
+        assert!(mean >= 64.0 / 255.0);
+        assert!(!qwen_quality_passes(maximum, mean));
+    }
 }

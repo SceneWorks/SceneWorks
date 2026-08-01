@@ -205,6 +205,7 @@
           "additionalProperties": false,
           "properties": {
             "contract": { "type": "string", "minLength": 1 },
+            "identicalInputs": { "type": "boolean" },
             "identicalLatents": { "type": "boolean" },
             "result": { "enum": ["passed", "failed", "not_run"] },
             "maximumError": { "type": "number", "minimum": 0 },
@@ -285,7 +286,6 @@
               "observedMemory": { "$ref": "#/$defs/phaseMetrics" },
               "sweep": {
                 "properties": {
-                  "axes": { "minItems": 1 },
                   "rangeVerified": { "const": true },
                   "cases": { "minItems": 1 }
                 }
@@ -322,11 +322,16 @@
               },
               "quality": {
                 "required": [
-                  "contract", "identicalLatents", "result", "maximumError", "meanError",
+                  "contract", "result", "maximumError", "meanError",
                   "maximumErrorThreshold", "meanErrorThreshold"
                 ],
+                "anyOf": [
+                  { "required": ["identicalLatents"], "properties": { "identicalLatents": { "const": true } } },
+                  { "required": ["identicalInputs"], "properties": { "identicalInputs": { "const": true } } }
+                ],
                 "properties": {
-                  "identicalLatents": { "const": true },
+                  "identicalInputs": { "type": "boolean" },
+                  "identicalLatents": { "type": "boolean" },
                   "result": { "const": "passed" },
                   "maximumError": { "type": "number", "minimum": 0 },
                   "meanError": { "type": "number", "minimum": 0 },

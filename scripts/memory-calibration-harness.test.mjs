@@ -136,38 +136,23 @@ function qwenPositiveComplete() {
       mode: "text_to_image", overlay: "none",
       geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
     },
-    fixture: "qwen-vae-encoded-latent-1024",
+    fixture: "qwen-image-bf16-seed15511-step2",
     strategy: {
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
       parameters: { decodeTileEdge: 512, decodeOverlap: 64 },
     },
-    calibrationFingerprint: "qwen-vae-identical-latent-v3",
+    calibrationFingerprint: "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
   });
-  const edges = [768, 640, 512, 448, 384, 320, 256];
   record.sweep = {
-    axes: [{ parameter: "decodeTileEdge", testedValues: edges }],
-    cases: [
-      ...edges.map((decodeTileEdge) => ({
-        parameters: { decodeTileEdge, decodeOverlap: 64 },
-        result: "passed",
-      })),
-      {
-        parameters: {
-          decodeTileEdge: 256,
-          decodeOverlap: 32,
-          comparisonOutputBias: 0.05,
-        },
-        result: "failed",
-      },
+    axes: [
+      { parameter: "decodeTileEdge", testedValues: [512] },
+      { parameter: "decodeOverlap", testedValues: [64] },
     ],
+    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 64 }, result: "passed" }],
     rangeVerified: true,
   };
-  record.negativeMutation.parameters = {
-    decodeTileEdge: 256,
-    decodeOverlap: 32,
-    comparisonOutputBias: 0.05,
-  };
+  record.negativeMutation.parameters = { decodeTileEdge: 512, decodeOverlap: 64 };
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
   return record;
@@ -189,6 +174,16 @@ test("complete record validates and identity includes evidence scope plus resolv
   }
 });
 
+test("complete final-output quality may attest identical inputs without claiming identical latents", () => {
+  const record = complete();
+  record.quality.identicalInputs = true;
+  record.quality.identicalLatents = false;
+  assert.equal(validateRecord(record), record);
+
+  delete record.quality.identicalInputs;
+  assert.throws(() => validateRecord(record), /identical latents or identical inputs/);
+});
+
 test("complete status fails closed on scenario, quality, mutation, memory and loadability mutations", () => {
   const mutations = [
     [(r) => (r.scenarios.find((x) => x.name === "warm_repeat").result = "not_run"), /warm_repeat/],
@@ -205,7 +200,7 @@ test("complete status fails closed on scenario, quality, mutation, memory and lo
     [(r) => (r.loadability.resolvedPathFingerprint = ""), /non-empty/],
     [(r) => (r.quality.contract = ""), /non-empty/],
     [(r) => (r.repositories.sceneWorks.dirty = true), /dirty/],
-    [(r) => (r.sweep.axes = []), /axes must not be empty/],
+    [(r) => (r.sweep.axes = []), /parameterized complete strategy must sweep/],
     [(r) => r.sweep.axes.push(structuredClone(r.sweep.axes[0])), /axes must be unique/],
     [(r) => r.sweep.cases.push(structuredClone(r.sweep.cases[0])), /cases must be unique/],
   ];
@@ -367,17 +362,23 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
   assert.ok(calibrationBinding(composition, cell).reasons.includes("composition-mismatch"));
 });
 
-test("plan separates seven identical-latent positives from a deterministic output-bias negative", async () => {
+test("Qwen plan covers every ladder rung and all seven production decode edges", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
   const qwen = cases.filter((item) => item.target.provider === "qwen_image");
-  assert.equal(qwen.filter((item) => item.expectedResult === "passed").length, 7);
-  const negative = qwen.find((item) => item.negative);
-  assert.deepEqual(negative.strategy.parameters, {
-    decodeTileEdge: 256,
-    decodeOverlap: 32,
-    comparisonOutputBias: 0.05,
-  });
+  assert.equal(qwen.length, 11);
+  assert.ok(qwen.every((item) => item.expectedResult === "passed" && !item.negative));
+  assert.deepEqual(
+    [...new Set(qwen.map((item) => item.strategy.rung))].sort(),
+    ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"].sort(),
+  );
+  assert.deepEqual(
+    qwen
+      .filter((item) => item.strategy.rung === "bounded_decode")
+      .map((item) => item.strategy.parameters.decodeTileEdge)
+      .sort((left, right) => right - left),
+    [768, 640, 512, 448, 384, 320, 256],
+  );
 });
 
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
@@ -507,20 +508,25 @@ test("provider execution requires one backend-specific hardware probe", async ()
   );
 });
 
-test("positive Qwen completion never suppresses the separate 256/32 negative plan", async () => {
+test("one exact Qwen completion suppresses only its own ladder case", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
   validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [record] });
   const qwenRemaining = expandPlan(config, [record]).filter(
     (item) => item.target.provider === "qwen_image",
   );
-  assert.equal(qwenRemaining.length, 1);
-  assert.equal(qwenRemaining[0].negative, true);
-  assert.deepEqual(qwenRemaining[0].strategy.parameters, {
-    decodeTileEdge: 256,
-    decodeOverlap: 32,
-    comparisonOutputBias: 0.05,
-  });
+  assert.equal(qwenRemaining.length, 10);
+  assert.equal(
+    qwenRemaining.some(
+      (item) =>
+        item.strategy.rung === "bounded_decode" &&
+        item.strategy.parameters.decodeTileEdge === 512 &&
+        item.strategy.parameters.decodeOverlap === 64,
+    ),
+    false,
+  );
+  assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_attention"));
+  assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_transformer_residency"));
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {
@@ -573,7 +579,7 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
   }
 });
 
-test("gated no-parameter references use an empty sweep instead of a fabricated field", () => {
+test("parameterless strategies use a truthful degenerate sweep instead of a fabricated field", () => {
   const record = complete({
     status: "gated",
     sweep: {
@@ -589,11 +595,18 @@ test("gated no-parameter references use an empty sweep instead of a fabricated f
 
   const promoted = structuredClone(record);
   promoted.status = "complete";
+  promoted.sweep.rangeVerified = true;
   promoted.logicalCaseId = logicalCaseId(promoted);
   promoted.id = recordId(promoted);
+  assert.equal(validateRecord(promoted), promoted);
+
+  const invalid = structuredClone(promoted);
+  invalid.strategy.parameters = { decodeTileEdge: 512 };
+  invalid.logicalCaseId = logicalCaseId(invalid);
+  invalid.id = recordId(invalid);
   assert.throws(
-    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [promoted] }),
-    /schema validation failed|sweep axes must not be empty/,
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+    /parameterized complete strategy must sweep at least one axis/,
   );
 });
 

@@ -277,16 +277,13 @@
             "qwen_image_edit_2511",
             "qwen_image_edit_2511_lightning"
           ],
-          "implementedTiers": [
-            "bf16",
-            "q4",
-            "q8"
-          ],
+          "implementedTiers": ["bf16", "q4", "q8"],
+          "implementedOverlays": ["none", "lora", "identity"],
           "strategyParameters": {
             "transformerWindowSize": 1,
             "transformerWindowComponent": "Dit"
           },
-          "summary": "All three MLX Qwen provider routes can rebuild the uniform 60-block base DiT through the shared block-residency primitive, with window=1 as the only bounded published cadence. A real-weight 1024x1024 base text-to-image/no-overlay run found that window=1 lowered denoise residency but did not move the conditioning-bound whole-request peak on BF16/Q4/Q8. Edit, Control, and adapter request peaks remain unmeasured.",
+          "summary": "The shared block-window primitive rebuilds the uniform 60-block base/edit DiT one block at a time for BF16, packed Q4/Q8, and captured LoRA/LoKr residuals. The optional five-block control side branch is structurally windowable but is not implemented by this MLX provider path, so the distinct qwen_image_control provider does not advertise rung 3 or 4.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -298,7 +295,7 @@
               "blocks": "5 (control route only)",
               "windowable": true,
               "entries": [
-                "qwen_image"
+                "qwen_image_control"
               ]
             }
           ],
@@ -313,42 +310,35 @@
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/block_stream.rs",
-              "reason": "QwenBlockStream reopens the production snapshot, replays the diffusers key remap, drains both accessed internal tensors and their retained source aliases, replays Q4/Q8 plus captured LoRA/LoKr residuals, and is driven by mlx_gen::block_residency::run_windowed from QwenTransformer."
+              "reason": "QwenBlockStream reopens the production checkpoint, rebuilds one mapped block per shared window, drains its source aliases, and replays packed quantization plus captured adapter residuals."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
-              "reason": "The per-load contract publishes bounded Dit/window=1 only for device-format BF16/Q4/Q8 directory weights with Sequential offload, DeferredMaterialization, and no PiD; dense load-time quantization is rejected because it would quantize materialized windows rather than transfer packed blocks. T2I, Edit, and Control register the same load-exact contract."
+              "reason": "The load-exact contract publishes DiT window 1 only for sequential deferred directory loads and explicitly leaves bounded attention and transformer residency Missing on qwen_image_control."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
+            "finding": "moves",
             "scopes": [
               {
                 "entries": ["qwen_image"],
-                "tiers": ["bf16", "q4", "q8"],
+                "tiers": ["bf16"],
                 "modes": ["text_to_image"],
                 "overlays": ["none"],
-                "finding": "does-not-move"
+                "finding": "moves"
               }
             ],
-            "reason": "Real Qwen-Image base weights on Apple/Metal at 1024x1024 compared the same deferred block stream with an unbounded 60-block window against bounded window=1. Whole-request peak was unchanged within the declared 1% counter tolerance on BF16/Q4/Q8 because conditioning dominated, although window=1 lowered denoise residency. Every output matched within one RGB8 channel value. This is not a rung-3 comparison: Qwen's rung-3 implementation remains Missing under SC-15511, so the literal rung-3-versus-rung-4 acceptance comparison is blocked.",
+            "reason": "SC-15511's authoritative base-BF16 ladder run measured bounded attention at 64,574,244,508 allocator bytes (67,847,061,504 conservative predicted bytes) and bounded transformer residency at 16,128,899,280 allocator bytes (16,978,542,592 conservative predicted bytes). Separately, SC-16353's unbounded-versus-window-1 same-stream attribution found no whole-request movement because conditioning dominated that comparison; it is retained as a distinct attribution result rather than substituted for the rung-3-versus-rung-4 ladder measurement.",
             "evidence": [
               {
-                "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/tests/block_residency_real_weights.rs",
-                "reason": "The ignored real-weight harness serializes the global MLX counters, measures conditioning/denoise/decode and their request maximum, sweeps 60/8/4/2/1, includes fully-resident attribution, and checks rendered-image equivalence."
-              },
-              {
-                "source": "docs/sc-16353/qwen-rung4-measurements.json",
-                "reason": "Machine-readable rows preserve the exact byte counters and the production-window decision for every published tier."
+                "source": "docs/generated/memory-calibration-evidence.json",
+                "reason": "Authoritative base BF16/no-overlay provider records compare the complete bounded-attention and bounded-transformer-residency rungs on the same pinned artifact and fixture."
               }
             ]
           },
           "findings": [
-            "The prior staged composition is not rung 3: Qwen's bounded-decode capability is still Missing and is owned by open prerequisite SC-15511. Its lower request peak versus that prior composition cannot be attributed to rung 4.",
-            "Window size is not denoise-inert, but it is request-inert at this geometry. The dense Qwen2.5-VL conditioning encoder sets a roughly 14.8-14.9 GiB request floor on every tier. Window=1 is the exact bounded production value; window=60 equals all 60 blocks and is retained only as the unbounded same-stream attribution control.",
-            "The five-block QwenFunControlBranch is an explicit resident remainder. The base 60-block stack still streams on Control requests, while the branch checkpoint size is recorded in MemoryAssetFacts.overlay_bytes so the selector does not model it as reclaimed.",
-            "LoRA/LoKr remain statically compatible because Qwen adapters are forward-time residuals captured from each resident block and replayed on materialization, but their request peaks are unmeasured. PiD is excluded by the load predicate and safety check because this measurement used native VAE decode.",
-            "The declaration is per load: eager, Resident, single-file, and PiD loads do not receive rung 4. Catalog MLX routes use re-openable tier directories; the matrix has no separate load-shape axis."
+            "The five-block QwenFunControlBranch is structurally windowable because it is the same uniform QwenTransformerBlock stack, but the MLX control provider does not implement its block stream in this change. It is a real resident remainder, and qwen_image_control is excluded from rung 3/4 instead of inheriting a family-level claim.",
+            "Window 1 is the sole bounded production cadence. SC-16353's 1024x1024 BF16/Q4/Q8 sweep found it lowered denoise residency but did not move the conditioning-bound request peak; that result is retained as measurement evidence, not relabeled as a request saving."
           ]
         },
         "candle": {
