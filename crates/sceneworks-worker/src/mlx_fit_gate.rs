@@ -3033,7 +3033,8 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_revision == "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+                && binding.query.inference_revision
+                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
         }));
         let mut rungs = bindings
             .iter()
