@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.local/schemas/tier-integrity.schema.json",
   "title": "Tier-integrity exception ledger",
-  "description": "Schema for config/tier-integrity.jsonc (sc-15799) — the declared above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity. scripts/check-tier-integrity.mjs APPLIES this schema to the ledger on every run (its `schemaErrors` walks the subset used here) and adds the cross-checks a JSON Schema cannot express: that the model is a real catalog entry, that residentTier is strictly above every tier in appliesToTiers, that appliesToTiers names only hosted tiers, that a declared `backends` lane is one the catalog entry actually has a block for, that no two rows claim the same (model, component, lane), and the per-(model, component) unmeasured ratchet. NOTE (sc-15799 review): this file was originally IDE-only and unenforced, which is how it drifted to draft-07 with a sceneworks.dev $id while every sibling schema requires draft 2020-12 and a sceneworks.local id — scripts/check-scaffold.mjs now pins both conventions for this schema alongside the manifest schemas. Its load-bearing contribution is additionalProperties:false: before it was applied, a misspelled key such as `backend` for `backends` was silently ignored.",
+  "description": "Schema for config/tier-integrity.jsonc — the declared, measured above-tier residency exceptions to the invariant 'no component is resident above the user's selected quant tier unless a declared, measured exception says otherwise'. The normative statement lives in docs/memory-strategy-contract.md ('Tier integrity'); the executable rule is gen_core::tier_integrity. scripts/check-tier-integrity.mjs applies this schema and cross-checks catalog entries, hosted tiers, backend lanes, row uniqueness, exact per-tier measurement coverage, isolation method, eliminate-vs-measure triage, and cause review. sc-16015 removed the temporary sc-15799 unmeasured amnesty. additionalProperties:false keeps misspelled evidence and lane keys from being silently ignored.",
   "type": "object",
   "additionalProperties": false,
   "required": ["exceptions"],
@@ -31,12 +31,12 @@
         "component": {
           "type": "string",
           "enum": ["textEncoder", "vae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
-          "description": "Which component is resident above tier. The row uniqueness key is (model, component, BACKEND LANE) — a component whose residency genuinely differs per lane is split into one row per lane, and the checker rejects two rows that claim the same lane for the same pair. The unmeasured ratchet is keyed on (model, component) alone, so splitting a row per lane does not widen the amnesty."
+          "description": "Which component is resident above tier. The row uniqueness key is (model, component, BACKEND LANE) — a component whose residency genuinely differs per lane is split into one row per lane, and the checker rejects two rows that claim the same lane for the same pair."
         },
         "residentTier": {
           "type": "string",
-          "enum": ["f32", "bf16", "q8"],
-          "description": "The precision the component is ACTUALLY resident at. Must be strictly above every tier in appliesToTiers on the fidelity ladder f32 > bf16 > q8 > q4 = nvfp4 (int8-convrot ranks with q8) — an 'exception' at or below the selected tier is a mistake, not an exception, and the checker says so."
+          "enum": ["f32", "bf16", "f16", "q8"],
+          "description": "The precision the component is ACTUALLY resident at. Must be strictly above every tier in appliesToTiers on the fidelity ladder f32 > bf16 = f16 > q8 > q4 = nvfp4 (int8-convrot ranks with q8) — an 'exception' at or below the selected tier is a mistake, not an exception, and the checker says so."
         },
         "appliesToTiers": {
           "type": "array",
@@ -70,8 +70,8 @@
       "properties": {
         "state": {
           "type": "string",
-          "enum": ["measured", "unmeasured"],
-          "description": "measured: costGb (or costBytes) is a real in-tree number. unmeasured: no isolated component cost exists in the tree yet. UNMEASURED IS RATIONED — legal only for the (model, component) pairs enumerated in scripts/check-tier-integrity.mjs's GRANDFATHERED_UNMEASURED, whose size is pinned by GRANDFATHERED_UNMEASURED_COUNT so any change is a reviewed two-place edit. That list lives in the checker, not here, so editing this file cannot widen the amnesty."
+          "enum": ["measured"],
+          "description": "Every declared above-tier exception must be measured. sc-16015 removed the temporary unmeasured amnesty; the checker rejects unmeasured evidence unconditionally."
         },
         "costGb": {
           "type": "number",
@@ -83,14 +83,47 @@
           "exclusiveMinimum": 0,
           "description": "Alternative to costGb when the in-tree number is a byte count."
         },
+        "costBytesByTier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "q4": { "type": "number", "exclusiveMinimum": 0 },
+            "q8": { "type": "number", "exclusiveMinimum": 0 },
+            "bf16": { "type": "number", "exclusiveMinimum": 0 },
+            "nvfp4": { "type": "number", "exclusiveMinimum": 0 },
+            "int8-convrot": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "description": "Exact isolated resident bytes by selected tier. The checker requires exactly one positive entry for every appliesToTiers value and no others."
+        },
         "source": {
           "type": "string",
           "minLength": 1,
           "description": "file:line (or file plus a quoted phrase) where the FACT is recorded in-tree — and the number too, when measured. Required on every row, measured or not: an undeclared cost is tolerable while it is owed, an uncited fact is not."
         },
-        "owedBy": {
+        "isolation": {
           "type": "string",
-          "description": "The Shortcut story that owes the measurement. Required when state is unmeasured."
+          "minLength": 20,
+          "description": "How the component cost was isolated. Required with costBytesByTier so a bundled total cannot masquerade as a component measurement. The source must also cite an immutable artifact revision that matches a pinned catalog download."
+        },
+        "triageDecision": {
+          "type": "string",
+          "enum": ["measure", "eliminate"],
+          "description": "The eliminate-vs-measure triage result recorded before measurement. A measured row may remain temporarily while an explicit elimination story owns the repack."
+        },
+        "eliminationStory": {
+          "type": "string",
+          "pattern": "^sc-[1-9][0-9]*$",
+          "description": "Required when triageDecision is eliminate; the Shortcut story that owns the repack and eventual removal of this row."
+        },
+        "reviewedCause": {
+          "type": "string",
+          "enum": ["packing-exception", "backend-capability", "structural"],
+          "description": "Cause re-checked while measuring. The checker requires this to equal the row's cause."
+        },
+        "triageNote": {
+          "type": "string",
+          "minLength": 20,
+          "description": "Why the surviving exception was measured rather than eliminated."
         },
         "note": {
           "type": "string",

@@ -5,8 +5,8 @@
  * That is the right shape for "does this guard have teeth", but it lives inside the file under test and
  * runs as one pass/fail, so a rule can be deleted along with its own mutation and nothing notices. Every
  * other checker in `npm run check` has a sibling `node --test` file; this is that file. It asserts the
- * things `--self-test` structurally cannot: that the ratchet's shape and committed size are what they
- * claim, that the real ledger is clean, and that the amnesty set contains exactly the unmeasured rows.
+ * things `--self-test` structurally cannot: that the real ledger is clean, the completed amnesty is
+ * pinned at zero, and every promoted row carries exact per-tier evidence and its audit trail.
  */
 
 import assert from "node:assert/strict";
@@ -25,10 +25,11 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function realInputs() {
-  const [ledger, manifest, mlxFitGate, schema] = await Promise.all([
+  const [ledger, manifest, mlxFitGate, routingCatalog, schema] = await Promise.all([
     readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
     readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
     readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8"),
+    readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"), "utf8"),
     readFile(path.join(ROOT, "packages/schemas/tier-integrity.schema.json"), "utf8"),
   ]);
   return {
@@ -36,6 +37,7 @@ async function realInputs() {
     ledgerSource: ledger,
     manifest: JSON.parse(stripJsoncComments(manifest)),
     mlxFitGate,
+    routingCatalog,
     schema: JSON.parse(schema),
   };
 }
@@ -109,26 +111,20 @@ test("a Lens text-encoder exception cannot be reintroduced after the q4/q8 rehos
   );
 });
 
-test("the amnesty set is keyed per (model, component), not per model", () => {
-  for (const key of GRANDFATHERED_UNMEASURED) {
-    assert.match(
-      key,
-      /^[a-z0-9_]+::[a-zA-Z]+$/,
-      `"${key}" must be a \`model::component\` pair — a bare model id hands the entry a free slot for ` +
-        `every component it has not yet declared, which is the bypass sc-15799's review reproduced`,
-    );
-  }
+test("the temporary unmeasured amnesty is empty", () => {
+  assert.deepEqual([...GRANDFATHERED_UNMEASURED], []);
+  assert.equal(GRANDFATHERED_UNMEASURED_COUNT, 0);
 });
 
-test("the committed amnesty size matches the set, so growth is a two-place edit", () => {
+test("the committed amnesty count remains zero", () => {
   assert.equal(
     GRANDFATHERED_UNMEASURED.size,
     GRANDFATHERED_UNMEASURED_COUNT,
-    "adding an amnesty line must also bump the committed count",
+    "the completed migration must not regain an amnesty slot",
   );
 });
 
-test("the amnesty set is exactly the ledger's unmeasured rows", async () => {
+test("the ledger has no unmeasured rows", async () => {
   const { ledger } = await realInputs();
   const unmeasured = new Set(
     ledger.exceptions
@@ -138,29 +134,12 @@ test("the amnesty set is exactly the ledger's unmeasured rows", async () => {
   assert.deepEqual(
     [...GRANDFATHERED_UNMEASURED].sort(),
     [...unmeasured].sort(),
-    "no amnesty line may lack a row (an open slot) and no unmeasured row may lack a line",
+    "sc-16015 removed both the temporary amnesty and every unmeasured row",
   );
 });
 
-/**
- * The victim MUST be a model that already holds amnesty for a DIFFERENT component, or this is just
- * "a brand-new model cannot add an unmeasured row" wearing a different label. `boogu_image` is
- * amnestied for `vae` and declares no `textEncoder`, so it is the real case.
- *
- * This used `sdxl`, which holds NO amnesty pair at all — so despite its name it only exercised the
- * non-amnestied path, and the per-component keying it claimed to test could have been reverted to
- * per-model keying with this test still green. Found by the sc-15799 review.
- */
-test("an already-amnestied model cannot add an unmeasured row for a new component", async () => {
+test("an existing model cannot add an unmeasured row", async () => {
   const inputs = await realInputs();
-  assert.ok(
-    GRANDFATHERED_UNMEASURED.has("boogu_image::vae"),
-    "the victim must genuinely hold amnesty for another component, or the mutation is vacuous",
-  );
-  assert.ok(
-    !GRANDFATHERED_UNMEASURED.has("boogu_image::textEncoder"),
-    "…and must NOT already hold amnesty for the component being added",
-  );
   const ledger = clone(inputs.ledger);
   ledger.exceptions.push({
     model: "boogu_image",
@@ -173,8 +152,8 @@ test("an already-amnestied model cannot add an unmeasured row for a new componen
   });
   const { errors } = validate({ ...inputs, ledger });
   assert.ok(
-    errors.some((error) => error.includes('boogu_image::textEncoder" is not one of them')),
-    `expected the per-component ratchet to fire, got: ${errors.join(" | ")}`,
+    errors.some((error) => error.includes("UNMEASURED exceptions are forbidden")),
+    `expected unconditional measured enforcement to fire, got: ${errors.join(" | ")}`,
   );
 });
 
@@ -191,20 +170,92 @@ test("a brand-new model cannot add an unmeasured row at all", async () => {
     evidence: { state: "unmeasured", source: "somewhere", owedBy: "sc-99999" },
   });
   const { errors } = validate({ ...inputs, ledger });
-  assert.ok(errors.some((error) => error.includes("is not one of them")));
+  assert.ok(errors.some((error) => error.includes("UNMEASURED exceptions are forbidden")));
 });
 
-test("promoting a row to measured without deleting its amnesty line is an error", async () => {
+test("exact per-tier measurements cover every applicable tier", async () => {
   const inputs = await realInputs();
   const ledger = clone(inputs.ledger);
   const row = ledger.exceptions.find(
     (item) => item.model === "qwen_image" && item.component === "vae",
   );
-  row.evidence = { state: "measured", costGb: 0.25, source: "a real measurement" };
+  delete row.evidence.costBytesByTier.q8;
   const { errors } = validate({ ...inputs, ledger });
   assert.ok(
-    errors.some((error) => error.includes('still amnesties "qwen_image::vae"')),
-    `expected the orphaned-amnesty check to fire, got: ${errors.join(" | ")}`,
+    errors.some((error) => error.includes("must exactly match appliesToTiers")),
+    `expected per-tier coverage enforcement to fire, got: ${errors.join(" | ")}`,
+  );
+});
+
+test("promoted measurements record isolation, triage, and the reviewed cause", async () => {
+  const { ledger } = await realInputs();
+  const promoted = ledger.exceptions.filter((row) => row.evidence.costBytesByTier);
+  assert.ok(promoted.length > 0);
+  for (const row of promoted) {
+    assert.ok(
+      ["measure", "eliminate"].includes(row.evidence.triageDecision),
+      `${row.model}/${row.component}: triage`,
+    );
+    if (row.evidence.triageDecision === "eliminate") {
+      assert.match(row.evidence.eliminationStory, /^sc-[1-9][0-9]*$/);
+    } else {
+      assert.equal(row.evidence.eliminationStory, undefined);
+    }
+    assert.equal(row.evidence.reviewedCause, row.cause, `${row.model}/${row.component}: cause review`);
+    assert.ok(row.evidence.isolation.length >= 20, `${row.model}/${row.component}: isolation method`);
+    assert.ok(row.evidence.triageNote.length >= 20, `${row.model}/${row.component}: triage note`);
+  }
+});
+
+test("an elimination decision must name the story that owns the repack", async () => {
+  const inputs = await realInputs();
+  const ledger = clone(inputs.ledger);
+  const row = ledger.exceptions.find(
+    (item) => item.model === "chroma1_base" && item.component === "textEncoder",
+  );
+  delete row.evidence.eliminationStory;
+  const { errors } = validate({ ...inputs, ledger });
+  assert.ok(
+    errors.some((error) => error.includes("must name its eliminationStory")),
+    `expected elimination ownership enforcement to fire, got: ${errors.join(" | ")}`,
+  );
+});
+
+test("only the six Chroma T5 and VAE pairs are scoped to sc-16462 elimination", async () => {
+  const { ledger } = await realInputs();
+  const actual = ledger.exceptions
+    .filter((row) => row.evidence.triageDecision === "eliminate")
+    .map((row) => `${row.model}::${row.component}::${row.evidence.eliminationStory}`)
+    .sort();
+  const expected = ["chroma1_base", "chroma1_flash", "chroma1_hd"]
+    .flatMap((model) => ["textEncoder", "vae"].map((component) => `${model}::${component}::sc-16462`))
+    .sort();
+  assert.deepEqual(actual, expected);
+});
+
+test("a promoted measurement is bound to the catalog's pinned artifact revision", async () => {
+  const inputs = await realInputs();
+  const manifest = clone(inputs.manifest);
+  const anima = manifest.models.find((entry) => entry.id === "anima_base");
+  for (const download of anima.downloads) download.revision = "0".repeat(40);
+  const { errors } = validate({ ...inputs, manifest });
+  assert.ok(
+    errors.some((error) => error.includes("measured artifact and the shipping artifact must move together")),
+    `expected artifact-binding enforcement to fire, got: ${errors.join(" | ")}`,
+  );
+});
+
+test("exact bytes reproduce the independent safetensors-header receipt", async () => {
+  const inputs = await realInputs();
+  const ledger = clone(inputs.ledger);
+  const row = ledger.exceptions.find(
+    (item) => item.model === "sdxl" && item.component === "vae" && item.backends?.includes("candle"),
+  );
+  row.evidence.costBytesByTier.q4 += 2;
+  const { errors } = validate({ ...inputs, ledger });
+  assert.ok(
+    errors.some((error) => error.includes("does not reproduce the independent safetensors-header receipt")),
+    `expected receipt arithmetic enforcement to fire, got: ${errors.join(" | ")}`,
   );
 });
 
@@ -312,15 +363,20 @@ test("SenseNova dense heads are declared per lane: candle f32, mlx bf16", async 
 });
 
 test("a declared backends lane must be one the catalog entry actually has", async () => {
-  const { ledger, manifest } = await realInputs();
+  const { ledger, manifest, routingCatalog } = await realInputs();
   const byId = new Map(manifest.models.map((entry) => [entry.id, entry]));
+  const routed = new Map(
+    [...routingCatalog.matchAll(/ModelCaps::new\("([^"]+)",\s*(true|false),\s*(true|false),/g)].map(
+      (match) => [match[1], { mlx: match[2] === "true", candle: match[3] === "true" }],
+    ),
+  );
   for (const row of ledger.exceptions) {
     if (!Array.isArray(row.backends)) continue;
     for (const lane of row.backends) {
       assert.ok(
-        byId.get(row.model)?.[lane],
-        `${row.model}/${row.component} claims the "${lane}" lane, but the catalog entry has no ` +
-          `\`${lane}\` block — a per-backend claim about a lane the entry does not host describes nothing`,
+        byId.get(row.model)?.[lane] || routed.get(row.model)?.[lane],
+        `${row.model}/${row.component} claims the "${lane}" lane, but neither the manifest nor ` +
+          `ModelCaps routes that backend — the claim describes nothing`,
       );
     }
   }
