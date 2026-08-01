@@ -352,9 +352,8 @@ export function writeEmbedWorkflowInImages(value) {
   return writeFlag(EMBED_STORAGE_KEY, value);
 }
 
-// Whether the first-run disclosure has already been shown and dismissed. Absent means NOT seen,
-// which is what makes an existing install upgrading into this build get the notice once: the
-// default is silently ON, and someone who has been generating for months has never been told.
+// Durable one-time decision marker. The old `notice seen` storage/API name is retained so existing
+// installs do not lose their completed decision during the modal redesign.
 export function readWorkflowEmbedNoticeSeen() {
   return readFlag(NOTICE_STORAGE_KEY, false);
 }
