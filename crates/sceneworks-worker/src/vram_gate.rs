@@ -1484,6 +1484,7 @@ pub(crate) fn video_weights_fit_error(
 /// Missing either signal admits, exactly like [`fit_decision`]'s [`FitDecision::Unknown`]: no budget
 /// (`nvidia-smi` unreadable) ⇒ `None`, and an engine with neither a `candle` block nor countable
 /// weights (`ltx`/`svd`) ⇒ `None` through the floor.
+#[cfg(any(test, doc))]
 pub(crate) fn wan_video_fit_error(
     model_label: &str,
     manifest_entry: &JsonObject,

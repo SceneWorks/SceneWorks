@@ -491,6 +491,7 @@ pub(crate) fn fit_ladder(
 /// `krea_control_candle`'s `reclaim_improves`).
 ///
 /// Pure: the caller resolves the budget, so the whole decision is unit-testable with no CUDA and no GPU.
+#[cfg(any(test, doc))]
 pub(crate) fn fit_ladder_for_entry(
     manifest_entry: &JsonObject,
     tier_key: &str,
@@ -552,6 +553,7 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
 /// base peak carries [`HEADROOM_GB`] like the txt2img `predicted_peak_gb` this mirrors, so the small
 /// headroom over-count is the same one base.rs's reclaim already tolerates (bounded by the next load's
 /// own headroom).
+#[cfg(any(test, doc))]
 pub(crate) fn incurred_peak_gb(
     fit: &KreaControlFit,
     manifest_entry: &JsonObject,
