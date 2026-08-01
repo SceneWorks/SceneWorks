@@ -288,6 +288,7 @@ pub struct Phase {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Quality {
     pub contract: Option<String>,
+    pub identical_inputs: Option<bool>,
     pub identical_latents: Option<bool>,
     pub result: Option<QualityResult>,
     pub maximum_error: Option<f64>,
@@ -849,8 +850,8 @@ fn validate_hardware(hardware: &Hardware, id: &str) -> Result<(), String> {
 }
 
 fn validate_sweep(sweep: &Sweep, id: &str) -> Result<(), String> {
-    if sweep.axes.is_empty() || sweep.cases.is_empty() {
-        return Err(format!("{id} sweep axes and cases must be nonempty"));
+    if sweep.cases.is_empty() {
+        return Err(format!("{id} sweep cases must be nonempty"));
     }
     let mut names = BTreeSet::new();
     for axis in &sweep.axes {
@@ -1025,7 +1026,9 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
     }
 
     let quality = &record.quality;
-    if quality.identical_latents != Some(true) || quality.result != Some(QualityResult::Passed) {
+    if (quality.identical_inputs != Some(true) && quality.identical_latents != Some(true))
+        || quality.result != Some(QualityResult::Passed)
+    {
         return Err(format!(
             "{} complete quality evidence did not pass",
             record.id
@@ -1568,14 +1571,27 @@ mod tests {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle is stale: {reason:?}"),
         };
+        assert_eq!(bundle.records.len(), 24);
         assert_eq!(
             bundle
                 .records
                 .iter()
-                .map(|record| record.id.as_str())
-                .collect::<Vec<_>>(),
-            ["imc-265dafd26c0ad92ce367", "imc-2ca548230323b40eece3"]
+                .filter(|record| record.target.provider == "qwen_image")
+                .count(),
+            22
         );
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.target.provider == "krea_2_turbo_control")
+                .count(),
+            2
+        );
+        assert!(bundle.records.iter().any(|record| {
+            record.quality.identical_inputs == Some(true)
+                && record.quality.identical_latents == Some(false)
+        }));
         assert_eq!(
             bundle.evidence_for(&exact_query()),
             EvidenceVerdict::Unknown

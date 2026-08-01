@@ -507,15 +507,15 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
-  assert.equal(model.completedBaseline.completeRecords, 2);
+  assert.equal(model.completedBaseline.completeRecords, 24);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    0,
-    "an inference pin change must not relabel exact runs from the prior runtime as current",
+    5,
+    "only the five exact Qwen ladder selectors are current and matrix-eligible",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /2 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /24 complete record\(s\) exist/);
+  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 3 of 53 catalog entries/);
   const allProse = JSON.stringify(model);

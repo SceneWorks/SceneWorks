@@ -3040,11 +3040,10 @@ fn load_spec(
     spec
 }
 
-/// Select deferred materialization only for the MLX load shapes whose production contracts measured
-/// it (Lens in SC-15800 and Qwen-Image in SC-16353). The fit gate still owns the independent
-/// Resident/Sequential decision; adding Sequential to one of these shaped specs is what satisfies the
-/// provider's exact rung-4 predicate. Keep every family-specific overlay exclusion explicit so an
-/// unmeasured load can never inherit another route's result.
+/// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
+/// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
+/// and can then select the provider's bounded transformer rung. Qwen base/edit also cover Q4/Q8 and
+/// forward-time adapters because the block stream replays packed quantization and captured residuals.
 #[cfg(target_os = "macos")]
 fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let directory_bf16 = matches!(&spec.weights, WeightsSource::Dir(_))
@@ -3063,13 +3062,7 @@ fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none();
-    let qwen_control = directory_bf16
-        && engine_id == "qwen_image_control"
-        && matches!(spec.control, Some(WeightsSource::File(_)))
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none();
-    if lens_dense_native || qwen_native || qwen_control {
+    if lens_dense_native || qwen_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3178,9 +3171,9 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_qwen_specs_reach_the_measured_native_edit_and_control_contracts() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = fixture_spec(dir.path());
+    fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
+        let bf16_dir = tempfile::tempdir().unwrap();
+        let bf16 = fixture_spec(bf16_dir.path());
         let q4_dir = tempfile::tempdir().unwrap();
         let q4 = fixture_spec(q4_dir.path());
         std::fs::write(
@@ -3188,46 +3181,37 @@ mod measured_mlx_load_shape_tests {
             r#"{"quantization":{"bits":4}}"#,
         )
         .unwrap();
-        let q8_dir = tempfile::tempdir().unwrap();
-        let q8 = fixture_spec(q8_dir.path());
-        std::fs::write(
-            q8_dir.path().join("transformer/config.json"),
-            r#"{"quantization":{"bits":8}}"#,
-        )
-        .unwrap();
-        let adapter = AdapterSpec::new(
-            dir.path().join("adapter.safetensors"),
+        let lightning_adapter = AdapterSpec::new(
+            q4_dir.path().join("lightning.safetensors"),
             1.0,
             AdapterKind::Lora,
         );
-        let control = dir.path().join("control.safetensors");
-        std::fs::write(&control, [0_u8; 8]).unwrap();
 
-        let measured = [
-            ("qwen_image", base.clone()),
+        for (label, engine_id, spec) in [
+            ("qwen_image", "qwen_image", bf16.clone()),
             (
+                "qwen_image_edit_2511",
                 "qwen_image_edit",
-                q4
-                    .with_quant(Quant::Q4)
-                    .with_adapters(vec![adapter]),
+                q4.clone().with_quant(Quant::Q4),
             ),
             (
-                "qwen_image_control",
-                q8
-                    .with_quant(Quant::Q8)
-                    .with_control(WeightsSource::File(control)),
+                "qwen_image_edit_2511_lightning",
+                "qwen_image_edit",
+                q4.with_quant(Quant::Q4)
+                    .with_adapters(vec![lightning_adapter]),
             ),
-        ];
-        for (engine_id, spec) in measured {
+        ] {
             let shaped = apply_measured_mlx_load_shape(engine_id, spec);
             assert_eq!(
                 shaped.load_shape,
                 gen_core::LoadShape::DeferredMaterialization,
-                "{engine_id} must request the Qwen block-stream load shape"
+                "{label} must resolve to the shared Qwen provider load shape"
             );
-            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
             let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(engine_id, &sequential)
+                .memory_strategy_contract(
+                    engine_id,
+                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
+                )
                 .unwrap()
                 .expect("Qwen contract");
             let rung = contract
@@ -3241,21 +3225,19 @@ mod measured_mlx_load_shape_tests {
             );
         }
 
-        let pid = base
-            .clone()
-            .with_pid(
-                WeightsSource::File(dir.path().join("pid.safetensors")),
-                WeightsSource::Dir(dir.path().join("gemma")),
-            );
+        let pid = bf16.clone().with_pid(
+            WeightsSource::File(bf16_dir.path().join("pid.safetensors")),
+            WeightsSource::Dir(bf16_dir.path().join("gemma")),
+        );
         assert_eq!(
             apply_measured_mlx_load_shape("qwen_image", pid).load_shape,
             gen_core::LoadShape::EagerMaterialization,
-            "the native-VAE measurement must not opt PiD into deferred materialization"
+            "the native-Qwen-VAE ladder must not opt PiD into its load shape"
         );
         assert_eq!(
-            apply_measured_mlx_load_shape("qwen_image_control", base).load_shape,
+            apply_measured_mlx_load_shape("qwen_image_control", bf16).load_shape,
             gen_core::LoadShape::EagerMaterialization,
-            "the control engine requires its measured single-file overlay"
+            "the unbounded five-block control side branch is not advertised as rung 4"
         );
     }
 }

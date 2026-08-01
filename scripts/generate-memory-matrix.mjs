@@ -418,7 +418,6 @@ function runtimeStrategyParameters(parameters) {
         "decodeOverlap",
         "attentionChunkSize",
         "transformerWindowSize",
-        "transformerWindowComponent",
       ].includes(key),
     ),
   );
@@ -1108,13 +1107,36 @@ function strategyStatus({
   rung4Survey,
   manifestById,
 }) {
+  const staticMemoryContract = model[backend]?.memoryStrategyContract;
+  const staticRung4Verdict = rung === "bounded_transformer_residency"
+    ? rung4Survey.get(`${familyGroup(model.id)}:${backend}`)
+    : null;
+  const staticRung4Allowed = rung !== "bounded_transformer_residency" || (
+    ["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
+    (staticRung4Verdict?.implementedEntries ?? []).includes(model.id) &&
+    (staticRung4Verdict?.implementedModes ?? [mode]).includes(mode) &&
+    (staticRung4Verdict?.implementedTiers ?? [tier]).includes(tier) &&
+    (staticRung4Verdict?.implementedOverlays ?? [overlay]).includes(overlay) &&
+    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
+  );
+  const staticImplementation = staticMemoryContract?.provider === provider
+    ? staticMemoryContract.implementations.find(
+        (implementation) =>
+          staticRung4Allowed &&
+          implementation.rung === rung &&
+          implementation.tiers.includes(tier) &&
+          implementation.modes.includes(mode) &&
+          implementation.overlays.includes(overlay),
+      )
+    : undefined;
   const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
       binding.provider === provider &&
       binding.tier === tier &&
       binding.mode === mode &&
       matrixOverlayFor(binding.overlay) === overlay &&
-      binding.rung === rung,
+      binding.rung === rung &&
+      staticRung4Allowed,
   );
   if (declaredCalibrations.length) {
     const fingerprints = sortedUnique(declaredCalibrations.map((binding) => binding.fingerprint));
@@ -1129,8 +1151,29 @@ function strategyStatus({
     return {
       state: "Implemented/unverified",
       source: "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route",
-      parameters: JSON.parse(parameters[0]),
+      parameters: {
+        ...(staticImplementation?.parameters ?? {}),
+        ...JSON.parse(parameters[0]),
+        ...(staticImplementation
+          ? { publishedRanges: staticImplementation.parameterRanges }
+          : {}),
+      },
       calibrationFingerprint: fingerprints[0],
+      engagedRungs: staticImplementation?.engagedRungs,
+    };
+  }
+  if (staticImplementation) {
+    return {
+      // This declaration inventories production capability only. Exact runtime evidence must still
+      // pass calibrationBinding before the cell can be promoted to Verified.
+      state: "Implemented/unverified",
+      source: staticImplementation.source,
+      parameters: {
+        ...staticImplementation.parameters,
+        publishedRanges: staticImplementation.parameterRanges,
+      },
+      calibrationFingerprint: staticImplementation.fingerprint,
+      engagedRungs: staticImplementation.engagedRungs,
     };
   }
   const declaredModel =
@@ -1361,7 +1404,7 @@ function validateMatrix(
     }
     if (cell.state === "Verified") {
       const dynamic = cell.evidence.currentEnvironmentVerification;
-      if (!dynamic.length || !cell.calibrationFingerprint || !Object.keys(cell.strategyParameters).length) {
+      if (!dynamic.length || !cell.calibrationFingerprint) {
         throw new Error(`${cell.id}: unsupported Full/Verified claim`);
       }
     }

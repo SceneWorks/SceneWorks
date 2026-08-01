@@ -1812,6 +1812,122 @@
       "mlx": {
         "minMemoryGb": 50,
         "quantize": 4,
+        // SC-15511: exact promoted BF16 base-provider records. These five selectors are deliberately
+        // geometry-, tier-, mode-, and overlay-specific; the static contract below inventories the
+        // wider production capability but cannot admit a request or verify either edit sibling.
+        "calibrations": [
+          {
+            "abi": 1,
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
+            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
+            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
+            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
+            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
+            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
+            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
+            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
+            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_attention",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
+            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
+            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_transformer_residency",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }
+          }
+        ],
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            }
+          ]
+        },
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -1955,7 +2071,46 @@
       // `candle` block below ("gates the DEFAULT (q4) tier"). Shared checkpoint with the Lightning
       // variant, which carries the same declaration.
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_edit",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (epic 10765 sc-11019, the EDIT measure-sibling of the qwen txt2img sc-10969
       // + flux2 sc-10920) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
@@ -2094,7 +2249,46 @@
       // Explicit so the image gate / `resolve_quant` never hit their `None => q8` fallthrough; matches the
       // `default: true` q4 download and the `candle` block below ("gates the DEFAULT (q4) tier").
       "mlx": {
-        "quantize": 4
+        "quantize": 4,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_edit",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (epic 10765) — MEASURED through the shared additive-LoRA path (sc-11666;
       // candle-gen #425 / sc-11091), replacing the sc-11019 base-copied estimate. q4/q8 apply the lightx2v

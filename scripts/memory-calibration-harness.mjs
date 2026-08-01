@@ -246,8 +246,11 @@ function validateComplete(record) {
   validatePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
   validatePhaseMetrics(record.observedMemory, `${record.id}.observedMemory`);
   object(record.sweep, `${record.id}.sweep`);
-  if (!Array.isArray(record.sweep.axes) || record.sweep.axes.length === 0) {
-    fail(`${record.id}: sweep axes must not be empty`);
+  if (!Array.isArray(record.sweep.axes)) {
+    fail(`${record.id}: sweep axes must be an array`);
+  }
+  if (record.sweep.axes.length === 0 && Object.keys(record.strategy.parameters).length > 0) {
+    fail(`${record.id}: a parameterized complete strategy must sweep at least one axis`);
   }
   const axisNames = record.sweep.axes.map((axis) => axis.parameter);
   if (new Set(axisNames).size !== axisNames.length) fail(`${record.id}: sweep axes must be unique`);
@@ -299,8 +302,11 @@ function validateComplete(record) {
       fail(`${record.id}: ${name} must clean up and pass a warm follow-up`);
     }
   }
-  if (record.quality.result !== "passed" || record.quality.identicalLatents !== true) {
-    fail(`${record.id}: complete quality evidence must pass with identical latents`);
+  if (
+    record.quality.result !== "passed" ||
+    (record.quality.identicalLatents !== true && record.quality.identicalInputs !== true)
+  ) {
+    fail(`${record.id}: complete quality evidence must pass with identical latents or identical inputs`);
   }
   text(record.quality.contract, `${record.id}.quality.contract`);
   for (const metric of ["maximumError", "meanError", "maximumErrorThreshold", "meanErrorThreshold"]) {

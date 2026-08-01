@@ -189,7 +189,43 @@
       "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
     },
     {
-      "name": "mlx-qwen-vae-decode",
+      "name": "mlx-qwen-bf16-resident",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "resident",
+      "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-bf16-seed15511-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-bf16-staged-residency",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-bf16-seed15511-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-bf16-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
       "target": {
@@ -202,8 +238,8 @@
       },
       "rung": "bounded_decode",
       "engagedRungs": ["resident", "bounded_decode"],
-      "calibrationFingerprint": "qwen-vae-identical-latent-v3",
-      "fixture": "qwen-vae-encoded-latent-1024",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         { "parameters": { "decodeTileEdge": 768, "decodeOverlap": 64 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 }, "expectedResult": "passed" },
@@ -211,9 +247,44 @@
         { "parameters": { "decodeTileEdge": 448, "decodeOverlap": 64 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 320, "decodeOverlap": 64 }, "expectedResult": "passed" },
-        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 64 }, "expectedResult": "passed" },
-        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 32, "comparisonOutputBias": 0.05 }, "expectedResult": "failed", "negative": true }
+        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 64 }, "expectedResult": "passed" }
       ]
+    },
+    {
+      "name": "mlx-qwen-bf16-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-bf16-seed15511-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-bf16-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "fixture": "qwen-image-bf16-seed15511-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
     },
     {
       "name": "mlx-krea-pose-control-q4-768",

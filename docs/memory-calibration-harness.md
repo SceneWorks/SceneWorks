@@ -72,13 +72,14 @@ The provider probe must return:
 A provider record is complete only if it reports synchronized conditioning/denoise/decode/overall
 active, allocator, device, wired, and reclaimable values; overall covers each phase; all scenarios
 pass (overlay may be justified structurally N/A); exact-fit values exist and are equal; cancel/error
-restore baseline and pass a warm follow-up; identical-latent quality passes; a measured negative
+interrupt the active selected rung, restore baseline, and pass a warm follow-up; quality compares
+either identical latents or final outputs from identical inputs and passes; a measured negative
 mutation breaches a threshold; executed passed cases exactly derive every claimed range; and the
 resolved artifact loads.
 
 Warm-repeat is one loaded generator running A→B→A, not three fresh processes. Cancellation and error
-are injected during every phase, followed by synchronization, baseline comparison, and a successful
-warm request.
+are injected at the active physical boundary for the rung being certified, followed by synchronization,
+baseline comparison, and a successful warm request.
 
 ## Commands
 
@@ -97,7 +98,8 @@ Run an authoritative provider adapter:
 node scripts/memory-calibration-harness.mjs run \
   --config config/memory-calibration-plan.json \
   --backend mlx \
-  --provider mlx-qwen-vae-decode \
+  --fixture qwen-image-bf16-seed15511-step2 \
+  --fresh-per-case \
   --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
   --sceneworks-repo /absolute/path/to/SceneWorks \
   --inference-repo /absolute/path/to/inference \
@@ -286,16 +288,19 @@ Those raw tests must be parameterized/adapted to the JSON protocol so phase sync
 hardware probing, lifecycle injection, and record emission occur in the provider process. A raw
 green test log is not ingestible evidence.
 
-The Qwen plan has seven passing overlap-64 cases (`768, 640, 512, 448, 384, 320, 256`) and a separate
-expected-failure `256/32` mutation. The Krea plan enumerates candidate tile, overlap, attention-chunk,
-and transformer-window combinations explicitly; a record may claim only cases actually returned by
-the provider.
+The Qwen plan has eleven authoritative records: resident, staged residency, seven overlap-64 decode
+edges (`768, 640, 512, 448, 384, 320, 256`), bounded attention, and window-1 transformer residency.
+Every record executes its own deterministic broad-bias mutation and may claim only its exact returned
+strategy tuple. The Krea plan likewise enumerates candidate tile, overlap, attention-chunk, and
+transformer-window combinations explicitly.
 
 ## Matrix promotion
 
 Matrix ingestion binds a record to one cell and independently checks complete status, quality,
 executed range, calibration fingerprint, exact runtime strategy parameters, width/height/batch/frame
 geometry envelope, artifact revision/variant, and resolved loadability. A gated record remains
-`gated` even when its SHAs match. A complete authoritative record is `current` only when the clean
-inference SHA and SceneWorks matrix source-tree digest exactly match. Exact records never promote an
-aggregate geometry or parameter envelope.
+`gated` even when its SHAs match. A complete authoritative record is `current` only when its clean
+inference SHA matches the exact workspace pin; SceneWorks invalidation is owned by the provider ABI
+fingerprint checked by `calibrationBinding`. The captured SceneWorks revision and matrix source-tree
+digest remain provenance, not a second invalidation gate. Exact records never promote an aggregate
+geometry or parameter envelope.

@@ -370,7 +370,7 @@ jobs:
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
-      - name: Build and run the authoritative MLX calibration adapter
+      - name: Build and run the authoritative Qwen MLX ladder calibration
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
           SCENEWORKS_QWEN_IMAGE_REPOSITORY: ${{ inputs.qwen_repository }}
@@ -382,7 +382,8 @@ jobs:
           node scripts/memory-calibration-harness.mjs run \
             --config config/memory-calibration-plan.json \
             --backend mlx \
-            --provider mlx-qwen-vae-decode \
+            --fixture qwen-image-bf16-seed15511-step2 \
+            --fresh-per-case \
             --provider-command '["target/release/memory-mlx-adapter"]' \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
