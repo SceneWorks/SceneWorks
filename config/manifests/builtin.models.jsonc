@@ -10385,14 +10385,14 @@
         // be Q4 ~40 / Q8 ~48 / bf16 64 — the per-download `footprint` blocks now carry those numbers;
         // this single field cannot express them.
         //
-        // ⚠️ Two caveats, so these are not over-trusted:
+        // ⚠️ One caveat plus sc-15325's settled decode result:
         //   * They are MLX **active**. The allocator's reclaimable buffer cache took the same run to
         //     ~90 GiB on a 128 GB host. Active is the right basis for a floor (MLX frees cache under
         //     pressure), but `get_peak_memory` must never be quoted as "the memory this uses".
-        //   * They were measured with the CURRENT decode tiling, which sc-15325 shows is visibly
-        //     corrupting the output. Fixing it costs real memory (a 4-latent-frame decode tile measured
-        //     38.5 GiB, an 8-frame tile 75.8 GiB, vs 19.8 GiB today), so resolving sc-15325 WILL
-        //     re-open this number. Do not treat 64 as settled across that change.
+        //   * sc-15325 (inference PR #292 / 51d65a1a) added spatial tiling to the corrected decode
+        //     policy. The decode-phase floor fell from ~20 GiB to ~7.5 GiB (192 px spatial tile,
+        //     +0.17/255), so the measured 27.90 / 34.44 / 46.71 GiB ladder is conservative rather
+        //     than at risk of a raise.
         //
         // The 720p buckets add ~9.4 GiB of KV (3600 vs 1560 tokens/frame) on top of any tier — that,
         // not the weight tier, is the memory-relevant resolution jump. The UMT5 text encoder (11.4 GB
