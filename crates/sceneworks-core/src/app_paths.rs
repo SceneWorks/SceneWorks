@@ -31,6 +31,19 @@ impl AppPaths {
         platform_default_paths().unwrap_or_else(repo_relative_paths)
     }
 
+    /// Platform defaults **only** when the OS actually gave us a home directory —
+    /// i.e. without the repo-relative fallback [`AppPaths::platform_default`] applies.
+    ///
+    /// That fallback is right for the data/config roots (it reproduces the historical
+    /// default rather than panicking), but it resolves to a *relative* `config`, which
+    /// means "whatever directory this process was started in". For anything that must
+    /// never land in the current working directory — the credential store, which would
+    /// otherwise put a plaintext token inside a git checkout — a relative answer is
+    /// worse than no answer. Callers that care take the `None` and decide themselves.
+    pub fn platform_default_checked() -> Option<Self> {
+        platform_default_paths()
+    }
+
     /// Create the data, config, and cache directories if they do not yet exist.
     pub fn ensure_exists(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.data_dir)?;

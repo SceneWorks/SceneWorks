@@ -1,6 +1,8 @@
 //! Server/Docker credential management (sc-1893). Backs the same Settings
 //! "Service credentials" screen used on desktop, but over HTTP against a `0600`
-//! file in the config dir instead of the OS keychain. The token is write-only —
+//! file (in `Settings::credentials_dir`, sc-16540) instead of the OS keychain. The
+//! store deliberately does NOT live in the config dir — see
+//! [`sceneworks_core::credentials::resolve_credentials_dir`]. The token is write-only —
 //! `GET` never returns it, only host/label/scheme/present. Routes sit behind the
 //! standard access-token middleware like the rest of `/api/*`.
 
@@ -9,7 +11,7 @@ use super::*;
 use sceneworks_core::credentials::{normalize_host, CredentialFileStore, CredentialStatus};
 
 fn credential_store(state: &AppState) -> CredentialFileStore {
-    CredentialFileStore::new(&state.settings.config_dir)
+    CredentialFileStore::new(&state.settings.credentials_dir)
 }
 
 /// Redacted listing of stored credentials — never includes tokens.
