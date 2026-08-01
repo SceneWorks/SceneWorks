@@ -5567,49 +5567,66 @@ fn flux2_edit_engine_id_maps_variants() {
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
 
-// ---- sc-6124 / sc-6211: FLUX.2-dev multi-reference edit memory guard --------------------------
+// ---- sc-6124 / sc-6211: FLUX.2-dev provider memory admission context --------------------------
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_dev_edit_peak_gb_tracks_chunked_measurements() {
-    // sc-6211 worker-layer peaks with the sc-6266 chunking ON (Q4, 1024², /usr/bin/time -l):
-    // 2-ref ~81 GB, 4-ref ~93 GB. (Pre-chunking sc-5923 had 2-ref ~104 — the re-anchored fit is
-    // ~3.8× gentler per token, which is why the 2-ref edit now fits 96.)
-    let two = flux2_dev_edit_peak_gb(2, 1024, 1024);
-    let four = flux2_dev_edit_peak_gb(4, 1024, 1024);
-    assert!(
-        (two - 81.0).abs() < 2.0,
-        "two-reference estimate {two} GB ≉ measured ~81"
-    );
-    assert!(
-        (four - 93.0).abs() < 2.0,
-        "four-reference estimate {four} GB ≉ measured ~93"
-    );
-    // Monotonic in both reference count and resolution.
-    assert!(four > two);
-    assert!(flux2_dev_edit_peak_gb(2, 768, 768) < two);
+fn flux2_dev_edit_memory_context_preserves_multiref_boundaries_for_provider_safety() {
+    let contract = crate::inference_runtime::media()
+        .memory_strategy_contract(
+            "flux2_dev_edit",
+            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
+        )
+        .unwrap()
+        .expect("FLUX.2-dev edit provider memory contract");
+
+    // Single-reference and a failed RAM probe remain outside the provider safety context.
+    assert!(flux2_dev_edit_memory_context(
+        &contract,
+        Some(gen_core::Quant::Q4),
+        1,
+        1024,
+        1024,
+        Some(64.0),
+    )
+    .unwrap()
+    .is_none());
+    assert!(flux2_dev_edit_memory_context(
+        &contract,
+        Some(gen_core::Quant::Q4),
+        4,
+        1024,
+        1024,
+        None,
+    )
+    .unwrap()
+    .is_none());
+    for quant in [Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8), None] {
+        let context = flux2_dev_edit_memory_context(&contract, quant, 2, 1024, 1024, Some(128.0))
+            .unwrap()
+            .expect("multi-reference context");
+        assert_eq!(context.selection.tier.quant, quant);
+        assert_eq!(context.predicted_peak_bytes, 0);
+        assert_eq!(context.overlay.as_deref(), Some("references=2"));
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_dev_edit_memory_guard_gates_multiref_on_small_machines() {
-    // Single reference / txt2img always pass — covered by the declared minMemoryGb — even on a
-    // small machine, and regardless of the RAM probe.
-    assert!(flux2_dev_edit_memory_guard(1, 1024, 1024, Some(64.0)).is_ok());
-    assert!(flux2_dev_edit_memory_guard(0, 1024, 1024, Some(64.0)).is_ok());
-    // sc-6211: the chunked two-reference 1024² edit (~81 GB) now PASSES on a 96 GB Mac (the whole
-    // point of this story) and of course on a 128 GB one.
-    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(96.0)).is_ok());
-    assert!(flux2_dev_edit_memory_guard(2, 1024, 1024, Some(128.0)).is_ok());
-    // Four references at 1024² (~93 GB peak) is too tight for a 96 GB machine but fits a 128 GB one.
-    let err = flux2_dev_edit_memory_guard(4, 1024, 1024, Some(96.0)).unwrap_err();
-    assert!(
-        matches!(&err, WorkerError::InvalidPayload(msg) if msg.contains("multi-reference")),
-        "expected an actionable multi-reference rejection, got {err:?}"
+fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
+    let requested_q4 = request(json!({
+        "model": "flux2_dev",
+        "advanced": { "mlxQuantize": 4 }
+    }));
+    let (quant, bits) = flux2_edit_resolved_quant(
+        &requested_q4,
+        Path::new("/models/flux2-dev/q8"),
+        "flux2_dev",
+        "job-tier-fallback",
+        "mlx",
     );
-    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, Some(128.0)).is_ok());
-    // A failed RAM probe is lenient (don't block a possibly-fine job).
-    assert!(flux2_dev_edit_memory_guard(4, 1024, 1024, None).is_ok());
+    assert_eq!(quant, Some(gen_core::Quant::Q8));
+    assert_eq!(bits, Some(8));
 }
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
@@ -6420,6 +6437,9 @@ fn flux2_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        false,
+        None,
+        None,
         "make it a watercolor painting",
         512,
         512,
@@ -9174,6 +9194,9 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        false,
+        None,
+        None,
         &augment_prompt_for_pose("a knight standing in a courtyard"),
         512,
         512,
@@ -9305,6 +9328,9 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
+                false,
+                None,
+                None,
                 &prompt,
                 SIDE,
                 SIDE,
@@ -14405,6 +14431,9 @@ fn sc_8253_8278_identity_angle_ab() {
                 let cancel = gen_core::CancelFlag::new();
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
+                    false,
+                    None,
+                    None,
                     &prompt,
                     SIDE,
                     SIDE,
@@ -14831,9 +14860,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     );
     // And that named gate must actually run in that lane, not merely be cited.
     assert!(
-        krea_source.contains("krea_control_fit::fit_ladder_for_entry_with_adapter_bytes("),
-        "krea_control_candle.rs must actually walk `krea_control_fit`'s ladder — naming a gate it does \
-         not call would be an admission claim with nothing behind it (sc-16069)"
+        krea_source.contains("krea_control_fit::fit_ladder_for_entry_with_runtime("),
+        "krea_control_candle.rs must actually call `krea_control_fit`'s runtime-aware shared-selector \
+         seam — naming a gate it does not call would be an admission claim with nothing behind it \
+         (sc-16069)"
     );
 
     // 5. Each direct-gate lane gates BEFORE it hands off to the load — a gate placed after the allocation

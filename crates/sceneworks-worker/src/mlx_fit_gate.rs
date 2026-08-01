@@ -22,8 +22,8 @@
 //! headroom, never a post-allocation accounting number — the same conclusion the candle gate reached
 //! for a different (caching-allocator) reason.
 //!
-//! Generalizes the per-model `flux2_dev_edit_memory_guard` (`image_jobs/flux2.rs`): that one gates a
-//! single activation-bound edit path; this gates the base weight-fit for every MLX image model.
+//! Complements FLUX.2-dev edit's provider-owned multi-reference safety policy (`image_jobs/flux2.rs`):
+//! that policy gates one activation-bound edit path; this gates base weight-fit for every MLX model.
 //!
 //! The pure decision logic is cross-platform and unit-tested on every lane; only the live
 //! `sysctl hw.memsize` probe is macOS-only (it returns `None` elsewhere, so the gate no-ops).
