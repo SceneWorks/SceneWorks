@@ -1775,10 +1775,16 @@ fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
     for id in EVIDENCED {
         assert_resident_rows(id);
     }
+    let zimage_edit_arm = include_str!("../image_jobs.rs")
+        .split_once("CandleImageRoute::ZimageEdit => {")
+        .expect("Z-Image Edit route must remain explicit")
+        .1
+        .split_once("CandleImageRoute::")
+        .expect("Z-Image Edit route must end before the next route")
+        .0;
     assert!(
-        include_str!("../image_jobs/zimage_edit_candle.rs")
-            .contains("CandleBaseEvidence::Alias(\"z_image_turbo\")"),
-        "z_image_edit loads the identical Turbo base and must name z_image_turbo as its evidence alias"
+        zimage_edit_arm.contains("generate_candle_stream("),
+        "Z-Image Edit must use the generic provider path so z_image_turbo catalog evidence and the shared memory selector remain live"
     );
     for (id, reason, source) in EXPLICITLY_UNMEASURED {
         let model = builtin_model_entry(id);

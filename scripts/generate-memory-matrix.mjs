@@ -856,6 +856,26 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
           throw new Error(`${at}: requestPeak.byTier.${tier} has unknown finding ${JSON.stringify(finding)}`);
         }
       }
+      for (const [index, scope] of (verdict.requestPeak?.scopes ?? []).entries()) {
+        const scopeAt = `${at}: requestPeak.scopes[${index}]`;
+        if (!RUNG4_REQUEST_PEAKS.includes(scope.finding)) {
+          throw new Error(`${scopeAt}.finding has unknown finding ${JSON.stringify(scope.finding)}`);
+        }
+        for (const [field, values, vocabulary] of [
+          ["tiers", scope.tiers, ["bf16", "q4", "q8"]],
+          ["overlays", scope.overlays, ["none", "lora", "control", "identity"]],
+        ]) {
+          if (values?.length === 0) {
+            throw new Error(`${scopeAt}.${field} is empty — omit it to mean every cell value`);
+          }
+          if (values?.some((value) => !vocabulary.includes(value))) {
+            throw new Error(`${scopeAt}.${field} contains a value outside the matrix vocabulary`);
+          }
+        }
+        if (scope.entries?.length === 0 || scope.modes?.length === 0) {
+          throw new Error(`${scopeAt} has an empty selector — omit it to mean every cell value`);
+        }
+      }
       if (!verdict.evidence?.length) {
         throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
       }
@@ -906,6 +926,9 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
         // then rode onto every rung-4 cell of the family as though it were a real per-entry fact.
         const named = [
           ...implemented.map((id) => [id, "implementedEntries"]),
+          ...(verdict.requestPeak?.scopes ?? []).flatMap((scope, index) =>
+            (scope.entries ?? []).map((id) => [id, `requestPeak.scopes[${index}].entries`]),
+          ),
           ...(verdict.blockStacks ?? []).flatMap((stack) =>
             (stack.entries ?? []).map((id) => [id, `blockStacks[${JSON.stringify(stack.name)}].entries`]),
           ),
@@ -962,9 +985,16 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
  * the number that matters). A cell can be `partial`/`unmeasured`, which is neither "implemented" nor
  * "not applicable" — the state the five-value conformance vocabulary alone cannot express.
  */
-function rung4SurveyCell(survey, modelId, backend, tier, overlayIncompatible) {
+function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayIncompatible) {
   const verdict = survey.get(`${familyGroup(modelId)}:${backend}`);
   if (!verdict) throw new Error(`${modelId}:${backend}: no rung-4 survey verdict (SC-15969)`);
+  const scopedRequestPeak = (verdict.requestPeak.scopes ?? []).find(
+    (scope) =>
+      (scope.entries ?? [modelId]).includes(modelId) &&
+      (scope.tiers ?? [tier]).includes(tier) &&
+      (scope.modes ?? [mode]).includes(mode) &&
+      (scope.overlays ?? [overlay]).includes(overlay),
+  );
   return {
     story: 15969,
     // Always the family's OWN verdict. Overlay incompatibility is a property of the provider's
@@ -973,7 +1003,8 @@ function rung4SurveyCell(survey, modelId, backend, tier, overlayIncompatible) {
     // publish `none` for a family whose stack is perfectly windowable, and a consumer filtering that
     // field for architecturally-inapplicable families would read those cells as false positives.
     structuralApplicability: verdict.structuralApplicability,
-    requestPeak: verdict.requestPeak.byTier?.[tier] ?? verdict.requestPeak.finding,
+    requestPeak:
+      scopedRequestPeak?.finding ?? verdict.requestPeak.byTier?.[tier] ?? verdict.requestPeak.finding,
     implementation: verdict.implementation,
     overlayIncompatible,
     summary: verdict.summary,
@@ -1022,10 +1053,27 @@ export function assertRung4SurveyCoversEveryFamily(survey, models) {
  * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
  * reporting rung 4 as unreachable.
  */
-function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines }) {
+function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }) {
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
   return backend === "mlx"
     ? sequentialEngines.has(route.engine)
-    : model.candle?.sequentialPeakGb !== undefined || model.candle?.turboFit !== undefined;
+    : declaredModel.candle?.supportsSequentialOffload === true ||
+        declaredModel.candle?.sequentialPeakGb !== undefined ||
+        declaredModel.candle?.turboFit !== undefined;
+}
+
+function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
+  if (overlay === "none") return true;
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
+  const capabilities = Object.values(declaredModel.candle?.memoryStrategyCapabilities ?? {});
+  if (!capabilities.length) return true;
+  return capabilities.some((capability) => (capability.overlays ?? ["none"]).includes(overlay));
 }
 
 function declaredEvidence(model, backend, tier) {
@@ -1033,6 +1081,8 @@ function declaredEvidence(model, backend, tier) {
   const keys = [
     "minMemoryGb",
     "vramGbByTier",
+    "supportsSequentialOffload",
+    "memoryStrategyCapabilities",
     "sequentialPeakGb",
     "turboFit",
     "measured",
@@ -1056,6 +1106,7 @@ function strategyStatus({
   mode,
   overlay,
   rung4Survey,
+  manifestById,
 }) {
   const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
@@ -1082,6 +1133,18 @@ function strategyStatus({
       calibrationFingerprint: fingerprints[0],
     };
   }
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
+  const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
+  if (staticCapability?.overlays?.includes(overlay)) {
+    return {
+      state: "Implemented/unverified",
+      source: `config/manifests/builtin.models.jsonc#models/${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,
+      parameters: staticCapability.parameters,
+    };
+  }
   if (
     rung === "resident" &&
     !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image")
@@ -1095,7 +1158,9 @@ function strategyStatus({
   if (
     rung === "staged_residency" &&
     !(model.id === "krea_2_turbo" && backend === "candle") &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines })
+    (backend !== "candle" ||
+      staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
+    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
   ) {
     return {
       state: "Implemented/unverified",
@@ -1190,7 +1255,7 @@ function strategyStatus({
       (verdict.implementedModes ?? [mode]).includes(mode) &&
       (verdict.implementedTiers ?? [tier]).includes(tier) &&
       (verdict.implementedOverlays ?? [overlay]).includes(overlay) &&
-      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines });
+      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
     if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",
@@ -1466,6 +1531,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 mode,
                 overlay,
                 rung4Survey,
+                manifestById,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -1607,6 +1673,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                         model.id,
                         backend,
                         tier,
+                        mode,
+                        overlay,
                         status.overlayIncompatible === true,
                       ),
                     }

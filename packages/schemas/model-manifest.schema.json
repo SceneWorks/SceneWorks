@@ -6,6 +6,23 @@
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
+    "staticMemoryStrategyCapability": {
+      "type": "object",
+      "required": ["parameters", "overlays"],
+      "additionalProperties": false,
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "description": "Default production parameters written to each Implemented/unverified matrix cell."
+        },
+        "overlays": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["none", "lora", "control"] }
+        }
+      }
+    },
     "samplerKey": {
       "type": "string",
       "enum": [
@@ -893,6 +910,30 @@
                 "type": "object",
                 "description": "Measured candle/CUDA SEQUENTIAL-residency peak VRAM (GB) at 1024², keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this measured sequential peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
+              },
+              "supportsSequentialOffload": {
+                "type": "boolean",
+                "description": "Static provider capability: the registered Candle generator honors LoadSpec sequential residency. Separate from sequentialPeakGb, which records measurement evidence."
+              },
+              "memoryStrategyCapabilities": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Static, unmeasured provider capability declarations. Measurement and promotion remain in calibration evidence; these rows only prevent implemented rungs from being rendered as Missing.",
+                "properties": {
+                  "bounded_decode": { "$ref": "#/$defs/staticMemoryStrategyCapability" },
+                  "bounded_attention": { "$ref": "#/$defs/staticMemoryStrategyCapability" }
+                }
+              },
+              "calibrations": {
+                "$ref": "#/properties/models/items/properties/mlx/properties/calibrations",
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+                    "anchor": "verified_candidates"
+                  }
+                ],
+                "description": "Optional exact per-cell Candle/CUDA calibration bindings. The worker submits only exact authoritative packaged records to the shared selector; absence or any identity mismatch leaves optimized execution unavailable."
               },
               "turboFit": {
                 "$ref": "#/$defs/kreaTurboFit",
