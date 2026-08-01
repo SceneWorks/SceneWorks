@@ -148,7 +148,38 @@
         "parity": {
           "$ref": "#/$defs/parityEvidence"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["evidenceScope"] },
+          "then": { "required": ["runtimeAdmission"] }
+        },
+        {
+          "if": { "required": ["runtimeAdmission"] },
+          "then": { "required": ["evidenceScope"] }
+        },
+        {
+          "if": {
+            "properties": { "evidenceScope": { "const": "exact_request" } },
+            "required": ["evidenceScope"]
+          },
+          "then": {
+            "properties": { "runtimeAdmission": { "const": true } },
+            "required": ["runtimeAdmission", "parity"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "evidenceScope": { "const": "phase_fit_only" } },
+            "required": ["evidenceScope"]
+          },
+          "then": {
+            "properties": { "runtimeAdmission": { "const": false } },
+            "required": ["runtimeAdmission"],
+            "not": { "required": ["parity"] }
+          }
+        }
+      ]
     },
     "loadabilityEvidence": {
       "type": "object",
