@@ -17,18 +17,10 @@
  *     `residentTier` STRICTLY above every tier it claims to apply to (an "exception" that is at or below
  *     the selected tier is not an exception, it is a mistake), and — where the entry publishes per-tier
  *     download variants — only tiers that are actually hosted.
- *  2. Every exception carries EVIDENCE: `measured` needs a number and a source; `unmeasured` needs a
- *     source for the fact and a story that owes the measurement.
- *  3. The RATCHET, keyed per **(model, component)**. `unmeasured` is legal only for the exact pairs
- *     grandfathered below. A NEW model cannot ship an above-tier component without a measured cost, and
- *     neither can an already-amnestied model add an unmeasured row for a component it does not already
- *     declare. Keying on the model alone left ~155 free slots: any of the 31 amnestied ids could add an
- *     unmeasured row for any component it had not yet used, and two ids held amnesty they never used at
- *     all. The set's SIZE is asserted against a committed constant, so any growth is a visible two-place
- *     edit, and a grandfathered key with no matching ledger row is an ERROR — so a promotion to
- *     `measured` (or a deleted row) must delete its amnesty line rather than leaving a live slot behind.
- *     This is what makes AC "a check prevents a new model shipping a component above its tier without a
- *     declared exception" have teeth without pretending the existing debt was measured.
+ *  2. Every exception carries EVIDENCE: a positive legacy scalar, or exact resident bytes for every
+ *     applicable tier plus its isolation method, triage decision, and re-checked cause.
+ *  3. `unmeasured` is forbidden unconditionally. sc-16015 emptied the temporary sc-15799 amnesty; the
+ *     exported empty set and committed zero count make that completed migration mechanically visible.
  *  4. `mlx.denseTextEncoderTier` — the one above-tier mechanism the RUNTIME reads — must be declared in
  *     the manifest AND matched by an exception row. Since sc-15799 deleted the hardcoded
  *     `DENSE_TE_TIER_MODELS` worker registry, the flag is the only way to obtain the carve-out, so a
@@ -66,12 +58,14 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { HEADER_MEASUREMENT_TERMS } from "./tier-integrity-measurement-receipts.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEDGER = "config/tier-integrity.jsonc";
 const SCHEMA = "packages/schemas/tier-integrity.schema.json";
 const MANIFEST = "config/manifests/builtin.models.jsonc";
 const MLX_FIT_GATE = "crates/sceneworks-worker/src/mlx_fit_gate.rs";
+const ROUTING_CATALOG = "crates/sceneworks-core/src/jobs_store/routing/catalog.rs";
 const OUTPUT_JSON = "docs/generated/tier-integrity.json";
 const OUTPUT_MD = "docs/generated/tier-integrity.md";
 
@@ -82,7 +76,7 @@ const OUTPUT_MD = "docs/generated/tier-integrity.md";
  * claiming an ordering against their neighbours is not something this ladder is entitled to do. Mirrors
  * `gen_core::tier_integrity::fidelity_rank`.
  */
-const FIDELITY = { f32: 4, bf16: 3, q8: 2, "int8-convrot": 2, q4: 1, nvfp4: 1 };
+const FIDELITY = { f32: 4, bf16: 3, f16: 3, q8: 2, "int8-convrot": 2, q4: 1, nvfp4: 1 };
 
 const COMPONENTS = new Set([
   "textEncoder",
@@ -108,87 +102,15 @@ const CAUSES = new Set(["packing-exception", "backend-capability", "structural"]
 const BACKENDS = ["mlx", "candle"];
 
 /**
- * `model::component` pairs GRANDFATHERED with an `unmeasured` cost by sc-15799 — the audit found the FACT
- * of an above-tier component in-tree but no isolated cost for it, and estimating one from a per-tier total
- * would be inventing evidence.
- *
- * This list lives HERE and not in the ledger on purpose: editing the ledger must not be able to widen the
- * amnesty. It is keyed per (model, component), not per model: keying per model handed every amnestied id a
- * free slot for every component it did not already declare, which is not a ratchet — `sdxl` +
- * `textEncoder` sailed through with `evidence.source: "nowhere in particular"`.
- *
- * It SHRINKS as each row is promoted to `measured` (sc-16015 empties it). It may grow only for an entry
- * the original audit MISSED — a pre-existing above-tier residency, never a new one — and only as a visible
- * two-place edit, because [`GRANDFATHERED_UNMEASURED_COUNT`] pins the size. A pair NOT on this list may
- * not declare an unmeasured exception at all.
+ * The temporary sc-15799 amnesty remains as an exported EMPTY set so tests and reviewers can see that
+ * sc-16015 closed the bounded debt rather than deleting the guard's history.
  */
-export const GRANDFATHERED_UNMEASURED = new Set([
-  "anima_aesthetic::textEncoder",
-  "anima_aesthetic::vae",
-  "anima_base::textEncoder",
-  "anima_base::vae",
-  "anima_turbo::textEncoder",
-  "anima_turbo::vae",
-  "boogu_image::vae",
-  "boogu_image_edit::vae",
-  "boogu_image_turbo::vae",
-  "chroma1_base::textEncoder",
-  "chroma1_base::vae",
-  "chroma1_flash::textEncoder",
-  "chroma1_flash::vae",
-  "chroma1_hd::textEncoder",
-  "chroma1_hd::vae",
-  "flux2_dev::vae",
-  "flux2_klein_9b::textEncoder",
-  "flux2_klein_9b::vae",
-  "flux2_klein_9b_kv::textEncoder",
-  "flux2_klein_9b_kv::vae",
-  "ideogram_4::vae",
-  "ideogram_4_turbo::vae",
-  "illustrious_xl_v1::vae",
-  "illustrious_xl_v2::vae",
-  "kolors::vae",
-  "krea_2_raw::vae",
-  "krea_2_turbo::vae",
-  "lens::vae",
-  "lens_turbo::vae",
-  "qwen_image::textEncoder",
-  "qwen_image::vae",
-  "qwen_image_edit_2511_lightning::textEncoder",
-  "realvisxl::vae",
-  "realvisxl_lightning::vae",
-  "sana_1600m::vae",
-  "sana_sprint_1600m::vae",
-  "sd3_5_large::textEncoder",
-  "sd3_5_large::vae",
-  "sd3_5_large_turbo::textEncoder",
-  "sd3_5_large_turbo::vae",
-  "sd3_5_medium::textEncoder",
-  "sd3_5_medium::vae",
-  "sensenova_u1_8b::transformerHead",
-  "sensenova_u1_8b::visionTower",
-  "sensenova_u1_8b_fast::transformerHead",
-  "sensenova_u1_8b_fast::visionTower",
-  "sensenova_u1_8b_infographic_v2::transformerHead",
-  "sensenova_u1_8b_infographic_v2::visionTower",
-  "sensenova_u1_8b_infographic_v2_fast::transformerHead",
-  "sensenova_u1_8b_infographic_v2_fast::visionTower",
-  "sensenova_u1_8b_infographic_v3::transformerHead",
-  "sensenova_u1_8b_infographic_v3::visionTower",
-  "sensenova_u1_8b_infographic_v3_fast::transformerHead",
-  "sensenova_u1_8b_infographic_v3_fast::visionTower",
-]);
+export const GRANDFATHERED_UNMEASURED = new Set();
 
 /**
- * The COMMITTED size of [`GRANDFATHERED_UNMEASURED`]. Asserted, so adding an amnesty line is a two-place
- * edit a reviewer cannot miss, and so the set cannot quietly grow to cover a row someone added. Nothing
- * else pinned the list's size before, which made "it may only ever SHRINK" advisory prose.
- *
- * 42 from sc-15799's own audit + 13 the sc-15799 review found it had MISSED (`krea_2_raw::vae` and the
- * twelve SenseNova-U1 rows) − the resolved `lens::textEncoder` row (sc-16014) = 54. sc-16015 drives it
- * to 0.
+ * The committed size of the completed amnesty migration. This must remain zero.
  */
-export const GRANDFATHERED_UNMEASURED_COUNT = 54;
+export const GRANDFATHERED_UNMEASURED_COUNT = 0;
 
 /**
  * Shared marker for the resolved Lens q4/q8 tier-integrity exception. It appears in the ledger source
@@ -279,11 +201,20 @@ function schemaErrors(schema, value, root = schema, at = "$") {
  * Validate the ledger against its schema, the catalog and the worker. Returns
  * `{ errors, rows, unverifiedTiers }`; pure so `--self-test` can drive it with mutated inputs.
  */
-export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema }) {
+export function validate({ ledger, ledgerSource, manifest, mlxFitGate, routingCatalog, schema }) {
   const errors = [];
   const rows = [];
   const unverifiedTiers = [];
   const byId = new Map((manifest.models ?? []).map((entry) => [entry.id, entry]));
+  const routedBackends = new Map();
+  for (const match of (routingCatalog ?? "").matchAll(
+    /ModelCaps::new\("([^"]+)",\s*(true|false),\s*(true|false),/g,
+  )) {
+    routedBackends.set(match[1], new Set([
+      ...(match[2] === "true" ? ["mlx"] : []),
+      ...(match[3] === "true" ? ["candle"] : []),
+    ]));
+  }
   const exceptions = ledger.exceptions ?? [];
 
   if (exceptions.length === 0) {
@@ -310,6 +241,7 @@ export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema })
   // double declaration, which is why this tracks claimed lanes rather than comparing key strings (a
   // naive `model::component::backends` key would let a both-lanes row and an mlx-only row coexist).
   const claimedLanes = new Map();
+  const usedMeasurementReceipts = new Set();
   for (const row of exceptions) {
     const where = `${row.model ?? "?"}/${row.component ?? "?"}`;
     const entry = byId.get(row.model);
@@ -341,10 +273,11 @@ export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema })
         // that says "candle" for an entry with no `candle` block is describing residency on a lane that
         // does not exist for it — undetectable while `backends` was inert.
         for (const lane of lanes) {
-          if (!entry[lane]) {
+          if (!entry[lane] && !routedBackends.get(row.model)?.has(lane)) {
             errors.push(
               `${where}: declares \`backends\` including "${lane}", but catalog entry "${row.model}" ` +
-                `has no \`${lane}\` block, so it does not host that lane. A per-backend claim about a ` +
+                `has neither a \`${lane}\` block nor a ${ROUTING_CATALOG} route, so it does not host ` +
+                `that lane. A per-backend claim about a ` +
                 `lane the entry does not have describes nothing — fix the lane, or drop the key to ` +
                 `claim both.`,
             );
@@ -419,29 +352,105 @@ export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema })
       errors.push(`${where}: evidence.source must cite where the fact is recorded in-tree.`);
     }
     if (evidence.state === "measured") {
-      const cost = evidence.costGb ?? evidence.costBytes;
-      if (typeof cost !== "number" || !Number.isFinite(cost) || cost <= 0) {
+      const scalarCost = evidence.costGb ?? evidence.costBytes;
+      const byTier = evidence.costBytesByTier;
+      const hasScalar = typeof scalarCost === "number" && Number.isFinite(scalarCost) && scalarCost > 0;
+      const hasByTier = byTier !== null && typeof byTier === "object" && !Array.isArray(byTier);
+      if (!hasScalar && !hasByTier) {
         errors.push(
-          `${where}: evidence.state "measured" requires a positive costGb/costBytes. An exception ` +
+          `${where}: evidence.state "measured" requires a positive costGb/costBytes or an exact ` +
+            `costBytesByTier map. An exception ` +
             `whose cost nobody knows is undeclared in the only way that matters.`,
         );
       }
-    } else if (evidence.state === "unmeasured") {
-      if (!evidence.owedBy) {
-        errors.push(`${where}: an unmeasured exception must name the story that owes the measurement.`);
-      }
-      if (!GRANDFATHERED_UNMEASURED.has(key)) {
-        errors.push(
-          `${where}: UNMEASURED exceptions are only permitted for the (model, component) PAIRS ` +
-            `grandfathered by sc-15799. "${key}" is not one of them, so this component must ship a ` +
-            `MEASURED cost — neither a new model nor an already-amnestied one may add above-tier ` +
-            `residency on trust for a component it does not already declare. (If this is a genuine ` +
-            `pre-existing residency the audit missed, that is a finding: measure it, or add the pair ` +
-            `AND bump GRANDFATHERED_UNMEASURED_COUNT so the growth is reviewed.)`,
+      if (hasByTier) {
+        const receiptKey = `${row.model}::${row.component}::${lanes.join("+")}`;
+        const terms = HEADER_MEASUREMENT_TERMS[receiptKey];
+        if (!terms) {
+          errors.push(
+            `${where}: exact header measurement has no independent receipt for ${receiptKey}. ` +
+              `Record selected element counts and runtime widths in ` +
+              `scripts/tier-integrity-measurement-receipts.mjs.`,
+          );
+        } else {
+          usedMeasurementReceipts.add(receiptKey);
+          const receiptBytes = terms.reduce(
+            (sum, [elementCount, bytesPerElement]) => sum + elementCount * bytesPerElement,
+            0,
+          );
+          for (const [tier, cost] of Object.entries(byTier)) {
+            if (cost !== receiptBytes) {
+              errors.push(
+                `${where}: costBytesByTier.${tier}=${cost} does not reproduce the independent ` +
+                  `safetensors-header receipt ${receiptKey} (${receiptBytes} bytes).`,
+              );
+            }
+          }
+        }
+        const expectedTiers = [...new Set(applies)].sort();
+        const measuredTiers = Object.keys(byTier).sort();
+        if (JSON.stringify(measuredTiers) !== JSON.stringify(expectedTiers)) {
+          errors.push(
+            `${where}: costBytesByTier keys ${JSON.stringify(measuredTiers)} must exactly match ` +
+              `appliesToTiers ${JSON.stringify(expectedTiers)}. Every applicable tier needs an isolated ` +
+              `cost, and unrelated tiers must not be smuggled into the row.`,
+          );
+        }
+        for (const [tier, cost] of Object.entries(byTier)) {
+          if (typeof cost !== "number" || !Number.isFinite(cost) || cost <= 0) {
+            errors.push(`${where}: costBytesByTier.${tier} must be a positive finite byte count.`);
+          }
+        }
+        if (typeof evidence.isolation !== "string" || evidence.isolation.trim().length < 20) {
+          errors.push(`${where}: an exact per-tier measurement must record how the component was isolated.`);
+        }
+        const artifact = evidence.source?.match(
+          /isolated artifact: ([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)@([0-9a-f]{40}):/,
         );
+        if (!artifact) {
+          errors.push(
+            `${where}: an exact per-tier measurement must cite an immutable ` +
+              `"isolated artifact: owner/repo@<40-hex-revision>:path" source.`,
+          );
+        } else {
+          const [, repo, revision] = artifact;
+          const pinned = (entry.downloads ?? []).some(
+            (download) => download.repo === repo && download.revision === revision,
+          );
+          if (!pinned) {
+            errors.push(
+              `${where}: measurement source ${repo}@${revision} is not one of this catalog entry's ` +
+                `pinned downloads. The measured artifact and the shipping artifact must move together.`,
+            );
+          }
+        }
+        if (!["measure", "eliminate"].includes(evidence.triageDecision)) {
+          errors.push(`${where}: a promoted row must record triageDecision "measure" or "eliminate".`);
+        }
+        if (evidence.triageDecision === "eliminate") {
+          if (!/^sc-[1-9][0-9]*$/.test(evidence.eliminationStory ?? "")) {
+            errors.push(`${where}: triageDecision "eliminate" must name its eliminationStory.`);
+          }
+        } else if (evidence.eliminationStory !== undefined) {
+          errors.push(`${where}: eliminationStory is only valid when triageDecision is "eliminate".`);
+        }
+        if (evidence.reviewedCause !== row.cause) {
+          errors.push(
+            `${where}: reviewedCause must equal the re-checked row cause "${row.cause}", got ` +
+              `${JSON.stringify(evidence.reviewedCause)}.`,
+          );
+        }
+        if (typeof evidence.triageNote !== "string" || evidence.triageNote.trim().length < 20) {
+          errors.push(`${where}: eliminate-vs-measure triage needs a substantive triageNote.`);
+        }
       }
+    } else if (evidence.state === "unmeasured") {
+      errors.push(
+        `${where}: UNMEASURED exceptions are forbidden after sc-16015. Above-tier residency must ship ` +
+          `with an isolated measured cost, or be eliminated before the catalog entry ships.`,
+      );
     } else {
-      errors.push(`${where}: evidence.state must be "measured" or "unmeasured".`);
+      errors.push(`${where}: evidence.state must be "measured".`);
     }
 
     rows.push({
@@ -454,34 +463,32 @@ export function validate({ ledger, ledgerSource, manifest, mlxFitGate, schema })
       reason: row.reason,
       evidenceState: evidence.state,
       costGb: evidence.costGb ?? null,
+      costBytes: evidence.costBytes ?? null,
+      costBytesByTier: evidence.costBytesByTier ?? null,
+      isolation: evidence.isolation ?? null,
+      triageDecision: evidence.triageDecision ?? null,
+      reviewedCause: evidence.reviewedCause ?? null,
+      triageNote: evidence.triageNote ?? null,
       source: evidence.source ?? null,
-      owedBy: evidence.owedBy ?? null,
       note: evidence.note ?? null,
     });
   }
 
-  // (3b) The amnesty list must not outlive the debt. Every grandfathered pair needs a live UNMEASURED
-  // ledger row: once a row is promoted to `measured` (or deleted), its amnesty line is a free slot
-  // somebody could later fill without review, so removing it is part of the promotion.
-  const unmeasuredKeys = new Set(
-    exceptions
-      .filter((row) => (row.evidence ?? {}).state === "unmeasured")
-      .map((row) => `${row.model}::${row.component}`),
-  );
-  for (const grandfathered of [...GRANDFATHERED_UNMEASURED].sort()) {
-    if (!unmeasuredKeys.has(grandfathered)) {
+  for (const receiptKey of Object.keys(HEADER_MEASUREMENT_TERMS)) {
+    if (!usedMeasurementReceipts.has(receiptKey)) {
       errors.push(
-        `GRANDFATHERED_UNMEASURED still amnesties "${grandfathered}", but ${LEDGER} has no unmeasured ` +
-          `exception for it. A promotion to \`measured\` (or a deleted row) must delete its amnesty ` +
-          `line — otherwise the slot stays open for an unreviewed row. The list may only shrink.`,
+        `scripts/tier-integrity-measurement-receipts.mjs has stale receipt ${receiptKey} with no ` +
+          `matching exact ledger measurement.`,
       );
     }
   }
-  if (GRANDFATHERED_UNMEASURED.size !== GRANDFATHERED_UNMEASURED_COUNT) {
+
+  // (3b) The completed migration remains pinned at an empty set and a zero count.
+  if (GRANDFATHERED_UNMEASURED.size !== 0 || GRANDFATHERED_UNMEASURED_COUNT !== 0) {
     errors.push(
-      `GRANDFATHERED_UNMEASURED has ${GRANDFATHERED_UNMEASURED.size} entries but ` +
-        `GRANDFATHERED_UNMEASURED_COUNT is ${GRANDFATHERED_UNMEASURED_COUNT}. The size is committed on ` +
-        `purpose: changing the amnesty must be a visible two-place edit, not a one-line addition.`,
+      `The sc-15799 unmeasured amnesty is closed: GRANDFATHERED_UNMEASURED must stay empty and ` +
+        `GRANDFATHERED_UNMEASURED_COUNT must stay 0 (got ${GRANDFATHERED_UNMEASURED.size} and ` +
+        `${GRANDFATHERED_UNMEASURED_COUNT}).`,
     );
   }
 
@@ -650,6 +657,7 @@ function renderJson({ rows, unverifiedTiers }) {
     {
       generatedBy: "scripts/check-tier-integrity.mjs",
       story: "sc-15799",
+      measurementStory: "sc-16015",
       invariant:
         "No component is resident above the user's selected quant tier unless a declared, measured exception says otherwise.",
       normativeHome: "docs/memory-strategy-contract.md#tier-integrity",
@@ -684,14 +692,10 @@ function renderMarkdown({ rows, unverifiedTiers }) {
     `Declared exceptions: **${rows.length}** — ${measured.length} measured, ${unmeasured.length} unmeasured.`,
     "",
     "Above-tier residency is not rare. On a q4 or q8 tier the great majority of image entries keep a",
-    "VAE, a text encoder, or both resident at bf16 or f32. Every component that meets the declaration",
+    "VAE, a text encoder, or both resident at f16, bf16, or f32. Every component that meets the declaration",
     "THRESHOLD stated in `config/tier-integrity.jsonc`'s header is declared below with the in-tree",
-    "citation for the fact; the unmeasured rows have no isolated component cost in the tree yet and name",
-    "the story that owes it. `scripts/check-tier-integrity.mjs` refuses an unmeasured exception for any",
-    "`(model, component)` PAIR not grandfathered by sc-15799 — per pair, not per model, so an amnestied",
-    "entry cannot add one for a component it does not already declare — pins the amnesty set's SIZE",
-    "against a committed constant, and errors on a grandfathered pair whose row is gone. sc-16015 owns",
-    "emptying it.",
+    "citation for the fact and the isolated cost. `scripts/check-tier-integrity.mjs` rejects every",
+    "unmeasured exception unconditionally: sc-16015 emptied the temporary sc-15799 amnesty.",
     "",
     "**The same declared tier can yield different residency per backend**, so the `backends` column is",
     "part of each row's identity, not a footnote. The two ports make independent dtype decisions: the",
@@ -701,14 +705,20 @@ function renderMarkdown({ rows, unverifiedTiers }) {
     "really is uniformly q4. Such a component is declared as one row PER LANE. A row listing both lanes",
     "claims the residency holds identically on both.",
     "",
-    "| model | component | backends | resident at | above tier on | cause | cost (GB) | evidence |",
+    "| model | component | backends | resident at | above tier on | cause | cost by selected tier (GiB) | evidence |",
     "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
   for (const row of rows) {
-    const cost =
-      row.evidenceState === "measured" && row.costGb !== null
-        ? row.costGb.toFixed(3).replace(/\.?0+$/, "")
-        : `_unmeasured_ (${row.owedBy ?? "no owner"})`;
+    const formatGiB = (bytes) => (bytes / 2 ** 30).toFixed(3).replace(/\.?0+$/, "");
+    const cost = row.costBytesByTier
+      ? Object.entries(row.costBytesByTier)
+          .map(([tier, bytes]) => `${tier}: ${formatGiB(bytes)}`)
+          .join("; ")
+      : row.costBytes !== null
+        ? formatGiB(row.costBytes)
+        : row.costGb !== null
+          ? row.costGb.toFixed(3).replace(/\.?0+$/, "")
+          : "_missing_";
     lines.push(
       `| \`${row.model}\` | ${row.component} | ${row.backends.join(" + ")} | ${row.residentTier} | ${row.appliesToTiers.join(", ")} | ${row.cause} | ${cost} | ${row.source ?? ""} |`,
     );
@@ -740,10 +750,11 @@ function renderMarkdown({ rows, unverifiedTiers }) {
 }
 
 async function readInputs() {
-  const [ledgerBody, manifestBody, mlxFitGate, schemaBody] = await Promise.all([
+  const [ledgerBody, manifestBody, mlxFitGate, routingCatalog, schemaBody] = await Promise.all([
     readFile(path.join(ROOT, LEDGER), "utf8"),
     readFile(path.join(ROOT, MANIFEST), "utf8"),
     readFile(path.join(ROOT, MLX_FIT_GATE), "utf8"),
+    readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
     readFile(path.join(ROOT, SCHEMA), "utf8"),
   ]);
   return {
@@ -751,6 +762,7 @@ async function readInputs() {
     ledgerSource: ledgerBody,
     manifest: parseJsonc(manifestBody),
     mlxFitGate,
+    routingCatalog,
     schema: JSON.parse(schemaBody),
   };
 }
@@ -816,49 +828,24 @@ async function selfTest() {
       reason: "A newly added model that quietly keeps its decoder dense on a packed tier.",
       evidence: { state: "unmeasured", source: "somewhere", owedBy: "sc-99999" },
     });
-    expect("ratchet", validate({ ...inputs, ledger }).errors, "not one of them");
-  }
-
-  // 3b. The RATCHET, per component: an ALREADY-AMNESTIED model adding an unmeasured row for a component
-  //     it does not already declare. Keyed per MODEL, this passed with `errors: 0` — 31 amnestied ids x
-  //     the components they had not declared left ~155 open slots.
-  //
-  //     The victim must be a model that genuinely HOLDS amnesty for a DIFFERENT component, or this
-  //     mutation is just mutation 3 again. `boogu_image` is amnestied for `vae` and has no `textEncoder`
-  //     row, so `boogu_image::textEncoder` is exactly the "already-amnestied, new component" case. (This
-  //     used `sdxl`, which holds NO amnesty pair at all — so despite its label it only ever exercised
-  //     the non-amnestied path, and reverting the ratchet to per-MODEL keying would not have failed it.
-  //     Found by the sc-15799 review.)
-  {
-    const ledger = clone();
-    ledger.exceptions.push({
-      model: "boogu_image",
-      component: "textEncoder",
-      residentTier: "bf16",
-      appliesToTiers: ["q4", "q8"],
-      cause: "packing-exception",
-      reason: "An amnestied entry quietly adding a component the audit never declared for it.",
-      evidence: { state: "unmeasured", source: "nowhere in particular", owedBy: "sc-99999" },
-    });
     expect(
-      "per-component ratchet",
+      "unconditional measurement",
       validate({ ...inputs, ledger }).errors,
-      'boogu_image::textEncoder" is not one of them',
+      "UNMEASURED exceptions are forbidden",
     );
   }
 
-  // 3c. An amnesty line that outlived its row: promoting a row to `measured` must delete its line, or the
-  //     slot stays open for an unreviewed addition.
+  // 3b. A promoted per-tier measurement cannot omit one of the tiers it claims to cover.
   {
     const ledger = clone();
     const row = ledger.exceptions.find(
-      (item) => item.model === "krea_2_raw" && item.component === "vae",
+      (item) => item.model === "qwen_image" && item.component === "vae",
     );
-    row.evidence = { state: "measured", costGb: 0.5, source: "somewhere real" };
+    delete row.evidence.costBytesByTier.q8;
     expect(
-      "orphaned amnesty line",
+      "per-tier measurement coverage",
       validate({ ...inputs, ledger }).errors,
-      'still amnesties "krea_2_raw::vae"',
+      "must exactly match appliesToTiers",
     );
   }
 
@@ -912,16 +899,16 @@ async function selfTest() {
     expect("lane overlap", validate({ ...inputs, ledger }).errors, 'declared twice for "mlx"');
   }
 
-  // 7b. A row whose declared lane the ENTRY DOES NOT HAVE. `sana_1600m` is mlx-only (no `candle` block),
-  //     so claiming its dense VAE on candle describes residency on a lane that does not exist for it.
-  //     Nothing caught this while `backends` was a defaulted passthrough.
+  // 7b. A row whose declared lane the ENTRY DOES NOT HAVE. `z_image_edit` has neither a candle block
+  //     nor a generic Candle ModelCaps route, so a fabricated candle claim describes no hosted lane.
   {
     const ledger = clone();
     const row = ledger.exceptions.find(
       (item) => item.model === "sana_1600m" && item.component === "vae",
     );
+    row.model = "z_image_edit";
     row.backends = ["candle"];
-    expect("wrong lane", validate({ ...inputs, ledger }).errors, "has no `candle` block");
+    expect("wrong lane", validate({ ...inputs, ledger }).errors, "does not host that lane");
   }
 
   // 8. The ledger's own SCHEMA is applied. A misspelled key (`backend` for `backends`) used to be a
@@ -1002,7 +989,7 @@ async function main() {
     const measured = result.rows.filter((row) => row.evidenceState === "measured").length;
     console.log(
       `tier integrity OK: ${result.rows.length} declared exceptions (${measured} measured, ` +
-        `${result.rows.length - measured} unmeasured and owned).`,
+        `${result.rows.length - measured} unmeasured).`,
     );
     return;
   }

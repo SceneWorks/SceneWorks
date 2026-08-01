@@ -7050,6 +7050,7 @@
           // worker packs this ON-DEVICE into the q4/q8/bf16 tier matrix (convert-at-install).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-base-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",
@@ -7067,6 +7068,7 @@
           // the variant DiT + shared Qwen3 TE + Qwen-Image VAE, never the ~30 GB bare repo.
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-base-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",
@@ -7169,6 +7171,7 @@
           // macOS convert source (sc-10517).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",
@@ -7182,6 +7185,7 @@
           // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",
@@ -7270,6 +7274,7 @@
           // macOS convert source (sc-10517).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",
@@ -7283,6 +7288,7 @@
           // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
+          "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
           "files": [
             "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
             "split_files/text_encoders/qwen_3_06b_base.safetensors",

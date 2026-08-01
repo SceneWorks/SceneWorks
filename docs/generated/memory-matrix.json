@@ -1,12 +1,12 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f6be568ce78b5f73723405ac10b20434157d547f12e8f5e3d71c7a841f4e634b",
+    "sceneWorksRevision": "source-tree:f6111b4f1d9fd632ec7dde0d2a3c5a8fc653e2a617f6ce0fed6b54ee4764eff2",
     "inferenceRevision": "f522fd1f646d147e513054cbb3abe8410a91c836",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "dd55e9743ab207916516054db09e211884a67cd8e3006aa37ad5c8b1550ae89d"
+        "sha256": "48115d296eb76e0151b16616d8ae226d85058d761169444fb8d43fd1c4a72856"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -1339,7 +1339,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1393,7 +1393,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1465,7 +1465,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1525,7 +1525,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1589,7 +1589,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1643,7 +1643,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1697,7 +1697,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1769,7 +1769,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1829,7 +1829,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1893,7 +1893,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -1947,7 +1947,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2001,7 +2001,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2073,7 +2073,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2133,7 +2133,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2197,7 +2197,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2251,7 +2251,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2305,7 +2305,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2377,7 +2377,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2437,7 +2437,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2501,7 +2501,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2555,7 +2555,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2609,7 +2609,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2681,7 +2681,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2741,7 +2741,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2805,7 +2805,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2859,7 +2859,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2913,7 +2913,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -2985,7 +2985,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -3045,7 +3045,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
@@ -3109,7 +3109,7 @@
         "loadability": [
           {
             "repository": "circlestone-labs/Anima",
-            "revision": null,
+            "revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
             "variant": null
           }
         ],
