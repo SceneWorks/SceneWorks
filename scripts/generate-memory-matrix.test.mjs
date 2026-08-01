@@ -808,7 +808,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15512:mlx", "15517:candle"],
+    ["15510:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
   assert.ok(
     matrix.rung4SurveyRows.every(
@@ -944,20 +944,50 @@ test("an implemented family is Implemented/unverified only where the provider ac
     "Lens adapter overlays remain exactly Missing",
   );
 
-  // Candle Krea's contract is gated on the turbo descriptor id, and its edit modes route to
-  // descriptors that do not return it. A family- or entry-level claim alone would over-report both.
-  const krea = implemented.filter((cell) => cell.backend === "candle");
-  assert.ok(krea.every((cell) => cell.modelId === "krea_2_turbo"));
-  assert.ok(krea.every((cell) => cell.mode === "text_to_image"));
+  // MLX Krea registers the contract on all four base descriptors, so both catalog entries and both
+  // modes are covered at every measured tier. Low-rank overlays replay; the distinct pose-control
+  // provider remains outside this claim.
+  const mlxKrea = implemented.filter(
+    (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15517,
+  );
+  assert.deepEqual(
+    [...new Set(mlxKrea.map((cell) => cell.modelId))].sort(),
+    ["krea_2_raw", "krea_2_turbo"],
+  );
+  assert.deepEqual([...new Set(mlxKrea.map((cell) => cell.mode))].sort(), ["edit_image", "text_to_image"]);
+  assert.ok(mlxKrea.every((cell) => ["none", "lora"].includes(cell.overlay)));
+  assert.ok(
+    mlxKrea.every(
+      (cell) =>
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.rung4Survey.requestPeak === "moves",
+    ),
+  );
+  assert.equal(
+    implemented.filter(
+      (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15517 && cell.overlay === "control",
+    ).length,
+    0,
+    "the separately registered Krea pose-control route does not inherit the base DiT claim",
+  );
+
+  // Candle Krea remains narrower: its contract is gated on the turbo descriptor id, and its edit
+  // modes route to descriptors that do not return it.
+  const candleKrea = implemented.filter(
+    (cell) => cell.backend === "candle" && cell.owningFamilyStory === 15517,
+  );
+  assert.ok(candleKrea.every((cell) => cell.modelId === "krea_2_turbo"));
+  assert.ok(candleKrea.every((cell) => cell.mode === "text_to_image"));
   assert.equal(
     matrix.cells.filter(
       (cell) =>
+        cell.backend === "candle" &&
         cell.modelId === "krea_2_raw" &&
         cell.rung === "bounded_transformer_residency" &&
         cell.state === "Implemented/unverified",
     ).length,
     0,
-    "krea_2_raw does not get its sibling's contract",
+    "Candle krea_2_raw does not get its sibling's contract",
   );
 });
 
@@ -1124,6 +1154,17 @@ test("overlay incompatibility is a provider fact, applied where evidenced and no
   );
   assert.ok(zImageOverlay.length > 0);
   assert.ok(zImageOverlay.every((cell) => cell.state === "Implemented/unverified"));
+
+  // MLX Krea has the same forward-time-residual property, now proven with real LoRA and LoKr A/Bs.
+  const mlxKreaOverlay = matrix.cells.filter(
+    (cell) =>
+      cell.owningFamilyStory === 15517 &&
+      cell.backend === "mlx" &&
+      cell.rung === "bounded_transformer_residency" &&
+      cell.overlay === "lora",
+  );
+  assert.ok(mlxKreaOverlay.length > 0);
+  assert.ok(mlxKreaOverlay.every((cell) => cell.state === "Implemented/unverified"));
 });
 
 test("a Structurally N/A survey verdict without structural evidence is rejected", async () => {

@@ -737,8 +737,19 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "A uniform 28-block single-stream trunk plus a text-fusion front-end of its own (2 layerwise + 2 refiner blocks) that sits outside the windowed run.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "krea_2_turbo",
+            "krea_2_raw"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The four MLX base descriptors (Turbo, Raw, and both edit routes) rebuild exact windows of the shared 28-block DiT through `mlx_gen::block_residency::run_windowed`. The text-fusion front-end remains resident; pose control retains its separate seven-block branch and contract.",
           "blockStacks": [
             {
               "name": "text_fusion",
@@ -771,14 +782,38 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/control.rs",
               "reason": "The pose-control route adds `Krea2ControlBranch { blocks: Vec<ControlBlock> }`, each a full copy of a base SingleStreamBlock plus a zero-init `proj_out`. The depth is inferred from the overlay checkpoint (`infer_num_blocks`, expected `DEFAULT_N_CONTROL_BLOCKS` = 7) rather than fixed in config."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/transformer/mod.rs",
+              "reason": "`run_blocks` delegates the 28-block schedule to `mlx_gen::block_residency::run_windowed`, materializes each exact Krea block from a fresh lazy weights view, evaluates the carried state, and releases the window before advancing."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
+              "reason": "The per-provider contract publishes DiT window size 1 only for a re-openable directory with Sequential offload and DeferredMaterialization; all q4/q8/bf16 base tiers and real LoRA/LoKr overlays reduced the measured request peak."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_stream.rs",
+              "reason": "`KreaBlockStream` reconstructs one `SingleStreamBlock`, drains the accessed tensor set, and replays packed/dense quantization plus captured forward-time adapters."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/tests/block_residency_real_weights.rs",
+              "reason": "The ignored Apple/Metal harness measures conditioning, denoise, decode, and their request maximum against an otherwise-identical fully resident 28-block attribution control, while asserting byte-identical output."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "The Candle twin's measurements are Candle's; no MLX rung-4 run exists for Krea."
+            "finding": "moves",
+            "reason": "At 512x512/1 step on real Turbo weights, window 1 reduced the full request peak from 11.928 to 5.555 GiB (q4), 17.748 to 5.715 GiB (q8), and 28.660 to 8.383 GiB (bf16). Real q4 LoRA and LoKr controls moved 12.141 to 5.768 and 13.383 to 7.010 GiB. Every paired image was byte-identical.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-krea/tests/block_residency_real_weights.rs",
+                "reason": "Sequential + Deferred resident-stack versus window-1 A/B, with the request peak computed as max(conditioning, denoise, decode) rather than using denoise alone."
+              }
+            ]
           },
           "findings": [
-            "The MLX Krea provider has no rung-4 path while its Candle twin does. It is the only family whose implemented backend is CANDLE — Z-Image is the mirror case, implemented on MLX and absent on Candle — so between them the two shipped implementations sit on opposite backends and neither family is covered on both."
+            "Krea is now implemented on both backends, but the contracts are backend-specific: MLX admits the two catalog entries and every base/edit descriptor at q4/q8/bf16, while Candle remains turbo text-to-image only.",
+            "MLX low-rank overlays are compatible. Real LoRA and LoKr A/B runs were byte-identical because the stream captures and replays forward-time residual adapters per block. Dense `.diff`/`.diff_b` patches remain excluded at contract construction because they irreversibly mutate the resident base and cannot be reconstructed from the pristine snapshot.",
+            "The MLX pose-control provider keeps its distinct seven-block branch and memory contract; `implementedOverlays` excludes control cells so base-DiT evidence cannot be misreported as control-route rung-4 coverage."
           ]
         },
         "candle": {
