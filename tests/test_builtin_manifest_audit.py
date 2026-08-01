@@ -1485,7 +1485,9 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     } == {
         ("q4", 768, 768),
         ("q4", 1024, 1024),
+        ("q8", 768, 768),
         ("q8", 1024, 1024),
+        ("bf16", 768, 768),
         ("bf16", 1024, 1024),
     }
     for record in turbo_fit["evidenceRecords"]:
@@ -1496,7 +1498,12 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "streamedBlocks",
         }
         assert set(record["observedPeaksGb"]) == set(record["predictedPeaksGb"])
-        assert record["parity"]["result"] == "passed"
+        if record["evidenceScope"] == "exact_request":
+            assert record["parity"]["result"] == "passed"
+        else:
+            assert record["evidenceScope"] == "phase_fit_only"
+            assert "parity" not in record
+            assert set(record["observedPhasesGb"]) == set(record["predictedPeaksGb"])
         assert len(record["sceneWorksCommit"]) == 40
         assert len(record["inferenceCommit"]) == 40
     assert turbo_fit["maxMeasuredPixels"] == 1024 * 1024
@@ -1512,7 +1519,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "threeStage": {
             "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
             "denoise": {"fixedGb": 23.83, "perMpxGb": 7.90},
-            "decode": {"fixedGb": 26.55, "perMpxGb": 0.00},
+            "decode": {"fixedGb": 26.47, "perMpxGb": 0.08},
         },
         "tiledVae": {
             "text": {"fixedGb": 8.80, "perMpxGb": 0.00},
@@ -1530,6 +1537,44 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
             "decode": {"fixedGb": 0.30, "perMpxGb": 3.27},
         },
     }
+
+
+def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
+    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them."""
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    curves = krea["candle"]["turboFit"]["phaseCurvesByTier"]
+    records = krea["candle"]["turboFit"]["evidenceRecords"]
+    measured = {
+        tier: {
+            rung: tuple(
+                next(
+                    record["observedPhasesGb"][rung]
+                    for record in records
+                    if record["tier"] == tier and record["width"] == edge
+                )
+                for edge in (768, 1024)
+            )
+            for rung in ("threeStage", "tiledVae", "chunkedAttention", "streamedBlocks")
+        }
+        for tier in ("q8", "bf16")
+    }
+    megapixel_delta = (1024**2 - 768**2) / 1_000_000
+
+    for tier, rungs in measured.items():
+        for rung, (lower, upper) in rungs.items():
+            for phase in ("text", "denoise", "decode"):
+                measured_slope = max(
+                    0.0,
+                    (upper[phase] - lower[phase]) / megapixel_delta,
+                )
+                fitted_slope = curves[tier][rung][phase]["perMpxGb"]
+                assert measured_slope <= fitted_slope + 1e-9
+                assert fitted_slope < measured_slope + 0.02, (
+                    f"{tier}.{rung}.{phase} slope {fitted_slope:.4f} must be the "
+                    f"conservative two-decimal fit of same-tier measured slope "
+                    f"{measured_slope:.4f}"
+                )
 
 
 def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
@@ -1594,6 +1639,16 @@ def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
     assert_rejected(
         "unexecuted parity",
         lambda fit: fit["evidenceRecords"][0]["parity"].__setitem__("result", "not_run"),
+    )
+    assert_rejected(
+        "exact request without geometry-specific parity",
+        lambda fit: fit["evidenceRecords"][0].pop("parity"),
+    )
+    assert_rejected(
+        "phase-fit record pretending tier parity is geometry-specific",
+        lambda fit: fit["evidenceRecords"][2].__setitem__(
+            "parity", copy.deepcopy(fit["evidenceRecords"][3]["parity"])
+        ),
     )
 
 

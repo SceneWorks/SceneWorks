@@ -346,6 +346,43 @@ def test_matrix_schema_rejects_malformed_evidence_records():
         )
     )
     rejected(
+        lambda evidence: evidence["historicalVerification"][0].__setitem__(
+            "runtimeAdmission", "unknown"
+        )
+    )
+    rejected(
+        lambda evidence: evidence["historicalVerification"][0].__setitem__(
+            "runtimeAdmission", False
+        )
+    )
+    rejected(
+        lambda evidence: evidence["historicalVerification"][0].pop("parity")
+    )
+    rejected(
+        lambda evidence: evidence["historicalVerification"][0].pop(
+            "runtimeAdmission"
+        )
+    )
+    rejected(
+        lambda evidence: evidence["historicalVerification"][0].pop(
+            "evidenceScope"
+        )
+    )
+
+    def phase_fit_with_runtime_admission(evidence):
+        record = evidence["historicalVerification"][0]
+        record["evidenceScope"] = "phase_fit_only"
+        record.pop("parity")
+
+    rejected(phase_fit_with_runtime_admission)
+
+    def phase_fit_with_parity(evidence):
+        record = evidence["historicalVerification"][0]
+        record["evidenceScope"] = "phase_fit_only"
+        record["runtimeAdmission"] = False
+
+    rejected(phase_fit_with_parity)
+    rejected(
         lambda evidence: evidence["strategyParameterVerification"][0].__setitem__(
             "geometry", "up to 1024"
         )
