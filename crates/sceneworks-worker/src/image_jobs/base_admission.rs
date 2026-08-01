@@ -360,16 +360,17 @@ pub(super) async fn admit_candle_load_spec_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn catalog_evidence_requires_a_per_tier_row_not_the_static_minimum() {
-        let static_only = serde_json::json!({ "candle": { "minMemoryGb": 24 } })
+        let static_only = json!({ "candle": { "minMemoryGb": 24 } })
             .as_object()
             .unwrap()
             .clone();
         assert!(!has_tier_peak_row(&static_only, "q4"));
 
-        let evidenced = serde_json::json!({
+        let evidenced = json!({
             "candle": { "vramGbByTier": { "q4": 18.0, "q8": 24.0 } }
         })
         .as_object()
@@ -403,7 +404,7 @@ mod tests {
     fn tensor_prefix_accounting_counts_only_selected_subtrees() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("model.safetensors");
-        let header = serde_json::json!({
+        let header = json!({
             "visual.block.weight": { "dtype": "F32", "shape": [2], "data_offsets": [0, 8] },
             "language_model.weight": { "dtype": "F32", "shape": [4], "data_offsets": [8, 24] },
             "encoder.conv.weight": { "dtype": "F32", "shape": [3], "data_offsets": [24, 36] },
