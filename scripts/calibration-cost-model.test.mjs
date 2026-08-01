@@ -266,7 +266,12 @@ test("the collapsing rule maps cells 1:1 to records and counts sessions rather t
   // The declared axes must stay in sync with what the numbers above actually demonstrate.
   const verdicts = Object.fromEntries(COLLAPSING_AXES.map((axis) => [axis.axis, axis.verdict]));
   assert.equal(verdicts.cell, "NOT collapsed");
-  assert.equal(verdicts.geometry, "collapsed");
+  // sc-16060: geometry collapses for the implementation claim and does NOT for the characterization
+  // claim. A verdict that still read a bare "collapsed" would be re-asserting the conflation this
+  // axis was rewritten to remove, so the two halves are matched independently rather than pinned as
+  // one opaque string.
+  assert.match(verdicts.geometry, /^collapsed for the implementation claim/);
+  assert.match(verdicts.geometry, /NOT collapsed for the characterization claim$/);
 });
 
 /**

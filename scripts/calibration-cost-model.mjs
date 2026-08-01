@@ -294,19 +294,26 @@ export const FIT_SENSITIVITY_GRID = {
 export const COLLAPSING_AXES = [
   {
     axis: "geometry",
-    verdict: "collapsed",
-    factor: "already applied by the matrix generator",
+    verdict: "collapsed for the implementation claim; NOT collapsed for the characterization claim",
+    factor: "1x on `state`; `geometryPointsPerFit` per curve on `memoryCharacterization`",
     rule:
-      "A cell carries a geometry ENVELOPE, not a geometry. One record binds the whole envelope: " +
-      "`calibrationBinding` accepts any record whose `width x height` appears in " +
-      "`cell.geometryEnvelope.resolutions`, and only rejects batch/frames != 1.",
-    citation: "scripts/generate-memory-matrix.mjs#calibrationBinding (resolution/batch/frames checks)",
+      "A cell carries a geometry ENVELOPE, not a geometry — and SC-16060 split what that licenses " +
+      "into the two claims it was conflating. `state` (does the rung WORK) is not geometry-sensitive, " +
+      "so one record binds the envelope and `calibrationBinding` accepts any record whose " +
+      "`width x height` appears in `cell.geometryEnvelope.resolutions`. " +
+      "`cells[].memoryCharacterization` (are its PEAKS known across the envelope) is geometry-" +
+      "sensitive by construction, and reads `point` on one measured geometry, `fitted` only on two " +
+      "or more.",
+    citation:
+      "scripts/generate-memory-matrix.mjs#calibrationBinding (implementation claim) and " +
+      "#memoryCharacterization (characterization claim); vocabulary defined in the artifact's `claims`",
     caveat:
-      "This is ACCEPTANCE, not evidence. The manifest states the opposite policy in its own words " +
-      "— evidenceRecords are 'exact request envelopes, not permission to interpolate: a geometry " +
-      "absent here is Implemented/unverified even when a phase curve can predict it'. The binding " +
-      "logic is the more permissive of the two, so this collapse is only sound if the envelope " +
-      "claim is backed by a fitted curve rather than by one measured point.",
+      "The manifest's evidenceRecords comment — 'exact request envelopes, not permission to " +
+      "interpolate: a geometry absent here is Implemented/unverified even when a phase curve can " +
+      "predict it' — is a statement about the CHARACTERIZATION claim, and is now true as written: a " +
+      "geometry absent from the evidence is absent from `measuredGeometries` and cannot lift the " +
+      "cell past `point`. It was only ever in tension with the binding rule while both claims shared " +
+      "one field.",
   },
   {
     axis: "strategyParameters",
@@ -1170,16 +1177,20 @@ export function fitVersusExhaustive(cells, kreaPrecedent, parameters = DEFAULT_P
         sessions: exhaustiveExactGeometry,
         providerInvocations: exhaustiveExactGeometry * rungSpan,
         policy:
-          "Measure every advertised resolution. This is what the manifest's own evidenceRecords " +
-          "comment demands: 'exact request envelopes, not permission to interpolate'.",
+          "Measure every advertised resolution. Retained as the UPPER BOUND a purely " +
+          "per-resolution reading of the evidence would have cost. SC-16060 established that " +
+          "nothing needs this: the manifest's 'exact request envelopes, not permission to " +
+          "interpolate' governs the characterization claim, which `fit-then-validate` prices.",
       },
       {
         name: "exhaustive-per-cell",
         sessions: exhaustivePerCell,
         providerInvocations: runs.shippedModelLoads.total,
         policy:
-          "One measurement per cell at one geometry, relying on the binding logic accepting any " +
-          "resolution inside the envelope. Cheaper, but it certifies an envelope from a point.",
+          "One measurement per cell at one geometry. Since SC-16060 this is the honest price of " +
+          "the IMPLEMENTATION claim alone — it takes every cell to `state: Verified` and leaves " +
+          "`memoryCharacterization` at `point`, which the artifact now says out loud instead of " +
+          "reading as envelope-wide certification.",
       },
       {
         name: "fit-then-validate",
@@ -1433,16 +1444,24 @@ export function rankUncertainties(
     perRunSeconds,
     ...codeGated.slice(1),
     {
-      input: "which geometry policy is true",
+      input: "how many geometry points each cell's curve needs",
       why:
-        "The binding logic accepts any resolution inside the envelope; the manifest says exactly the " +
-        "opposite. The two policies differ by the geometry collapse factor across the whole campaign. " +
-        "Compounding it, the gate's own doc comment claims slopes 'fitted from real renders at " +
-        "multiple resolutions' while 2 of the 3 shipped tiers carry a single geometry point.",
+        "RESOLVED as posed, and the resolution changed the question. SC-16060 found the two 'policies' " +
+        "were answers to different claims: whether a rung WORKS is not geometry-sensitive, and whether " +
+        "its PEAKS are known across the envelope is. The matrix now carries them separately — `state` " +
+        "and `cells[].memoryCharacterization` — so one measured geometry establishes the first and " +
+        "cannot pretend to establish the second. What remains open is a campaign question, not a " +
+        "contradiction: the implementation claim collapses geometry entirely, while the " +
+        "characterization claim needs at least `geometryPointsPerFit` points per (entry, backend, " +
+        "mode, overlay, tier), and only the exhaustive-exact-geometry column ever needed the full " +
+        "per-resolution count.",
       howToResolve:
-        "Decide it explicitly and make the losing side fail closed, rather than leaving two " +
-        "contradictory policies in the same pipeline; and correct the slope-provenance comment so a " +
-        "single-point slope cannot be read as a fitted one. Tracked as SC-16060.",
+        "Nothing to decide — read the two columns. `exhaustive-per-cell` now prices the implementation " +
+        "claim and `fit-then-validate` prices the characterization claim; they are complementary " +
+        "rather than rival. `exhaustive-exact-geometry` is retained as the upper bound a purely " +
+        "per-resolution reading would have cost. The under-determined shipped tiers are reported by " +
+        "`fitVersusExhaustive.kreaPrecedent` and now also by the matrix itself, where Krea's q8 and " +
+        "bf16 cells read `point` rather than `fitted`.",
       story: 16060,
     },
   ];
