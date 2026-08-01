@@ -219,10 +219,15 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         with:
           node-version: 22
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Validate runner Python for Krea provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
-        with:
-          python-version: "3.12"
+        shell: powershell
+        run: |
+          if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+            throw 'python is required to provision the exact Krea reference snapshot'
+          }
+          python --version
+          python -m pip --version
       - name: Provision exact public Krea reference snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
         shell: powershell
