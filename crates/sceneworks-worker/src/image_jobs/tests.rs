@@ -14831,7 +14831,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     );
     // And that named gate must actually run in that lane, not merely be cited.
     assert!(
-        krea_source.contains("krea_control_fit::fit_ladder_for_entry("),
+        krea_source.contains("krea_control_fit::fit_ladder_for_entry_with_adapter_bytes("),
         "krea_control_candle.rs must actually walk `krea_control_fit`'s ladder — naming a gate it does \
          not call would be an admission claim with nothing behind it (sc-16069)"
     );

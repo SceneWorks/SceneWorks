@@ -3,14 +3,68 @@ use super::standard_tier_subdir_gated;
 use super::{
     consume_gen_events, drive_gen_items, gate_tier_key, gate_with_evict_reclaim,
     installed_tier_keys, load_reference_image, non_empty, nvfp4_host_eligible, nvfp4_selected,
-    requested_receipt_variant, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32_with, resolve_seed, standard_tier_subdir, start_gen_stream,
-    tier_key_from_resolved_dir, vram_reject_tail_for_tier, AdapterKind, AdapterSpec, ApiClient,
-    Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, QwenEdit,
-    QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError, WorkerResult,
+    read_safetensors_header, requested_receipt_variant, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_seed,
+    standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
+    AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    Path, PathBuf, QwenEdit, QwenEditPaths, QwenEditRequest, Settings, Value, WorkerError,
+    WorkerResult,
 };
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
+
+/// User-adapter residency for the pinned Qwen Edit provider. Packed tiers always use deferred
+/// residuals. Dense tiers do so for plain LoRA and PEFT-stamped LoKr, but fold LoHa and untagged
+/// LyCORIS LoKr; mirror the provider's header-only router so fit and load cannot disagree.
+fn qwen_user_adapter_resident_bytes(adapters: &[AdapterSpec], tier: &str) -> WorkerResult<u64> {
+    let mode = if tier != "bf16" {
+        gen_core::AdapterResidencyMode::Additive
+    } else {
+        let mut additive = true;
+        for adapter in adapters {
+            let header = read_safetensors_header(&adapter.path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit adapter header {}: {error}",
+                    adapter.path.display()
+                ))
+            })?;
+            let object = header.as_object().ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit adapter header is not an object: {}",
+                    adapter.path.display()
+                ))
+            })?;
+            let network_type = object
+                .get("__metadata__")
+                .and_then(|meta| meta.get("networkType"))
+                .and_then(Value::as_str);
+            let keys = || {
+                object
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|key| *key != "__metadata__")
+            };
+            let contains_loha = gen_core::weightsmeta::keys_contain_loha(keys());
+            let contains_lokr = gen_core::weightsmeta::keys_contain_lokr(keys());
+            let declares_lokr = gen_core::weightsmeta::is_lokr_network_type(network_type);
+            if contains_loha || (contains_lokr && !declares_lokr) {
+                additive = false;
+                break;
+            }
+        }
+        if additive {
+            gen_core::AdapterResidencyMode::Additive
+        } else {
+            gen_core::AdapterResidencyMode::Folded
+        }
+    };
+    gen_core::adapter_stack_resident_bytes(adapters, mode).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Qwen Edit cannot determine the resident size of the requested adapter stack."
+                .to_owned(),
+        )
+    })
+}
 
 // Candle (Windows/CUDA) Qwen-Image-Edit route (sc-5487, epic 5480) — reference-conditioned image
 // editing on the Qwen-Image-Edit family off-Mac via `runtime_cuda::providers::qwen_image::QwenEdit`. The reference
@@ -448,7 +502,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at load.
     // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
     // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
-    adapters.extend(resolve_adapters(request, settings)?);
+    let user_adapters = resolve_adapters(request, settings)?;
+    adapters.extend(user_adapters.iter().cloned());
     let adapter_count = adapters.len();
     let mut raw_settings =
         qwen_edit_candle_raw_settings(request, &repo, &qwen_base, steps, guidance);
@@ -520,11 +575,21 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             &request.model_manifest_entry,
             nvfp4_selected(request, nvfp4_host_eligible(), Some(&qwen_base)),
         );
-        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        // The manifest's Lightning rows already include the built-in distill LoRA. Charge only user
+        // adapters, and only when the provider keeps them independently resident for this tier.
+        let user_adapter_bytes = qwen_user_adapter_resident_bytes(&user_adapters, tier)?;
+        let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+        );
         // Second-stage gate input (sc-10856): the tier's MEASURED sequential peak (the largest single
         // working set once the VL encoder is dropped). `None` for an unmeasured tier ⇒ best-effort stage.
-        let sequential_needed =
-            crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier);
+        let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+        );
         let raw_budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
@@ -696,6 +761,57 @@ pub(super) async fn generate_candle_qwen_edit_stream(
 mod qwen_edit_tier_reconcile_tests {
     use super::*;
     use serde_json::json;
+
+    fn write_adapter(path: &Path, key: &str, network_type: Option<&str>) {
+        let mut header = serde_json::Map::new();
+        header.insert(
+            key.to_owned(),
+            json!({ "dtype": "U8", "shape": [1], "data_offsets": [0, 1] }),
+        );
+        if let Some(network_type) = network_type {
+            header.insert(
+                "__metadata__".to_owned(),
+                json!({ "networkType": network_type }),
+            );
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut file = Vec::with_capacity(8 + encoded.len() + 1);
+        file.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+        file.extend_from_slice(&encoded);
+        file.push(0);
+        std::fs::write(path, file).unwrap();
+    }
+
+    #[test]
+    fn user_adapter_residency_matches_qwen_dense_and_packed_routes() {
+        let root = tempfile::tempdir().unwrap();
+        let lora = root.path().join("lora.safetensors");
+        write_adapter(&lora, "transformer.block.lora_A.weight", None);
+        let lora_spec = AdapterSpec::new(lora, 1.0, AdapterKind::Lora);
+        let packed = qwen_user_adapter_resident_bytes(std::slice::from_ref(&lora_spec), "q4")
+            .expect("packed LoRA bytes");
+        assert!(packed > 0);
+        assert_eq!(
+            qwen_user_adapter_resident_bytes(std::slice::from_ref(&lora_spec), "bf16")
+                .expect("dense plain LoRA remains additive"),
+            packed
+        );
+
+        let loha = root.path().join("loha.safetensors");
+        write_adapter(&loha, "transformer.block.hada_w1_a", None);
+        let loha_spec = AdapterSpec::new(loha, 1.0, AdapterKind::Lora);
+        assert_eq!(
+            qwen_user_adapter_resident_bytes(&[loha_spec], "bf16").expect("dense LoHa folds"),
+            0
+        );
+
+        let missing = AdapterSpec::new(
+            root.path().join("missing.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        assert!(qwen_user_adapter_resident_bytes(&[missing], "q4").is_err());
+    }
 
     /// The upstream repos this lane used to default to. No download flow ever fetches either — they are
     /// named here ONLY so the tests can assert we never resolve them again.

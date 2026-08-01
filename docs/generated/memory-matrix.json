@@ -1,12 +1,12 @@
 {
   "schemaVersion": 4,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9d7b3902f4b75634b9adf9cfaa620b4f516022b5eb7b2e0d15ef6bd03c5fe884",
+    "sceneWorksRevision": "source-tree:832358e1a6c5a3719df83722155772c323af75d3327602dcc76f8c4f327c0dd1",
     "inferenceRevision": "b23ffc1adf8711ab3e9a2d7215a8ff860f2a750d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6a3767ab3b2c6d2e8641b9eb1d5b442fdff29bf08701ca35f1b3db8aa964e92b"
+        "sha256": "2e3f76066b23266d1d11513b6305b6ad304877d05c62321f118a41213a3fe409"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -14,11 +14,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6a942f24d2a849b1122611cfc9ed0a42f7afcd9ee1bfb34829b1e2c6c35629af"
+        "sha256": "1c2c31ceaec00f5c5b2bbcba94fc0ad6116bdba1ec4e8167c16f196524dcd9dd"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "67cbd22eac7dac1948a36038e4bece842a4fd7b318a8d3416f420ef23c7d34d3"
+        "sha256": "3cedffa673dfcbf28f954c886b50d0aa09a61c1a376b84f058d89d6414c6553b"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -26,7 +26,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "717ec339340e1fdceb08e2e78222b1d8cad0b858ff334e98f0077128016de749"
+        "sha256": "ed77dec2ebb1842808ce052a887104c3b726d5eaf9d557fe113a430fd5ad4f6a"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
