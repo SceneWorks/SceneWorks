@@ -16,7 +16,7 @@ use super::{
     wan::{
         advanced_opt_f32, advanced_opt_u32, ensure_wan_lightning_present, generate_video,
         generate_video_using, resolve_scail2_adapters, resolve_wan_adapters, scail2_sampling,
-        wan_sampling, ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
+        wan_lightning_on, wan_sampling, ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
     },
 };
 
@@ -609,17 +609,82 @@ pub(super) fn wan_vram_preflight(
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<PathBuf> {
-    match crate::vram_gate::wan_video_fit_error(
+    wan_vram_preflight_with_adapter_bytes(
+        engine_id,
+        manifest_entry,
+        tier_key,
+        model_dir,
+        0,
+        gpu_id,
+        budget,
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_vram_preflight_with_adapter_bytes(
+    engine_id: &str,
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    model_dir: PathBuf,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<PathBuf> {
+    match crate::vram_gate::wan_video_fit_error_with_adapter_bytes(
         engine_id,
         manifest_entry,
         tier_key,
         crate::vram_gate::wan_weight_bytes(engine_id, &model_dir),
+        adapter_bytes,
         gpu_id,
         budget,
     ) {
         Some(error) => Err(error),
         None => Ok(model_dir),
     }
+}
+
+/// Independently resident USER adapter bytes for the Candle Wan load. The calibrated A14B rows
+/// already contain the built-in Lightning pair, so callers pass only the user tail. Shared MoE
+/// factors are resident once; high/low expert-specific factors alternate and contribute the larger
+/// side to the sequential peak.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_user_adapter_resident_bytes(
+    adapters: &[AdapterSpec],
+    is_moe: bool,
+    tier_key: &str,
+) -> WorkerResult<u64> {
+    if tier_key == "bf16" || adapters.is_empty() {
+        return Ok(0);
+    }
+    let additive_bytes = |stack: &[AdapterSpec]| {
+        gen_core::adapter_stack_resident_bytes(stack, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Wan cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })
+    };
+    if !is_moe {
+        return additive_bytes(adapters);
+    }
+    let shared: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert.is_none())
+        .cloned()
+        .collect();
+    let high: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert == Some(gen_core::MoeExpert::High))
+        .cloned()
+        .collect();
+    let low: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.moe_expert == Some(gen_core::MoeExpert::Low))
+        .cloned()
+        .collect();
+    Ok(additive_bytes(&shared)?.saturating_add(additive_bytes(&high)?.max(additive_bytes(&low)?)))
 }
 
 /// The candle video lane's live VRAM budget: the real `nvidia-smi` reading, the
@@ -790,7 +855,7 @@ pub(super) async fn generate_candle_video_using(
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let is_ltx = engine_id == "ltx_2_3_distilled";
-    let (model_dir, wan_quant) = if is_mochi {
+    let (mut model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
         // marker is bundled into the gated return rather than read alongside a free-standing check.
@@ -888,6 +953,34 @@ pub(super) async fn generate_candle_video_using(
     } else {
         Vec::new()
     };
+    if is_wan {
+        let built_in = if wan_lightning_on(engine_id, request)
+            && matches!(engine_id, "wan2_2_t2v_14b" | "wan2_2_i2v_14b")
+        {
+            2
+        } else {
+            0
+        };
+        let tier_key = candle_wan_tier_key(wan_quant);
+        let user_adapter_bytes = wan_user_adapter_resident_bytes(
+            adapters.get(built_in..).unwrap_or(&[]),
+            matches!(engine_id, "wan2_2_t2v_14b" | "wan2_2_i2v_14b"),
+            tier_key,
+        )?;
+        if user_adapter_bytes > 0 {
+            // Final pre-load gate: keep the early base-only check above so a hopeless card still avoids
+            // downloads, then re-read live VRAM after adapters resolve and charge their exact residual.
+            model_dir = wan_vram_preflight_with_adapter_bytes(
+                engine_id,
+                &request.model_manifest_entry,
+                tier_key,
+                model_dir,
+                user_adapter_bytes,
+                &settings.gpu_id,
+                candle_video_vram_budget(settings).await,
+            )?;
+        }
+    }
 
     // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
     // distilled ltx takes neither (single-stage, no CFG). Wan uses the Lightning-aware recipe
@@ -1806,4 +1899,54 @@ pub(super) async fn generate_candle_wan_vace_extend_bridge(
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod adapter_fit_tests {
+    use super::wan_user_adapter_resident_bytes;
+    use gen_core::{AdapterKind, AdapterSpec, MoeExpert};
+    use std::path::PathBuf;
+
+    fn adapter(path: PathBuf, expert: Option<MoeExpert>) -> AdapterSpec {
+        AdapterSpec {
+            path,
+            scale: 1.0,
+            kind: AdapterKind::Lora,
+            pass_scales: None,
+            moe_expert: expert,
+        }
+    }
+
+    #[test]
+    fn wan_user_adapter_bytes_follow_dense_single_and_moe_peak_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared.safetensors");
+        let high = root.path().join("high.safetensors");
+        let low = root.path().join("low.safetensors");
+        std::fs::write(&shared, vec![0_u8; 100]).unwrap();
+        std::fs::write(&high, vec![0_u8; 300]).unwrap();
+        std::fs::write(&low, vec![0_u8; 200]).unwrap();
+        let stack = vec![
+            adapter(shared, None),
+            adapter(high, Some(MoeExpert::High)),
+            adapter(low, Some(MoeExpert::Low)),
+        ];
+        assert_eq!(
+            wan_user_adapter_resident_bytes(&stack, true, "q4").unwrap(),
+            400,
+            "shared is counted once and the sequential expert peak takes max(high, low)"
+        );
+        assert_eq!(
+            wan_user_adapter_resident_bytes(&stack, false, "q4").unwrap(),
+            600,
+            "the single-expert 5B load retains the full stack"
+        );
+        assert_eq!(
+            wan_user_adapter_resident_bytes(&stack, true, "bf16").unwrap(),
+            0
+        );
+
+        let missing = vec![adapter(root.path().join("missing.safetensors"), None)];
+        assert!(wan_user_adapter_resident_bytes(&missing, true, "q4").is_err());
+    }
 }
