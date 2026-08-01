@@ -3006,7 +3006,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shipped_qwen_manifest_binds_all_five_exact_mlx_ladder_rungs() {
+    fn shipped_qwen_manifest_preserves_all_five_exact_historical_mlx_ladder_rungs() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3033,9 +3033,13 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_revision
-                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                && binding.query.inference_revision == "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         }));
+        assert_ne!(
+            bindings[0].query.inference_revision,
+            crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            "the Qwen measurements must remain historical until they are recaptured on the new runtime",
+        );
         let mut rungs = bindings
             .iter()
             .map(|binding| format!("{:?}", binding.rung))

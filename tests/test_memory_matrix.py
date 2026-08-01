@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import uuid
+from collections import Counter
 
 import jsonschema
 import pytest
@@ -85,25 +86,39 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     evidence_ids = {record["id"] for record in calibration["records"]}
     assert len(evidence_ids) == len(calibration["records"]) == 24
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
-        "current",
-        "historical",
-    }
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert len(current_eligible) == 5
-    assert all(run["binding"]["reasons"] == [] for run in current_eligible)
+    assert current_eligible == []
+    historical_qwen = [
+        run
+        for run in matrix["calibrationRuns"]
+        if run["semantics"] == "historical"
+        and run["record"]["target"]["modelId"] == "qwen_image"
+        and run["binding"]["eligible"]
+    ]
+    assert len(historical_qwen) == 10
+    assert all(run["binding"]["reasons"] == [] for run in historical_qwen)
     assert {
-        run["record"]["strategy"]["rung"] for run in current_eligible
-    } == {
-        "resident",
-        "staged_residency",
-        "bounded_decode",
-        "bounded_attention",
-        "bounded_transformer_residency",
+        (
+            run["record"]["backend"],
+            run["record"]["target"]["tier"],
+            run["record"]["target"]["mode"],
+            run["record"]["target"]["overlay"],
+        )
+        for run in historical_qwen
+    } == {("mlx", "bf16", "text_to_image", "none")}
+    assert Counter(
+        run["record"]["strategy"]["rung"] for run in historical_qwen
+    ) == {
+        "resident": 2,
+        "staged_residency": 2,
+        "bounded_decode": 2,
+        "bounded_attention": 2,
+        "bounded_transformer_residency": 2,
     }
 
 
@@ -249,16 +264,29 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_aggregate_cells_do_not_promote_exact_records_to_dynamic_verification():
+def test_historical_records_do_not_promote_cells_to_dynamic_verification():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert len(verified) == 5
+    assert verified == []
+    historical_qwen_cells = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "qwen_image"
+        and cell["backend"] == "mlx"
+        and cell["tier"] == "bf16"
+        and cell["mode"] == "text_to_image"
+        and cell["overlay"] == "none"
+    ]
+    assert len(historical_qwen_cells) == 5
+    assert all(
+        cell["state"] == "Implemented/unverified" for cell in historical_qwen_cells
+    )
     assert {
         (cell["modelId"], cell["backend"], cell["tier"], cell["mode"], cell["overlay"])
-        for cell in verified
+        for cell in historical_qwen_cells
     } == {("qwen_image", "mlx", "bf16", "text_to_image", "none")}
-    assert {cell["rung"] for cell in verified} == {
+    assert {cell["rung"] for cell in historical_qwen_cells} == {
         "resident",
         "staged_residency",
         "bounded_decode",

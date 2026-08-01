@@ -510,12 +510,12 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 24);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    5,
-    "only the five exact Qwen ladder selectors are current and matrix-eligible",
+    0,
+    "the Qwen captures remain complete history after the inference runtime pin advances",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /24 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 3 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
