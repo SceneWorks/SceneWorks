@@ -14682,13 +14682,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // Routes that overlay NO second network, so the conditioning gate does not apply to them. Each is
     // listed to make the classification explicit rather than implied by absence.
     //
-    // **This list asserts only that a route is not a CONDITIONING route — never that it is gated.** The
-    // edit / imported / ComfyUI lanes load a single base model, so the right admission check for them is
-    // the measured per-tier `vram_gate::predicted_peak_gb` + `load_plan` path that `qwen_edit_candle`
-    // runs — and most of them do not run it yet. That is a real but SEPARATE defect (a base-model peak
-    // gate needs per-lane sequential-capability and per-tier measured rows, not this overlay floor); it
-    // is tracked on its own story and is deliberately outside sc-16069, whose scope is the conditioning
-    // table. Do not read a row here as "admitted".
+    // This list remains only the overlay classification. The edit / imported / ComfyUI / Bernini routes
+    // that load a single base are ALSO enumerated in BASE_ADMITTED below: built-in tiered models use the
+    // catalog per-tier gate when evidenced (or a pinned, reasoned exception), while user-owned
+    // checkpoints use the explicitly weaker weights floor.
+    // Keeping the classifications separate prevents an overlay floor from being substituted for catalog
+    // base evidence while ensuring "not conditioning" can no longer disguise an ungated base lane.
     const NOT_CONDITIONING: &[&str] = &[
         // Edit lanes: one base model, reference/source conditioning, no second network.
         "SdxlEdit",
@@ -14714,6 +14713,116 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // The generic arm — the one route that DOES reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
     ];
+
+    // Every bespoke single-base route named by sc-16093, plus the already-correct Qwen Edit reference.
+    // The marker is route-local live code: deleting/commenting any call turns this guard red. External
+    // checkpoints deliberately use the floor marker because no stable manifest tier exists for them.
+    const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "SdxlEdit",
+            "sdxl_edit_candle.rs",
+            include_str!("sdxl_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "Flux2Edit",
+            "flux2_edit_candle.rs",
+            include_str!("flux2_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "QwenEdit",
+            "qwen_edit_candle.rs",
+            include_str!("qwen_edit_candle.rs"),
+            "crate::vram_gate::load_plan(",
+        ),
+        (
+            "ZimageEdit",
+            "zimage_edit_candle.rs",
+            include_str!("zimage_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaEdit",
+            "krea_edit_candle.rs",
+            include_str!("krea_edit_candle.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaTurboOnRaw",
+            "krea_turbo_raw.rs",
+            include_str!("krea_turbo_raw.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaMultiPhase",
+            "krea_multiphase.rs",
+            include_str!("krea_multiphase.rs"),
+            "admit_candle_base(",
+        ),
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "SdxlImported",
+            "sdxl_imported.rs",
+            include_str!("sdxl_imported.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
+            "ZimageComfyui",
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "QwenImageComfyui",
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "Flux2Comfyui",
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+            "admit_candle_base_floor(",
+        ),
+        (
+            "Bernini",
+            "bernini.rs",
+            include_str!("bernini.rs"),
+            "admit_candle_base(",
+        ),
+    ];
+    for (route, file, source, marker) in BASE_ADMITTED {
+        let gate = source
+            .lines()
+            .position(|line| line.contains(marker) && !line.trim_start().starts_with("//"))
+            .unwrap_or_else(|| {
+                panic!("{route} ({file}) has no live base-admission call `{marker}`")
+            });
+        let handoff = ["start_gen_stream(", "start_cached_gen_stream("]
+            .iter()
+            .filter_map(|needle| {
+                source
+                    .lines()
+                    .enumerate()
+                    .skip(gate + 1)
+                    .find(|(_, line)| line.contains(needle) && !line.trim_start().starts_with("//"))
+                    .map(|(line, _)| line)
+            })
+            .min()
+            .unwrap_or_else(|| {
+                panic!("{route} ({file}) has no generation-stream handoff after its gate")
+            });
+        assert!(
+            gate < handoff,
+            "{route} ({file}) gates after allocation begins; base admission must be pre-load (sc-16093)"
+        );
+    }
 
     // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`
     // is the production form, so prose mentioning a variant cannot inflate this set.

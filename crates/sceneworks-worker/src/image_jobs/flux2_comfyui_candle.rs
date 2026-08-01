@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    consume_gen_events, drive_gen_items, pose_entries, resolve_advanced_or_manifest_u32,
-    resolve_seed, start_gen_stream, ApiClient, GenerationOutput, GenerationRequest, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
+    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant,
+    Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -282,6 +282,19 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
+    let snapshot_vae = paths.snapshot_dir.join("vae");
+    admit_candle_base_floor(
+        &request.model,
+        "ComfyUI FLUX.2",
+        settings,
+        &[
+            paths.transformer.as_path(),
+            snapshot_text_encoder.as_path(),
+            snapshot_vae.as_path(),
+        ],
+    )
+    .await?;
 
     let (width, height) = (request.width, request.height);
     let steps =

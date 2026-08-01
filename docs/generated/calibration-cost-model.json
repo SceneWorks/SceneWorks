@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7680e15f613558ddc27d5496552d53c06febf92f874b1b02f4533018eb86619b",
-    "matrixRevision": "source-tree:28b26543eba18a4b55ea8c1e38c67439d9ade67213f742080dcd3d942f8b9bdb",
-    "inferenceRevision": "2898c3b70ee5d1a4ab16d05d40911b58cc9ecce9",
+    "sceneWorksRevision": "source-tree:f0b8ddae10c52c36017c44086aed919979ae0d4ac4064c2e1741f727c2d7e113",
+    "matrixRevision": "source-tree:e165aed8a3ac6773534419305ec9c66711ec932cc764de131570a466c2c7bb1b",
+    "inferenceRevision": "09aefe3afb125af3f0736d55a438c412d64ec4c2",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "f3c72c27609cec405a4ab79d48810a580b86eaf81d1fe5348b784a68e3a38c40"
+        "sha256": "6fe5eddec722e6dab59b7197efc501949e6b009ff9bf39aff63d23c6a300299e"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "7073dba11622ab3fe74271d731a32aac18eff60497dbd33f80dd2b9593f32330"
+        "sha256": "33710ea1fb3a1584ff861cb5dd360cc496ba3f9aee424a8cd628551aa6dbc8e9"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -370,8 +370,8 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2478,
-      "Missing": 4876,
+      "Implemented/unverified": 2502,
+      "Missing": 4852,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -380,9 +380,9 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 730,
-      "Implemented/unverified @ mlx": 1748,
+      "Implemented/unverified @ mlx": 1772,
       "Missing @ candle": 2004,
-      "Missing @ mlx": 2872,
+      "Missing @ mlx": 2848,
       "Structurally N/A @ candle": 6
     },
     "byRung": {
@@ -499,11 +499,11 @@
     "axes": [
       {
         "axis": "geometry",
-        "verdict": "collapsed",
-        "factor": "already applied by the matrix generator",
-        "rule": "A cell carries a geometry ENVELOPE, not a geometry. One record binds the whole envelope: `calibrationBinding` accepts any record whose `width x height` appears in `cell.geometryEnvelope.resolutions`, and only rejects batch/frames != 1.",
-        "citation": "scripts/generate-memory-matrix.mjs#calibrationBinding (resolution/batch/frames checks)",
-        "caveat": "This is ACCEPTANCE, not evidence. The manifest states the opposite policy in its own words — evidenceRecords are 'exact request envelopes, not permission to interpolate: a geometry absent here is Implemented/unverified even when a phase curve can predict it'. The binding logic is the more permissive of the two, so this collapse is only sound if the envelope claim is backed by a fitted curve rather than by one measured point."
+        "verdict": "collapsed for the implementation claim; NOT collapsed for the characterization claim",
+        "factor": "1x on `state`; `geometryPointsPerFit` per curve on `memoryCharacterization`",
+        "rule": "A cell carries a geometry ENVELOPE, not a geometry — and SC-16060 split what that licenses into the two claims it was conflating. `state` (does the rung WORK) is not geometry-sensitive, so one record binds the envelope and `calibrationBinding` accepts any record whose `width x height` appears in `cell.geometryEnvelope.resolutions`. `cells[].memoryCharacterization` (are its PEAKS known across the envelope) is geometry-sensitive by construction, and reads `point` on one measured geometry, `fitted` only on two or more.",
+        "citation": "scripts/generate-memory-matrix.mjs#calibrationBinding (implementation claim) and #memoryCharacterization (characterization claim); vocabulary defined in the artifact's `claims`",
+        "caveat": "The manifest's evidenceRecords comment — 'exact request envelopes, not permission to interpolate: a geometry absent here is Implemented/unverified even when a phase curve can predict it' — is a statement about the CHARACTERIZATION claim, and is now true as written: a geometry absent from the evidence is absent from `measuredGeometries` and cannot lift the cell past `point`. It was only ever in tension with the binding rule while both claims shared one field."
       },
       {
         "axis": "strategyParameters",
@@ -1092,13 +1092,13 @@
         "name": "exhaustive-exact-geometry",
         "sessions": 8970,
         "providerInvocations": 44850,
-        "policy": "Measure every advertised resolution. This is what the manifest's own evidenceRecords comment demands: 'exact request envelopes, not permission to interpolate'."
+        "policy": "Measure every advertised resolution. Retained as the UPPER BOUND a purely per-resolution reading of the evidence would have cost. SC-16060 established that nothing needs this: the manifest's 'exact request envelopes, not permission to interpolate' governs the characterization claim, which `fit-then-validate` prices."
       },
       {
         "name": "exhaustive-per-cell",
         "sessions": 1472,
         "providerInvocations": 7354,
-        "policy": "One measurement per cell at one geometry, relying on the binding logic accepting any resolution inside the envelope. Cheaper, but it certifies an envelope from a point."
+        "policy": "One measurement per cell at one geometry. Since SC-16060 this is the honest price of the IMPLEMENTATION claim alone — it takes every cell to `state: Verified` and leaves `memoryCharacterization` at `point`, which the artifact now says out loud instead of reading as envelope-wide certification."
       },
       {
         "name": "fit-then-validate",
@@ -1391,9 +1391,9 @@
       "cellsTouched": 4564
     },
     {
-      "input": "which geometry policy is true",
-      "why": "The binding logic accepts any resolution inside the envelope; the manifest says exactly the opposite. The two policies differ by the geometry collapse factor across the whole campaign. Compounding it, the gate's own doc comment claims slopes 'fitted from real renders at multiple resolutions' while 2 of the 3 shipped tiers carry a single geometry point.",
-      "howToResolve": "Decide it explicitly and make the losing side fail closed, rather than leaving two contradictory policies in the same pipeline; and correct the slope-provenance comment so a single-point slope cannot be read as a fitted one. Tracked as SC-16060.",
+      "input": "how many geometry points each cell's curve needs",
+      "why": "RESOLVED as posed, and the resolution changed the question. SC-16060 found the two 'policies' were answers to different claims: whether a rung WORKS is not geometry-sensitive, and whether its PEAKS are known across the envelope is. The matrix now carries them separately — `state` and `cells[].memoryCharacterization` — so one measured geometry establishes the first and cannot pretend to establish the second. What remains open is a campaign question, not a contradiction: the implementation claim collapses geometry entirely, while the characterization claim needs at least `geometryPointsPerFit` points per (entry, backend, mode, overlay, tier), and only the exhaustive-exact-geometry column ever needed the full per-resolution count.",
+      "howToResolve": "Nothing to decide — read the two columns. `exhaustive-per-cell` now prices the implementation claim and `fit-then-validate` prices the characterization claim; they are complementary rather than rival. `exhaustive-exact-geometry` is retained as the upper bound a purely per-resolution reading would have cost. The under-determined shipped tiers are reported by `fitVersusExhaustive.kreaPrecedent` and now also by the matrix itself, where Krea's q8 and bf16 cells read `point` rather than `fitted`.",
       "story": 16060
     }
   ]

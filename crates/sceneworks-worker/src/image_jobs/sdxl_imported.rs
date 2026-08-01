@@ -284,6 +284,8 @@ async fn generate_sdxl_imported_stream(
     let tokenizer_root = stage_sdxl_tokenizer(api, settings, job).await?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = attach_imported_sdxl_components(spec, api, settings, job).await?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

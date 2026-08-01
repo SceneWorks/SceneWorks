@@ -366,7 +366,12 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (row["familyStory"], row["backend"])
         for row in rows
         if row["requestPeak"] == "moves"
-    ] == [(15510, "mlx"), (15512, "mlx"), (15517, "candle")]
+    ] == [
+        (15510, "mlx"),
+        (15512, "mlx"),
+        (15517, "candle"),
+        (15517, "mlx"),
+    ]
     assert all(
         row["implementation"] != "none"
         for row in rows

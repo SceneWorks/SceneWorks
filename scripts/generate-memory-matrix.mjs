@@ -355,6 +355,15 @@ function sortedUnique(values) {
   return [...new Set(values)].sort();
 }
 
+// SC-16060. "Implemented" is a claim about the CODE, and `Verified` is `Implemented/unverified` plus
+// evidence — never a replacement for it. Before the promotion producer existed no cell could hold
+// `Verified`, so every coverage count could spell this as one exact state and stay correct by
+// accident. The first promoted cell would have silently dropped out of those counts. Coverage
+// surfaces must go through here rather than re-spelling the comparison.
+export function isImplemented(state) {
+  return state === "Implemented/unverified" || state === "Verified";
+}
+
 function calibrationAbiVersion(provider) {
   return CALIBRATION_ABI_VERSIONS[provider] ?? CALIBRATION_ABI_VERSIONS.default;
 }
@@ -451,6 +460,43 @@ export function calibrationBinding(record, cell) {
     !record.loadability.resolvedPathFingerprint
   ) reasons.push("loadability-not-passed");
   return { eligible: reasons.length === 0, reasons };
+}
+
+// SC-16060. A cell spans a geometry ENVELOPE; measured evidence covers POINTS inside it. Two
+// separate claims live on a cell, and only one of them is geometry-sensitive:
+//
+//   `state`                  — the rung WORKS. Implemented, parity-passed, engaging the claimed
+//                              composition. One measured geometry establishes it, and envelope
+//                              membership is the right binding, because whether a rung executes
+//                              does not depend on the resolution it executed at.
+//   `memoryCharacterization` — the rung's PEAKS are known across the envelope. Geometry-sensitive
+//                              by construction: `fixedGb + perMpxGb * megapixels`
+//                              (`vram_gate.rs#krea_phase_curve`) has two coefficients, so one
+//                              point cannot determine a slope.
+//
+// Collapsing both into `state` is what let a single 768x768 capture read as certifying a cell whose
+// envelope reaches 2048x2048. `point` is the honest middle state the five-value vocabulary could not
+// express — and it is exactly where Krea's shipped q8/bf16 curves sit, each carrying one geometry
+// point while the gate's own doc comment calls their slopes "fitted from real renders at multiple
+// resolutions".
+//
+// `fitted` asserts the evidence is SUFFICIENT to determine the affine curve, not that a fit has been
+// performed. `coveredPixelBound` is the largest measured area, so a consumer can tell how far the
+// determinable curve reaches without re-deriving it from `measuredGeometries`; it is null below two
+// points because there is no curve to bound.
+export function memoryCharacterization(geometries) {
+  const measured = sortedUnique(
+    geometries.filter((geometry) => /^[1-9][0-9]*x[1-9][0-9]*$/.test(geometry ?? "")),
+  );
+  const areas = measured.map((geometry) => {
+    const [width, height] = geometry.split("x").map(Number);
+    return width * height;
+  });
+  return {
+    status: measured.length === 0 ? "unmeasured" : measured.length === 1 ? "point" : "fitted",
+    measuredGeometries: measured,
+    coveredPixelBound: areas.length > 1 ? Math.max(...areas) : null,
+  };
 }
 
 function expectedEngagedRungs({
@@ -1283,6 +1329,32 @@ function validateMatrix(
         throw new Error(`${cell.id}: unsupported Full/Verified claim`);
       }
     }
+    // SC-16060. The two claims are independent, and the invariants that keep them from silently
+    // merging back into one field belong here rather than in a consumer.
+    const characterization = cell.memoryCharacterization;
+    const measured = characterization.measuredGeometries.length;
+    const expected = measured === 0 ? "unmeasured" : measured === 1 ? "point" : "fitted";
+    if (characterization.status !== expected) {
+      throw new Error(
+        `${cell.id}: memoryCharacterization is ${characterization.status} on ${measured} measured geometr${measured === 1 ? "y" : "ies"}`,
+      );
+    }
+    // A bound without a determinable curve is the exact overclaim this story exists to stop: it
+    // would read as "covered up to here" on the strength of a single point.
+    if ((characterization.coveredPixelBound !== null) !== (characterization.status === "fitted")) {
+      throw new Error(
+        `${cell.id}: coveredPixelBound is only meaningful on a fitted curve (status ${characterization.status})`,
+      );
+    }
+    // `Verified` is the implementation claim and must never imply geometry coverage. A cell may be
+    // Verified while `unmeasured`/`point` — that is the honest combination. The reverse cannot hold:
+    // measured geometry that bound this cell came from a record, so a cell with no implementation
+    // cannot have one.
+    if (characterization.status !== "unmeasured" && !isImplemented(cell.state)) {
+      throw new Error(
+        `${cell.id}: ${cell.state} cell carries measured geometry (${characterization.measuredGeometries.join(",")})`,
+      );
+    }
   }
 }
 
@@ -1517,6 +1589,28 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                     inference: pin,
                   }) === "current" && record.status === "complete",
               );
+              // SC-16060. Characterization counts every geometry bound to this cell — the
+              // manifest-declared captures AND the eligible bundle records — because
+              // `calibrationBinding` has already gated on the calibration fingerprint, which
+              // `memory-calibration-harness.mjs#evidenceSemantics` names as the invalidation switch
+              // that owns SceneWorks drift. The historical/current split is a revision distinction,
+              // and staling a measured slope on an unrelated source edit is the failure that comment
+              // exists to prevent. Promotion to `Verified` is stricter and does require `current`.
+              const characterization = memoryCharacterization([
+                ...(status.historicalVerification ?? []).map((row) => row.geometry),
+                ...eligibleRuns.map(
+                  (record) => `${record.target.geometry.width}x${record.target.geometry.height}`,
+                ),
+              ]);
+              // SC-16060. The producer the vocabulary never had: `Verified` was a listed state with
+              // nothing able to emit it, so the guard in `validateMatrix` was unreachable and a test
+              // asserting zero of them was green for the trivial reason. Promotion is from
+              // `Implemented/unverified` ONLY — `Missing` has no implementation to verify and
+              // `Structurally N/A` has nothing to measure, so neither may be lifted by evidence.
+              const state =
+                status.state === "Implemented/unverified" && currentRuns.length > 0
+                  ? "Verified"
+                  : status.state;
               const cell = {
                 id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),
                 modelId: model.id,
@@ -1532,7 +1626,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   : geometryFor(model, backend),
                 strategyParameters: status.parameters,
                 engagedRungs,
-                state: status.state,
+                state,
+                memoryCharacterization: characterization,
                 calibrationFingerprint: fingerprint,
                 owningFamilyStory,
                 owningModelStory,
@@ -1648,7 +1743,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
         (cell) =>
           cell.backend === "mlx" &&
           cell.rung === "staged_residency" &&
-          cell.state === "Implemented/unverified",
+          isImplemented(cell.state),
       )
       .map((cell) => cell.modelId),
   );
@@ -1656,6 +1751,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
     // both, so the two shapes cannot share a version number — that is the whole job of this field.
+    //
+    // 5 (SC-16060): `claims`, `memoryCharacterizationStates`, and `cells[].memoryCharacterization`
+    // were ADDED and are REQUIRED, and `conformanceStates` changed SHAPE — from bare strings to
+    // `{state, definition}` objects. That last one is not additive: a version-4 reader indexing
+    // `conformanceStates` for a string gets an object. It is also the point of the change — the
+    // states carried no definitions, which is how the pipeline came to hold two contradictory
+    // answers to whether one measured geometry certifies a whole envelope.
     //
     // 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were ADDED, and both are REQUIRED —
     // the first at the document root, the second on every rung-4 cell. A version-3 document has
@@ -1671,7 +1773,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
     // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
     // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -1682,12 +1784,63 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
         ]),
       ),
     },
+    // SC-16060. These carried no definitions, so every consumer supplied its own — which is how the
+    // pipeline came to hold two contradictory answers to "does one measured geometry certify the
+    // envelope?". The claim each state belongs to is now named here, in the artifact, rather than
+    // being inferred from whichever binding rule a reader happened to find first.
+    claims: {
+      state: {
+        asserts: "the rung WORKS: implemented, parity-passed, engaging the claimed composition",
+        geometrySensitive: false,
+        binding:
+          "scripts/generate-memory-matrix.mjs#calibrationBinding — envelope membership, because " +
+          "whether a rung executes does not depend on the resolution it executed at",
+      },
+      memoryCharacterization: {
+        asserts: "the rung's PEAKS are known across the geometry envelope",
+        geometrySensitive: true,
+        binding:
+          "scripts/generate-memory-matrix.mjs#memoryCharacterization — distinct measured " +
+          "geometries, because `fixedGb + perMpxGb * megapixels` has two coefficients and one " +
+          "point cannot determine a slope",
+      },
+    },
     conformanceStates: [
-      "Verified",
-      "Implemented/unverified",
-      "Structurally N/A",
-      "Missing",
-      "Route unavailable/broken",
+      {
+        state: "Verified",
+        definition:
+          "Implemented AND carrying at least one eligible current-environment calibration record. " +
+          "Says nothing about geometry coverage — read `memoryCharacterization` for that.",
+      },
+      {
+        state: "Implemented/unverified",
+        definition: "The code path exists and is statically evidenced; no current measurement binds it.",
+      },
+      {
+        state: "Structurally N/A",
+        definition: "The rung cannot apply to this architecture; there is nothing to measure.",
+      },
+      { state: "Missing", definition: "No implementation of this rung on this route." },
+      { state: "Route unavailable/broken", definition: "The route itself does not resolve." },
+    ],
+    memoryCharacterizationStates: [
+      {
+        status: "unmeasured",
+        definition: "No geometry has been measured for this cell.",
+      },
+      {
+        status: "point",
+        definition:
+          "Exactly one measured geometry. The peak is known AT that geometry and the slope is " +
+          "undeterminable, so nothing is known about the rest of the envelope.",
+      },
+      {
+        status: "fitted",
+        definition:
+          "Two or more distinct measured geometries — sufficient to determine the affine curve, " +
+          "which is not a claim that a fit has been performed. `coveredPixelBound` is the largest " +
+          "measured area.",
+      },
     ],
     evidenceDimensions: [
       "staticImplementation",
@@ -1759,10 +1912,19 @@ function renderMarkdown(matrix) {
           cell.modelId === model.id &&
           cell.backend === backend &&
           cell.rung === "staged_residency" &&
-          cell.state === "Implemented/unverified",
+          isImplemented(cell.state),
       );
+      const stagedState = matrix.cells.find(
+        (cell) =>
+          cell.modelId === model.id &&
+          cell.backend === backend &&
+          cell.rung === "staged_residency" &&
+          cell.state === "Verified",
+      )
+        ? "Verified"
+        : "Implemented/unverified";
       lines.push(
-        `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? "Implemented/unverified" : "Missing"} |`,
+        `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? stagedState : "Missing"} |`,
       );
     }
   }

@@ -507,6 +507,16 @@ async fn generate_candle_bernini_image_stream(
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
+    let offload_policy = admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Bernini still image",
+        CandleBaseEvidence::Ungateable("Bernini still-image tiers have not been CUDA-calibrated"),
+        0,
+        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+    )
+    .await?;
 
     // i2i (`edit_image`): resolve the source image into the engine's `Conditioning::Reference` (the
     // engine ViT/VAE-encodes it at native resolution, no worker-side fit, and ignores the reference
@@ -547,7 +557,8 @@ async fn generate_candle_bernini_image_stream(
 
     // Load the resolved tier subfolder at its matching quant: `bf16/` dense (quant `None`), or the
     // packed `q4/`|`q8/` tree with `Quant::Q4`|`Quant::Q8` (sc-11003).
-    let spec = load_spec(weights_dir, quant, Vec::new(), None);
+    let spec = load_spec(weights_dir, quant, Vec::new(), None)
+        .with_offload_policy(offload_policy);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

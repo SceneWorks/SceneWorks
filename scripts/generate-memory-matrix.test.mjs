@@ -21,6 +21,7 @@ import {
   mlxRequiredHostBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
+import { recordId } from "./memory-calibration-harness.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 
@@ -186,7 +187,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix();
-  assert.equal(matrix.schemaVersion, 4);
+  assert.equal(matrix.schemaVersion, 5);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -726,6 +727,12 @@ test("a shipping control lane is declared, not inferred from having been measure
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
   // Declaring a lane must NOT fabricate evidence: these cells are honestly unverified.
+  //
+  // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
+  // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
+  // verbatim. It now asserts something: a declared lane with no measurement stays unverified while a
+  // measured one is promoted, and the sc-16060 tests below prove the promotion path is live. What
+  // this test forbids is DECLARATION alone producing verification.
   assert.equal(
     control.filter((cell) => cell.state === "Verified").length,
     0,
@@ -801,7 +808,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15512:mlx", "15517:candle"],
+    ["15510:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
@@ -942,20 +949,50 @@ test("an implemented family is Implemented/unverified only where the provider ac
     "Lens adapter overlays remain exactly Missing",
   );
 
-  // Candle Krea's contract is gated on the turbo descriptor id, and its edit modes route to
-  // descriptors that do not return it. A family- or entry-level claim alone would over-report both.
-  const krea = implemented.filter((cell) => cell.backend === "candle");
-  assert.ok(krea.every((cell) => cell.modelId === "krea_2_turbo"));
-  assert.ok(krea.every((cell) => cell.mode === "text_to_image"));
+  // MLX Krea registers the contract on all four base descriptors, so both catalog entries and both
+  // modes are covered at every measured tier. Low-rank overlays replay; the distinct pose-control
+  // provider remains outside this claim.
+  const mlxKrea = implemented.filter(
+    (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15517,
+  );
+  assert.deepEqual(
+    [...new Set(mlxKrea.map((cell) => cell.modelId))].sort(),
+    ["krea_2_raw", "krea_2_turbo"],
+  );
+  assert.deepEqual([...new Set(mlxKrea.map((cell) => cell.mode))].sort(), ["edit_image", "text_to_image"]);
+  assert.ok(mlxKrea.every((cell) => ["none", "lora"].includes(cell.overlay)));
+  assert.ok(
+    mlxKrea.every(
+      (cell) =>
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.rung4Survey.requestPeak === "moves",
+    ),
+  );
+  assert.equal(
+    implemented.filter(
+      (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15517 && cell.overlay === "control",
+    ).length,
+    0,
+    "the separately registered Krea pose-control route does not inherit the base DiT claim",
+  );
+
+  // Candle Krea remains narrower: its contract is gated on the turbo descriptor id, and its edit
+  // modes route to descriptors that do not return it.
+  const candleKrea = implemented.filter(
+    (cell) => cell.backend === "candle" && cell.owningFamilyStory === 15517,
+  );
+  assert.ok(candleKrea.every((cell) => cell.modelId === "krea_2_turbo"));
+  assert.ok(candleKrea.every((cell) => cell.mode === "text_to_image"));
   assert.equal(
     matrix.cells.filter(
       (cell) =>
+        cell.backend === "candle" &&
         cell.modelId === "krea_2_raw" &&
         cell.rung === "bounded_transformer_residency" &&
         cell.state === "Implemented/unverified",
     ).length,
     0,
-    "krea_2_raw does not get its sibling's contract",
+    "Candle krea_2_raw does not get its sibling's contract",
   );
 });
 
@@ -1122,6 +1159,17 @@ test("overlay incompatibility is a provider fact, applied where evidenced and no
   );
   assert.ok(zImageOverlay.length > 0);
   assert.ok(zImageOverlay.every((cell) => cell.state === "Implemented/unverified"));
+
+  // MLX Krea has the same forward-time-residual property, now proven with real LoRA and LoKr A/Bs.
+  const mlxKreaOverlay = matrix.cells.filter(
+    (cell) =>
+      cell.owningFamilyStory === 15517 &&
+      cell.backend === "mlx" &&
+      cell.rung === "bounded_transformer_residency" &&
+      cell.overlay === "lora",
+  );
+  assert.ok(mlxKreaOverlay.length > 0);
+  assert.ok(mlxKreaOverlay.every((cell) => cell.state === "Implemented/unverified"));
 });
 
 test("a Structurally N/A survey verdict without structural evidence is rejected", async () => {
@@ -1455,4 +1503,209 @@ test("request-peak tier overrides fail closed", async () => {
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badFinding) } }),
     /requestPeak\.byTier\.q4 has unknown finding/,
   );
+});
+
+// SC-16060 ------------------------------------------------------------------------------------
+// `Verified` was a listed conformance state with nothing able to emit it: `strategyStatus` returns
+// only Implemented/unverified, Structurally N/A and Missing, and the cell copied that verbatim. So
+// the guard in `validateMatrix` was unreachable and the overlay test asserting "no cell is Verified"
+// was green for the trivial reason that no cell COULD be. These tests exist to make that class of
+// green impossible: every assertion below is paired with a mutation that must flip it.
+
+const KREA_CONTROL_CELL =
+  "krea_2_turbo:krea_2_turbo_control:mlx:q4:text_to_image:control:bounded_decode";
+
+/// The shipped bundle re-stamped onto the current inference pin. Both shipped records are
+/// `historical` — their inference revision predates the pin — which is why the real catalog has zero
+/// Verified cells. Promotion is a property of CURRENT evidence, so a test of the producer has to
+/// supply some; anything less tests the absence.
+async function currentEvidenceFixture({ keepGeometries = null } = {}) {
+  const [bundle, cargo] = await Promise.all([
+    readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8"),
+  ]);
+  const pin = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
+  )[1];
+  const parsed = JSON.parse(bundle);
+  parsed.records = parsed.records
+    .filter(
+      (record) =>
+        !keepGeometries ||
+        keepGeometries.includes(`${record.target.geometry.width}x${record.target.geometry.height}`),
+    )
+    .map((record) => {
+      // `repositories` is part of the record's deterministic identity, so re-stamping the revision
+      // without re-deriving the id produces a bundle the harness rejects outright. Recomputing it
+      // through the real `recordId` keeps the fixture a VALID record rather than a shape that only
+      // this test would accept.
+      const restamped = {
+        ...record,
+        repositories: {
+          ...record.repositories,
+          inference: { ...record.repositories.inference, revision: pin },
+        },
+      };
+      return { ...restamped, id: recordId(restamped) };
+    });
+  return JSON.stringify(parsed);
+}
+
+test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
+  const shipped = await buildMatrix();
+  const shippedCell = shipped.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(
+    shippedCell.state,
+    "Implemented/unverified",
+    "the shipped records are historical, so nothing may be promoted",
+  );
+  assert.equal(shipped.cells.filter((cell) => cell.state === "Verified").length, 0);
+
+  // MUTATION: the same two records, re-stamped onto the current pin. If the producer were absent —
+  // the state this story found the generator in — this assertion would fail while every other test
+  // in this file stayed green.
+  const promoted = await buildMatrix({
+    sourceOverrides: { calibrationEvidence: await currentEvidenceFixture() },
+  });
+  const promotedCell = promoted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(promotedCell.state, "Verified", "current eligible evidence must promote its cell");
+  assert.ok(
+    promotedCell.evidence.currentEnvironmentVerification.length > 0,
+    "a Verified cell must carry the dynamic evidence its guard requires",
+  );
+
+  // Promotion is scoped to the cell the records bind. Nothing else may move.
+  const movedIds = promoted.cells
+    .filter(
+      (cell) => cell.state !== shipped.cells.find((other) => other.id === cell.id).state,
+    )
+    .map((cell) => cell.id);
+  assert.deepEqual(movedIds, [KREA_CONTROL_CELL]);
+});
+
+test("Verified never implies geometry coverage — one point certifies one point (sc-16060)", async () => {
+  // The story's central case: a record whose geometry is INSIDE the envelope but far from what the
+  // cell will be asked to render. Under the old single-field model this cell read as certified
+  // across all 17 advertised resolutions on the strength of one 768x768 capture.
+  const single = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["768x768"] }),
+    },
+  });
+  const cell = single.cells.find((candidate) => candidate.id === KREA_CONTROL_CELL);
+
+  assert.equal(cell.state, "Verified", "one current record establishes the implementation claim");
+  assert.equal(cell.memoryCharacterization.status, "point");
+  assert.deepEqual(cell.memoryCharacterization.measuredGeometries, ["768x768"]);
+  assert.equal(
+    cell.memoryCharacterization.coveredPixelBound,
+    null,
+    "one point determines no curve, so it bounds no coverage",
+  );
+
+  // The envelope is genuinely much wider than the measurement — otherwise this test would pass for
+  // the uninteresting reason that there was nothing to over-claim.
+  const measured = 768 * 768;
+  const widest = Math.max(
+    ...cell.geometryEnvelope.resolutions.map((resolution) => {
+      const [width, height] = resolution.split("x").map(Number);
+      return width * height;
+    }),
+  );
+  assert.ok(
+    widest >= measured * 4,
+    `envelope must dwarf the measurement for this to mean anything (widest ${widest}, measured ${measured})`,
+  );
+});
+
+test("a second geometry is what makes a curve determinable (sc-16060)", async () => {
+  const fitted = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({
+        keepGeometries: ["768x768", "896x896"],
+      }),
+    },
+  });
+  const fittedCell = fitted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(fittedCell.memoryCharacterization.status, "fitted");
+  assert.deepEqual(fittedCell.memoryCharacterization.measuredGeometries, ["768x768", "896x896"]);
+  assert.equal(fittedCell.memoryCharacterization.coveredPixelBound, 896 * 896);
+
+  // MUTATION: drop one geometry. `fitted` must fall back to `point` and surrender its bound — a
+  // status that survived losing half its evidence would be asserting nothing.
+  const single = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["896x896"] }),
+    },
+  });
+  const singleCell = single.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(singleCell.memoryCharacterization.status, "point");
+  assert.equal(singleCell.memoryCharacterization.coveredPixelBound, null);
+  assert.equal(
+    singleCell.state,
+    "Verified",
+    "losing a geometry costs the curve, never the implementation claim",
+  );
+});
+
+test("the shipped manifest curves report their own under-determination (sc-16060)", async () => {
+  // Krea's q8 and bf16 carry ONE geometry point each while `vram_gate.rs#krea_phase_curve` documents
+  // its slopes as "fitted from real renders at multiple resolutions". The artifact now says which
+  // tiers that sentence is true of, rather than leaving a reader to trust the comment.
+  const matrix = await buildMatrix();
+  const status = (tier) =>
+    matrix.cells.find(
+      (cell) => cell.id === `krea_2_turbo:krea_2_turbo:candle:${tier}:text_to_image:none:bounded_decode`,
+    ).memoryCharacterization.status;
+
+  assert.equal(status("q4"), "fitted", "q4 carries 768x768 and 1024x1024");
+  assert.equal(status("q8"), "point", "q8 carries one geometry point");
+  assert.equal(status("bf16"), "point", "bf16 carries one geometry point");
+});
+
+test("promotion is available only to an implemented cell (sc-16060)", async () => {
+  const matrix = await buildMatrix({
+    sourceOverrides: { calibrationEvidence: await currentEvidenceFixture() },
+  });
+  for (const cell of matrix.cells) {
+    if (cell.state === "Verified") {
+      assert.ok(
+        cell.evidence.currentEnvironmentVerification.length > 0,
+        `${cell.id}: Verified without current evidence`,
+      );
+    }
+    // Neither of the two non-implementation states may carry measured geometry: there is no code to
+    // verify and nothing to measure, so evidence reaching one of them means a record bound a cell it
+    // should not have.
+    if (cell.state === "Missing" || cell.state === "Structurally N/A") {
+      assert.equal(
+        cell.memoryCharacterization.status,
+        "unmeasured",
+        `${cell.id}: ${cell.state} cell carries measured geometry`,
+      );
+    }
+  }
+});
+
+test("every conformance and characterization state carries a definition (sc-16060)", async () => {
+  // The defect underneath this story: `conformanceStates` was a bare string list, so `Verified` had
+  // no definition anywhere in the artifact, the generator, or the docs — and two parts of the
+  // pipeline answered "does one geometry certify the envelope?" differently without either being
+  // wrong about a rule that had never been written down.
+  const matrix = await buildMatrix();
+  const states = new Set(matrix.cells.map((cell) => cell.state));
+  for (const state of states) {
+    const declared = matrix.conformanceStates.find((entry) => entry.state === state);
+    assert.ok(declared, `${state} appears on a cell but is not declared`);
+    assert.ok(declared.definition.length > 20, `${state} has no usable definition`);
+  }
+  for (const status of new Set(matrix.cells.map((cell) => cell.memoryCharacterization.status))) {
+    const declared = matrix.memoryCharacterizationStates.find((entry) => entry.status === status);
+    assert.ok(declared, `${status} appears on a cell but is not declared`);
+    assert.ok(declared.definition.length > 20, `${status} has no usable definition`);
+  }
+  // The two claims are declared as what they are: one geometry-sensitive, one not. Collapsing them
+  // is what produced this story.
+  assert.equal(matrix.claims.state.geometrySensitive, false);
+  assert.equal(matrix.claims.memoryCharacterization.geometrySensitive, true);
 });
