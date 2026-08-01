@@ -1378,6 +1378,87 @@ mod resolved_artifact_provenance_tests {
             "a spoofed payload cannot manufacture missing worker-owned provenance"
         );
     }
+
+    /// A model installed before download-time tree stamps existed carries a BACKFILLED receipt
+    /// (`apps/rust-api/src/models.rs::backfill_current_receipt`), which records `resolvedFiles` read
+    /// off disk but never an `artifactTreeStamp` — only a download whose job payload carried
+    /// `memoryCalibrationProvenanceRequired: true` computes one. Such a receipt resolves a fully
+    /// loadable snapshot and still yields NO provenance, and nothing recomputes the stamp later.
+    ///
+    /// This is the exact state that made every calibration-opted-in model unusable: the plan turned
+    /// absent provenance into a hard refusal instead of degrading. Assert the resolver's `None` here
+    /// so the cause stays pinned; `mlx_fit_gate` asserts that `None` now routes to legacy.
+    #[test]
+    fn a_backfilled_receipt_resolves_weights_but_yields_no_provenance() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+        let repo = "SceneWorks/fixture-turnkey";
+        let files = ["q8/model_index.json", "q8/transformer/config.json"];
+        let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots/rev-backfilled");
+        std::fs::create_dir_all(snapshot.join("q8/transformer")).expect("snapshot tree");
+        for file in files {
+            std::fs::write(snapshot.join(file), b"{}").expect("snapshot file");
+        }
+        let marker_dir = data
+            .path()
+            .join("models")
+            .join(crate::paths::safe_download_dir(repo));
+        std::fs::create_dir_all(&marker_dir).expect("marker dir");
+        // Byte-for-byte the backfill writer's shape: no `snapshotRevision`, no `artifactTreeStamp`.
+        std::fs::write(
+            marker_dir.join(crate::INSTALL_MARKER),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "repo": repo,
+                "modelId": "fixture_model",
+                "variant": "q8",
+                "manifestFiles": ["q8/*"],
+                "resolvedFiles": files,
+                "backfilled": true,
+            }))
+            .expect("receipt json"),
+        )
+        .expect("marker");
+
+        let weights_dir = snapshot.join("q8");
+        let resolved = crate::model_jobs::huggingface_receipt_weights(
+            data.path(),
+            repo,
+            Some("fixture_model"),
+            Some("q8"),
+        )
+        .expect("a backfilled receipt still resolves loadable weights");
+        assert_eq!(
+            resolved.path, weights_dir,
+            "the artifact itself is found and loadable"
+        );
+        assert_eq!(
+            resolved.provenance, None,
+            "no artifactTreeStamp means the install cannot prove its artifact identity"
+        );
+
+        let request = ImageRequest::from_payload(
+            json!({ "model": "fixture_model" })
+                .as_object()
+                .expect("request object"),
+        );
+        assert_eq!(
+            resolved_mlx_artifact_provenance(
+                &request,
+                &settings(data.path()),
+                repo,
+                &weights_dir,
+                Some("q8"),
+            )
+            .expect("resolver"),
+            None,
+            "the MLX resolver must report the unproven install rather than invent an identity"
+        );
+    }
 }
 
 /// Models that ship the standard SceneWorks quant-matrix turnkey layout: self-contained `q4/`

@@ -109,12 +109,15 @@ impl MlxRequestPlan {
                             MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
                         ),
                     },
-                    None => (
-                        spec_tier,
-                        MlxCalibrationConfig::Invalid(
-                            "the resolver supplied no immutable artifact provenance".to_owned(),
-                        ),
-                    ),
+                    // The manifest opts in, but the resolver could not PROVE which artifact is on
+                    // disk. That is a property of the install, not of the opt-in: a receipt written
+                    // before download-time tree stamps existed (`backfill_current_receipt` never
+                    // writes `artifactTreeStamp`) resolves a perfectly loadable snapshot and still
+                    // yields no provenance. Refusing the request outright would strand every such
+                    // install with no repair path, so this is a NON-COVERING state and routes to the
+                    // established legacy selector — the conservative gate — exactly like every other
+                    // one. `Invalid` stays reserved for a malformed opt-in, which is an authoring bug.
+                    None => (spec_tier, MlxCalibrationConfig::Unproven),
                 },
                 Ok(None) => (spec_tier, MlxCalibrationConfig::Absent),
                 Err(reason) => (spec_tier, MlxCalibrationConfig::Invalid(reason)),
@@ -272,6 +275,11 @@ struct MlxCalibrationSet {
 enum MlxCalibrationConfig {
     Absent,
     Valid(MlxCalibrationSet),
+    /// The manifest declares bindings but the resolver could not establish immutable artifact
+    /// provenance, so no binding may be trusted for this request. Distinct from [`Self::Absent`]
+    /// so telemetry can tell "this model declares no evidence" from "this INSTALL cannot prove
+    /// which artifact it holds" — the two demand different follow-up.
+    Unproven,
     Invalid(String),
 }
 
@@ -507,6 +515,8 @@ enum LegacyAdmissionReason {
     StaleFingerprint,
     StaleIdentity,
     StaleBundle,
+    /// The manifest opted in but the install could not prove its artifact identity.
+    NoProvenance,
 }
 
 #[derive(Clone, Debug)]
@@ -713,7 +723,8 @@ fn stronger_fallback_reason(
         LegacyAdmissionReason::StaleIdentity => 3,
         LegacyAdmissionReason::PackagedEmpty
         | LegacyAdmissionReason::NoBinding
-        | LegacyAdmissionReason::StaleBundle => 4,
+        | LegacyAdmissionReason::StaleBundle
+        | LegacyAdmissionReason::NoProvenance => 4,
     };
     if priority(candidate) > priority(current) {
         candidate
@@ -889,6 +900,16 @@ fn evidence_admission_route(
             return Ok(AdmissionRoute {
                 path: AdmissionPath::Legacy,
                 fallback_reason: Some(LegacyAdmissionReason::NoBinding),
+                evidence: Vec::new(),
+                evidence_revision: None,
+                process_limit_bytes: None,
+                lower_alternative: None,
+            })
+        }
+        MlxCalibrationConfig::Unproven => {
+            return Ok(AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::NoProvenance),
                 evidence: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
@@ -3707,7 +3728,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_reader_distinguishes_absent_valid_and_malformed_opt_in() {
+    fn manifest_reader_distinguishes_absent_valid_unproven_and_malformed_opt_in() {
         let spec = fixture_spec(gen_core::Quant::Q4, "packed-q4");
         let absent = MlxRequestPlan::for_spec_and_manifest(
             "fixture_provider",
@@ -3733,6 +3754,11 @@ mod tests {
         assert_eq!(calibration.resolved.identity.variant, "packed-q4");
         assert_eq!(valid.tier.quant, Some(gen_core::Quant::Q4));
 
+        // An opt-in the resolver cannot back with immutable provenance is a NON-COVERING state, not
+        // a malformed manifest: the install simply cannot prove which artifact it holds (a receipt
+        // written before download-time tree stamps is the common cause). It must degrade to the
+        // conservative legacy selector rather than refuse the request, which would strand the
+        // install with no repair path.
         let unavailable = MlxRequestPlan::for_spec_and_manifest(
             "fixture_provider",
             "fixture_model",
@@ -3742,17 +3768,19 @@ mod tests {
         );
         assert!(matches!(
             unavailable.calibration,
-            MlxCalibrationConfig::Invalid(_)
+            MlxCalibrationConfig::Unproven
         ));
-        assert!(packaged_admission_route(
-            &unavailable,
-            &fixture_inputs(1024, 1024),
-            "text_to_image",
-            fixture_budget(8.0)
-        )
-        .expect_err("present opt-in without trusted resolver provenance must fail closed")
-        .to_string()
-        .contains("resolver supplied no immutable"));
+        assert_eq!(
+            packaged_admission_route(
+                &unavailable,
+                &fixture_inputs(1024, 1024),
+                "text_to_image",
+                fixture_budget(8.0)
+            )
+            .expect("an unproven opt-in must degrade, never refuse")
+            .path,
+            AdmissionPath::Legacy
+        );
 
         let mut malformed = fixture_calibration_json("q4", "packed-q4");
         malformed
