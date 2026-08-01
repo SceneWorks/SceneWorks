@@ -27,6 +27,8 @@ pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
 pub struct EvidenceBundle {
     pub schema_version: u32,
     pub harness_version: String,
+    #[serde(default)]
+    pub source_sessions: Vec<SourceSession>,
     pub records: Vec<EvidenceRecord>,
 }
 
@@ -52,9 +54,101 @@ pub struct EvidenceRecord {
     pub negative_mutation: RequiredNullable<NegativeMutation>,
     pub loadability: Loadability,
     pub diagnostics: Option<Diagnostics>,
+    pub derivation: Option<EvidenceDerivation>,
     pub calibration_fingerprint: String,
     pub captured_at: String,
     pub harness_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceSession {
+    pub id: String,
+    pub kind: SourceSessionKind,
+    pub command: String,
+    pub captured_at: String,
+    pub repositories: Repositories,
+    pub hardware: SourceHardware,
+    pub target: Option<SourceTarget>,
+    pub stdout_sha256: String,
+    pub outputs: Vec<SourceOutput>,
+    pub claims: Vec<SourceClaim>,
+    pub result: SourceResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSessionKind {
+    PhysicalCuda,
+    UnitTest,
+    StaticAnalysis,
+    Comparison,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceHardware {
+    pub probe: String,
+    pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceTarget {
+    pub tier: String,
+    pub mode: String,
+    pub overlay: String,
+    pub rung: StrategyRung,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceOutput {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceClaim {
+    Memory,
+    Quality,
+    Lifecycle,
+    Loadability,
+    Overlay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceResult {
+    Passed,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvidenceDerivation {
+    pub memory: DerivationRef,
+    pub quality: DerivationRef,
+    pub lifecycle: DerivationRef,
+    pub loadability: DerivationRef,
+    pub overlay: DerivationRef,
+    pub justification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivationRef {
+    pub kind: DerivationKind,
+    pub source_session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivationKind {
+    Direct,
+    ConservativeUpperBound,
+    IdenticalComponent,
+    SharedImplementation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -651,8 +745,150 @@ impl EvidenceRecord {
 }
 
 fn validate_bundle(bundle: &EvidenceBundle) -> Result<(), String> {
+    let mut sessions = BTreeMap::new();
+    for session in &bundle.source_sessions {
+        validate_source_session(session)?;
+        if sessions.insert(session.id.as_str(), session).is_some() {
+            return Err(format!("duplicate source session {}", session.id));
+        }
+    }
     for record in &bundle.records {
         validate_record(record)?;
+        validate_derivation(record, &sessions)?;
+    }
+    Ok(())
+}
+
+fn validate_source_session(session: &SourceSession) -> Result<(), String> {
+    if !has_prefixed_hex(&session.id, "ims-", 20) {
+        return Err("source session id must be ims- plus 20 lowercase hex digits".to_owned());
+    }
+    require_nonempty(&session.command, "sourceSession.command")?;
+    require_nonempty(&session.hardware.probe, "sourceSession.hardware.probe")?;
+    if session.hardware.memory_bytes == 0 {
+        return Err(format!(
+            "{} hardware.memoryBytes must be positive",
+            session.id
+        ));
+    }
+    if !is_rfc3339_datetime(&session.captured_at) {
+        return Err(format!("{} capturedAt is not RFC 3339", session.id));
+    }
+    if !is_sha256(&session.stdout_sha256) {
+        return Err(format!(
+            "{} stdoutSha256 must be lowercase SHA-256",
+            session.id
+        ));
+    }
+    if session.claims.is_empty()
+        || session
+            .claims
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != session.claims.len()
+    {
+        return Err(format!("{} claims must be nonempty and unique", session.id));
+    }
+    validate_git_state(&session.repositories.scene_works, false, &session.id)?;
+    validate_git_state(&session.repositories.inference, false, &session.id)?;
+    for output in &session.outputs {
+        require_nonempty(&output.path, "sourceSession.outputs.path")?;
+        if !is_sha256(&output.sha256) {
+            return Err(format!(
+                "{} output sha256 must be lowercase SHA-256",
+                session.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_derivation(
+    record: &EvidenceRecord,
+    sessions: &BTreeMap<&str, &SourceSession>,
+) -> Result<(), String> {
+    let requires_provenance = record.backend == Backend::Candle
+        && record.target.model_id == "z_image"
+        && record.evidence_scope == EvidenceScope::Authoritative
+        && record.status == RecordStatus::Complete;
+    let Some(derivation) = &record.derivation else {
+        return if requires_provenance {
+            Err(format!("{} requires source-session derivation", record.id))
+        } else {
+            Ok(())
+        };
+    };
+    require_nonempty(&derivation.justification, "record.derivation.justification")?;
+    let dimensions = [
+        (SourceClaim::Memory, &derivation.memory),
+        (SourceClaim::Quality, &derivation.quality),
+        (SourceClaim::Lifecycle, &derivation.lifecycle),
+        (SourceClaim::Loadability, &derivation.loadability),
+        (SourceClaim::Overlay, &derivation.overlay),
+    ];
+    for (claim, reference) in dimensions {
+        if reference.source_session_ids.is_empty() {
+            return Err(format!("{} has an empty derivation source list", record.id));
+        }
+        let unique = reference.source_session_ids.iter().collect::<BTreeSet<_>>();
+        if unique.len() != reference.source_session_ids.len() {
+            return Err(format!("{} repeats a derivation source", record.id));
+        }
+        for id in &reference.source_session_ids {
+            let session = sessions
+                .get(id.as_str())
+                .ok_or_else(|| format!("{} references missing source session {id}", record.id))?;
+            if !session.claims.contains(&claim) {
+                return Err(format!(
+                    "{} source session {id} does not claim {claim:?}",
+                    record.id
+                ));
+            }
+            if let Some(target) = &session.target {
+                if matches!(
+                    claim,
+                    SourceClaim::Memory | SourceClaim::Quality | SourceClaim::Overlay
+                ) && target.tier != record.target.tier
+                {
+                    return Err(format!(
+                        "{} cannot derive {claim:?} across precision tiers from {id}",
+                        record.id
+                    ));
+                }
+                if claim == SourceClaim::Memory && target.rung != record.strategy.rung {
+                    return Err(format!(
+                        "{} cannot derive memory across rungs from {id}",
+                        record.id
+                    ));
+                }
+                if matches!(reference.kind, DerivationKind::Direct)
+                    && matches!(claim, SourceClaim::Quality | SourceClaim::Overlay)
+                    && target.overlay != record.target.overlay
+                {
+                    return Err(format!(
+                        "{} direct {claim:?} source {id} has the wrong overlay",
+                        record.id
+                    ));
+                }
+            }
+        }
+    }
+    if !matches!(
+        derivation.memory.kind,
+        DerivationKind::Direct | DerivationKind::ConservativeUpperBound
+    ) {
+        return Err(format!(
+            "{} has an invalid memory derivation kind",
+            record.id
+        ));
+    }
+    if derivation.loadability.kind != DerivationKind::Direct {
+        return Err(format!(
+            "{} loadability must be directly sourced",
+            record.id
+        ));
     }
     Ok(())
 }
@@ -1231,6 +1467,10 @@ fn is_lower_hex(value: &str) -> bool {
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && is_lower_hex(value)
+}
+
 fn is_rfc3339_datetime(value: &str) -> bool {
     let Some((date, time_and_offset)) = value.split_once('T') else {
         return false;
@@ -1587,6 +1827,14 @@ mod tests {
                 .filter(|record| record.target.provider == "krea_2_turbo_control")
                 .count(),
             2
+        );
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.target.provider == "z_image")
+                .count(),
+            0
         );
         assert!(bundle.records.iter().any(|record| {
             record.quality.identical_inputs == Some(true)

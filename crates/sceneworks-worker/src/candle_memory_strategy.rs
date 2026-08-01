@@ -312,6 +312,17 @@ fn verified_candidates(
     Ok(candidates)
 }
 
+fn account_for_runtime_overlay_bytes(
+    candidates: &mut [MemoryEvidence],
+    runtime_overlay_bytes: u64,
+) {
+    for candidate in candidates {
+        candidate.predicted_peak_bytes = candidate
+            .predicted_peak_bytes
+            .saturating_add(runtime_overlay_bytes);
+    }
+}
+
 fn memory_for_selection(
     contract: &gen_core::MemoryProviderContract,
     selection: MemorySelection,
@@ -347,6 +358,7 @@ pub(crate) fn evaluate_z_image(
     has_phases: bool,
     budget: Option<VramBudget>,
     predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     if !matches!(
@@ -423,7 +435,7 @@ pub(crate) fn evaluate_z_image(
     // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
     // returned candidate to the exact runtime route expected by the provider contract.
     let evidence_provider = evidence_provider(engine_id);
-    let verified = verified_candidates(
+    let mut verified = verified_candidates(
         manifest,
         model_id,
         evidence_provider,
@@ -433,6 +445,11 @@ pub(crate) fn evaluate_z_image(
         exact_overlay,
         geometry,
     )?;
+    // Calibration records describe the certified overlay fixture. User-provided adapters can be
+    // larger, so every optimized candidate must reserve the bytes for the actual request before
+    // the common selector performs its fit check. The resident estimate already includes these
+    // bytes through `predicted_peak_gb_with_adapter_bytes` and must not be adjusted twice.
+    account_for_runtime_overlay_bytes(&mut verified, runtime_overlay_bytes);
     if let Some(exact) = verified.first() {
         resident
             .inference_revision
@@ -458,11 +475,6 @@ pub(crate) fn evaluate_z_image(
             evidence,
         })
         .collect::<Vec<_>>();
-    let expected_revision = verified
-        .first()
-        .map_or(resident.inference_revision.as_str(), |item| {
-            item.inference_revision.as_str()
-        });
     let selected = crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: engine_id,
@@ -471,7 +483,7 @@ pub(crate) fn evaluate_z_image(
             mode: mode_key,
             overlay,
             geometry,
-            expected_inference_revision: expected_revision,
+            expected_inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         },
         &contract,
         Some(Budget {
@@ -593,6 +605,7 @@ mod tests {
                 total_gb: 32.0,
             }),
             Some(8.0),
+            0,
             MemoryCacheState::Cold,
         )
         .unwrap()
@@ -605,7 +618,7 @@ mod tests {
         assert!(evaluation.context.has_reference);
         assert_eq!(
             evaluation.context.calibration_fingerprint,
-            "z-image-cuda-staged-tiled-decode-bounded-attention-streamed-blocks-v1"
+            "z-image-cuda-base-control-host-decode-streamed-blocks-v1"
         );
         assert!(evaluation.memory.is_none());
     }
@@ -636,9 +649,47 @@ mod tests {
                 total_gb: 32.0,
             }),
             Some(8.0),
+            0,
             MemoryCacheState::Cold,
         )
         .unwrap();
         assert!(evaluation.is_none());
+    }
+
+    #[test]
+    fn optimized_candidates_reserve_the_actual_runtime_adapter_bytes() {
+        let mut evidence = MemoryEvidence {
+            key: MemoryEvidenceKey {
+                resolved_route: "z_image".to_owned(),
+                backend: "candle".to_owned(),
+                tier: NumericTier::Q4,
+                mode: "text_to_image".to_owned(),
+                overlay: Some("lora".to_owned()),
+                geometry: MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                },
+                strategy: MemoryStrategy::BoundedTransformerResidency,
+                engaged_composition: vec![MemoryStrategy::BoundedTransformerResidency],
+                parameters: Default::default(),
+            },
+            conformance: MemoryConformanceState::Verified,
+            dimensions: MemoryEvidenceDimensions::VERIFIED,
+            calibration_abi: 1,
+            calibration_fingerprint: "fixture".to_owned(),
+            sceneworks_revision: "fixture".to_owned(),
+            inference_revision: "fixture".to_owned(),
+            harness_version: "fixture".to_owned(),
+            predicted_peak_bytes: 8 * 1024,
+            observed_peak_bytes: Some(8 * 1024),
+            parity: MemoryParityContract::Exact,
+            parity_result: MemoryParityResult::Passed,
+        };
+
+        account_for_runtime_overlay_bytes(std::slice::from_mut(&mut evidence), 512);
+
+        assert_eq!(evidence.predicted_peak_bytes, 8 * 1024 + 512);
     }
 }

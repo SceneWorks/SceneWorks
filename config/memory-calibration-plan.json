@@ -882,8 +882,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1055,8 +1054,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1228,8 +1226,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1401,8 +1398,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1574,8 +1570,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1747,8 +1742,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -1920,8 +1914,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2093,8 +2086,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2266,8 +2258,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2439,8 +2430,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2612,8 +2602,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2785,8 +2774,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -2958,8 +2946,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -3131,8 +3118,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -3304,8 +3290,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -3477,8 +3462,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -3650,8 +3634,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }
@@ -3823,8 +3806,7 @@
             "decodeTileEdge": 512,
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "Dit"
+            "transformerWindowSize": 1
           },
           "expectedResult": "passed"
         }

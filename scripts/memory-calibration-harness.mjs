@@ -399,11 +399,47 @@ export function validateBundle(bundle) {
   if (bundle.schemaVersion !== 3 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
+  const sessions = new Map();
+  for (const session of bundle.sourceSessions ?? []) {
+    if (sessions.has(session.id)) fail(`duplicate source session ${session.id}`);
+    sessions.set(session.id, session);
+  }
   const ids = new Set();
   for (const record of bundle.records) {
     validateRecord(record);
     if (ids.has(record.id)) fail(`duplicate record ${record.id}`);
     ids.add(record.id);
+    const requiresDerivation = record.backend === "candle"
+      && record.target.modelId === "z_image"
+      && record.evidenceScope === "authoritative"
+      && record.status === "complete";
+    if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (record.derivation) {
+      for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
+        for (const sessionId of reference.sourceSessionIds) {
+          const session = sessions.get(sessionId);
+          if (!session) fail(`${record.id}: missing source session ${sessionId}`);
+          if (!session.claims.includes(claim)) fail(`${record.id}: ${sessionId} does not claim ${claim}`);
+          if (["memory", "quality", "overlay"].includes(claim)
+              && session.target && session.target.tier !== record.target.tier) {
+            fail(`${record.id}: ${claim} cannot cross precision tiers`);
+          }
+          if (claim === "memory" && session.target && session.target.rung !== record.strategy.rung) {
+            fail(`${record.id}: memory cannot cross ladder rungs`);
+          }
+          if (["quality", "overlay"].includes(claim) && reference.kind === "direct"
+              && session.target && session.target.overlay !== record.target.overlay) {
+            fail(`${record.id}: direct ${claim} cannot cross overlays`);
+          }
+        }
+      }
+      if (!["direct", "conservative_upper_bound"].includes(record.derivation.memory.kind)) {
+        fail(`${record.id}: invalid memory derivation kind`);
+      }
+      if (record.derivation.loadability.kind !== "direct") {
+        fail(`${record.id}: loadability must be direct`);
+      }
+    }
   }
   return bundle;
 }
@@ -430,7 +466,18 @@ export function mergeBundles(left, right) {
     if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
     records.set(record.id, record);
   }
-  return { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+  const sourceSessions = new Map((left.sourceSessions ?? []).map((session) => [session.id, session]));
+  for (const session of right.sourceSessions ?? []) {
+    const existing = sourceSessions.get(session.id);
+    if (existing && !equal(existing, session)) fail(`conflicting source session ${session.id}`);
+    sourceSessions.set(session.id, session);
+  }
+  return {
+    schemaVersion: 3,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [...sourceSessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)),
+  };
 }
 
 export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
@@ -632,7 +679,7 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume ? validateBundle(resume) : { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [] };
+  const existing = resume ? validateBundle(resume) : { schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
   const selectedConfig = {
     ...config,
     providers: config.providers.filter(

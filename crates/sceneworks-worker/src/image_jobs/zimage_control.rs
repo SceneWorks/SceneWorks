@@ -217,12 +217,15 @@ async fn ensure_zimage_control_weights(
     settings: &Settings,
     job: &JobSnapshot,
     request: &ImageRequest,
-) -> WorkerResult<PathBuf> {
+) -> WorkerResult<(PathBuf, bool)> {
     let (repo, file) = zimage_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_ZIMAGE") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            return Ok(p);
+            // An environment override is intentionally supported for resident execution, but it
+            // has not passed the pinned Hugging Face revision/LFS verification below. Do not let
+            // it borrow optimized memory evidence minted for the certified checkpoint.
+            return Ok((p, false));
         }
     }
     let engine_id = if is_zimage_base_model(&request.model) {
@@ -236,7 +239,7 @@ async fn ensure_zimage_control_weights(
     {
         let f = snapshot.join(&file);
         if f.is_file() {
-            return Ok(f);
+            return Ok((f, true));
         }
     }
     let client = crate::downloads::streaming_download_client();
@@ -257,7 +260,7 @@ async fn ensure_zimage_control_weights(
     // moving under us can't swap the ControlNet checkpoint (sc-9879). Registered overlays carry their
     // own immutable pin.
     ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
-    Ok(dst)
+    Ok((dst, true))
 }
 
 /// Flat telemetry recorded on candle Z-Image control assets. `guidance` is recorded only for the base
@@ -482,7 +485,8 @@ pub(super) async fn generate_candle_zimage_control_stream(
         let label = if is_base { "Z-Image" } else { "Z-Image-Turbo" };
         WorkerError::InvalidPayload(format!("Z-Image base ({label}) weights not found"))
     })?;
-    let controlnet = ensure_zimage_control_weights(api, settings, job, request).await?;
+    let (controlnet, controlnet_is_certified) =
+        ensure_zimage_control_weights(api, settings, job, request).await?;
 
     let steps = zimage_control_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -547,27 +551,32 @@ pub(super) async fn generate_candle_zimage_control_stream(
     }
     let budget = crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await;
     let resident_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_z_image(
-        engine_id,
-        &request.model,
-        &contract_spec,
-        &request.model_manifest_entry,
-        tier,
-        &request.mode,
-        Some("control"),
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-        },
-        true,
-        use_pid,
-        false,
-        budget,
-        resident_peak,
-        gen_core::MemoryCacheState::Cold,
-    )?;
+    let memory_evaluation = if controlnet_is_certified {
+        crate::candle_memory_strategy::evaluate_z_image(
+            engine_id,
+            &request.model,
+            &contract_spec,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            Some("control"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+            },
+            true,
+            use_pid,
+            false,
+            budget,
+            resident_peak,
+            0,
+            gen_core::MemoryCacheState::Cold,
+        )?
+    } else {
+        None
+    };
     let (memory, memory_gate_selected) = match memory_evaluation {
         Some(evaluation) => (
             evaluation.memory.unwrap_or_default(),

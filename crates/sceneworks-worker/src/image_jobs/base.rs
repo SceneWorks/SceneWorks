@@ -7205,6 +7205,7 @@ async fn generate_candle_stream(
         hires_fix.is_some(),
         budget,
         needed,
+        adapter_resident_bytes,
         if reclaimable_gb > 0.0 {
             gen_core::MemoryCacheState::Warm
         } else {
