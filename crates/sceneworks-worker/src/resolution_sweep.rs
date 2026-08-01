@@ -151,6 +151,23 @@ fn cached_tier_dir(repo: &str, tier: &str, sentinel: &str) -> Option<PathBuf> {
         })
 }
 
+/// Locate a cached turnkey whose weights live at the snapshot root rather than in q4/q8/bf16.
+fn cached_snapshot_dir(repo: &str, sentinel: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let repo_cache = repo.replace('/', "--");
+    let snapshots = PathBuf::from(home)
+        .join(".cache/huggingface/hub")
+        .join(format!("models--{repo_cache}"))
+        .join("snapshots");
+    std::fs::read_dir(&snapshots)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .find_map(|entry| {
+            let root = entry.path();
+            root.join(sentinel).is_file().then_some(root)
+        })
+}
+
 /// Resolve the tier dir from an explicit override env (a turnkey root OR the tier dir itself) or the
 /// HF cache, panicking with a download hint if neither resolves.
 fn resolve_tier_dir(env_key: &str, repo: &str, tier: &str, sentinel: &str) -> PathBuf {
@@ -179,6 +196,40 @@ fn resolve_tier_dir(env_key: &str, repo: &str, tier: &str, sentinel: &str) -> Pa
     })
 }
 
+/// Resolve a root-layout turnkey from an explicit override or the HF cache.
+fn resolve_snapshot_dir(env_key: &str, repo: &str, sentinel: &str) -> PathBuf {
+    if let Ok(path) = std::env::var(env_key) {
+        let path = path.trim();
+        if !path.is_empty() {
+            let root = PathBuf::from(path);
+            assert!(
+                root.join(sentinel).is_file(),
+                "{env_key}={} has no {sentinel}",
+                root.display()
+            );
+            return root;
+        }
+    }
+    cached_snapshot_dir(repo, sentinel).unwrap_or_else(|| {
+        panic!(
+            "no cached {repo} turnkey with {sentinel}; download it or set {env_key} to the snapshot root"
+        )
+    })
+}
+
+/// Resolve a locally assembled directory that is not published as a turnkey (currently Anima).
+fn resolve_local_dir(env_key: &str, sentinel: &str) -> PathBuf {
+    let raw = std::env::var(env_key)
+        .unwrap_or_else(|_| panic!("set {env_key} to the assembled model directory"));
+    let root = PathBuf::from(raw.trim());
+    assert!(
+        root.join(sentinel).is_file(),
+        "{env_key}={} has no {sentinel}",
+        root.display()
+    );
+    root
+}
+
 /// The load-quant for a tier, or `None` for the dense `bf16` tier (the worker's dense path). Packed
 /// q4/q8 subdirs auto-detect their quant, so `with_quant` just names the tier.
 fn quant_for(tier: &str) -> Option<Quant> {
@@ -187,6 +238,26 @@ fn quant_for(tier: &str) -> Option<Quant> {
         "q8" => Some(Quant::Q8),
         _ => None,
     }
+}
+
+/// Sum the safetensors sources this harness supplied, including externally staged components.
+fn spec_safetensors_bytes(spec: &LoadSpec) -> u64 {
+    let source_bytes = |source: &WeightsSource| match source {
+        WeightsSource::Dir(path) => crate::mlx_fit_gate::sum_safetensors_bytes(path),
+        WeightsSource::File(path) => std::fs::metadata(path).map_or(0, |meta| meta.len()),
+    };
+    let mut total = source_bytes(&spec.weights);
+    for source in spec.components.values() {
+        let already_counted = match (source, &spec.weights) {
+            (WeightsSource::Dir(path), WeightsSource::Dir(root))
+            | (WeightsSource::File(path), WeightsSource::Dir(root)) => path.starts_with(root),
+            _ => false,
+        };
+        if !already_counted {
+            total = total.saturating_add(source_bytes(source));
+        }
+    }
+    total
 }
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -294,6 +365,22 @@ fn sweep_tier(
     dir: &Path,
     make_request: impl Fn(u32, u32) -> GenerationRequest,
 ) {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(dir.to_path_buf()));
+    if let Some(quant) = quant_for(tier) {
+        spec = spec.with_quant(quant);
+    }
+    sweep_with_spec(model, tier, engine_id, dir, spec, make_request);
+}
+
+/// [`sweep_tier`] with a caller-built load spec for providers with staged components.
+fn sweep_with_spec(
+    model: &str,
+    tier: &str,
+    engine_id: &str,
+    dir: &Path,
+    spec: LoadSpec,
+    make_request: impl Fn(u32, u32) -> GenerationRequest,
+) {
     // Enforce the one-tier-per-process invariant before touching the GPU (see `SWEEP_RAN`): a second
     // tier in this process would report numbers contaminated by the first tier's resident weights.
     assert!(
@@ -307,7 +394,7 @@ fn sweep_tier(
     let cells = sweep_cells();
     assert!(!cells.is_empty(), "no sweep cells");
 
-    let disk = crate::mlx_fit_gate::sum_safetensors_bytes(dir);
+    let disk = spec_safetensors_bytes(&spec);
     println!(
         "[sweep] {model} ({tier}) from {} — disk {:.2} GiB, cells {cells:?}",
         dir.display(),
@@ -316,10 +403,6 @@ fn sweep_tier(
 
     mlx_rs::memory::clear_cache();
     mlx_rs::memory::reset_peak_memory();
-    let mut spec = LoadSpec::new(WeightsSource::Dir(dir.to_path_buf()));
-    if let Some(quant) = quant_for(tier) {
-        spec = spec.with_quant(quant);
-    }
     let generator = crate::inference_runtime::load(engine_id, &spec)
         .unwrap_or_else(|error| panic!("load {engine_id} ({tier}): {error:?}"));
 
@@ -388,6 +471,15 @@ fn request_for(steps: u32, guidance: Option<f32>) -> impl Fn(u32, u32) -> Genera
     }
 }
 
+/// Chroma carries its CFG scale in `true_cfg` and rejects the ordinary `guidance` field.
+fn request_for_true_cfg(steps: u32, true_cfg: f32) -> impl Fn(u32, u32) -> GenerationRequest {
+    let make_request = request_for(steps, None);
+    move |width, height| GenerationRequest {
+        true_cfg: Some(true_cfg),
+        ..make_request(width, height)
+    }
+}
+
 const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
 const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
 // Lens AND Krea pack the DiT under transformer/diffusion_pytorch_model.safetensors …
@@ -397,6 +489,10 @@ const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
 const SHARDED_DIT_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors.index.json";
 // … while Z-Image AND Qwen-Image pack the DiT under transformer/model.safetensors.
 const ZIMAGE_SENTINEL: &str = "transformer/model.safetensors";
+const DIT_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
+const SHARDED_TRANSFORMER_SENTINEL: &str =
+    "transformer/diffusion_pytorch_model.safetensors.index.json";
+const FLAT_MODEL_SENTINEL: &str = "model.safetensors";
 
 // ── The sweep set ────────────────────────────────────────────────────────────────────────────────
 // Chosen to span the two axes the estimator has to survive: ARCHITECTURE (SDXL UNet vs single-stream
@@ -524,4 +620,237 @@ fn sweep_qwen_image_q8() {
 fn sweep_lens_q4() {
     let dir = resolve_tier_dir("RS_LENS_Q4_DIR", "SceneWorks/lens-mlx", "q4", LENS_SENTINEL);
     sweep_tier("lens", "q4", "lens", &dir, request_for(20, Some(5.0)));
+}
+
+// ── sc-16209 family-completeness additions ─────────────────────────────────────────────────────
+// One representative text-to-image descriptor per remaining MLX architecture. These ignored tests
+// intentionally exist even when this checkout lacks a complete local turnkey: an unavailable row is
+// recorded as unmeasured and therefore MUST keep the generic estimator fallback. Adding a provider
+// anchor without a successful row from this harness is a review failure.
+
+/// Mage-Flow uses a split install: the selected transformer's tier is the primary source while the
+/// provider-owned text encoder and VAE are staged as explicit LoadSpec components.
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs Mage-Flow + Mage-Flow-Components-mlx bf16 cached + an Apple-Silicon Mac"]
+fn sweep_mage_flow_bf16() {
+    let transformer = resolve_tier_dir(
+        "RS_MAGE_FLOW_DIR",
+        "SceneWorks/Mage-Flow",
+        "bf16",
+        DIT_SENTINEL,
+    );
+    let components = resolve_tier_dir(
+        "RS_MAGE_COMPONENTS_DIR",
+        "SceneWorks/Mage-Flow-Components-mlx",
+        "bf16",
+        "text_encoder/model.safetensors",
+    );
+    let spec = LoadSpec::new(WeightsSource::Dir(transformer.clone()))
+        .with_component(
+            "text_encoder",
+            WeightsSource::Dir(components.join("text_encoder")),
+        )
+        .with_component("vae", WeightsSource::Dir(components.join("vae")));
+    sweep_with_spec(
+        "mage_flow",
+        "bf16",
+        "mage_flow",
+        &transformer,
+        spec,
+        request_for(20, Some(5.0)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/ideogram-4-mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_ideogram_4_q8() {
+    let dir = resolve_tier_dir(
+        "RS_IDEOGRAM_4_DIR",
+        "SceneWorks/ideogram-4-mlx",
+        "q8",
+        DIT_SENTINEL,
+    );
+    sweep_tier(
+        "ideogram_4",
+        "q8",
+        "ideogram_4",
+        &dir,
+        request_for(48, Some(7.0)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/flux1-dev-mlx bf16 cached + an Apple-Silicon Mac"]
+fn sweep_flux1_dev_bf16() {
+    let dir = resolve_tier_dir(
+        "RS_FLUX1_DEV_DIR",
+        "SceneWorks/flux1-dev-mlx",
+        "bf16",
+        SHARDED_TRANSFORMER_SENTINEL,
+    );
+    sweep_tier(
+        "flux_dev",
+        "bf16",
+        "flux1_dev",
+        &dir,
+        request_for(28, Some(3.5)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/flux2-klein-9b-mlx bf16 cached + an Apple-Silicon Mac"]
+fn sweep_flux2_klein_9b_bf16() {
+    let dir = resolve_tier_dir(
+        "RS_FLUX2_KLEIN_DIR",
+        "SceneWorks/flux2-klein-9b-mlx",
+        "bf16",
+        SHARDED_TRANSFORMER_SENTINEL,
+    );
+    sweep_tier(
+        "flux2_klein_9b",
+        "bf16",
+        "flux2_klein_9b",
+        &dir,
+        request_for(4, Some(1.0)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/kolors-mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_kolors_q8() {
+    let dir = resolve_tier_dir(
+        "RS_KOLORS_DIR",
+        "SceneWorks/kolors-mlx",
+        "q8",
+        SDXL_SENTINEL,
+    );
+    sweep_tier("kolors", "q8", "kolors", &dir, request_for(25, Some(5.0)));
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/chroma1-hd-mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_chroma1_hd_q8() {
+    let dir = resolve_tier_dir(
+        "RS_CHROMA1_HD_DIR",
+        "SceneWorks/chroma1-hd-mlx",
+        "q8",
+        DIT_SENTINEL,
+    );
+    sweep_tier(
+        "chroma1_hd",
+        "q8",
+        "chroma1_hd",
+        &dir,
+        request_for_true_cfg(40, 3.0),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/sensenova-u1-8b-mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_sensenova_u1_8b_q8() {
+    let dir = resolve_tier_dir(
+        "RS_SENSENOVA_DIR",
+        "SceneWorks/sensenova-u1-8b-mlx",
+        "q8",
+        FLAT_MODEL_SENTINEL,
+    );
+    sweep_tier(
+        "sensenova_u1_8b",
+        "q8",
+        "sensenova_u1_8b",
+        &dir,
+        request_for(50, Some(4.0)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/bernini-mlx cached + an Apple-Silicon Mac"]
+fn sweep_bernini_image_bf16() {
+    let dir = resolve_snapshot_dir(
+        "RS_BERNINI_DIR",
+        "SceneWorks/bernini-mlx",
+        "high_noise_model.safetensors",
+    );
+    let make_request = request_for(40, Some(4.0));
+    sweep_tier(
+        "bernini_image",
+        "bf16",
+        "bernini",
+        &dir,
+        move |width, height| GenerationRequest {
+            frames: Some(1),
+            video_mode: Some("t2i".to_owned()),
+            ..make_request(width, height)
+        },
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/boogu-image-mlx turbo cached + an Apple-Silicon Mac"]
+fn sweep_boogu_image_turbo_q8() {
+    let dir = resolve_tier_dir(
+        "RS_BOOGU_DIR",
+        "SceneWorks/boogu-image-mlx",
+        "turbo",
+        DIT_SENTINEL,
+    );
+    sweep_tier(
+        "boogu_image_turbo",
+        "q8",
+        "boogu_image_turbo",
+        &dir,
+        request_for(4, None),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/sd3.5-large-turbo-mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_sd3_5_large_turbo_q8() {
+    let dir = resolve_tier_dir(
+        "RS_SD3_5_TURBO_DIR",
+        "SceneWorks/sd3.5-large-turbo-mlx",
+        "q8",
+        DIT_SENTINEL,
+    );
+    sweep_tier(
+        "sd3_5_large_turbo",
+        "q8",
+        "sd3_5_large_turbo",
+        &dir,
+        request_for(4, None),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; needs SceneWorks/Sana_Sprint_1.6B_1024px_mlx q8 cached + an Apple-Silicon Mac"]
+fn sweep_sana_sprint_1600m_q8() {
+    let dir = resolve_tier_dir(
+        "RS_SANA_SPRINT_DIR",
+        "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+        "q8",
+        DIT_SENTINEL,
+    );
+    sweep_tier(
+        "sana_sprint_1600m",
+        "q8",
+        "sana_sprint_1600m",
+        &dir,
+        request_for(2, Some(4.5)),
+    );
+}
+
+#[test]
+#[ignore = "sc-16209 resolution sweep; set RS_ANIMA_BASE_DIR to an assembled q8 Anima directory on an Apple-Silicon Mac"]
+fn sweep_anima_base_q8() {
+    let dir = resolve_local_dir(
+        "RS_ANIMA_BASE_DIR",
+        "diffusion_models/anima-base-v1.0.safetensors",
+    );
+    sweep_tier(
+        "anima_base",
+        "q8",
+        "anima_base",
+        &dir,
+        request_for(30, Some(4.5)),
+    );
 }
