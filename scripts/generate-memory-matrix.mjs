@@ -1211,13 +1211,15 @@ function strategyStatus({
         historicalVerification: evidenceRecords.map((record) => ({
           source: `Shortcut ${record.sourceStory} activity ${record.sourceActivity}`,
           hardware: verification?.hardware,
+          evidenceScope: record.evidenceScope,
+          runtimeAdmission: record.evidenceScope === "exact_request",
           tier: record.tier,
           geometry: `${record.width}x${record.height}`,
           capturedAt: record.capturedAt,
           harnessVersion: record.harnessVersion,
           engagedRungs: record.measuredCompositions?.[manifestRung],
           observedPeakGb: record.observedPeaksGb?.[manifestRung],
-          parity: record.parity,
+          ...(record.parity ? { parity: record.parity } : {}),
         })),
         currentEnvironmentVerification: [],
         strategyParameterVerification: evidenceRecords

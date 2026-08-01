@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:30a2228f3f98e272732f8f4e4bdbbcd9d3383e6ae41a2a3c612b1da6401f36ee",
-    "matrixRevision": "source-tree:7010c84910709b69f92246b31734f2bd0928ccfb93543ed9a28d7aeaf6632106",
+    "sceneWorksRevision": "source-tree:e3fb7256c3ae41f87e37a1d9b5411937213516886bee4939e81c52239e02efc8",
+    "matrixRevision": "source-tree:b21e83d07e54cc993788ba58db5e0389a6124d09134ec3c8c708e776e6b5ad38",
     "inferenceRevision": "09aefe3afb125af3f0736d55a438c412d64ec4c2",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "c0378df2509f7d8fc8ae09791c7f42bbf373e6d06b44862dcbf8cdca4d10ba5e"
+        "sha256": "96457d2c1423f0cc9f5e14b98407f7c03f494b88da0e8c92eb3a9524eb86c44d"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "3cc87208ff5d2757f8ba93f782b993eab18ec824db5661f168fd7f826617bfc3"
+        "sha256": "c70fdfef684c25c30905df03828c25b5911212621c234226f73bd549d09bb62e"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "951065e084b1777d3fa78aae0b99e0c62bfe2d2356981ab041d063af8ad24786"
+        "sha256": "19f1ff7ffa5f86c6661d85ebaad68e432f8757a9724ff2243d4c100471077ae4"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f8324fed6431b47453886015c6174efd8f5be3ac16aaf4342ba64e836f03fd66"
+        "sha256": "f0692211286f7178c0807e411343e30f91a8fa3aa13933f564d9b432fc8c3fd5"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -1038,17 +1038,19 @@
     },
     "kreaPrecedent": {
       "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit",
-      "measurementRecords": 4,
+      "measurementRecords": 6,
       "geometriesByTier": {
         "bf16": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
         "q4": [
           "1024x1024",
           "768x768"
         ],
         "q8": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ]
       },
       "tiers": [
@@ -1060,9 +1062,9 @@
       "coefficients": 72,
       "slopesByTier": {
         "bf16": {
-          "geometryPoints": 1,
+          "geometryPoints": 2,
           "geometrySensitiveCurves": 8,
-          "flatSlopes": 4
+          "flatSlopes": 3
         },
         "q4": {
           "geometryPoints": 2,
@@ -1070,22 +1072,14 @@
           "flatSlopes": 1
         },
         "q8": {
-          "geometryPoints": 1,
+          "geometryPoints": 2,
           "geometrySensitiveCurves": 8,
           "flatSlopes": 4
         }
       },
-      "underDeterminedTiers": [
-        "bf16",
-        "q8"
-      ],
-      "honestyNote": "Tiers bf16, q8 carry ONE geometry point each, so their perMpxGb slopes cannot have been fitted. The zero-slope counts on the geometry-SENSITIVE phases (denoise, decode) show the consequence — bf16 (1 geometry point): 4/8 flat; q4 (2 geometry points): 1/8 flat; q8 (1 geometry point): 4/8 flat. A campaign budgeted from this precedent must budget two geometry points per tier, not the four records this evidence actually cost.",
-      "slopeProvenanceContradiction": {
-        "claim": "crates/sceneworks-worker/src/vram_gate.rs:460-463 documents the slope as \"the geometry-dependent activation slope, fitted from real renders at multiple resolutions\"",
-        "reality": "that is true for q4 only. Tiers bf16, q8 carry ONE geometry point each in the same manifest block the gate reads, so their slopes cannot have been fitted from multiple resolutions — they are either carried over from q4 or left at zero. Both show up in the data: the threeStage/tiledVae denoise slopes are 7.98 / 7.98 / 7.90 across q4/q8/bf16 (evidently shared, not independently fitted), while 4 of 8 geometry-sensitive curves on each of bf16 and q8 ship a zero slope versus 1 of 8 on q4",
-        "nuance": "the manifest's PROSE comment does quote 768x768 and 1024x1024 raw samples for all three tiers, so the sentence is not invented — but the machine-readable `evidenceRecords` the gate actually consumes contain one geometry cell for q8 and one for bf16. The defect is a comment that reassures the reader about evidence the artifact does not carry, which is exactly how a single-point slope gets trusted as a fitted one",
-        "consequence": "any consumer budgeting or trusting per-tier slopes from this precedent should treat q8 and bf16 as unfitted. Recorded on SC-16060 (geometry policy) alongside the binding-vs-manifest contradiction"
-      }
+      "underDeterminedTiers": [],
+      "honestyNote": "Every tier carries at least two geometry points, so every slope is determined.",
+      "slopeProvenanceContradiction": null
     },
     "strategies": [
       {

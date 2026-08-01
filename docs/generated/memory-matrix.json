@@ -1,12 +1,12 @@
 {
   "schemaVersion": 5,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7010c84910709b69f92246b31734f2bd0928ccfb93543ed9a28d7aeaf6632106",
+    "sceneWorksRevision": "source-tree:b21e83d07e54cc993788ba58db5e0389a6124d09134ec3c8c708e776e6b5ad38",
     "inferenceRevision": "09aefe3afb125af3f0736d55a438c412d64ec4c2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "3cc87208ff5d2757f8ba93f782b993eab18ec824db5661f168fd7f826617bfc3"
+        "sha256": "c70fdfef684c25c30905df03828c25b5911212621c234226f73bd549d09bb62e"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f8324fed6431b47453886015c6174efd8f5be3ac16aaf4342ba64e836f03fd66"
+        "sha256": "f0692211286f7178c0807e411343e30f91a8fa3aa13933f564d9b432fc8c3fd5"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -227236,11 +227236,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -227277,6 +227278,25 @@
           {
             "source": "Shortcut sc-15206 activity 15314",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "bf16",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T11:24:32Z",
+            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 27.552
+          },
+          {
+            "source": "Shortcut sc-15206 activity 15314",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T11:24:32Z",
@@ -227306,6 +227326,23 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "bf16",
+            "geometry": "768x768",
+            "predictedPeakGb": 27.65976128,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
@@ -227366,11 +227403,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -227407,6 +227445,24 @@
           {
             "source": "Shortcut sc-15206 activity 15314",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "bf16",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T11:24:32Z",
+            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "observedPeakGb": 28.39
+          },
+          {
+            "source": "Shortcut sc-15206 activity 15314",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T11:24:32Z",
@@ -227435,6 +227491,21 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "bf16",
+            "geometry": "768x768",
+            "predictedPeakGb": 28.4896096,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
@@ -227497,11 +227568,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -227570,6 +227642,26 @@
           {
             "source": "Shortcut sc-15206 activity 15314",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "bf16",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T11:24:32Z",
+            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 8.535
+          },
+          {
+            "source": "Shortcut sc-15206 activity 15314",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T11:24:32Z",
@@ -227600,6 +227692,25 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "bf16",
+            "geometry": "768x768",
+            "predictedPeakGb": 8.64,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728,
+              "transformerWindowSize": 1
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
@@ -227658,11 +227769,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -227699,6 +227811,18 @@
           {
             "source": "Shortcut sc-15206 activity 15314",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "bf16",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T11:24:32Z",
+            "harnessVersion": "sc-15206-activity-15314-waiver-15323"
+          },
+          {
+            "source": "Shortcut sc-15206 activity 15314",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T11:24:32Z",
@@ -227760,11 +227884,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -227801,6 +227926,23 @@
           {
             "source": "Shortcut sc-15206 activity 15314",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "bf16",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T11:24:32Z",
+            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "observedPeakGb": 28.39
+          },
+          {
+            "source": "Shortcut sc-15206 activity 15314",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T11:24:32Z",
@@ -227828,6 +227970,17 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "bf16",
+            "geometry": "768x768",
+            "predictedPeakGb": 28.4896096,
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "exactParameters": {}
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
@@ -230134,6 +230287,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230156,6 +230311,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230304,6 +230461,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230325,6 +230484,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230504,6 +230665,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230527,6 +230690,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230676,6 +230841,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230691,6 +230858,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230794,6 +230963,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -230814,6 +230985,8 @@
           {
             "source": "Shortcut sc-15117 activity 15189",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-26T21:22:50Z",
@@ -233116,11 +233289,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -233157,6 +233331,25 @@
           {
             "source": "Shortcut sc-15205 activity 15272",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T03:22:43Z",
+            "harnessVersion": "sc-15205-activity-15272",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 17.619
+          },
+          {
+            "source": "Shortcut sc-15205 activity 15272",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T03:22:43Z",
@@ -233186,6 +233379,23 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "q8",
+            "geometry": "768x768",
+            "predictedPeakGb": 17.72599232,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
@@ -233246,11 +233456,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -233287,6 +233498,24 @@
           {
             "source": "Shortcut sc-15205 activity 15272",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T03:22:43Z",
+            "harnessVersion": "sc-15205-activity-15272",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "observedPeakGb": 18.357
+          },
+          {
+            "source": "Shortcut sc-15205 activity 15272",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T03:22:43Z",
@@ -233315,6 +233544,21 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "q8",
+            "geometry": "768x768",
+            "predictedPeakGb": 18.46679552,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
@@ -233377,11 +233621,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -233450,6 +233695,26 @@
           {
             "source": "Shortcut sc-15205 activity 15272",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T03:22:43Z",
+            "harnessVersion": "sc-15205-activity-15272",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 6.345
+          },
+          {
+            "source": "Shortcut sc-15205 activity 15272",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T03:22:43Z",
@@ -233480,6 +233745,25 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "q8",
+            "geometry": "768x768",
+            "predictedPeakGb": 6.4488064,
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "exactParameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 134217728,
+              "transformerWindowSize": 1
+            }
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
@@ -233538,11 +233822,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -233579,6 +233864,18 @@
           {
             "source": "Shortcut sc-15205 activity 15272",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T03:22:43Z",
+            "harnessVersion": "sc-15205-activity-15272"
+          },
+          {
+            "source": "Shortcut sc-15205 activity 15272",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T03:22:43Z",
@@ -233640,11 +233937,12 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
+        "status": "fitted",
         "measuredGeometries": [
-          "1024x1024"
+          "1024x1024",
+          "768x768"
         ],
-        "coveredPixelBound": null
+        "coveredPixelBound": 1048576
       },
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "owningFamilyStory": 15829,
@@ -233681,6 +233979,23 @@
           {
             "source": "Shortcut sc-15205 activity 15272",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "phase_fit_only",
+            "runtimeAdmission": false,
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-07-27T03:22:43Z",
+            "harnessVersion": "sc-15205-activity-15272",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "observedPeakGb": 18.357
+          },
+          {
+            "source": "Shortcut sc-15205 activity 15272",
+            "hardware": "RTX PRO 6000 Blackwell (sm_120)",
+            "evidenceScope": "exact_request",
+            "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
             "capturedAt": "2026-07-27T03:22:43Z",
@@ -233708,6 +234023,17 @@
           }
         ],
         "strategyParameterVerification": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
+            "tier": "q8",
+            "geometry": "768x768",
+            "predictedPeakGb": 18.46679552,
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "exactParameters": {}
+          },
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",

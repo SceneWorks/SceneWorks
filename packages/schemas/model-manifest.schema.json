@@ -244,6 +244,7 @@
     "kreaTurboEvidenceRecord": {
       "type": "object",
       "required": [
+        "evidenceScope",
         "tier",
         "width",
         "height",
@@ -259,11 +260,14 @@
         "predictedPeaksGb",
         "predictedPhasesGb",
         "observedPeaksGb",
-        "measuredCompositions",
-        "parity"
+        "measuredCompositions"
       ],
       "additionalProperties": false,
       "properties": {
+        "evidenceScope": {
+          "enum": ["exact_request", "phase_fit_only"],
+          "description": "Whether the cell carries geometry-specific output parity and may admit this exact runtime request, or carries only phase measurements for fitting the bounded curve."
+        },
         "tier": { "enum": ["q4", "q8", "bf16"] },
         "width": { "type": "integer", "minimum": 1 },
         "height": { "type": "integer", "minimum": 1 },
@@ -295,6 +299,10 @@
           "$ref": "#/$defs/kreaTurboEvidencePhases",
           "description": "Exact phase-curve outputs for this evidence cell. Every emitted text/denoise/decode value must match these values within the declared 0.01 GiB tolerance."
         },
+        "observedPhasesGb": {
+          "$ref": "#/$defs/kreaTurboEvidencePhases",
+          "description": "Direct rendered-device text/denoise/decode peaks. Required for phase_fit_only cells so a fitted coefficient is traceable to machine-readable same-tier measurements."
+        },
         "observedPeaksGb": { "$ref": "#/$defs/kreaTurboEvidencePeaks" },
         "measuredCompositions": {
           "$ref": "#/$defs/kreaTurboMeasuredCompositions",
@@ -312,7 +320,26 @@
             "fixture": { "type": "string", "minLength": 1 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "evidenceScope": { "const": "exact_request" } },
+            "required": ["evidenceScope"]
+          },
+          "then": { "required": ["parity"] }
+        },
+        {
+          "if": {
+            "properties": { "evidenceScope": { "const": "phase_fit_only" } },
+            "required": ["evidenceScope"]
+          },
+          "then": {
+            "required": ["observedPhasesGb"],
+            "not": { "required": ["parity"] }
+          }
+        }
+      ]
     },
     "kreaTurboFit": {
       "type": "object",
@@ -375,7 +402,7 @@
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/kreaTurboEvidenceRecord" },
-          "description": "Exact, immutable measured request cells. Curves may predict other geometries, but optimized selection is eligible only when one of these records matches tier and geometry exactly."
+          "description": "Immutable measured cells. exact_request records include geometry-specific output parity and may admit only that exact tier and geometry; phase_fit_only records characterize bounded curves but never authorize runtime selection."
         },
         "strategyParameters": {
           "type": "object",
