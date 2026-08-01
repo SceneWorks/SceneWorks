@@ -22,6 +22,10 @@ const RUNGS = [
   "bounded_attention", "bounded_transformer_residency",
 ];
 const RUNG_SET = new Set(RUNGS);
+export const RUNG_REUSE_TOLERANCE = Object.freeze({
+  absoluteBytes: 256 * 1024 * 1024,
+  relative: 0.05,
+});
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -423,6 +427,64 @@ export function mergeBundles(left, right) {
   return { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
 
+export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
+  validateBundle(fresh);
+  validateBundle(reused);
+  const freshByLogicalId = new Map(fresh.records.map((record) => [record.logicalCaseId, record]));
+  const reusedByLogicalId = new Map(reused.records.map((record) => [record.logicalCaseId, record]));
+  if (freshByLogicalId.size !== fresh.records.length || reusedByLogicalId.size !== reused.records.length) {
+    fail("fresh/reused comparison cannot contain duplicate logical cases");
+  }
+  if (freshByLogicalId.size !== reusedByLogicalId.size) {
+    fail(`fresh/reused comparison cardinality differs: ${freshByLogicalId.size} != ${reusedByLogicalId.size}`);
+  }
+  const comparisons = [];
+  for (const [logicalCaseId, freshRecord] of freshByLogicalId) {
+    const reusedRecord = reusedByLogicalId.get(logicalCaseId);
+    if (!reusedRecord) fail(`reused capture is missing ${logicalCaseId}`);
+    if (freshRecord.id !== reusedRecord.id) {
+      fail(`${logicalCaseId}: fresh/reused comparison domain differs in repository, hardware, or artifact provenance`);
+    }
+    if (!freshRecord.observedMemory || !reusedRecord.observedMemory) {
+      fail(`${logicalCaseId}: fresh/reused comparison requires observedMemory on both records`);
+    }
+    const metrics = [];
+    for (const phase of ["conditioning", "denoise", "decode", "overall"]) {
+      for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+        const freshBytes = freshRecord.observedMemory[phase][metric];
+        const reusedBytes = reusedRecord.observedMemory[phase][metric];
+        const differenceBytes = Math.abs(reusedBytes - freshBytes);
+        const allowedBytes = Math.max(tolerance.absoluteBytes, Math.ceil(freshBytes * tolerance.relative));
+        metrics.push({ phase, metric, freshBytes, reusedBytes, differenceBytes, allowedBytes,
+          passed: differenceBytes <= allowedBytes });
+      }
+    }
+    comparisons.push({
+      logicalCaseId,
+      rung: freshRecord.strategy.rung,
+      passed: metrics.every((metric) => metric.passed),
+      metrics,
+    });
+  }
+  const backend = fresh.records[0]?.backend;
+  if (
+    !backend ||
+    fresh.records.some((record) => record.backend !== backend) ||
+    reused.records.some((record) => record.backend !== backend)
+  ) {
+    fail("fresh/reused comparison must contain exactly one backend");
+  }
+  return {
+    schemaVersion: 1,
+    backend,
+    tolerance,
+    verdict: comparisons.every((comparison) => comparison.passed)
+      ? "amortizable"
+      : "unable_to_amortize",
+    comparisons,
+  };
+}
+
 function completedLogicalIds(record) {
   if (record.status === "negative_complete") return [record.logicalCaseId];
   if (record.status !== "complete") return [];
@@ -471,10 +533,40 @@ export function expandPlan(config, completed = []) {
         negative: candidate.negative === true,
       };
       const id = logicalCaseId(spec);
-      if (!completedLogical.has(id)) cases.push({ logicalCaseId: id, ...spec, expectedResult: candidate.expectedResult });
+      if (!completedLogical.has(id)) cases.push({
+        logicalCaseId: id,
+        ...spec,
+        expectedResult: candidate.expectedResult,
+        modelLoadPolicy: provider.modelLoadPolicy ?? "fresh_per_case",
+        modelLoadGroup: provider.modelLoadGroup ?? null,
+      });
     }
   }
   return cases.sort((a, b) => a.logicalCaseId.localeCompare(b.logicalCaseId));
+}
+
+export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
+  if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
+  const planned = expandPlan(config).filter(
+    (candidate) => candidate.backend === backend && (!fixture || candidate.fixture === fixture),
+  ).sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung));
+  if (planned.length === 0) fail(`reuse assessment selected no ${backend} cases`);
+  const response = JSON.parse(await execute(
+    providerCommand[0],
+    providerCommand.slice(1),
+    canonicalJson({ action: "assess_batch", planned }),
+  ));
+  if (!["eligible_for_measurement", "unable_to_amortize"].includes(response.verdict)) {
+    fail(`provider returned invalid reuse-assessment verdict ${JSON.stringify(response.verdict)}`);
+  }
+  text(response.reason, "reuse assessment reason");
+  return {
+    schemaVersion: 1,
+    backend,
+    fixture: fixture ?? null,
+    tolerance: RUNG_REUSE_TOLERANCE,
+    ...response,
+  };
 }
 
 function execute(command, args, input) {
@@ -511,6 +603,7 @@ function execute(command, args, input) {
 
 export async function runProviderPlan({
   config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
+  onProviderInvocation, forceFreshPerCase = false, forceBatchRungs = false,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const gitState = async (repo, sceneWorks = false) => ({
@@ -546,7 +639,18 @@ export async function runProviderPlan({
   if (fixture && selectedConfig.providers.length === 0) {
     fail(`provider run selected no plan provider with fixture ${fixture}`);
   }
-  const expanded = expandPlan(selectedConfig, existing.records);
+  let expanded = expandPlan(selectedConfig, existing.records);
+  if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
+  if (forceFreshPerCase) {
+    expanded = expanded.map((planned) => ({ ...planned, modelLoadPolicy: "fresh_per_case", modelLoadGroup: null }));
+  }
+  if (forceBatchRungs) {
+    expanded = expanded.map((planned) => ({
+      ...planned,
+      modelLoadPolicy: "batch_rungs",
+      modelLoadGroup: `forced-${digest({ backend: planned.backend, target: planned.target, fixture: planned.fixture })}`,
+    }));
+  }
   const cases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
   if (cases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
   const backends = new Set(cases.map((planned) => planned.backend));
@@ -560,49 +664,93 @@ export async function runProviderPlan({
   ));
   await assertRepositoriesStable();
   const incoming = [];
-  for (const planned of cases) {
+  let remaining = cases;
+  const sameBatch = (left, right) =>
+    left.modelLoadPolicy === "batch_rungs" &&
+    right.modelLoadPolicy === "batch_rungs" &&
+    left.modelLoadGroup &&
+    left.modelLoadGroup === right.modelLoadGroup &&
+    left.backend === right.backend &&
+    equal(left.target, right.target) &&
+    left.fixture === right.fixture;
+  while (remaining.length > 0) {
+    const first = remaining[0];
+    const batchRungs = new Set();
+    const invocation = first.modelLoadPolicy === "batch_rungs"
+      ? remaining
+          .filter((planned) => sameBatch(first, planned))
+          .sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung))
+          .filter((planned) => {
+            if (batchRungs.has(planned.strategy.rung)) return false;
+            batchRungs.add(planned.strategy.rung);
+            return true;
+          })
+      : [first];
+    const uniqueRungs = new Set(invocation.map((planned) => planned.strategy.rung));
+    if (first.modelLoadPolicy === "batch_rungs" && uniqueRungs.size !== invocation.length) {
+      fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
+    }
+    const action = invocation.length > 1 ? "run_batch" : "run";
+    onProviderInvocation?.({ action, cases: invocation });
     const providerOutput = await execute(
       providerCommand[0],
       providerCommand.slice(1),
       canonicalJson({
-        action: "run",
-        planned,
+        action,
+        ...(action === "run" ? { planned: first } : { planned: invocation }),
         repositories,
         repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
         hardware: probe.hardware,
       }),
     );
     await assertRepositoriesStable();
-    const fragment = JSON.parse(providerOutput);
-    if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
-      fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
+    const response = JSON.parse(providerOutput);
+    const fragments = action === "run_batch" ? response.fragments : [response];
+    if (!Array.isArray(fragments) || fragments.length !== invocation.length) {
+      fail(`${first.modelLoadGroup ?? first.logicalCaseId}: provider returned ${
+        Array.isArray(fragments) ? fragments.length : "a non-array"
+      } fragments for ${invocation.length} planned cases`);
     }
-    validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
-    if (!equal(fragment.strategy, planned.strategy)) {
-      fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
+    if (action === "run_batch" && response.modelLoads !== 1) {
+      fail(`${first.modelLoadGroup}: batched provider must attest exactly one model load`);
     }
-    const record = {
-      ...fragment,
-      logicalCaseId: planned.logicalCaseId,
-      evidenceScope: planned.evidenceScope,
-      backend: planned.backend,
-      repositories,
-      hardware: probe.hardware,
-      target: planned.target,
-      strategy: fragment.strategy,
-      calibrationFingerprint: planned.calibrationFingerprint,
-      fixture: planned.fixture,
-      harnessVersion: HARNESS_VERSION,
-    };
-    if (planned.expectedResult === "failed" && record.status !== "negative_complete") {
-      fail(`${planned.logicalCaseId}: negative plan case must return status=negative_complete`);
+    for (const [index, fragment] of fragments.entries()) {
+      const planned = invocation[index];
+      if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
+        fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
+      }
+      validateEngagedRungs(fragment.strategy, `${planned.logicalCaseId}.provider strategy`);
+      if (!equal(fragment.strategy, planned.strategy)) {
+        fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
+      }
+      const record = {
+        ...fragment,
+        logicalCaseId: planned.logicalCaseId,
+        evidenceScope: planned.evidenceScope,
+        backend: planned.backend,
+        repositories,
+        hardware: probe.hardware,
+        target: planned.target,
+        strategy: fragment.strategy,
+        calibrationFingerprint: planned.calibrationFingerprint,
+        fixture: planned.fixture,
+        harnessVersion: HARNESS_VERSION,
+      };
+      if (planned.expectedResult === "failed" && record.status !== "negative_complete") {
+        fail(`${planned.logicalCaseId}: negative plan case must return status=negative_complete`);
+      }
+      if (planned.expectedResult === "passed" && record.status === "negative_complete") {
+        fail(`${planned.logicalCaseId}: passing plan case returned a negative result`);
+      }
+      record.id = recordId(record);
+      validateRecord(record);
+      incoming.push(record);
     }
-    if (planned.expectedResult === "passed" && record.status === "negative_complete") {
-      fail(`${planned.logicalCaseId}: passing plan case returned a negative result`);
-    }
-    record.id = recordId(record);
-    validateRecord(record);
-    incoming.push(record);
+    const completed = new Set([...existing.records, ...incoming].flatMap(completedLogicalIds));
+    const invoked = new Set(invocation.map((planned) => planned.logicalCaseId));
+    remaining = remaining.filter(
+      (planned) => !invoked.has(planned.logicalCaseId) && !completed.has(planned.logicalCaseId),
+    );
   }
   return mergeBundles(existing, { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: incoming });
 }
@@ -633,6 +781,20 @@ async function main() {
     const output = value("--resume") ? mergeBundles(validateBundle(await readJson(value("--resume"))), incoming) : incoming;
     return void await atomicWrite(value("--output"), output);
   }
+  if (command === "compare-reuse") {
+    return void await atomicWrite(
+      value("--output"),
+      compareRungReuse(await readJson(value("--fresh")), await readJson(value("--reused"))),
+    );
+  }
+  if (command === "assess-reuse") {
+    return void await atomicWrite(value("--output"), await assessProviderReuse({
+      config: await readJson(value("--config")),
+      providerCommand: JSON.parse(value("--provider-command")),
+      backend: value("--backend"),
+      fixture: value("--fixture"),
+    }));
+  }
   if (command === "run") {
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
@@ -643,10 +805,12 @@ async function main() {
       backend: value("--backend"),
       providerName: value("--provider"),
       fixture: value("--fixture"),
+      forceFreshPerCase: args.includes("--fresh-per-case"),
+      forceBatchRungs: args.includes("--batch-rungs"),
     });
     return void await atomicWrite(value("--output"), output);
   }
-  fail("usage: check|plan|ingest|run (see docs/memory-calibration-harness.md)");
+  fail("usage: check|plan|ingest|assess-reuse|compare-reuse|run (see docs/memory-calibration-harness.md)");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

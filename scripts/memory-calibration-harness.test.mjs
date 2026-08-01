@@ -1,13 +1,35 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
-  HARNESS_VERSION, canonicalJson, evidenceSemantics, expandPlan, logicalCaseId,
-  mergeBundles, recordId, runProviderPlan, validateBundle, validateRecord,
+  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, canonicalJson,
+  compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
+  runProviderPlan, validateBundle, validateRecord,
 } from "./memory-calibration-harness.mjs";
 import { calibrationBinding } from "./generate-memory-matrix.mjs";
+
+const execFileAsync = promisify(execFile);
+
+async function cleanFixtureRepo() {
+  const root = await mkdtemp(path.join(tmpdir(), "memory-harness-repo-"));
+  await mkdir(path.join(root, "docs/generated"), { recursive: true });
+  await writeFile(
+    path.join(root, "docs/generated/memory-matrix.json"),
+    JSON.stringify({ generatedFrom: { sceneWorksRevision: `source-tree:${"1".repeat(64)}` } }),
+  );
+  await execFileAsync("git", ["init", root]);
+  await execFileAsync("git", ["-C", root, "config", "user.email", "fixture@example.invalid"]);
+  await execFileAsync("git", ["-C", root, "config", "user.name", "Fixture"]);
+  await execFileAsync("git", ["-C", root, "add", "docs/generated/memory-matrix.json"]);
+  await execFileAsync("git", ["-C", root, "commit", "-m", "fixture"]);
+  return root;
+}
 
 const phase = (value) => ({
   activeBytes: value,
@@ -244,6 +266,34 @@ test("merge is commutative and rejects conflicting exact-identity captures", () 
   );
 });
 
+test("fresh and reused rung captures use a committed absolute-or-relative tolerance", () => {
+  const freshRecord = complete();
+  const reusedRecord = structuredClone(freshRecord);
+  const withinTolerance = RUNG_REUSE_TOLERANCE.absoluteBytes;
+  for (const phaseName of ["conditioning", "denoise", "decode", "overall"]) {
+    for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes"]) {
+      reusedRecord.observedMemory[phaseName][metric] += withinTolerance;
+    }
+  }
+  const fresh = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
+  const reused = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
+  assert.equal(compareRungReuse(fresh, reused).verdict, "amortizable");
+
+  reusedRecord.observedMemory.conditioning.activeBytes += 1;
+  reusedRecord.observedMemory.conditioning.allocatorBytes += 1;
+  reusedRecord.observedMemory.conditioning.deviceBytes += 1;
+  reusedRecord.observedMemory.conditioning.wiredBytes += 1;
+  assert.equal(compareRungReuse(fresh, reused).verdict, "unable_to_amortize");
+
+  const differentHardware = structuredClone(reusedRecord);
+  differentHardware.hardware.driverVersion = "different";
+  differentHardware.id = recordId(differentHardware);
+  assert.throws(
+    () => compareRungReuse(fresh, { ...reused, records: [differentHardware] }),
+    /comparison domain differs/,
+  );
+});
+
 test("gated and fixture semantics can never become current", () => {
   const fixture = complete();
   assert.equal(evidenceSemantics(fixture, {
@@ -330,7 +380,7 @@ test("plan separates seven identical-latent positives from a deterministic outpu
   });
 });
 
-test("shipped fresh-process oracle declares exact five-rung ladders for MLX and Candle", async () => {
+test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const expectedRungs = [
     "resident",
@@ -380,8 +430,15 @@ test("shipped fresh-process oracle declares exact five-rung ladders for MLX and 
         ],
       },
     );
+    const mlx = cases.filter(
+      (item) => item.fixture === "fresh-five-rung-z-image-q4-768-seed16402-step2",
+    );
+    assert.ok(mlx.every((item) => item.modelLoadPolicy === "fresh_per_case"));
+    const candle = cases.filter(
+      (item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2",
+    );
     assertLadder(
-      cases.filter((item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2"),
+      candle,
       "candle",
       {
         provider: "krea_2_turbo", modelId: "krea_2_turbo", tier: "q4",
@@ -399,6 +456,8 @@ test("shipped fresh-process oracle declares exact five-rung ladders for MLX and 
         ],
       },
     );
+    assert.ok(candle.every((item) => item.modelLoadPolicy === "fresh_per_case"));
+    assert.ok(candle.every((item) => item.modelLoadGroup === null));
   };
   assertPlan(config);
 
@@ -538,7 +597,7 @@ test("gated no-parameter references use an empty sweep instead of a fabricated f
   );
 });
 
-test("executable runner handles fragmented responses across probe and multiple case processes", async () => {
+test("executable runner handles fragmented responses across provider processes", async () => {
   const config = {
     providers: [{
       evidenceScope: "fixture",
@@ -563,9 +622,157 @@ test("executable runner handles fragmented responses across probe and multiple c
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
     inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
   });
-  assert.equal(result.records.length, 2);
+  const clean = result.records.every((record) =>
+    !record.repositories.sceneWorks.dirty && !record.repositories.inference.dirty
+  );
+  assert.equal(result.records.length, clean ? 1 : 2);
+  assert.equal(expandPlan(config, result.records).length, clean ? 0 : 2);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
+});
+
+test("runner batches one target's five rungs into one attested model load", async () => {
+  const rungs = [
+    ["resident", ["resident"]],
+    ["staged_residency", ["resident", "staged_residency"]],
+    ["bounded_decode", ["resident", "bounded_decode"]],
+    ["bounded_attention", ["resident", "bounded_decode", "bounded_attention"]],
+    [
+      "bounded_transformer_residency",
+      ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+    ],
+  ];
+  const config = {
+    providers: rungs.map(([rung, engagedRungs]) => ({
+      evidenceScope: "fixture",
+      backend: "candle",
+      target: complete().target,
+      rung,
+      engagedRungs,
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "fixture-five-rungs",
+      modelLoadPolicy: "batch_rungs",
+      modelLoadGroup: "fixture-target",
+      cases: [
+        { parameters: { decodeTileEdge: 384, decodeOverlap: 128 }, expectedResult: "passed" },
+        { parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" },
+      ],
+    })),
+  };
+  const invocations = [];
+  const cleanRepo = await cleanFixtureRepo();
+  const result = await runProviderPlan({
+    config,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.equal(result.records.length, 5);
+  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run_batch", 5]]);
+  assert.equal(expandPlan(config, result.records).length, 0);
+});
+
+test("runner flags provide explicit fresh and experimental batch controls", async () => {
+  const config = {
+    providers: ["resident", "bounded_decode"].map((rung) => ({
+      evidenceScope: "fixture",
+      backend: "candle",
+      target: complete().target,
+      rung,
+      engagedRungs: rung === "resident" ? ["resident"] : ["resident", "bounded_decode"],
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "fixture-forced-rungs",
+      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+    })),
+  };
+  const fixtureCommand = [
+    process.execPath,
+    fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+  ];
+  const freshInvocations = [];
+  await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    forceFreshPerCase: true,
+    onProviderInvocation: (invocation) => freshInvocations.push(invocation),
+  });
+  assert.deepEqual(freshInvocations.map(({ action }) => action), ["run", "run"]);
+
+  const batchInvocations = [];
+  await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    forceBatchRungs: true,
+    onProviderInvocation: (invocation) => batchInvocations.push(invocation),
+  });
+  assert.deepEqual(batchInvocations.map(({ action, cases }) => [action, cases.length]), [["run_batch", 2]]);
+});
+
+test("provider reuse assessment records whether a batch can be measured", async () => {
+  const config = {
+    providers: [{
+      evidenceScope: "fixture",
+      backend: "candle",
+      target: complete().target,
+      rung: "resident",
+      engagedRungs: ["resident"],
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "fixture-assessment",
+      cases: [{ parameters: {}, expectedResult: "passed" }],
+    }],
+  };
+  const assessment = await assessProviderReuse({
+    config,
+    backend: "candle",
+    fixture: "fixture-assessment",
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+  });
+  assert.equal(assessment.verdict, "eligible_for_measurement");
+  assert.deepEqual(assessment.tolerance, RUNG_REUSE_TOLERANCE);
+});
+
+test("a completed sweep retires its other parameter points before another spawn", async () => {
+  const config = {
+    providers: [{
+      evidenceScope: "fixture",
+      backend: "candle",
+      target: complete().target,
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "fixture-seed42",
+      cases: [
+        { parameters: { decodeTileEdge: 384, decodeOverlap: 128 }, expectedResult: "passed" },
+        { parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" },
+      ],
+    }],
+  };
+  const invocations = [];
+  const cleanRepo = await cleanFixtureRepo();
+  const result = await runProviderPlan({
+    config,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.equal(result.records.length, 1);
+  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run", 1]]);
+  assert.equal(expandPlan(config, result.records).length, 0);
 });
 
 test("provider execution can select every rung sharing one reproducible fixture", async () => {

@@ -97,13 +97,13 @@ The overlay axis is **4600** cells — 62.5% of the matrix — and it is not uni
 
 ## 2. The collapsing rule (derived)
 
-The run unit is one `action:"run"` provider invocation — scripts/memory-calibration-harness.mjs#runProviderPlan spawns the provider command once per planned case, so that is what costs a model load. A `complete` record must pass all 8 required scenarios plus quality and a measured negative mutation.
+One provider invocation. `runProviderPlan` uses `action:"run"` for a fresh case and `action:"run_batch"` for a compatible Candle five-rung group; either invocation attests one model load. A `complete` record must pass all 8 required scenarios plus quality and a measured negative mutation.
 
 | Axis | Verdict | Factor |
 | --- | --- | --- |
 | `geometry` | collapsed | already applied by the matrix generator |
 | `strategyParameters` | collapsed | one record retires every passed sweep point |
-| `rung` | not collapsed by the harness; UNPROVEN in principle | 5 (every session key spans exactly 5 rungs) — a CEILING, not a demonstrated saving |
+| `rung` | fresh per rung on both measured backends | 0 records in 0 explicit group(s) save 0 loads; combined 7354 -> 7354 (1x) |
 | `overlay` | NOT collapsed for records; NOT collapsible for model loads in the shipped contract | 1 today (the current 2.67x amortised load ratio prices a capability that does not exist) |
 | `cell` | NOT collapsed | 1 (cells map 1:1 to certifying records) |
 
@@ -117,13 +117,13 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 
 > Citation: scripts/memory-calibration-harness.mjs#completedLogicalIds (maps every passed sweep case to its own logicalCaseId) and #validateComplete (every declared axis range must be derived from passed executed cases)
 
-> Caveat: Realised only ACROSS resumed invocations. `runProviderPlan` computes its skip set once from `--resume` and then spawns the provider command once per planned case, without feeding incoming records back into the skip set — so within a single invocation an N-point sweep still costs N process spawns.
+> Caveat: `runProviderPlan` recomputes completed logical identities after every provider response. A complete record whose passed sweep covers other pending points retires those points before the runner chooses its next invocation, so the collapse is now realised both within one run and across `--resume` runs.
 
-**`rung` — not collapsed by the harness; UNPROVEN in principle.** A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key. So the schema forces one record per rung. Whether the PHYSICS also forces it is OPEN: nothing in this repository measures five rung peaks from one load, and the sources previously cited for it do not establish it. The 5x is therefore the size of a prize nobody has shown is collectable, not a saving being left on the table.
+**`rung` — fresh per rung on both measured backends.** A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key, so records remain one-per-rung. The harness and Candle adapter can execute Krea's five-rung group as one `run_batch` provider invocation with `modelLoads: 1`, but the authoritative fresh/reused comparison exceeded the committed tolerance, so the shipped plan keeps Candle fresh-per-rung. MLX also stays fresh: its Z-Image ladder spans distinct eager and deferred calibration fingerprints, so one loaded generator cannot preserve every rung's calibrated identity. No target is priced as batched.
 
-> Citation: SCHEMA SIDE (established): scripts/memory-calibration-harness.mjs#recordId + #validateRecord (rung is in the identity); scripts/generate-memory-matrix.mjs (record->cell match includes `rung`). PHYSICS SIDE (does NOT establish the collapse): docs/memory-calibration-harness.md 'one loaded generator' covers four memory PHASES (conditioning, denoise, decode, overall) at ONE strategy — phases are not rungs; its warm-repeat A->B->A and crates/sceneworks-memory-adapter/src/bin/candle.rs#execute_parity_request compare PIXEL output across two strategies and sample no memory at all (the function returns an Image and never touches the VramProbe); and the Krea turboFit evidence records say only "exclusive rendered-device phase peaks at 768x768 and 1024x1024" in verification.method — 'exclusive' means exclusive HARDWARE, and no field in the record schema names a process, load or session, so one record cannot evidence one process. Those peaks also cover FOUR rungs, not five: packages/schemas/model-manifest.schema.json caps `observedPeaksGb` at threeStage/tiledVae/chunkedAttention/streamedBlocks with additionalProperties false, so the manifest cannot express a `resident` peak — the one rung that is the irreducible floor.
+> Citation: scripts/memory-calibration-harness.mjs#runProviderPlan (canonical `run_batch`, one-load attestation, and within-invocation sweep retirement); crates/sceneworks-memory-adapter/src/bin/candle.rs#run_five_rung_batch; crates/sceneworks-memory-adapter/src/bin/mlx.rs#assess_z_image_batch; .github/workflows/windows-candle.yml (fresh/reused evidence gate) and macos-mlx.yml (fresh capture plus provider-contract inability gate)
 
-> Caveat: The harness spawns a FRESH process per planned case, so today the model load is paid once per rung. Capturing this 5x needs either a warm provider daemon behind the argv command or a runner that batches a target's rungs into one invocation. Neither exists — AND neither is purely scheduling work, because reusing a process risks CONTAMINATING the measurement, asymmetrically across backends. CANDLE has partial protection: the adapter enforces a 64 MiB post-fault cleanup-growth tolerance and asserts `cudaCachingAllocatorPresent = 0`, so freed device bytes return to the device rather than into an allocator cache (though that constant is a hardcoded diagnostic, not a probe of live allocator state). MLX has NO equivalent structural guarantee: a buffer cache is present and is itself measured and published, and the adapter must call `clear_cache()` + `reset_peak_memory()` explicitly between measurements. That is not sufficient — `clear_cache()` reclaims only allocator-cache buffers and cannot release LIVE weight arrays, which is precisely the residue a multi-rung campaign accumulates, because rungs 1 and 4 change residency. SceneWorks' own MLX footprint harness (crates/sceneworks-worker/src/footprint_measure.rs) therefore mandates ONE TIER PER PROCESS and enforces it with a runtime assert, having found that process-global counters let a heavier earlier measurement leak into a lighter later one. A rung-batching runner must prove it beats that, on both backends. Tracked as SC-16059.
+> Caveat: The committed equivalence gate is the larger of 256 MiB absolute drift and 5% of the fresh metric, applied to every phase and allocator/device/wired/reclaimable metric. Candle's measured verdict and MLX's structural verdict are both `unable_to_amortize`. MLX's inability is structural, not an inferred timing result: the eager and deferred fingerprints differ before a reused process can truthfully execute all five identities, so the backend retains fresh-per-rung cost.
 
 **`overlay` — NOT collapsed for records; NOT collapsible for model loads in the shipped contract.** 4600 of the 7360 cells carry a non-`none` overlay, so this axis is 62.5% of the matrix. It does NOT collapse on the record axis: `overlay` is part of the cell key and of `record.target`, and `validateComplete` requires the `overlay` scenario to actually pass (or carry a justified `not_applicable` reason) — a `none` record cannot certify a `lora` cell. Nor does it collapse on the model-load axis: adapters are resolved at LOAD time into `LoadSpec::adapters`, no API anywhere in `crates/` detaches or swaps an adapter on a loaded generator, and carrying adapters makes `vram_gate.rs` disable streamed blocks outright. Decisively, even a toggleable LoRA stays RESIDENT, so a `none` peak measured on an adapter-loaded generator is inflated by the adapter's own bytes — the collapse perturbs the very quantity being measured.
 
@@ -142,7 +142,8 @@ The run unit is one `action:"run"` provider invocation — scripts/memory-calibr
 | Unit | Total | MLX/Metal (this Mac) | Candle/CUDA (rented) |
 | --- | --- | --- | --- |
 | Certifying records (1 per cell) | 7354 | 4620 | 2734 |
-| Warm sessions (model loads, 5 rungs each) | 1472 | 924 | 548 |
+| Shipped model loads (explicit groups only) | 7354 | 4620 | 2734 |
+| All-backend warm-session floor (5 rungs each) | 1472 | 924 | 548 |
 
 **Does the overlay axis evaporate? No — on either axis.** On the record axis, each of the 4600 non-`none` cells needs its own record, because `overlay` is in the cell key and `validateComplete` requires the overlay scenario to actually pass.
 
@@ -163,7 +164,7 @@ On the model-load axis the answer is **unavailable in the shipped load contract*
 
 Excluded: 6 cells already classified `Structurally N/A`, which the epic exempts from measurement. Nothing else is excluded — `Missing` cells still need a run, they just need an implementation first.
 
-The warm-session row is **not currently achievable**. It is what the campaign would cost if one loaded generator covered a target's 5 rungs, at 4.996 records per load; the harness spawns a fresh process per planned case today, so every rung pays its own model load.
+The shipped campaign now costs **7354 model loads**. Exactly 0 records in 0 groups are configured for batching, saving 0 loads; every record remains fresh. That is a **1x** reduction from 7354 fresh-per-record loads. The 1472-load floor remains counterfactual because MLX is structurally unable and Candle failed the committed fresh/reused tolerance.
 
 ## 4. Structurally N/A sensitivity
 
@@ -171,19 +172,19 @@ SC-15969 (the per-family rung-4 applicability survey) has not run, so the final 
 
 Irreducible floor: the **1472** `resident` cells. Rung 0 is the unoptimised baseline every model has by definition, so it can never be Structurally N/A. No survey outcome can remove these cells from the campaign.
 
-| Scenario | Kind | Records | MLX | Candle | Warm sessions | Exempted MLX/Candle | ...if proportional |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `current` | fact | 7354 | 4620 | 2734 | 1472 | 0/0 | — |
-| `rung4-half` | projection | 6621 | 4132 | 2489 | 1472 | 488/245 | 462/271 ⚠ |
-| `rung4-all` | projection | 5888 | 3696 | 2192 | 1472 | 924/542 | 924/542 |
-| `rungs-2-3-4-half` | projection | 5149 | 3160 | 1989 | 1472 | 1460/745 | 1386/819 ⚠ |
-| `everything-but-baseline` | bound | 1472 | 924 | 548 | 1472 | 3696/2186 | 3696/2186 |
+| Scenario | Kind | Records | MLX | Candle | Shipped loads | Warm floor | Exempted MLX/Candle | ...if proportional |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `current` | fact | 7354 | 4620 | 2734 | 7354 | 1472 | 0/0 | — |
+| `rung4-half` | projection | 6621 | 4132 | 2489 | 6621 | 1472 | 488/245 | 462/271 ⚠ |
+| `rung4-all` | projection | 5888 | 3696 | 2192 | 5888 | 1472 | 924/542 | 924/542 |
+| `rungs-2-3-4-half` | projection | 5149 | 3160 | 1989 | 5149 | 1472 | 1460/745 | 1386/819 ⚠ |
+| `everything-but-baseline` | bound | 1472 | 924 | 548 | 1472 | 1472 | 3696/2186 | 3696/2186 |
 
 > **How cells are selected, and why the projection rows' backend columns are not findings.** Projected exemptions are applied to NAMED cells, not to a count, so the session arithmetic stays exact rather than becoming a division. Within each rung the exempted cells are the first N by ASCENDING CELL ID. That is deterministic but ARBITRARY: cell ids lead with the model id, so an alphabetical prefix does not split evenly across backends. Consequently the MLX/Candle columns of a PROJECTION row are partly an artifact of this rule. Only the `current` row's split is a fact. Each projection row therefore also reports what its split would be under proportional allocation, so the size of the artifact is visible instead of implied.
 
 Rows marked ⚠ have a per-backend split that differs from proportional allocation — that gap is the selection rule showing through, not a property of the projection. Only the `current` row's split is a fact.
 
-**The warm-session column does not move.** A session survives as long as any one of its rungs still needs measuring, and the resident baseline always does — so reclassifying rungs as `Structurally N/A` removes records but removes no model loads. If model load dominates the per-run cost, SC-15969's outcome changes the campaign's duration by far less than the record column suggests.
+**The all-backend warm floor does not move.** A session survives as long as any one rung still needs measuring, and the resident baseline always does. The shipped-load column can move because both backends still pay per surviving rung; only the counterfactual warm floor is one load per surviving session.
 
 ## 5. Wall clock (parameterised)
 
@@ -205,16 +206,16 @@ Per-run seconds is an **input**, defaulting to 300 s. ASSUMPTION — nothing in 
 
 ### Sweep
 
-| s/run | Record-hours (total) | MLX | Candle | Rungs amortised |
-| --- | --- | --- | --- | --- |
-| 30 | 61.3 | 38.5 | 22.8 | 12.3 |
-| 60 | 122.6 | 77 | 45.6 | 24.5 |
-| 120 | 245.1 | 154 | 91.1 | 49.1 |
-| 300 | 612.8 | 385 | 227.8 | 122.7 |
-| 600 | 1225.7 | 770 | 455.7 | 245.3 |
-| 1200 | 2451.3 | 1540 | 911.3 | 490.7 |
+| s/run | Record-hours (total) | MLX | Candle | Shipped load-hours | All-backend warm floor |
+| --- | --- | --- | --- | --- | --- |
+| 30 | 61.3 | 38.5 | 22.8 | 61.3 | 12.3 |
+| 60 | 122.6 | 77 | 45.6 | 122.6 | 24.5 |
+| 120 | 245.1 | 154 | 91.1 | 245.1 | 49.1 |
+| 300 | 612.8 | 385 | 227.8 | 612.8 | 122.7 |
+| 600 | 1225.7 | 770 | 455.7 | 1225.7 | 245.3 |
+| 1200 | 2451.3 | 1540 | 911.3 | 2451.3 | 490.7 |
 
-Only the first three columns are achievable with the harness as written; the final column prices the unimplemented rung collapse. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.
+The shipped load-hours column amortises only plan-declared, evidence-gated groups; all other records stay fresh. The final column is the unavailable all-backend warm floor. The unavailable overlay-amortised column is deliberately absent. And per section 0, none of these hours can be spent today at all.
 
 ## 6. Fit coefficients versus measure every cell
 
@@ -224,7 +225,7 @@ Worked precedent: **4** measurement records produced 36 curves (72 coefficients)
 
 > Tiers bf16, q8 carry ONE geometry point each, so their perMpxGb slopes cannot have been fitted. The zero-slope counts on the geometry-SENSITIVE phases (denoise, decode) show the consequence — bf16 (1 geometry point): 4/8 flat; q4 (2 geometry points): 1/8 flat; q8 (1 geometry point): 4/8 flat. A campaign budgeted from this precedent must budget two geometry points per tier, not the four records this evidence actually cost.
 
-| Strategy | Model loads | Provider invocations (harness as written) |
+| Strategy | Session points | Provider invocations (explicit batches only) |
 | --- | --- | --- |
 | `exhaustive-exact-geometry` | 8970 | 44850 |
 | `exhaustive-per-cell` | 1472 | 7354 |
@@ -305,13 +306,7 @@ DEMOTED, and this is the correction that matters most in this document. The firs
 
 > Resolve by: Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.
 
-### 5. whether the harness can amortise a model load across a target's rungs — not cell-gated
-
-A potential 5x on the whole campaign, currently NOT realised: the runner spawns a fresh process per planned case. Unlike the overlay load collapse this one is not ruled out by the load contract — but it is NOT established either. Nothing in the repository measures five rung peaks from one load, and the manifest cannot even express a `resident` peak alongside the other four. It is also not purely scheduling work: reusing a process risks contaminating the measurement, and the two backends have asymmetric protection (Candle asserts no caching allocator; MLX has a live buffer cache and its own footprint harness mandates one tier per process). See the `rung` axis for the full evidence review.
-
-> Resolve by: Either batch a target's rungs into one provider invocation, or run the provider as a warm daemon behind the argv command — and in either case demonstrate that a rung measured in a reused process matches the fresh-process measurement within a stated tolerance, ON BOTH BACKENDS, before believing the 5x. Tracked as SC-16059.
-
-### 6. which geometry policy is true — not cell-gated
+### 5. which geometry policy is true — not cell-gated
 
 The binding logic accepts any resolution inside the envelope; the manifest says exactly the opposite. The two policies differ by the geometry collapse factor across the whole campaign. Compounding it, the gate's own doc comment claims slopes 'fitted from real renders at multiple resolutions' while 2 of the 3 shipped tiers carry a single geometry point.
 

@@ -30,6 +30,27 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
   );
 });
 
+test("Windows Krea provisioning accepts supported newer Python 3 runtimes", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(workflow, /Python 3\.12 or newer/);
+  assert.match(workflow, /\[int\]\$Matches\.minor -lt 12/);
+  assert.doesNotMatch(workflow, /\^Python 3\\\.12\\\./);
+  assert.match(
+    workflow,
+    /token: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}/,
+  );
+});
+
+test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter/,
+  );
+  assert.match(workflow, /console\.log\(JSON\.stringify\(a,null,2\)\)/);
+  assert.match(workflow, /'amortizable','unable_to_amortize'/);
+});
+
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
   const workflow = await source(".github/workflows/check.yml");
   assert.match(workflow, /gh api --paginate/);
@@ -288,8 +309,13 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     /validate_plain_overlay_target\(request, KREA_PLAIN_EXECUTION_PATH\)\?/,
   );
   assert.ok(
-    candleReference.indexOf("validate_plain_overlay_target") < candleReference.indexOf("required_env"),
+    candleReference.indexOf("validate_plain_overlay_target") < candleReference.indexOf("load_five_rung_generator"),
     "the Candle five-rung reference must reject a mismatched overlay before provider work",
+  );
+  assert.ok(
+    candleReference.indexOf("for item in planned") <
+      candleReference.lastIndexOf("let (repository, revision, generator, mut vram)"),
+    "the Candle batch must validate every target before its one model load",
   );
   assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
