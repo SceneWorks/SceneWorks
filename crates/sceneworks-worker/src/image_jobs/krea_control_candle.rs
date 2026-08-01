@@ -79,7 +79,6 @@ const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
 /// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Registered overlays carry
 /// their own catalog-authorized immutable revision. `ensure_hf_cached_file` still verifies the file's
 /// `lfs.oid` from HF's tree API.
-#[cfg(test)]
 pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// The Krea control fit-ladder tier for the base directory the resolver will actually load.
@@ -101,6 +100,83 @@ fn krea_control_gate_tier(
         manifest_entry,
         nvfp4,
     )
+}
+
+/// Verify that the live request is inside sc-16013's exact rendered-device envelope: 1024² on sm_120,
+/// the pinned shipping base tier, and the pinned default control overlay. Custom/legacy artifacts and
+/// adapters may still run best-effort, but cannot inherit the calibrated hard-reject verdict.
+fn krea_control_runtime_evidence_verified(
+    request: &ImageRequest,
+    settings: &Settings,
+    tier: &str,
+    base: &Path,
+    control: &Path,
+) -> bool {
+    if request.width != 1024
+        || request.height != 1024
+        || crate::gpu::cached_compute_cap() != Some(12.0)
+    {
+        return false;
+    }
+    let Some(download) = request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads
+                .iter()
+                .find(|download| download.get("variant").and_then(Value::as_str) == Some(tier))
+        })
+    else {
+        return false;
+    };
+    let (Some(provider), Some(repository), Some(revision)) = (
+        download.get("provider").and_then(Value::as_str),
+        download.get("repo").and_then(Value::as_str),
+        download.get("revision").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    let Some(pinned_base_root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        repository,
+        revision,
+    ) else {
+        return false;
+    };
+    if crate::vram_gate::KreaRuntimeEvidenceContext::inspect(
+        KREA_CONTROL_ENGINE_ID,
+        "candle",
+        &settings.gpu_id,
+        crate::gpu::cached_compute_cap(),
+        provider,
+        repository,
+        revision,
+        tier,
+        base,
+        &pinned_base_root,
+    )
+    .is_none()
+    {
+        return false;
+    }
+    let Some(pinned_control_root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        KREA_CONTROL_OVERLAY_REPO,
+        KREA_CONTROL_OVERLAY_REVISION,
+    ) else {
+        return false;
+    };
+    match (
+        control.canonicalize().ok(),
+        pinned_control_root
+            .join(KREA_CONTROL_OVERLAY_FILE)
+            .canonicalize()
+            .ok(),
+    ) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => false,
+    }
 }
 
 /// Model ids the candle Krea strict-pose control route accepts (the deployed base the overlay applies on).
@@ -627,6 +703,25 @@ pub(super) async fn generate_candle_krea_control_stream(
         .await?;
     }
 
+    let mut memory_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
+    memory_spec = match tier {
+        "q4" => memory_spec.with_quant(gen_core::Quant::Q4),
+        "q8" | "int8-convrot" => memory_spec.with_quant(gen_core::Quant::Q8),
+        _ => memory_spec,
+    };
+    let provider_memory_contract = crate::inference_runtime::media()
+        .memory_strategy_contract(KREA_CONTROL_ENGINE_ID, &memory_spec)
+        .ok()
+        .flatten();
+    let memory_geometry = gen_core::MemoryGeometry {
+        width: request.width,
+        height: request.height,
+        batch: 1,
+        frames: 1,
+    };
+    let runtime_evidence_verified = adapter_bytes == 0
+        && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
+
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -643,11 +738,14 @@ pub(super) async fn generate_candle_krea_control_stream(
         // an indistinguishable `None` and the ladder took the zero-adaptation big-card path in silence.
         // It also removes the standing risk of pairing one tier's peak with another tier's savings.
         |budget| {
-            crate::krea_control_fit::fit_ladder_for_entry_with_adapter_bytes(
+            crate::krea_control_fit::fit_ladder_for_entry_with_runtime(
                 &request.model_manifest_entry,
                 tier,
                 budget,
                 adapter_bytes,
+                memory_geometry,
+                provider_memory_contract.as_ref(),
+                runtime_evidence_verified,
             )
         },
         // Two non-fits differing only in their reported free number are the same non-outcome — a reclaim

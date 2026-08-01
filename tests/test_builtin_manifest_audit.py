@@ -509,6 +509,7 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
         "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
         "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
+        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
         "image_jobs/pulid.rs": "PULID_FLUX_REPO",
         "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
@@ -573,6 +574,7 @@ def test_manifest_model_path_is_only_an_optional_override():
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
         "image_jobs/kolors_ipadapter.rs",
+        "image_jobs/krea_control_candle.rs",
         "image_jobs/krea_imported.rs",
         # sc-15036: the fine-tuned Mage-Flow base lane. Audited — `modelPath` is an optional
         # FIRST preference here, falling through to the catalog entry's `paths.model` (which is

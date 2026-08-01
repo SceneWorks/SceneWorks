@@ -777,8 +777,8 @@ fn edit_grouping(request: &ImageRequest) -> EditGrouping {
 /// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
 /// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
 /// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
-/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
-/// caps absurd inputs (and bounds the DiT sequence) before that.
+/// FLUX.2's provider safety contract rejects over-budget combinations with an actionable message;
+/// this caps absurd inputs (and bounds the DiT sequence) before that.
 #[cfg(target_os = "macos")]
 const MAX_EDIT_REFERENCES: usize = 4;
 
@@ -5615,7 +5615,10 @@ fn auto_tier_fit_decision(
     if matches!(
         final_fit,
         Some(crate::vram_gate::KreaTurboFit::Fits {
-            rung: crate::vram_gate::KreaTurboRung::StreamedBlocks,
+            selection: gen_core::MemorySelection {
+                strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+                ..
+            },
             ..
         })
     ) {
@@ -5751,8 +5754,7 @@ mod candle_request_residency_tests {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn final_krea_fit_enum_is_the_trusted_disclosure_source() {
-        let fit = |rung| crate::vram_gate::KreaTurboFit::Fits {
-            rung,
+        let fit = |strategy| crate::vram_gate::KreaTurboFit::Fits {
             phases: crate::vram_gate::KreaTurboPhasePeaks {
                 text_gb: 1.0,
                 denoise_gb: 1.0,
@@ -5760,7 +5762,7 @@ mod candle_request_residency_tests {
             },
             needed_gb: 1.0,
             selection: gen_core::MemorySelection {
-                strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+                strategy,
                 parameters: Default::default(),
                 tier: gen_core::MemoryNumericTier {
                     precision: gen_core::Precision::Bf16,
@@ -5768,9 +5770,10 @@ mod candle_request_residency_tests {
                     component_precision_floors: &[],
                 },
             },
+            memory: gen_core::GenerationMemory::default(),
         };
-        let streamed = fit(crate::vram_gate::KreaTurboRung::StreamedBlocks);
-        let cheaper = fit(crate::vram_gate::KreaTurboRung::ChunkedAttention);
+        let streamed = fit(gen_core::MemoryStrategy::BoundedTransformerResidency);
+        let cheaper = fit(gen_core::MemoryStrategy::BoundedAttention);
 
         assert_eq!(
             auto_tier_fit_decision(Some(&streamed)),
@@ -6985,38 +6988,13 @@ async fn generate_candle_stream(
                     match shared_krea_fit {
                         Some(crate::vram_gate::KreaTurboFit::Resident { .. }) => false,
                         Some(crate::vram_gate::KreaTurboFit::Fits {
-                            rung,
                             phases,
                             needed_gb,
                             selection,
+                            memory,
                         }) => {
                             memory_strategy_selection = Some(selection);
-                            generation_memory = Some(match rung {
-                                crate::vram_gate::KreaTurboRung::ThreeStage => {
-                                    gen_core::GenerationMemory::default()
-                                }
-                                crate::vram_gate::KreaTurboRung::TiledVae => {
-                                    gen_core::GenerationMemory {
-                                        tile_vae_decode: true,
-                                        ..Default::default()
-                                    }
-                                }
-                                crate::vram_gate::KreaTurboRung::ChunkedAttention => {
-                                    gen_core::GenerationMemory {
-                                        tile_vae_decode: true,
-                                        chunk_attention: true,
-                                        ..Default::default()
-                                    }
-                                }
-                                crate::vram_gate::KreaTurboRung::StreamedBlocks => {
-                                    gen_core::GenerationMemory {
-                                        tile_vae_decode: true,
-                                        chunk_attention: true,
-                                        stream_transformer_blocks: true,
-                                        ..Default::default()
-                                    }
-                                }
-                            });
+                            generation_memory = Some(memory);
                             // Reclaim accounting records allocations, not the admission threshold.
                             // `needed_gb` includes the 2 GB safety reserve, which is deliberately never
                             // allocated and therefore cannot be credited back during a model swap.
@@ -7026,7 +7004,7 @@ async fn generate_candle_stream(
                                 tier,
                                 width,
                                 height,
-                                ?rung,
+                                strategy = ?selection.strategy,
                                 text_peak_gb = phases.text_gb,
                                 denoise_peak_gb = phases.denoise_gb,
                                 decode_peak_gb = phases.decode_gb,

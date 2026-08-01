@@ -5747,8 +5747,8 @@
       // ~93 GB (down from ~104 GB un-chunked, sc-5923) — so the canonical multi-reference edit is
       // now a first-class sub-96 GB mode, reachable via the Image-Studio multi-image picker
       // (ui.multiReference). minMemoryGb stays 96 (inflating it would gate the common 74 GB T2I
-      // path behind 128 GB-only). The edit is still activation-bound, so the worker
-      // `flux2_dev_edit_memory_guard` (re-anchored on the chunked curve) rejects the genuinely
+      // path behind 128 GB-only). The edit is still activation-bound, so the FLUX.2 provider's
+      // calibrated safety contract (re-anchored on the chunked curve) rejects the genuinely
       // over-budget combinations (≥3 references / higher resolution that exceed the machine's
       // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {

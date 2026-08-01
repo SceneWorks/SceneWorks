@@ -243,6 +243,12 @@ pub fn select_strategy(
             reason: MemoryEvidenceVerdict::Missing,
         };
     };
+    // Evidence is an integer-byte ceiling. Canonicalize the effective budget to the same unit before
+    // comparing, so a decimal GiB equality (for example 28.6 - 2.0 == 26.6) cannot miss by one byte
+    // after the evidence ceiling conversion and spuriously select a deeper rung.
+    let available_bytes = (available_gb * BYTES_PER_GIB)
+        .ceil()
+        .clamp(0.0, u64::MAX as f64) as u64;
     let mut deepest = None;
     let mut first_unknown = None;
     for strategy in MemoryStrategy::ALL {
@@ -300,7 +306,7 @@ pub fn select_strategy(
         };
         if let Some(candidate) = eligible
             .iter()
-            .filter(|candidate| evidence_peak_gb(candidate.evidence) <= available_gb)
+            .filter(|candidate| candidate.evidence.predicted_peak_bytes <= available_bytes)
             .max_by(|left, right| {
                 left.evidence
                     .predicted_peak_bytes
@@ -516,6 +522,41 @@ mod tests {
                     reclaimable_gb: 0.0,
                     total_gb: 1.0,
                     reserved_headroom_gb: 0.0,
+                }),
+                &[candidate],
+            ),
+            Selection::Selected {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::Resident,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decimal_gib_exact_equality_fits_after_byte_ceiling_canonicalization() {
+        let mut exact = evidence(MemoryStrategy::Resident);
+        exact.predicted_peak_bytes = (26.6 * BYTES_PER_GIB).ceil() as u64;
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &exact,
+        };
+
+        assert!(matches!(
+            select_strategy(
+                request(),
+                &contract(),
+                Some(Budget {
+                    available_gb: 28.6,
+                    reclaimable_gb: 0.0,
+                    total_gb: 96.0,
+                    reserved_headroom_gb: 2.0,
                 }),
                 &[candidate],
             ),

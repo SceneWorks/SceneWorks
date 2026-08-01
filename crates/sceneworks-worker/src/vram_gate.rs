@@ -22,6 +22,8 @@
 
 use super::*;
 #[cfg(test)]
+use gen_core::MemoryStrategy;
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::fit_gate::BYTES_PER_GIB;
@@ -301,25 +303,16 @@ pub(crate) enum LoadPlan {
     Reject,
 }
 
-/// Krea 2 Turbo's quality-preserving constrained-card ladder. Ordering is load-bearing: the worker
-/// selects the first sufficient rung, preserving the resident path whenever it fits and adding only
-/// the cheapest necessary execution cost after that.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KreaTurboRung {
-    ThreeStage,
-    TiledVae,
-    ChunkedAttention,
-    StreamedBlocks,
-}
-
-impl KreaTurboRung {
-    fn manifest_key(self) -> &'static str {
-        match self {
-            Self::ThreeStage => "threeStage",
-            Self::TiledVae => "tiledVae",
-            Self::ChunkedAttention => "chunkedAttention",
-            Self::StreamedBlocks => "streamedBlocks",
-        }
+/// Translate the shared strategy vocabulary to Krea's historical manifest keys at the evidence-read
+/// boundary. This is deliberately a function, not a second rung enum: selection order and execution
+/// composition remain owned by [`gen_core::MemoryStrategy`] and the provider contract.
+fn krea_turbo_manifest_key(strategy: gen_core::MemoryStrategy) -> &'static str {
+    match strategy {
+        gen_core::MemoryStrategy::Resident => "resident",
+        gen_core::MemoryStrategy::StagedResidency => "threeStage",
+        gen_core::MemoryStrategy::BoundedDecode => "tiledVae",
+        gen_core::MemoryStrategy::BoundedAttention => "chunkedAttention",
+        gen_core::MemoryStrategy::BoundedTransformerResidency => "streamedBlocks",
     }
 }
 
@@ -345,10 +338,10 @@ pub(crate) enum KreaTurboFit {
         selection: gen_core::MemorySelection,
     },
     Fits {
-        rung: KreaTurboRung,
         phases: KreaTurboPhasePeaks,
         needed_gb: f64,
         selection: gen_core::MemorySelection,
+        memory: gen_core::GenerationMemory,
     },
     Reject {
         phases: KreaTurboPhasePeaks,
@@ -497,7 +490,7 @@ fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
 fn krea_rung_phase_peaks(
     manifest_entry: &JsonObject,
     tier: &str,
-    rung: KreaTurboRung,
+    strategy: gen_core::MemoryStrategy,
     width: u32,
     height: u32,
 ) -> Option<KreaTurboPhasePeaks> {
@@ -510,7 +503,7 @@ fn krea_rung_phase_peaks(
     let rung = turbo_fit
         .get("phaseCurvesByTier")?
         .get(tier)?
-        .get(rung.manifest_key())?
+        .get(krea_turbo_manifest_key(strategy))?
         .as_object()?;
     let phase = |name: &str| {
         rung.get(name)
@@ -526,11 +519,11 @@ fn krea_rung_phase_peaks(
 
 fn krea_rung_parameters(
     turbo_fit: &Value,
-    rung: KreaTurboRung,
+    strategy: gen_core::MemoryStrategy,
 ) -> Option<gen_core::MemoryStrategyParameters> {
     let parameters = turbo_fit
         .get("strategyParameters")?
-        .get(rung.manifest_key())?
+        .get(krea_turbo_manifest_key(strategy))?
         .as_object()?;
     let value = |name| {
         parameters
@@ -557,12 +550,9 @@ fn krea_rung_parameters(
         // (see `rung_pairs`); a blanket `Some` would fail `validate_selection` on three of the
         // four candidates and silently downgrade their evidence verdicts. `None` on those rungs
         // carries the identical DiT meaning without tripping that check.
-        transformer_window_component: match rung {
-            KreaTurboRung::StreamedBlocks => Some(gen_core::TransformerComponent::Dit),
-            KreaTurboRung::ThreeStage
-            | KreaTurboRung::TiledVae
-            | KreaTurboRung::ChunkedAttention => None,
-        },
+        transformer_window_component: (strategy
+            == gen_core::MemoryStrategy::BoundedTransformerResidency)
+            .then_some(gen_core::TransformerComponent::Dit),
     })
 }
 
@@ -914,17 +904,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         tier: numeric_tier,
     };
 
-    let rung_pairs = [
-        (KreaTurboRung::ThreeStage, MemoryStrategy::StagedResidency),
-        (KreaTurboRung::TiledVae, MemoryStrategy::BoundedDecode),
-        (
-            KreaTurboRung::ChunkedAttention,
-            MemoryStrategy::BoundedAttention,
-        ),
-        (
-            KreaTurboRung::StreamedBlocks,
-            MemoryStrategy::BoundedTransformerResidency,
-        ),
+    let optimized_strategies = [
+        MemoryStrategy::StagedResidency,
+        MemoryStrategy::BoundedDecode,
+        MemoryStrategy::BoundedAttention,
+        MemoryStrategy::BoundedTransformerResidency,
     ];
     let mut evidence = vec![make_evidence(
         resident_selection,
@@ -934,20 +918,20 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     )];
     let mut selections = vec![resident_selection];
     let mut measured = Vec::new();
-    for (rung, strategy) in rung_pairs {
-        let phases = krea_rung_phase_peaks(manifest_entry, tier, rung, width, height)?;
+    for strategy in optimized_strategies {
+        let phases = krea_rung_phase_peaks(manifest_entry, tier, strategy, width, height)?;
         let phase_peak_gb = phases.peak_gb();
         let needed_gb = phase_peak_gb + HEADROOM_GB;
-        let parameters = krea_rung_parameters(turbo_fit, rung)?;
+        let parameters = krea_rung_parameters(turbo_fit, strategy)?;
         let selection = MemorySelection {
             strategy,
             parameters,
             tier: numeric_tier,
         };
-        measured.push((rung, phases, needed_gb, selection));
+        measured.push((strategy, phases, needed_gb, selection));
         evidence.push(make_evidence(
             selection,
-            Some(rung.manifest_key()),
+            Some(krea_turbo_manifest_key(strategy)),
             phase_peak_gb,
             Some(phases),
         ));
@@ -991,14 +975,25 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             needed_gb,
             ..
         } => {
-            let (rung, phases, _, _) = measured
+            let (_, phases, _, _) = measured
                 .into_iter()
                 .find(|(_, _, _, selection)| selection.strategy == selected.strategy)?;
+            let memory = gen_core::GenerationMemory {
+                tile_vae_decode: provider_contract
+                    .engages(selected.strategy, MemoryStrategy::BoundedDecode),
+                chunk_attention: provider_contract
+                    .engages(selected.strategy, MemoryStrategy::BoundedAttention),
+                stream_transformer_blocks: provider_contract.engages(
+                    selected.strategy,
+                    MemoryStrategy::BoundedTransformerResidency,
+                ),
+                ..Default::default()
+            };
             Some(KreaTurboFit::Fits {
-                rung,
                 phases,
                 needed_gb: needed_gb + HEADROOM_GB,
                 selection: selected,
+                memory,
             })
         }
         Selection::Reject { needed_gb, .. } => {
@@ -1850,28 +1845,40 @@ mod tests {
         assert!(matches!(
             fit(20.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ThreeStage,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(19.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::TiledVae,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(17.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(13.5),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
                 ..
             })
         ));
@@ -1909,7 +1916,10 @@ mod tests {
                 true,
             ),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::TiledVae,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
                 ..
             })
         ));
@@ -1933,7 +1943,10 @@ mod tests {
                 true,
             ),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::TiledVae,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
                 ..
             })
         ));
@@ -2101,7 +2114,10 @@ mod tests {
         assert!(matches!(
             krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
                 ..
             })
         ));
@@ -2235,9 +2251,9 @@ mod tests {
         }
 
         for (tier, probe_rung) in [
-            ("q4", KreaTurboRung::TiledVae),
-            ("q8", KreaTurboRung::ChunkedAttention),
-            ("bf16", KreaTurboRung::ChunkedAttention),
+            ("q4", MemoryStrategy::BoundedDecode),
+            ("q8", MemoryStrategy::BoundedAttention),
+            ("bf16", MemoryStrategy::BoundedAttention),
         ] {
             let phases = krea_rung_phase_peaks(&manifest, tier, probe_rung, 1024, 1024)
                 .expect("probed rung phase peaks");
@@ -2253,8 +2269,8 @@ mod tests {
                 }),
                 true,
             ) {
-                Some(KreaTurboFit::Fits { rung, .. }) => assert_eq!(
-                    rung, probe_rung,
+                Some(KreaTurboFit::Fits { selection, .. }) => assert_eq!(
+                    selection.strategy, probe_rung,
                     "{tier} must select the least-cost useful rung at its measured boundary"
                 ),
                 other => panic!("{tier} expected {probe_rung:?}, got {other:?}"),
@@ -2318,21 +2334,30 @@ mod tests {
         assert!(matches!(
             fit(24.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ThreeStage,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(16.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(12.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
                 ..
             })
         ));
@@ -2385,14 +2410,20 @@ mod tests {
         assert!(matches!(
             fit(32.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ThreeStage,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(24.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
                 ..
             })
         ));
@@ -2400,17 +2431,21 @@ mod tests {
             assert!(matches!(
                 fit(free_gb),
                 Some(KreaTurboFit::Fits {
-                    rung: KreaTurboRung::StreamedBlocks,
+                    selection: gen_core::MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
                     ..
                 })
             ));
         }
 
         let three_stage =
-            krea_rung_phase_peaks(&manifest, "q8", KreaTurboRung::ThreeStage, 1024, 1024)
+            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
                 .expect("Q8 three-stage evidence");
-        let tiled = krea_rung_phase_peaks(&manifest, "q8", KreaTurboRung::TiledVae, 1024, 1024)
-            .expect("Q8 tiled-VAE evidence");
+        let tiled =
+            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
+                .expect("Q8 tiled-VAE evidence");
         assert!(
             tiled.peak_gb() >= three_stage.peak_gb(),
             "the measured Q8 tiled-VAE no-op must never displace the cheaper three-stage rung"
@@ -2419,7 +2454,10 @@ mod tests {
         assert!(matches!(
             fit(8.96),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
                 ..
             })
         ));
@@ -2448,22 +2486,38 @@ mod tests {
     fn builtin_krea_q8_curves_conservatively_cover_every_measured_phase_sample() {
         let manifest = builtin_krea_turbo_manifest();
         let samples = [
-            (KreaTurboRung::ThreeStage, 768, [6.345, 18.357, 16.514]),
-            (KreaTurboRung::ThreeStage, 1024, [6.345, 22.015, 16.514]),
-            (KreaTurboRung::TiledVae, 768, [6.345, 18.357, 16.548]),
-            (KreaTurboRung::TiledVae, 1024, [6.345, 22.015, 16.514]),
             (
-                KreaTurboRung::ChunkedAttention,
+                MemoryStrategy::StagedResidency,
+                768,
+                [6.345, 18.357, 16.514],
+            ),
+            (
+                MemoryStrategy::StagedResidency,
+                1024,
+                [6.345, 22.015, 16.514],
+            ),
+            (MemoryStrategy::BoundedDecode, 768, [6.345, 18.357, 16.548]),
+            (MemoryStrategy::BoundedDecode, 1024, [6.345, 22.015, 16.514]),
+            (
+                MemoryStrategy::BoundedAttention,
                 768,
                 [6.345, 17.619, 16.514],
             ),
             (
-                KreaTurboRung::ChunkedAttention,
+                MemoryStrategy::BoundedAttention,
                 1024,
                 [6.345, 18.156, 16.512],
             ),
-            (KreaTurboRung::StreamedBlocks, 768, [6.345, 6.211, 4.837]),
-            (KreaTurboRung::StreamedBlocks, 1024, [6.847, 6.757, 4.132]),
+            (
+                MemoryStrategy::BoundedTransformerResidency,
+                768,
+                [6.345, 6.211, 4.837],
+            ),
+            (
+                MemoryStrategy::BoundedTransformerResidency,
+                1024,
+                [6.847, 6.757, 4.132],
+            ),
         ];
         for (rung, edge, measured) in samples {
             let predicted = krea_rung_phase_peaks(&manifest, "q8", rung, edge, edge)
@@ -2524,30 +2578,45 @@ mod tests {
         assert!(matches!(
             fit(48.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ThreeStage,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(31.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::ChunkedAttention,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             fit(12.0),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
                 ..
             })
         ));
 
-        let three_stage =
-            krea_rung_phase_peaks(&manifest, "bf16", KreaTurboRung::ThreeStage, 1024, 1024)
-                .expect("BF16 three-stage evidence");
-        let tiled = krea_rung_phase_peaks(&manifest, "bf16", KreaTurboRung::TiledVae, 1024, 1024)
-            .expect("BF16 tiled-VAE evidence");
+        let three_stage = krea_rung_phase_peaks(
+            &manifest,
+            "bf16",
+            MemoryStrategy::StagedResidency,
+            1024,
+            1024,
+        )
+        .expect("BF16 three-stage evidence");
+        let tiled =
+            krea_rung_phase_peaks(&manifest, "bf16", MemoryStrategy::BoundedDecode, 1024, 1024)
+                .expect("BF16 tiled-VAE evidence");
         assert!(
             tiled.peak_gb() >= three_stage.peak_gb(),
             "the measured BF16 tiled-VAE no-op must never displace the cheaper three-stage rung"
@@ -2556,7 +2625,10 @@ mod tests {
         assert!(matches!(
             fit(10.64),
             Some(KreaTurboFit::Fits {
-                rung: KreaTurboRung::StreamedBlocks,
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
                 ..
             })
         ));
@@ -2577,22 +2649,38 @@ mod tests {
     fn builtin_krea_bf16_curves_conservatively_cover_every_measured_phase_sample() {
         let manifest = builtin_krea_turbo_manifest();
         let samples = [
-            (KreaTurboRung::ThreeStage, 768, [8.694, 28.390, 26.413]),
-            (KreaTurboRung::ThreeStage, 1024, [8.694, 32.014, 26.446]),
-            (KreaTurboRung::TiledVae, 768, [8.694, 28.390, 26.446]),
-            (KreaTurboRung::TiledVae, 1024, [8.560, 32.014, 26.446]),
             (
-                KreaTurboRung::ChunkedAttention,
+                MemoryStrategy::StagedResidency,
+                768,
+                [8.694, 28.390, 26.413],
+            ),
+            (
+                MemoryStrategy::StagedResidency,
+                1024,
+                [8.694, 32.014, 26.446],
+            ),
+            (MemoryStrategy::BoundedDecode, 768, [8.694, 28.390, 26.446]),
+            (MemoryStrategy::BoundedDecode, 1024, [8.560, 32.014, 26.446]),
+            (
+                MemoryStrategy::BoundedAttention,
                 768,
                 [8.527, 27.552, 26.414],
             ),
             (
-                KreaTurboRung::ChunkedAttention,
+                MemoryStrategy::BoundedAttention,
                 1024,
                 [8.526, 27.652, 26.413],
             ),
-            (KreaTurboRung::StreamedBlocks, 768, [8.535, 8.533, 2.130]),
-            (KreaTurboRung::StreamedBlocks, 1024, [8.526, 8.526, 3.629]),
+            (
+                MemoryStrategy::BoundedTransformerResidency,
+                768,
+                [8.535, 8.533, 2.130],
+            ),
+            (
+                MemoryStrategy::BoundedTransformerResidency,
+                1024,
+                [8.526, 8.526, 3.629],
+            ),
         ];
         for (rung, edge, measured) in samples {
             let predicted = krea_rung_phase_peaks(&manifest, "bf16", rung, edge, edge)
