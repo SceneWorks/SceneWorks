@@ -150,6 +150,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   );
   assert.match(
     workflow,
+    /qwen_tier:\s+description:[^\n]+\s+required: false\s+type: choice\s+options:\s+- bf16\s+- q4\s+- q8\s+default: bf16/,
+  );
+  assert.match(
+    workflow,
     /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(\(inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot\) \|\| \(inputs\.run_five_rung_reference && inputs\.provision_z_image_snapshot\)\) && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
   assert.match(
@@ -163,19 +167,15 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   assert.doesNotMatch(workflow, /^\s+qwen_root:/m);
   assert.match(
     workflow,
-    /models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/bf16/,
+    /models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/\$QWEN_TIER/,
   );
   const huggingFaceRoot =
-    "$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16";
+    "$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/$QWEN_TIER";
   const sceneWorksRoot =
-    "$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16";
+    "$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/$QWEN_TIER";
   assert.equal(workflow.split(huggingFaceRoot).length - 1, 1);
   assert.equal(workflow.split(sceneWorksRoot).length - 1, 1);
   assert.ok(workflow.indexOf(huggingFaceRoot) < workflow.indexOf(sceneWorksRoot));
-  assert.match(
-    workflow,
-    /if \[\[ -n "\$QWEN_ROOT_OVERRIDE" \]\]; then\s+QWEN_ROOT="\$QWEN_ROOT_OVERRIDE"\s+else/,
-  );
   assert.match(workflow, /if \[\[ -d "\$QWEN_HF_ROOT" \]\]; then/);
   assert.match(workflow, /elif \[\[ -d "\$QWEN_APP_ROOT" \]\]; then/);
   assert.doesNotMatch(workflow, /\bfind\b.*qwen|\bls\b.*qwen/i);
@@ -193,7 +193,7 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
   assert.match(workflow, /revision=os\.environ\["QWEN_REVISION"\]/);
-  assert.match(workflow, /allow_patterns=\["bf16\/\*\*"\]/);
+  assert.match(workflow, /allow_patterns=\[f"\{os\.environ\['QWEN_TIER'\]\}\/\*\*"\]/);
   assert.match(workflow, /token=False/);
   assert.match(workflow, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
   assert.match(workflow, /HF_HUB_DISABLE_PROGRESS_BARS: "1"/);
@@ -220,7 +220,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     provisioning.split('repo_id="SceneWorks/qwen-image-mlx"').length - 1,
     1,
   );
-  assert.equal(provisioning.split('allow_patterns=["bf16/**"]').length - 1, 1);
+  assert.equal(
+    provisioning.split('allow_patterns=[f"{os.environ[\'QWEN_TIER\']}/**"]').length - 1,
+    1,
+  );
   assert.match(
     workflow,
     /QWEN_REPOSITORY" != "SceneWorks\/qwen-image-mlx"/,
@@ -228,7 +231,12 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   assert.match(workflow, /QWEN_ROOT="\$\(cd "\$QWEN_ROOT" && pwd -P\)"/);
   assert.match(
     workflow,
-    /EXPECTED_SUFFIX="\/models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/bf16"/,
+    /QWEN_OVERRIDE_ROOT="\$\(cd "\$QWEN_ROOT_OVERRIDE" && pwd -P\)"[\s\S]*if \[\[ "\$QWEN_OVERRIDE_ROOT" == \*"\$EXPECTED_SUFFIX" \]\]; then[\s\S]*QWEN_ROOT="\$QWEN_OVERRIDE_ROOT"/,
+  );
+  assert.match(workflow, /if \[\[ -z "\$QWEN_ROOT" \]\]; then[\s\S]*QWEN_HF_ROOT=/);
+  assert.match(
+    workflow,
+    /EXPECTED_SUFFIX="\/models--SceneWorks--qwen-image-mlx\/snapshots\/\$QWEN_REVISION\/\$QWEN_TIER"/,
   );
   assert.match(workflow, /QWEN_ROOT" != \*"\$EXPECTED_SUFFIX"/);
   assert.match(
@@ -250,7 +258,9 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     /x-access-token:\$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}@github\.com\/SceneWorks\/inference\.insteadOf/,
   );
   assert.match(workflow, /--backend mlx/);
-  assert.match(workflow, /--fixture qwen-image-bf16-seed15511-step2/);
+  assert.match(workflow, /QWEN_SEED=15511/);
+  assert.match(workflow, /QWEN_SEED=16353/);
+  assert.match(workflow, /--fixture "qwen-image-\$\{QWEN_TIER\}-seed\$\{QWEN_SEED\}-step2"/);
   assert.match(workflow, /--fresh-per-case/);
   assert.match(
     workflow,

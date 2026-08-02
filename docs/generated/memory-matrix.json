@@ -1,7 +1,7 @@
 {
   "schemaVersion": 5,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2af91f21b852f510f4209173dc08ae3657f84a82a20b4e680449ddce3180aeb4",
+    "sceneWorksRevision": "source-tree:f05daa946580b3a605d93419d220f86206accceb3a8329f23dc3f47b2941efa8",
     "inferenceRevision": "942fcb44a68e39ffbb15d7a716ae3e766636ebd7",
     "sources": {
       "manifest": {
@@ -38,7 +38,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "8fb997802eab3007a0262373a493f20c4a105d3f00b873814d01d6e80d5ba54d"
+        "sha256": "add9e9394c28071670475902e5af41c680b89c3c3cc5ca1c4a520c1f8ecdc499"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",

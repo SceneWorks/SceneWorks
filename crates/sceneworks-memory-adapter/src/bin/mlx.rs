@@ -333,6 +333,48 @@ mod tests {
         assert!(!qwen_quality_passes(49.0 / 255.0, measured_mean));
         assert!(!qwen_quality_passes(measured_maximum, 0.51 / 255.0));
     }
+
+    #[test]
+    fn qwen_fixture_seed_is_bound_to_the_planned_tier() {
+        let request = json!({
+            "planned": {
+                "fixture": "qwen-image-q4-seed16353-step2",
+                "target": { "tier": "q4" }
+            }
+        });
+        assert_eq!(planned_qwen_tier(&request).unwrap(), "q4");
+        assert_eq!(planned_qwen_seed(&request, "q4").unwrap(), 16353);
+
+        let error = planned_qwen_seed(&request, "q8").unwrap_err();
+        assert!(error.contains("must start with"));
+    }
+
+    #[test]
+    fn qwen_load_spec_preserves_every_planned_numeric_tier() {
+        for (tier, expected_quant) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+        ] {
+            let request = json!({
+                "planned": {
+                    "strategy": {
+                        "rung": "bounded_attention",
+                        "parameters": {}
+                    },
+                    "target": { "tier": tier }
+                }
+            });
+            let selection = planned_selection(&request).unwrap();
+            let spec = qwen_load_spec(
+                PathBuf::from(format!("/tmp/qwen-image-{tier}")),
+                &selection,
+                OffloadPolicy::Resident,
+                LoadShape::EagerMaterialization,
+            );
+            assert_eq!(spec.quantize, expected_quant, "numeric tier {tier}");
+        }
+    }
 }
 
 fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, String> {
@@ -712,18 +754,51 @@ fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
     }
 }
 
-fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
-    let strategy = planned_memory_strategy(request)?;
-    let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
-    let (precision, quant) = match protocol::planned(request)?
+fn planned_qwen_tier(request: &Value) -> Result<&str, String> {
+    match protocol::planned(request)?
         .pointer("/target/tier")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.tier must be a string".to_owned())?
     {
+        tier @ ("bf16" | "q4" | "q8") => Ok(tier),
+        tier => Err(format!("unsupported MLX numeric tier {tier:?}")),
+    }
+}
+
+fn planned_qwen_seed(request: &Value, tier: &str) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("qwen-image-{tier}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Qwen fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Qwen fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the provider's two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
+    let strategy = planned_memory_strategy(request)?;
+    let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    let (precision, quant) = match planned_qwen_tier(request)? {
         "bf16" => (Precision::Bf16, None),
         "q4" => (Precision::Bf16, Some(Quant::Q4)),
         "q8" => (Precision::Bf16, Some(Quant::Q8)),
-        tier => return Err(format!("unsupported MLX numeric tier {tier:?}")),
+        _ => unreachable!("planned_qwen_tier returned an unsupported tier"),
     };
     Ok(MemorySelection {
         strategy,
@@ -741,6 +816,21 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
             component_precision_floors: &[],
         },
     })
+}
+
+fn qwen_load_spec(
+    root: PathBuf,
+    selection: &MemorySelection,
+    offload: OffloadPolicy,
+    load_shape: LoadShape,
+) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(load_shape);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    spec
 }
 
 fn strategy_name(strategy: MemoryStrategy) -> &'static str {
@@ -1704,14 +1794,14 @@ fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
-fn qwen_provider_request(width: u32, height: u32) -> GenerationRequest {
+fn qwen_provider_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
     GenerationRequest {
         prompt: "a red fox resting beside a blue ceramic vase, studio photograph".to_owned(),
         negative_prompt: Some("blurry, distorted, text".to_owned()),
         width,
         height,
         count: 1,
-        seed: Some(15511),
+        seed: Some(seed),
         steps: Some(2),
         ..Default::default()
     }
@@ -1724,6 +1814,7 @@ fn qwen_provider_context(
     height: u32,
     total_bytes: u64,
     predicted_peak_bytes: u64,
+    evidence_story: u64,
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
@@ -1752,7 +1843,7 @@ fn qwen_provider_context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-15511@{}", protocol::INFERENCE_PIN),
+        evidence_revision: format!("sc-{evidence_story}@{}", protocol::INFERENCE_PIN),
     }
 }
 
@@ -1771,6 +1862,8 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     protocol::validate_plain_overlay_target(request, QWEN_PROVIDER_EXECUTION_PATH)?;
     let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let seed = planned_qwen_seed(request, tier)?;
     let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
         LoadShape::DeferredMaterialization
     } else {
@@ -1796,18 +1889,16 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         &root,
         &repository,
         &revision,
-        "bf16",
+        tier,
         protocol::QWEN_REPOSITORY,
     )?;
-    let spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(offload)
-        .with_load_shape(load_shape);
+    let spec = qwen_load_spec(root, &selection, offload, load_shape);
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
     let generator = catalog
         .media()
         .load("qwen_image", &spec)
-        .map_err(|error| format!("load real Qwen-Image bf16 provider: {error}"))?;
+        .map_err(|error| format!("load real Qwen-Image {tier} provider: {error}"))?;
     let contract = generator
         .memory_strategy_contract()
         .ok_or_else(|| "loaded qwen_image has no memory-strategy contract".to_owned())?;
@@ -1844,6 +1935,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         height,
         hardware_bytes,
         1,
+        if tier == "bf16" { 15511 } else { 16353 },
     );
 
     let conditioning = Cell::new(PhaseMemory {
@@ -1858,7 +1950,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let selected = one_image(scoped_generate(
         generator.as_ref(),
-        qwen_provider_request(width, height),
+        qwen_provider_request(width, height, seed),
         &context,
         None,
         &mut |progress| match progress {
@@ -1911,7 +2003,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
 
     let baseline = one_image(
         generator
-            .generate(&qwen_provider_request(width, height), &mut |_| {})
+            .generate(&qwen_provider_request(width, height, seed), &mut |_| {})
             .map_err(|error| format!("generate unselected Qwen reference: {error}"))?,
     )?;
     let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
@@ -1922,7 +2014,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     let warm = one_image(scoped_generate(
         generator.as_ref(),
-        qwen_provider_request(width, height),
+        qwen_provider_request(width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -1932,7 +2024,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         return Err("Qwen warm repeat changed the deterministic output".to_owned());
     }
 
-    let cancelled = qwen_provider_request(width, height);
+    let cancelled = qwen_provider_request(width, height, seed);
     let cancel_signal = cancelled.cancel.clone();
     let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
     let mut cancel_triggered = false;
@@ -1978,7 +2070,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     let cancel_recovery = one_image(scoped_generate(
         generator.as_ref(),
-        qwen_provider_request(width, height),
+        qwen_provider_request(width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -1995,7 +2087,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     };
     let injected = scoped_generate(
         generator.as_ref(),
-        qwen_provider_request(width, height),
+        qwen_provider_request(width, height, seed),
         &context,
         Some(injected_phase),
         &mut |_| {},
@@ -2008,7 +2100,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     let error_recovery = one_image(scoped_generate(
         generator.as_ref(),
-        qwen_provider_request(width, height),
+        qwen_provider_request(width, height, seed),
         &context,
         None,
         &mut |_| {},
@@ -2031,7 +2123,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,
-            "variant": "bf16",
+            "variant": tier,
         },
         "sweep": qwen_complete_sweep(request)?,
         "scenarios": [
@@ -2075,7 +2167,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         },
         "loadability": {
             "result": "passed",
-            "resolvedPathFingerprint": format!("{repository}@{revision}:bf16"),
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
         },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:qwen-shared-ladder",

@@ -2846,6 +2846,7 @@ fn bernini_image_t2i_candle_real_weights_generates_one_image() {
         guidance,
         "t2i",
         Vec::new(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
