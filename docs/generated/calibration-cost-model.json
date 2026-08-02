@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:07dd93b384cf0da2fc3ea48ccda854c679e630733f500162d1ae75cc02191a5c",
-    "matrixRevision": "source-tree:4bf5ccfa7f875d8942f1a3bbea5cd2389bcb718e62b4e72d76ba9ed9ba632077",
+    "sceneWorksRevision": "source-tree:b2dd8c81c10f4a78474c56131cd9312bc2f87b27381094d9a6056849c663b56d",
+    "matrixRevision": "source-tree:794defe6e4900cf8dfbc7d2820a3f10d7b96d24f55577bcebe4990f46057512c",
     "inferenceRevision": "cc5b30a92ab5b0789afee71e38891aa15b8e5357",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "83e4a9b47f9f85b16bcdb1a36e28164cd82e3338f6fe253ea6ae064329722026"
+        "sha256": "76151ba04a15b55dc5fc5386e2637da2efe2a4486c835fbc2523cf10bca3fe72"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2e679e92ac2860e3cadfc8a22e9bac6f9eecdb928e32921bd91afb1fb86abfc4"
+        "sha256": "e3a13ed7e4cc2a2b6121ee0b1e1a8286f8313dee497f288566fc0b61485fc819"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -31,7 +31,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "668552dd288b86ad22c66248736dae813287ca89b40210e82a20a43239234f96"
+        "sha256": "42a737a26f3d1e22af6b1acf2c8ac90f2edfeb2159eeeb393b95f36e5e1ac841"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -39,7 +39,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "c7da263b72c4548454b7df8b0a63092b9a7d70055910e32c4e991753779079b5"
+        "sha256": "9436f8d6a54c5527bbb411a004f70485e50ff0f6c7a033999a543663bc839add"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
@@ -47,7 +47,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "6207079215d82fbf8aa7189f5d8314c77e8241c90390592f3bc656acc30a9cc8"
+        "sha256": "44a6e69727a5279f552f6befb27a6eb68f56c3f828fe4c0b677898ead6c7588e"
       }
     }
   },
@@ -681,6 +681,46 @@
       },
       {
         "name": "mlx-qwen-bf16-bounded-transformer",
+        "backend": "mlx",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q4-bounded-attention",
+        "backend": "mlx",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q4-bounded-transformer",
+        "backend": "mlx",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q8-bounded-attention",
+        "backend": "mlx",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q8-bounded-transformer",
         "backend": "mlx",
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",
