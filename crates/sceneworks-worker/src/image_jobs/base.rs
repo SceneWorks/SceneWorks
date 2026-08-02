@@ -5540,6 +5540,9 @@ async fn generate_stream(
     );
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
+    let reference_count = edit_refs.len().max(usize::from(
+        identity_init.is_some() || ideogram_edit_mask.is_some() || hires_fix.is_some(),
+    ));
     let mut memory_overlays = Vec::new();
     if has_request_reference {
         memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
@@ -5570,6 +5573,7 @@ async fn generate_stream(
         overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         adapter_count,
         has_reference: has_request_reference || hires_fix.is_some(),
+        reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
         use_pid,
         has_phases: false,
     };
@@ -7289,6 +7293,9 @@ async fn generate_candle_stream(
             height,
             batch: 1,
             frames: 1,
+            reference_count: u32::from(
+                edit_reference.is_some() || img2img_reference.is_some(),
+            ),
         },
         edit_reference.is_some() || img2img_reference.is_some(),
         use_pid,
@@ -7709,7 +7716,6 @@ async fn generate_candle_stream(
             calibration_fingerprint,
             load_shape,
             mode: gen_core::MemoryMode::TextToImage,
-            load_shape,
             has_reference: false,
             use_pid: false,
             has_phases: false,
@@ -7718,6 +7724,7 @@ async fn generate_candle_stream(
                 height,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             overlay: None,
             budget: gen_core::MemoryBudget {

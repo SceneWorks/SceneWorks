@@ -5422,7 +5422,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["perth", "voice_embedding"],
             control_kinds: None,
         }
@@ -5582,7 +5581,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["bundle"],
             control_kinds: None,
         };
@@ -5641,7 +5639,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["voice_embedding"],
             control_kinds: None,
         };
@@ -5863,7 +5860,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &[],
             control_kinds: None,
         };
@@ -5890,7 +5886,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
             control_kinds: None,
         }
@@ -6022,7 +6017,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["codec"],
             control_kinds: None,
         }
@@ -6058,7 +6052,6 @@ mod co_requisite_tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["text_encoder", "vae"],
             control_kinds: None,
         }
@@ -6271,7 +6264,6 @@ mod co_requisite_tests {
             backend: "candle",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
-            control_kinds: None,
             required_components: &["clip", "synchformer", "dit", "vae", "vocoder"],
             control_kinds: None,
         }

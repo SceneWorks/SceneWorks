@@ -39,11 +39,36 @@ and had slightly worse mean absolute error, while only lowering the tail of the 
 it also evaluates more redundant pixels. There is no material fidelity or memory win that justifies
 the extra work, so overlap 64 remains the sole shipped candidate below 512px.
 
+## Real-weight five-rung CUDA exercise
+
+The shared harness exercised every implemented rung in one model-load batch on GPU 0 using the
+packed Q4 snapshot `SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf`.
+The schema-valid capture is published separately at
+`docs/generated/qwen-candle-five-rung-sc-15817.json`, outside the runtime admission bundle.
+The capture is bound to SceneWorks `523e0c6351b49209084a9ab762a667c85c00261b` and inference
+`378f6c7dadd559bba7d32e8c87165e0dd7900710`, with both worktrees clean. The device was an NVIDIA
+RTX PRO 6000 Blackwell Max-Q Workstation Edition (compute capability 12.0, 102,641,958,912 bytes,
+CUDA 12.9, driver 596.36).
+
+| Rung | Parameters | Observed request peak |
+| --- | --- | ---: |
+| Resident | none | 55,638,491,136 bytes |
+| Staged residency | none | 42,048,946,176 bytes |
+| Bounded decode | tile 512, overlap 64 | 29,700,915,200 bytes |
+| Bounded attention | tile 512, overlap 64, score budget 67,108,864 | 29,700,915,200 bytes |
+| Bounded transformer residency | prior parameters, block window 1 | 29,700,915,200 bytes |
+
+Every record passed exact artifact loadability and reported the selected contract fingerprint,
+load shape, engaged-rung identity, parameters, phase peaks, and clean repository revisions. These
+records remain `candidate`/`gated`: they prove implementation and representative real-weight
+execution, but deliberately do not substitute for each sibling story's promotion-quality scenario,
+negative-mutation, lifecycle, tier, mode, and overlay calibration.
+
 ## Validation boundary
 
-The host has CUDA 12.9 and two RTX PRO 6000 Blackwell GPUs. The full provider and the real Qwen VAE
-load on CUDA, while contract/conformance, candidate coverage, exact request scope, stale fingerprint,
-cleanup, cancellation, and resident-versus-streamed ragged-window parity are exercised by tests.
-Exact current Qwen base/edit transformer and text-encoder artifacts were not installed locally, so
-this story records those complete-route cells as loadability-unverified rather than borrowing the
-older resident/sequential measurements or fabricating calibration evidence.
+The host has CUDA 12.9 and two RTX PRO 6000 Blackwell GPUs. The full base provider, text encoders,
+transformer, and VAE load from the exact packed snapshot on CUDA. Contract/conformance, candidate
+coverage, exact request scope, stale fingerprint, cleanup, cancellation, and
+resident-versus-streamed ragged-window parity are exercised by tests. The checked-in measurements
+are representative implementation evidence only; the three blocked model stories still own their
+complete request-specific calibration and Full signoff.

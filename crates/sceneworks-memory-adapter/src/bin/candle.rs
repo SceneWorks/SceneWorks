@@ -895,11 +895,19 @@ fn run_five_rung_reference_loaded(
             .ok_or_else(|| format!("{provider_id} fresh reference did not complete decode"))?,
     );
     let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
-    let blocker = concat!(
-        "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
-        "sc-16059; it intentionally remains gated because this run does not repeat the full ",
-        "promotion-quality, negative-mutation, and lifecycle scenario suite"
-    );
+    let blocker = if provider_id == QWEN_ID {
+        concat!(
+            "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, ",
+            "and loadability; it intentionally remains gated because this run does not repeat ",
+            "each sibling story's promotion-quality, negative-mutation, and lifecycle suite"
+        )
+    } else {
+        concat!(
+            "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
+            "SC-16059; it intentionally remains gated because this run does not repeat the full ",
+            "promotion-quality, negative-mutation, and lifecycle scenario suite"
+        )
+    };
     let mut fragment = protocol::plain_gated_fragment(
         request,
         execution_path,

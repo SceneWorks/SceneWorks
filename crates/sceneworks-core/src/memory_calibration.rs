@@ -1598,13 +1598,30 @@ mod tests {
     #[test]
     fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
         // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
-        // An empty current bundle yields Unknown for every query instead of accepting stale,
-        // pre-loadShape evidence as a claimed fit.
+        // Existing MLX measurements remain available as history under their truthful load shapes;
+        // their old inference revisions cannot become a current fit. The new gated Candle
+        // five-rung conformance capture is published separately from runtime admission.
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
-        assert!(bundle.records.is_empty());
+        assert_eq!(bundle.records.len(), 24);
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
+                .count(),
+            22
+        );
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
+                .count(),
+            2
+        );
     }
 
     #[test]

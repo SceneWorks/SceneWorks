@@ -372,6 +372,7 @@ fn fit_ladder_for_tier(
         height: 1024,
         batch: 1,
         frames: 1,
+        reference_count: 0,
     };
     let overlay = if adapter_gb > 0.0 {
         format!(
@@ -642,6 +643,7 @@ pub(crate) fn fit_ladder(
             height: 1024,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         peak_gb,
         sequential_peak_gb,
@@ -699,6 +701,7 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
             height: 1024,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         contract.as_ref(),
         true,

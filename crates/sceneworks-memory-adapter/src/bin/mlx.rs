@@ -535,6 +535,7 @@ fn krea_context(
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {
@@ -867,6 +868,7 @@ fn run_z_image_reference_loaded(
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -1739,6 +1741,7 @@ fn qwen_provider_context(
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {

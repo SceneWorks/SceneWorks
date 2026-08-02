@@ -614,6 +614,7 @@ pub(crate) struct MlxRequestInputs {
     pub overlay: Option<String>,
     pub adapter_count: usize,
     pub has_reference: bool,
+    pub reference_count: u32,
     pub use_pid: bool,
     pub has_phases: bool,
 }
@@ -669,6 +670,7 @@ fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
         height: inputs.height,
         batch: request_batch(inputs),
         frames: 1,
+        reference_count: inputs.reference_count,
     }
 }
 
@@ -2553,6 +2555,7 @@ fn generic_mlx_shared_observation(
         height: 1,
         batch: 1,
         frames: 1,
+        reference_count: 0,
     };
     let selection = MemorySelection {
         strategy: MemoryStrategy::Resident,
@@ -3136,6 +3139,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             1,
             None,
@@ -3261,6 +3265,7 @@ mod tests {
             overlay: Some("references:2+mask+adapters:1".to_owned()),
             adapter_count: 0,
             has_reference: true,
+            reference_count: 2,
             use_pid: false,
             has_phases: false,
         }
@@ -3532,6 +3537,7 @@ mod tests {
             overlay: None,
             adapter_count: 0,
             has_reference: false,
+            reference_count: 0,
             use_pid: false,
             has_phases: false,
         }
@@ -5887,6 +5893,7 @@ mod tests {
                     height: 1024,
                     batch: 1,
                     frames: 1,
+                    reference_count: inputs.reference_count,
                 },
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),

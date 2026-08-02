@@ -297,6 +297,7 @@ fn flux2_dev_edit_memory_context(
             height,
             batch: 1,
             frames: 1,
+            reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
         },
         overlay: Some(format!("references={reference_count}")),
         budget: gen_core::MemoryBudget {

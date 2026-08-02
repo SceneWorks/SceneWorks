@@ -380,10 +380,25 @@
               "reason": "Dense and packed loaders retain a static source and replay one exact `candle_gen::block_window::BlockPlan` window at a time, with cancellation checks, synchronization before release, and ragged-final-window parity coverage."
             }
           ],
-          "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "The provider path and CUDA loadability compile are established, but no exact current Qwen base/edit artifact is installed on this host. Historical resident/sequential measurements are not promoted into new rung evidence; sibling calibration stories remain authoritative for request peaks."
-          },
+            "requestPeak": {
+              "finding": "unmeasured",
+              "scopes": [
+                {
+                  "entries": ["qwen_image"],
+                  "tiers": ["q4"],
+                  "modes": ["text_to_image"],
+                  "overlays": ["none"],
+                  "finding": "does-not-move"
+                }
+              ],
+              "reason": "SC-15817's representative base-Q4 CUDA capture loaded the exact current artifact and measured the bounded-attention and window-1 transformer compositions at the same 29,700,915,200-byte request peak because conditioning remained dominant. The capture is candidate/gated conformance rather than promotion evidence; unmeasured sibling tiers, modes, and overlays still require their own calibration stories.",
+              "evidence": [
+                {
+                  "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+                  "reason": "Schema-valid real-weight records bind all five rungs to the exact artifact, CUDA device, load shape, paired repository revisions, phase peaks, and passed loadability without promoting a fit."
+                }
+              ]
+            },
           "findings": [
             "Head-once/tail-tiled VAE decode exposes 768, 640, 512, 448, 384, 320, and 256 output-pixel tile edges at overlap 64. Overlap 96 remains only the rejected sub-512 experiment arm.",
             "Lightning and all user-adapter requests preserve their pre-story semantics through the existing additive/folded path and do not inherit the no-overlay rung-4 claim.",

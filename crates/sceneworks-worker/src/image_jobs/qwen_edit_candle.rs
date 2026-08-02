@@ -618,6 +618,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 height,
                 batch: 1,
                 frames: 1,
+                reference_count: 1,
             },
             true,
             false,

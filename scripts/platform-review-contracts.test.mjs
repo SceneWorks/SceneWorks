@@ -328,7 +328,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   );
   assert.match(
     candleReference,
-    /validate_plain_overlay_target\(request, KREA_PLAIN_EXECUTION_PATH\)\?/,
+    /let execution_path = plain_execution_path\(request\)\?;[\s\S]*validate_plain_overlay_target\(request, execution_path\)\?/,
   );
   assert.ok(
     candleReference.indexOf("validate_plain_overlay_target") < candleReference.indexOf("load_five_rung_generator"),
@@ -336,7 +336,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   );
   assert.ok(
     candleReference.indexOf("for item in planned") <
-      candleReference.lastIndexOf("let (repository, revision, generator, mut vram)"),
+      candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
   assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);

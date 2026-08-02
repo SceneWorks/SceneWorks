@@ -492,6 +492,7 @@ mod tests {
                     height: 1024,
                     batch: 1,
                     frames: 1,
+                    reference_count: 0,
                 },
                 strategy,
                 engaged_composition: contract().engaged_composition(strategy),
@@ -527,6 +528,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             expected_inference_revision: INF,
         }
@@ -1373,6 +1375,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             overlay: None,
             budget: MemoryBudget {
