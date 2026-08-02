@@ -2,9 +2,10 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryPhase,
-    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
-    MemoryStrategyParameters, TransformerComponent, MEMORY_CALIBRATION_ABI,
+    MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
+    MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
+    MEMORY_CALIBRATION_ABI,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
 use mlx_gen::{
@@ -43,6 +44,13 @@ const KREA_FINGERPRINT: &str = "krea-control-mlx-v4-q4-pose-bounded-decode-512-6
 const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
+/// This harness loads the pose-control provider with a default-shaped spec, and the MLX providers
+/// mint their calibration identity from `spec.load_shape` — so the handshake and the emitted
+/// receipt state eager materialization from this one declaration.
+const KREA_CONTROL_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
+/// The gated VAE probe reaches `load_vae` directly, with no `LoadSpec` and therefore no deferred
+/// block schedule: it bulk-materializes the VAE, which is eager materialization.
+const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
@@ -565,9 +573,7 @@ fn krea_context(
         },
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
-        // This harness loads the provider with a default-shaped spec, and the MLX providers mint
-        // their calibration identity from `spec.load_shape` — so the handshake shape is eager.
-        load_shape: LoadShape::EagerMaterialization,
+        load_shape: KREA_CONTROL_LOAD_SHAPE,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -629,10 +635,13 @@ fn scoped_generate(
         .configure_request(&mut request)
         .map_err(|error| format!("configure calibrated request: {error}"))?;
     if let Some(phase) = error_phase {
+        // The shared gen-core request floor rejects a fault phase that is not paired with an
+        // explicit harness authorization, so the pair must be set together through gen-core's own
+        // helper. Without this every capture aborts at its first lifecycle injection.
         request
             .memory
             .get_or_insert_with(Default::default)
-            .calibration_error_phase = Some(phase);
+            .authorize_calibration_fault(phase);
     }
     scope
         .enter_phase(MemoryPhase::Conditioning)
@@ -864,6 +873,16 @@ fn attested_strategy(
     Ok(measured)
 }
 
+/// Persisted spelling of the materialization shape a run actually executed under. Derived from the
+/// same `LoadShape` handed to the `LoadSpec` (or, better, from the LOADED provider's calibration
+/// identity) — never from the plan, which only declares what it expects (sc-16482).
+fn load_shape_key(load_shape: LoadShape) -> &'static str {
+    match load_shape {
+        LoadShape::EagerMaterialization => protocol::LOAD_SHAPE_EAGER,
+        LoadShape::DeferredMaterialization => protocol::LOAD_SHAPE_DEFERRED,
+    }
+}
+
 fn z_image_load_spec(
     request: &Value,
     load_shape: LoadShape,
@@ -1064,6 +1083,7 @@ fn run_z_image_reference_loaded(
         },
     )?;
     fragment["strategy"] = strategy;
+    fragment["loadShape"] = json!(load_shape_key(load_shape));
     fragment["observedMemory"] = json!({
         "conditioning": conditioning.json(),
         "denoise": denoise.json(),
@@ -1478,6 +1498,7 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     Ok(json!({
         "status": "complete",
         "strategy": strategy,
+        "loadShape": load_shape_key(KREA_CONTROL_LOAD_SHAPE),
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,
@@ -1747,6 +1768,7 @@ fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
             },
         )?;
         fragment["strategy"] = strategy;
+        fragment["loadShape"] = json!(load_shape_key(QWEN_VAE_PROBE_LOAD_SHAPE));
         fragment["status"] = json!("negative_complete");
         return Ok(fragment);
     }
@@ -1791,6 +1813,7 @@ fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
         },
     )?;
     fragment["strategy"] = strategy;
+    fragment["loadShape"] = json!(load_shape_key(QWEN_VAE_PROBE_LOAD_SHAPE));
     Ok(fragment)
 }
 
@@ -1809,7 +1832,7 @@ fn qwen_provider_request(width: u32, height: u32, seed: u64) -> GenerationReques
 
 fn qwen_provider_context(
     selection: MemorySelection,
-    fingerprint: &str,
+    calibration: &MemoryCalibrationIdentity,
     width: u32,
     height: u32,
     total_bytes: u64,
@@ -1818,11 +1841,13 @@ fn qwen_provider_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
-        calibration_abi: MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: fingerprint.to_owned(),
-        // Same eager handshake as `krea_context`: the qwen spec this harness loads is
-        // default-shaped, so the provider identity's load shape is eager.
-        load_shape: LoadShape::EagerMaterialization,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        // From the LOADED provider's own identity. The Qwen spec is not default-shaped —
+        // `run_qwen_provider` passes `with_load_shape(load_shape)` and goes deferred at
+        // `bounded_transformer_residency` — and the safety check compares abi, fingerprint AND
+        // load shape, so a hardcoded eager can never satisfy the deferred rung.
+        load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1930,7 +1955,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let context = qwen_provider_context(
         selection,
-        calibration.fingerprint.as_str(),
+        calibration,
         width,
         height,
         hardware_bytes,
@@ -2120,6 +2145,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     let mut fragment = json!({
         "status": "complete",
         "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,

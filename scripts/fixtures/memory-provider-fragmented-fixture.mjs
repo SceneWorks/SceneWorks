@@ -30,6 +30,7 @@ if (request.action === "probe") {
         ? "gated"
         : "complete",
     strategy: request.planned.strategy,
+    loadShape: request.planned.loadShape,
     artifact: { repository: "SceneWorks/fixture", resolvedRevision: "cccccccccccccccccccccccccccccccccccccccc", variant: "q4" },
     sweep: {
       axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
