@@ -3043,6 +3043,14 @@ fn load_spec(
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
 /// base/edit transformer trunk can be reopened one window at a time: control/IP/PiD and adapter
 /// overlays keep the established eager shape and therefore make rung 4 explicitly unavailable.
+///
+/// Gated to exactly the predicate its call sites live under — `generate_candle_stream`, the
+/// `qwen_edit_candle` module, and `candle_qwen_load_shape_tests` all carry
+/// `all(not(target_os = "macos"), feature = "backend-candle")`. Note this deliberately does NOT
+/// use the `any(test, ...)` spelling of the sibling `apply_request_scoped_candle_residency`: this
+/// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
+/// in a macOS test build and dead-code-error again under `-D warnings`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let qwen_native = matches!(engine_id, "qwen_image" | "qwen_image_edit")
         && matches!(&spec.weights, WeightsSource::Dir(_))
