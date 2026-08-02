@@ -520,6 +520,7 @@ async fn generate_krea_control_stream(
         overlay: Some("control:1".to_owned()),
         adapter_count,
         has_reference: false,
+        reference_count: 0,
         use_pid: false,
         has_phases: false,
     };

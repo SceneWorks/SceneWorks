@@ -492,6 +492,7 @@ mod tests {
                     height: 1024,
                     batch: 1,
                     frames: 1,
+                    reference_count: 0,
                 },
                 strategy,
                 engaged_composition: contract().engaged_composition(strategy),
@@ -527,6 +528,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             expected_inference_revision: INF,
         }
@@ -652,9 +654,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "test".into(),
-            };
+                .support = MemoryStrategySupport::Missing;
         }
         assert!(matches!(
             select_strategy(
@@ -690,9 +690,7 @@ mod tests {
             .iter_mut()
             .find(|capability| capability.strategy == MemoryStrategy::Resident)
             .unwrap()
-            .support = MemoryStrategySupport::StructurallyNotApplicable {
-            reason: "test".into(),
-        };
+            .support = MemoryStrategySupport::Missing;
         rekey_composition(&mut staged, &provider);
         let candidate = Candidate {
             selection: MemorySelection {
@@ -870,9 +868,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "selector unit-test envelope".into(),
-            };
+                .support = MemoryStrategySupport::Missing;
         }
         rekey_composition(&mut stale_staged, &provider);
         rekey_composition(&mut bounded_decode, &provider);
@@ -953,9 +949,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "selector unit-test envelope".into(),
-            };
+                .support = MemoryStrategySupport::Missing;
         }
         let budget = |available_gb| {
             Some(Budget {
@@ -1000,9 +994,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "selector unit-test envelope".into(),
-            };
+                .support = MemoryStrategySupport::Missing;
         }
         provider
     }
@@ -1117,9 +1109,7 @@ mod tests {
                 .iter_mut()
                 .find(|capability| capability.strategy == strategy)
                 .unwrap()
-                .support = MemoryStrategySupport::StructurallyNotApplicable {
-                reason: "selector unit-test envelope".into(),
-            };
+                .support = MemoryStrategySupport::Missing;
         }
         provider
             .strategies
@@ -1373,6 +1363,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             overlay: None,
             budget: MemoryBudget {

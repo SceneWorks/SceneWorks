@@ -718,6 +718,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         height: request.height,
         batch: 1,
         frames: 1,
+        reference_count: 0,
     };
     let runtime_evidence_verified = adapter_bytes == 0
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);

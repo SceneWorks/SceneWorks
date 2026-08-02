@@ -12,7 +12,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
-export const HARNESS_VERSION = "sceneworks-memory-v4";
+export const HARNESS_VERSION = "sceneworks-memory-v5";
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -141,6 +141,7 @@ export function logicalCaseId(spec) {
     harnessVersion: HARNESS_VERSION,
     evidenceScope: spec.evidenceScope,
     backend: spec.backend,
+    loadShape: spec.loadShape,
     target: spec.target,
     strategy: spec.strategy,
     calibrationFingerprint: spec.calibrationFingerprint,
@@ -155,6 +156,7 @@ export function recordId(record) {
     evidenceScope: record.evidenceScope,
     repositories: record.repositories,
     backend: record.backend,
+    loadShape: record.loadShape,
     hardware: record.hardware,
     artifact: record.artifact,
     target: record.target,
@@ -367,6 +369,9 @@ export function validateRecord(record) {
     fail(`${record.id}: invalid evidenceScope`);
   }
   if (!["mlx", "candle"].includes(record.backend)) fail(`${record.id}: invalid backend`);
+  if (!["eager_materialization", "deferred_materialization"].includes(record.loadShape)) {
+    fail(`${record.id}: invalid loadShape`);
+  }
   validateRepositories(record);
   validateHardware(record);
   object(record.artifact, `${record.id}.artifact`);
@@ -396,7 +401,7 @@ export function validateRecord(record) {
 export function validateBundle(bundle) {
   validateSchema(bundle);
   object(bundle, "bundle");
-  if (bundle.schemaVersion !== 3 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
+  if (bundle.schemaVersion !== 4 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
   const ids = new Set();
@@ -430,7 +435,7 @@ export function mergeBundles(left, right) {
     if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
     records.set(record.id, record);
   }
-  return { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+  return { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
 
 export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
@@ -498,6 +503,7 @@ function completedLogicalIds(record) {
     logicalCaseId({
       evidenceScope: record.evidenceScope,
       backend: record.backend,
+      loadShape: record.loadShape,
       target: record.target,
       strategy: {
         rung: record.strategy.rung,
@@ -518,6 +524,9 @@ export function expandPlan(config, completed = []) {
   );
   const cases = [];
   for (const provider of config.providers) {
+    if (!["eager_materialization", "deferred_materialization"].includes(provider.loadShape)) {
+      fail(`${provider.name ?? provider.target.provider}: plan provider requires an explicit loadShape`);
+    }
     for (const candidate of provider.cases) {
       if (!["passed", "failed"].includes(candidate.expectedResult)) {
         fail(`${provider.name ?? provider.target.provider}: plan case requires expectedResult`);
@@ -528,6 +537,7 @@ export function expandPlan(config, completed = []) {
       const spec = {
         evidenceScope: provider.evidenceScope,
         backend: provider.backend,
+        loadShape: provider.loadShape,
         target: provider.target,
         strategy: {
           rung: provider.rung,
@@ -632,7 +642,7 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume ? validateBundle(resume) : { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [] };
+  const existing = resume ? validateBundle(resume) : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [] };
   const selectedConfig = {
     ...config,
     providers: config.providers.filter(
@@ -734,6 +744,7 @@ export async function runProviderPlan({
         logicalCaseId: planned.logicalCaseId,
         evidenceScope: planned.evidenceScope,
         backend: planned.backend,
+        loadShape: planned.loadShape,
         repositories,
         hardware: probe.hardware,
         target: planned.target,
@@ -758,7 +769,7 @@ export async function runProviderPlan({
       (planned) => !invoked.has(planned.logicalCaseId) && !completed.has(planned.logicalCaseId),
     );
   }
-  return mergeBundles(existing, { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: incoming });
+  return mergeBundles(existing, { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: incoming });
 }
 
 async function readJson(file) {

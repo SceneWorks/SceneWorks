@@ -5,8 +5,8 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "harnessVersion", "records"],
   "properties": {
-    "schemaVersion": { "const": 3 },
-    "harnessVersion": { "const": "sceneworks-memory-v4" },
+    "schemaVersion": { "const": 4 },
+    "harnessVersion": { "const": "sceneworks-memory-v5" },
     "records": { "type": "array", "items": { "$ref": "#/$defs/record" } }
   },
   "$defs": {
@@ -61,7 +61,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "id", "logicalCaseId", "status", "evidenceScope", "backend", "repositories",
+        "id", "logicalCaseId", "status", "evidenceScope", "backend", "loadShape", "repositories",
         "hardware", "artifact", "target", "fixture", "strategy", "sweep", "scenarios",
         "predictedPeakBytes", "observedMemory", "quality", "negativeMutation",
         "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
@@ -72,6 +72,7 @@
         "status": { "enum": ["complete", "gated", "negative_complete"] },
         "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "backend": { "enum": ["mlx", "candle"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
         "repositories": {
           "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
           "properties": {
@@ -265,7 +266,7 @@
         },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
-        "harnessVersion": { "const": "sceneworks-memory-v4" }
+        "harnessVersion": { "const": "sceneworks-memory-v5" }
       },
       "allOf": [
         {

@@ -155,6 +155,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         seed,
         lightning: false,
         stage_residency: false,
+        memory: None,
         cancel: cancel.clone(),
     };
     println!(
@@ -303,6 +304,7 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             seed: 42,
             lightning: false,
             stage_residency: false,
+            memory: None,
             cancel: CancelFlag::new(),
         };
         let out = engine

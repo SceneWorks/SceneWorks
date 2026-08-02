@@ -12,6 +12,7 @@
       "name": "mlx-z-image-q4-fresh-reference-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -30,6 +31,7 @@
       "name": "mlx-z-image-q4-fresh-reference-staged",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -48,6 +50,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -66,6 +69,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -84,6 +88,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -102,6 +107,7 @@
       "name": "candle-krea-q4-fresh-reference-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -120,6 +126,7 @@
       "name": "candle-krea-q4-fresh-reference-staged",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -138,6 +145,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -156,6 +164,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -174,6 +183,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -192,6 +202,7 @@
       "name": "mlx-qwen-bf16-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -210,6 +221,7 @@
       "name": "mlx-qwen-bf16-staged-residency",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -228,6 +240,7 @@
       "name": "mlx-qwen-bf16-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -254,6 +267,7 @@
       "name": "mlx-qwen-bf16-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -272,6 +286,7 @@
       "name": "mlx-qwen-bf16-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -290,6 +305,7 @@
       "name": "mlx-qwen-q4-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -308,6 +324,7 @@
       "name": "mlx-qwen-q4-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -326,6 +343,7 @@
       "name": "mlx-qwen-q8-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -344,6 +362,7 @@
       "name": "mlx-qwen-q8-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -362,6 +381,7 @@
       "name": "mlx-krea-pose-control-q4-768",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "krea_2_turbo_control",
         "modelId": "krea_2_turbo",
@@ -382,6 +402,7 @@
       "name": "mlx-krea-pose-control-q4-896",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "krea_2_turbo_control",
         "modelId": "krea_2_turbo",
@@ -402,6 +423,7 @@
       "name": "candle-krea-production-current-v1",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -428,6 +450,7 @@
       "name": "candle-krea-v2-candidates",
       "evidenceScope": "candidate",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -450,6 +473,149 @@
         { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 2 }, "expectedResult": "passed" }
       ]
+    },
+    {
+      "name": "candle-qwen-image-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        { "parameters": { "decodeTileEdge": 768, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 448, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 320, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 64 }, "expectedResult": "passed" }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-transformer-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 2 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 4 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 8 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 15 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 30 }, "expectedResult": "passed" }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-transformer-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
     }
   ]
 }

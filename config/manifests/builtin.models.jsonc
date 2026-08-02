@@ -1948,6 +1948,21 @@
       // readable by the candle Qwen loader, unlike FLUX). bf16 resident/sequential from the sc-10867 GPU
       // A/B on the same harness.
       "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 56,
         "vramGbByTier": { "q4": 53.7, "q8": 65.3, "bf16": 82.5 },
         "vramMeasuredPixels": 1048576,
@@ -2139,6 +2154,21 @@
       // RESOLVED dir (`gate_tier_key`), so the tier that loads is the tier that is budgeted. Keep that
       // true when re-measuring: a row here is only honest if the lane can actually resolve that subdir.
       "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
         "vramMeasuredPixels": 1048576,
@@ -2309,6 +2339,17 @@
       // the candle lane resolved the upstream dense snapshot rather than these staged tier subdirs until
       // that story pointed it at `standard_tier_subdir` and keyed the fit-gate off the resolved dir.
       "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "lora"]
+          }
+        },
         "minMemoryGb": 59,
         "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },
         "vramMeasuredPixels": 1048576,

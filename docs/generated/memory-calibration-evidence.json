@@ -1,5 +1,5 @@
 {
-  "harnessVersion": "sceneworks-memory-v4",
+  "harnessVersion": "sceneworks-memory-v5",
   "records": [
     {
       "artifact": {
@@ -49,13 +49,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-06c55d4bbe1b4c8fdbbc",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-6a2ef3d40aa813cc656e",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-be7108d576d5cef15006",
+      "logicalCaseId": "implan-4cc4e316a5575eea9fdb",
       "negativeMutation": {
         "maximumError": 0.8313725490196079,
         "meanError": 0.3139301275335606,
@@ -264,13 +265,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-08542625e8847cf5b9c9",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9d97c95f9b8ab852e494",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-fe5ef138f13872a3bfa1",
+      "logicalCaseId": "implan-d6b081c45b93492fdad6",
       "negativeMutation": {
         "maximumError": 0.05,
         "meanError": 0.05,
@@ -455,13 +457,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-085e31bc5bd6eda4c40b",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-516df6318c8f92cc63af",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-8a3b8825d5fa71053482",
+      "logicalCaseId": "implan-97dd2f4a5c36fe32be8a",
       "negativeMutation": {
         "maximumError": 0.7529411764705882,
         "meanError": 0.31389973960821366,
@@ -648,13 +651,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-08c2b65d5cea0a998be4",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-fba7297248d14e9e8d10",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-be7108d576d5cef15006",
+      "logicalCaseId": "implan-4cc4e316a5575eea9fdb",
       "negativeMutation": {
         "maximumError": 0.21862745098039216,
         "meanError": 0.05044420030381908,
@@ -862,13 +866,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-1376c78ae89c65e33081",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-cd19ff1c725e60d29497",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-698469ad7346a271cc08",
+      "logicalCaseId": "implan-dcbafd442f1aa183c321",
       "negativeMutation": {
         "maximumError": 0.807843137254902,
         "meanError": 0.3139123655060366,
@@ -1087,13 +1092,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-265dafd26c0ad92ce367",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-6298168d0a546b3bf105",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
         "result": "passed"
       },
-      "logicalCaseId": "implan-1e14f3024c6076a8a05d",
+      "logicalCaseId": "implan-9ac94211fb09cc78591a",
       "negativeMutation": {
         "maximumError": 0.11666666666666667,
         "meanError": 0.05010070434423765,
@@ -1317,13 +1323,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-2ca548230323b40eece3",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-09087fadcc98211b2863",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
         "result": "passed"
       },
-      "logicalCaseId": "implan-ed8c4cad207c3d34d8ca",
+      "logicalCaseId": "implan-3b9001c57f1ca2c18255",
       "negativeMutation": {
         "maximumError": 0.0696078431372549,
         "meanError": 0.05010499642565355,
@@ -1537,13 +1544,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-2cce22c63dca3a2fda45",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-72faccff75624bce3371",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-67e3a179054157312dac",
+      "logicalCaseId": "implan-de4f993520d9f93633b7",
       "negativeMutation": {
         "maximumError": 0.15980392156862744,
         "meanError": 0.05056260302175837,
@@ -1751,13 +1759,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-2dba69bfdc5707d9ebd9",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-75263fe981a65e17fd31",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-9a831308d948a38d5902",
+      "logicalCaseId": "implan-4571998b42d41beddde7",
       "negativeMutation": {
         "maximumError": 0.8156862745098039,
         "meanError": 0.31395085904204306,
@@ -1966,13 +1975,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-498a6916144a6ce625a6",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-76c863da64f63329f12b",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-7afdee4da8c3ea86c5fa",
+      "logicalCaseId": "implan-291cf03290314ff57952",
       "negativeMutation": {
         "maximumError": 0.21862745098039216,
         "meanError": 0.05044420030381908,
@@ -2190,13 +2200,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-4e9678502c3b2638a063",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c3cd503a27098023d0b2",
+      "loadShape": "deferred_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-d9f3ecc24686e3bed72f",
+      "logicalCaseId": "implan-b9e72d86701e88391d81",
       "negativeMutation": {
         "maximumError": 0.8313725490196079,
         "meanError": 0.3139301275335606,
@@ -2426,13 +2437,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-59d463b42063bb50b7ca",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-90b2e7d63a4018157612",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-9a831308d948a38d5902",
+      "logicalCaseId": "implan-4571998b42d41beddde7",
       "negativeMutation": {
         "maximumError": 0.22254901960784312,
         "meanError": 0.05049510531955255,
@@ -2640,13 +2652,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-62db8cebdb7d771a4f84",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-ea8673f7eb61d1401b9d",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-dff3d18873c8d4344ce5",
+      "logicalCaseId": "implan-7750ccc8de5d5e6cae39",
       "negativeMutation": {
         "maximumError": 0.8117647058823529,
         "meanError": 0.3139203115458025,
@@ -2855,13 +2868,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-74b277c5f6a1a9e56d55",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-25677433d78f7280b6c4",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-dff3d18873c8d4344ce5",
+      "logicalCaseId": "implan-7750ccc8de5d5e6cae39",
       "negativeMutation": {
         "maximumError": 0.15980392156862744,
         "meanError": 0.05031455794191025,
@@ -3069,13 +3083,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-868248d978ea1af16897",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-5ecdb123e44be748fac1",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-8a3b8825d5fa71053482",
+      "logicalCaseId": "implan-97dd2f4a5c36fe32be8a",
       "negativeMutation": {
         "maximumError": 0.05,
         "meanError": 0.05,
@@ -3261,13 +3276,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-986f5b75e3a26fc459ec",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-64f519bded8a41da6933",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-7afdee4da8c3ea86c5fa",
+      "logicalCaseId": "implan-291cf03290314ff57952",
       "negativeMutation": {
         "maximumError": 0.8313725490196079,
         "meanError": 0.3139301275335606,
@@ -3486,13 +3502,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-9aacc9f2b8bbc81176d4",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-57d8f5b1a38dcf71f3c8",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-d152392641bb49b1719b",
+      "logicalCaseId": "implan-adc9992bac4ab34d7409",
       "negativeMutation": {
         "maximumError": 0.15588235294117647,
         "meanError": 0.05018510257496541,
@@ -3700,13 +3717,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-a3f0078413e9ae200f98",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-8caa1a33f19d266188fc",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-a87933da552a45108671",
+      "logicalCaseId": "implan-9fc009ae09f1e89ccada",
       "negativeMutation": {
         "maximumError": 0.8117647058823529,
         "meanError": 0.31393596177669975,
@@ -3915,13 +3933,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-daaa770e30f97c56a091",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-7ab3272954961dd152d5",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-698469ad7346a271cc08",
+      "logicalCaseId": "implan-dcbafd442f1aa183c321",
       "negativeMutation": {
         "maximumError": 0.17549019607843136,
         "meanError": 0.05021731557409732,
@@ -4129,13 +4148,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-dabb76215429269d76bc",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-d314058df6e188459f3b",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-fe5ef138f13872a3bfa1",
+      "logicalCaseId": "implan-d6b081c45b93492fdad6",
       "negativeMutation": {
         "maximumError": 0.7529411764705882,
         "meanError": 0.31389973960821366,
@@ -4321,13 +4341,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-dbf1c2c89fdb8078cb3d",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-ff138b84eb2eda93968a",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-67e3a179054157312dac",
+      "logicalCaseId": "implan-de4f993520d9f93633b7",
       "negativeMutation": {
         "maximumError": 0.8274509803921568,
         "meanError": 0.31394463834286884,
@@ -4536,13 +4557,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-df68bc8687aa4b218d46",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-849a767eb4ed7241f397",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-d152392641bb49b1719b",
+      "logicalCaseId": "implan-adc9992bac4ab34d7409",
       "negativeMutation": {
         "maximumError": 0.8274509803921568,
         "meanError": 0.31391241038579504,
@@ -4751,13 +4773,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-e2cc09898d190e397a02",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-f6ca72a8124e7000e3f8",
+      "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-a87933da552a45108671",
+      "logicalCaseId": "implan-9fc009ae09f1e89ccada",
       "negativeMutation": {
         "maximumError": 0.17941176470588238,
         "meanError": 0.05052099539563503,
@@ -4965,13 +4988,14 @@
         "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
         "wiredLimitBytes": 87044670532
       },
-      "harnessVersion": "sceneworks-memory-v4",
-      "id": "imc-f9ccfff33b1a0eb33f63",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-da3533c476605929f10d",
+      "loadShape": "deferred_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
         "result": "passed"
       },
-      "logicalCaseId": "implan-d9f3ecc24686e3bed72f",
+      "logicalCaseId": "implan-b9e72d86701e88391d81",
       "negativeMutation": {
         "maximumError": 0.21862745098039216,
         "meanError": 0.05044420030381908,
@@ -5153,5 +5177,5 @@
       }
     }
   ],
-  "schemaVersion": 3
+  "schemaVersion": 4
 }
