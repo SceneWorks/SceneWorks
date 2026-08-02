@@ -2694,6 +2694,48 @@ pub fn stop_sidecars_for_update(app: &AppHandle) {
     }
 }
 
+/// `nvidia-smi` failing *because NVML itself is version-mismatched* (GH #1966 follow-up).
+///
+/// The remedy here is a REBOOT, and telling this user to "install or update the NVIDIA
+/// driver" — which is what both `CUDA_REQUIREMENT` and `LINUX_CUDA_REQUIREMENT` say — is
+/// actively wrong: their driver is installed and fine, the running kernel module and the
+/// userspace libraries are simply different versions. So this failure has to be split out
+/// of the generic "no usable GPU" bucket before those messages are reached.
+///
+/// Deliberately worded to match `sceneworks-worker`'s `CUDA_DRIVER_MISMATCH`, so a user in
+/// this state reads the same fix wherever it is caught. It is duplicated rather than shared
+/// because the desktop shell does not link the worker crate (that is the whole reason the
+/// device probe is a `SCENEWORKS_GPU_CHECK=1` sidecar spawn); adding a dependency edge just
+/// to share a string constant would be the worse trade.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA userspace \
+    libraries on this machine are different versions, so SceneWorks can't use the GPU — \
+    `nvidia-smi` itself is failing to start. This almost always means a driver update has \
+    been installed but the machine has not been rebooted onto it yet — reboot, then reopen \
+    SceneWorks. On an immutable/atomic Linux distribution (Bazzite, Silverblue, Bluefin, …) \
+    a driver update is staged into the NEXT boot, so a reboot is required even if the \
+    machine has been running for days.";
+
+/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s **stderr**, which the
+/// preflights below would otherwise discard along with the exit status.
+///
+/// `nvidia-smi` prints `Failed to initialize NVML: Driver/library version mismatch` (newer
+/// builds append the detected NVML/kernel-module versions on following lines) and exits
+/// non-zero. Matched on the `Driver/library version mismatch` tail alone: it is the stable
+/// half — the `Failed to initialize NVML:` prefix varies across driver branches, and the
+/// version lines are new — and it is specific enough that nothing else in NVML's error
+/// vocabulary collides with it.
+///
+/// Every other `nvidia-smi` failure (absent binary, `Unknown Error`, no permission) keeps
+/// the existing "no usable GPU" verdict: those really can mean the driver is missing or
+/// broken, and a reboot is not the fix.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn nvml_driver_mismatch(stderr: &str) -> Option<&'static str> {
+    stderr
+        .contains("Driver/library version mismatch")
+        .then_some(NVML_DRIVER_MISMATCH)
+}
+
 /// Minimum NVIDIA display driver for the bundled CUDA 12.9 runtime (sc-3676 /
 /// sc-5560): the floor that supports it and forward-JITs the compute_80 PTX.
 #[cfg(target_os = "windows")]
@@ -2751,8 +2793,17 @@ fn cuda_preflight() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout).into_owned()
         }
-        // Missing (no NVIDIA driver) or errored → treat as no usable GPU.
-        _ => return Err(CUDA_REQUIREMENT.to_owned()),
+        // Errored. A version-mismatched NVML is its own condition with its own remedy
+        // (reboot), so check stderr for it before falling back to "no usable GPU" —
+        // otherwise a user whose driver is installed and fine is told to install a driver.
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(nvml_driver_mismatch(&stderr)
+                .unwrap_or(CUDA_REQUIREMENT)
+                .to_owned());
+        }
+        // Couldn't run nvidia-smi at all (no NVIDIA driver) → no usable GPU.
+        Err(_) => return Err(CUDA_REQUIREMENT.to_owned()),
     };
     evaluate_nvidia_preflight(Some(&stdout))
 }
@@ -2873,7 +2924,17 @@ fn linux_cuda_preflight() -> Result<(), String> {
         Ok(output) if output.status.success() => {
             Some(String::from_utf8_lossy(&output.stdout).into_owned())
         }
-        _ => None,
+        // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
+        // exits non-zero with a healthy driver installed, so it must not collapse into
+        // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver".
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if let Some(guidance) = nvml_driver_mismatch(&stderr) {
+                return Err(guidance.to_owned());
+            }
+            None
+        }
+        Err(_) => None,
     };
     evaluate_linux_nvidia_preflight(stdout.as_deref())
 }
@@ -3616,6 +3677,70 @@ mod preflight_tests {
     fn unparseable_driver_does_not_block_a_present_gpu() {
         // The GPU is present; an odd version string shouldn't hard-block startup.
         assert!(evaluate_nvidia_preflight(Some("NVIDIA RTX, not-a-version")).is_ok());
+    }
+}
+
+/// The NVML-mismatch split (GH #1966 follow-up). `nvidia-smi` failing because NVML is
+/// version-mismatched is a REBOOT, not an install — and until this existed both platform
+/// preflights collapsed it into their "install or update the NVIDIA driver" requirement
+/// text, which sends a user with a perfectly good driver off to reinstall it. Worse, that
+/// gate runs BEFORE GPU-runtime provisioning, so it short-circuits `run_startup` and the
+/// deeper `cuda_device_preflight` — the one that already knows the right answer — never runs.
+#[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
+mod nvml_mismatch_tests {
+    use super::{nvml_driver_mismatch, NVML_DRIVER_MISMATCH};
+
+    /// The exact text `nvidia-smi` prints in this state, in both the classic one-line form
+    /// and the newer form that appends the two versions it found.
+    #[test]
+    fn the_nvml_mismatch_signature_maps_to_the_reboot_remedy() {
+        for stderr in [
+            "Failed to initialize NVML: Driver/library version mismatch\n",
+            "Failed to initialize NVML: Driver/library version mismatch\n\
+             NVML library version: 610.43\n",
+        ] {
+            let guidance =
+                nvml_driver_mismatch(stderr).expect("the NVML mismatch signature must be matched");
+            assert_eq!(guidance, NVML_DRIVER_MISMATCH);
+            assert!(
+                guidance.contains("reboot"),
+                "the remedy must name the reboot, got: {guidance}"
+            );
+        }
+    }
+
+    /// The remedy must not tell a user whose driver is installed and healthy to install a
+    /// driver — that is the entire defect this split exists to fix.
+    #[test]
+    fn the_reboot_remedy_does_not_ask_for_a_driver_install() {
+        let lowered = NVML_DRIVER_MISMATCH.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("install or update"),
+            "the mismatch remedy must not repeat the install-a-driver text: {NVML_DRIVER_MISMATCH}"
+        );
+        // The atomic-distro caveat is load-bearing: GH #1966 was a Bazzite host, where the
+        // update is staged into the next boot and uptime can be days.
+        assert!(lowered.contains("bazzite"));
+    }
+
+    /// Every other `nvidia-smi` failure keeps the existing "no usable GPU" verdict. These
+    /// really can mean the driver is missing or broken, and a reboot is not the fix — so
+    /// claiming them here would trade one wrong message for another.
+    #[test]
+    fn unrelated_nvidia_smi_failures_are_not_claimed_as_a_mismatch() {
+        for stderr in [
+            "Failed to initialize NVML: Unknown Error",
+            "Failed to initialize NVML: Insufficient Permissions",
+            "No devices were found",
+            "'nvidia-smi' is not recognized as an internal or external command",
+            "",
+        ] {
+            assert_eq!(
+                nvml_driver_mismatch(stderr),
+                None,
+                "{stderr:?} must not be reported as a driver/library version mismatch"
+            );
+        }
     }
 }
 
