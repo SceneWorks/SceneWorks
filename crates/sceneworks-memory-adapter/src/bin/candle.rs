@@ -738,6 +738,7 @@ fn run_five_rung_reference_loaded(
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -1197,6 +1198,7 @@ fn run(request: &Value) -> Result<Value, String> {
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {
