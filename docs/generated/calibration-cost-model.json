@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:3b09d1f5a0d24779c0de95c1818b4f26b403547fb8e5972888ce9ef5fe547a6d",
+    "sceneWorksRevision": "source-tree:09e72df02e678cd75133a7cbf1eb99a14542b47bf209e75f9043192bbb992613",
     "matrixRevision": "source-tree:20feefe4c8d91696ee5d37ea701a43717f64e744063b78653b9b13ce8bd638e6",
     "inferenceRevision": "cc5b30a92ab5b0789afee71e38891aa15b8e5357",
     "sources": {
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "248c89989e1b6b8a1f8ef4579da8b39d694febe1aec0668ff039ba8fd1d9ed68"
+        "sha256": "abe3f173c53489d2372dd3ba18564e91d5342acf4de29506088722081dcd118d"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "fb05d042796d8c13acca0dd113f09aab2a4f5212fbda05aed6a25d9886c5fdd7"
+        "sha256": "6207079215d82fbf8aa7189f5d8314c77e8241c90390592f3bc656acc30a9cc8"
       }
     }
   },
