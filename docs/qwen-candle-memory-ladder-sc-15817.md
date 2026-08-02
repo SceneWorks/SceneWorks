@@ -45,14 +45,14 @@ The shared harness exercised every implemented rung in one model-load batch on G
 packed Q4 snapshot `SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf`.
 The schema-valid capture is published separately at
 `docs/generated/qwen-candle-five-rung-sc-15817.json`, outside the runtime admission bundle.
-The capture is bound to SceneWorks `523e0c6351b49209084a9ab762a667c85c00261b` and inference
-`378f6c7dadd559bba7d32e8c87165e0dd7900710`, with both worktrees clean. The device was an NVIDIA
+The capture is bound to SceneWorks `a90402318b567f4f39b09d645ea85fad04c9f0a9` and inference
+`942fcb44a68e39ffbb15d7a716ae3e766636ebd7`, with both worktrees clean. The device was an NVIDIA
 RTX PRO 6000 Blackwell Max-Q Workstation Edition (compute capability 12.0, 102,641,958,912 bytes,
 CUDA 12.9, driver 596.36).
 
 | Rung | Parameters | Observed request peak |
 | --- | --- | ---: |
-| Resident | none | 55,638,491,136 bytes |
+| Resident | none | 55,604,936,704 bytes |
 | Staged residency | none | 42,048,946,176 bytes |
 | Bounded decode | tile 512, overlap 64 | 29,700,915,200 bytes |
 | Bounded attention | tile 512, overlap 64, score budget 67,108,864 | 29,700,915,200 bytes |
