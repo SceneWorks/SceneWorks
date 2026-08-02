@@ -66,14 +66,36 @@ pub struct SourceSession {
     pub id: String,
     pub kind: SourceSessionKind,
     pub command: String,
+    pub source_path: String,
     pub captured_at: String,
     pub repositories: Repositories,
     pub hardware: SourceHardware,
     pub target: Option<SourceTarget>,
     pub stdout_sha256: String,
+    pub inputs: Vec<SourceInput>,
     pub outputs: Vec<SourceOutput>,
     pub claims: Vec<SourceClaim>,
     pub result: SourceResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceInput {
+    pub role: SourceInputRole,
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub repository: String,
+    pub resolved_revision: String,
+    pub variant: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceInputRole {
+    Base,
+    Control,
+    Adapter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -113,6 +135,7 @@ pub struct SourceOutput {
 pub enum SourceClaim {
     Memory,
     Quality,
+    NegativeMutation,
     Lifecycle,
     Loadability,
     Overlay,
@@ -129,6 +152,7 @@ pub enum SourceResult {
 pub struct EvidenceDerivation {
     pub memory: DerivationRef,
     pub quality: DerivationRef,
+    pub negative_mutation: DerivationRef,
     pub lifecycle: DerivationRef,
     pub loadability: DerivationRef,
     pub overlay: DerivationRef,
@@ -746,15 +770,29 @@ impl EvidenceRecord {
 
 fn validate_bundle(bundle: &EvidenceBundle) -> Result<(), String> {
     let mut sessions = BTreeMap::new();
+    let mut inventory_inputs = BTreeMap::<(SourceInputRole, String), &SourceInput>::new();
     for session in &bundle.source_sessions {
         validate_source_session(session)?;
         if sessions.insert(session.id.as_str(), session).is_some() {
             return Err(format!("duplicate source session {}", session.id));
         }
+        if session.kind == SourceSessionKind::StaticAnalysis && session.target.is_none() {
+            for input in &session.inputs {
+                let key = (input.role, input.variant.clone());
+                if let Some(existing) = inventory_inputs.insert(key, input) {
+                    if existing != input {
+                        return Err(format!(
+                            "inventory sessions disagree on exact {:?}/{} input identity",
+                            input.role, input.variant
+                        ));
+                    }
+                }
+            }
+        }
     }
     for record in &bundle.records {
         validate_record(record)?;
-        validate_derivation(record, &sessions)?;
+        validate_derivation(record, &sessions, &inventory_inputs)?;
     }
     Ok(())
 }
@@ -764,6 +802,13 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
         return Err("source session id must be ims- plus 20 lowercase hex digits".to_owned());
     }
     require_nonempty(&session.command, "sourceSession.command")?;
+    require_nonempty(&session.source_path, "sourceSession.sourcePath")?;
+    if !session.source_path.starts_with("docs/calibration/")
+        || !session.source_path.ends_with(".log")
+        || session.source_path.contains("..")
+    {
+        return Err(format!("{} has an invalid sourcePath", session.id));
+    }
     require_nonempty(&session.hardware.probe, "sourceSession.hardware.probe")?;
     if session.hardware.memory_bytes == 0 {
         return Err(format!(
@@ -793,6 +838,53 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
     }
     validate_git_state(&session.repositories.scene_works, false, &session.id)?;
     validate_git_state(&session.repositories.inference, false, &session.id)?;
+    for input in &session.inputs {
+        require_nonempty(&input.path, "sourceSession.inputs.path")?;
+        require_nonempty(&input.repository, "sourceSession.inputs.repository")?;
+        require_nonempty(
+            &input.resolved_revision,
+            "sourceSession.inputs.resolvedRevision",
+        )?;
+        require_nonempty(&input.variant, "sourceSession.inputs.variant")?;
+        if input.bytes == 0 || !is_sha256(&input.sha256) {
+            return Err(format!("{} has an invalid source input", session.id));
+        }
+    }
+    let requires_exact_inputs = session.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            SourceClaim::Loadability | SourceClaim::Quality | SourceClaim::NegativeMutation
+        )
+    });
+    if requires_exact_inputs && session.inputs.is_empty() {
+        return Err(format!(
+            "{} artifact claims require exact inputs",
+            session.id
+        ));
+    }
+    if let Some(target) = &session.target {
+        let has_base = session
+            .inputs
+            .iter()
+            .any(|input| input.role == SourceInputRole::Base && input.variant == target.tier);
+        let has_overlay = match target.overlay.as_str() {
+            "control" => session
+                .inputs
+                .iter()
+                .any(|input| input.role == SourceInputRole::Control),
+            "lora" => session
+                .inputs
+                .iter()
+                .any(|input| input.role == SourceInputRole::Adapter),
+            _ => true,
+        };
+        if requires_exact_inputs && (!has_base || !has_overlay) {
+            return Err(format!(
+                "{} artifact claim is missing its exact tier/overlay inputs",
+                session.id
+            ));
+        }
+    }
     for output in &session.outputs {
         require_nonempty(&output.path, "sourceSession.outputs.path")?;
         if !is_sha256(&output.sha256) {
@@ -808,6 +900,7 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
 fn validate_derivation(
     record: &EvidenceRecord,
     sessions: &BTreeMap<&str, &SourceSession>,
+    inventory_inputs: &BTreeMap<(SourceInputRole, String), &SourceInput>,
 ) -> Result<(), String> {
     let requires_provenance = record.backend == Backend::Candle
         && record.target.model_id == "z_image"
@@ -824,6 +917,7 @@ fn validate_derivation(
     let dimensions = [
         (SourceClaim::Memory, &derivation.memory),
         (SourceClaim::Quality, &derivation.quality),
+        (SourceClaim::NegativeMutation, &derivation.negative_mutation),
         (SourceClaim::Lifecycle, &derivation.lifecycle),
         (SourceClaim::Loadability, &derivation.loadability),
         (SourceClaim::Overlay, &derivation.overlay),
@@ -845,6 +939,9 @@ fn validate_derivation(
                     "{} source session {id} does not claim {claim:?}",
                     record.id
                 ));
+            }
+            if requires_provenance {
+                validate_source_inputs_against_record(record, session, claim, inventory_inputs)?;
             }
             if let Some(target) = &session.target {
                 if matches!(
@@ -875,6 +972,24 @@ fn validate_derivation(
             }
         }
     }
+    if requires_provenance {
+        let mut loadability_inputs = BTreeMap::<SourceInputRole, &SourceInput>::new();
+        for id in &derivation.loadability.source_session_ids {
+            let session = sessions
+                .get(id.as_str())
+                .ok_or_else(|| format!("{} references missing source session {id}", record.id))?;
+            for input in &session.inputs {
+                if let Some(existing) = loadability_inputs.insert(input.role, input) {
+                    if existing != input {
+                        return Err(format!(
+                            "{} loadability sources disagree on exact {:?} input identity",
+                            record.id, input.role
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if !matches!(
         derivation.memory.kind,
         DerivationKind::Direct | DerivationKind::ConservativeUpperBound
@@ -889,6 +1004,82 @@ fn validate_derivation(
             "{} loadability must be directly sourced",
             record.id
         ));
+    }
+    Ok(())
+}
+
+fn validate_source_inputs_against_record(
+    record: &EvidenceRecord,
+    session: &SourceSession,
+    claim: SourceClaim,
+    inventory_inputs: &BTreeMap<(SourceInputRole, String), &SourceInput>,
+) -> Result<(), String> {
+    let fingerprint = match &record.loadability.resolved_path_fingerprint {
+        RequiredNullable::Value(value) => value.as_str(),
+        RequiredNullable::Null => "",
+    };
+    for input in &session.inputs {
+        let inventory_key = (input.role, input.variant.clone());
+        let expected_input = inventory_inputs.get(&inventory_key).ok_or_else(|| {
+            format!(
+                "{} source session {} has no canonical {:?}/{} inventory",
+                record.id, session.id, input.role, input.variant
+            )
+        })?;
+        if **expected_input != *input {
+            return Err(format!(
+                "{} source session {} input differs from its exact inventory identity",
+                record.id, session.id
+            ));
+        }
+        if input.role == SourceInputRole::Base {
+            if input.repository != record.artifact.repository
+                || input.resolved_revision != record.artifact.resolved_revision
+            {
+                return Err(format!(
+                    "{} source session {} base input does not match record artifact identity",
+                    record.id, session.id
+                ));
+            }
+            let expected_tier = session
+                .target
+                .as_ref()
+                .map_or(record.target.tier.as_str(), |target| target.tier.as_str());
+            if input.variant != expected_tier {
+                return Err(format!(
+                    "{} source session {} base input has the wrong tier variant",
+                    record.id, session.id
+                ));
+            }
+        }
+
+        let exact_overlay_source = session
+            .target
+            .as_ref()
+            .map_or(true, |target| target.overlay == record.target.overlay)
+            && matches!(
+                claim,
+                SourceClaim::Quality | SourceClaim::Loadability | SourceClaim::Overlay
+            );
+        if !exact_overlay_source {
+            continue;
+        }
+        let token = match input.role {
+            SourceInputRole::Base => format!(
+                "{}@{}:{}",
+                input.repository, input.resolved_revision, input.variant
+            ),
+            SourceInputRole::Control => {
+                format!("+{}@{}", input.repository, input.resolved_revision)
+            }
+            SourceInputRole::Adapter => format!("+lora@{}", input.resolved_revision),
+        };
+        if !fingerprint.contains(&token) {
+            return Err(format!(
+                "{} source session {} input is absent from the record artifact fingerprint",
+                record.id, session.id
+            ));
+        }
     }
     Ok(())
 }
@@ -1811,7 +2002,7 @@ mod tests {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle is stale: {reason:?}"),
         };
-        assert_eq!(bundle.records.len(), 24);
+        assert_eq!(bundle.records.len(), 114);
         assert_eq!(
             bundle
                 .records
@@ -1834,7 +2025,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.target.provider == "z_image")
                 .count(),
-            0
+            90
         );
         assert!(bundle.records.iter().any(|record| {
             record.quality.identical_inputs == Some(true)

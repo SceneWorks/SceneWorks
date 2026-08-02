@@ -75,13 +75,37 @@
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
+    "sourceInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "path", "bytes", "sha256", "repository", "resolvedRevision", "variant"],
+      "properties": {
+        "role": { "enum": ["base", "control", "adapter"] },
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "repository": { "type": "string", "minLength": 1 },
+        "resolvedRevision": { "type": "string", "minLength": 1 },
+        "variant": { "type": "string", "minLength": 1 }
+      }
+    },
     "sourceSession": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "kind", "command", "capturedAt", "repositories", "hardware", "stdoutSha256", "outputs", "claims", "result"],
+      "required": ["id", "kind", "command", "sourcePath", "capturedAt", "repositories", "hardware", "stdoutSha256", "inputs", "outputs", "claims", "result"],
+      "allOf": [{
+        "if": {
+          "properties": {
+            "claims": {
+              "contains": { "enum": ["loadability", "quality", "negative_mutation"] }
+            }
+          }
+        },
+        "then": { "properties": { "inputs": { "minItems": 1 } } }
+      }],
       "properties": {
         "id": { "type": "string", "pattern": "^ims-[0-9a-f]{20}$" },
         "kind": { "enum": ["physical_cuda", "unit_test", "static_analysis", "comparison"] },
         "command": { "type": "string", "minLength": 1 },
+        "sourcePath": { "type": "string", "pattern": "^docs/calibration/[A-Za-z0-9._/-]+\\.log$" },
         "capturedAt": { "type": "string", "format": "date-time" },
         "repositories": {
           "type": "object", "additionalProperties": false, "required": ["sceneWorks", "inference"],
@@ -93,10 +117,11 @@
         "hardware": { "oneOf": [{ "$ref": "#/$defs/hardwareBase" }] },
         "target": { "$ref": "#/$defs/sourceTarget" },
         "stdoutSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "inputs": { "type": "array", "items": { "$ref": "#/$defs/sourceInput" } },
         "outputs": { "type": "array", "items": { "$ref": "#/$defs/sourceOutput" } },
         "claims": {
           "type": "array", "minItems": 1, "uniqueItems": true,
-          "items": { "enum": ["memory", "quality", "lifecycle", "loadability", "overlay"] }
+          "items": { "enum": ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"] }
         },
         "result": { "const": "passed" }
       }
@@ -113,10 +138,11 @@
     },
     "derivation": {
       "type": "object", "additionalProperties": false,
-      "required": ["memory", "quality", "lifecycle", "loadability", "overlay", "justification"],
+      "required": ["memory", "quality", "negativeMutation", "lifecycle", "loadability", "overlay", "justification"],
       "properties": {
         "memory": { "$ref": "#/$defs/derivationRef" },
         "quality": { "$ref": "#/$defs/derivationRef" },
+        "negativeMutation": { "$ref": "#/$defs/derivationRef" },
         "lifecycle": { "$ref": "#/$defs/derivationRef" },
         "loadability": { "$ref": "#/$defs/derivationRef" },
         "overlay": { "$ref": "#/$defs/derivationRef" },

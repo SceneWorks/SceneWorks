@@ -173,13 +173,13 @@ fn evidence_provider(engine_id: &str) -> &str {
 fn verified_candidates(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
-    evidence_provider: &str,
     runtime_provider: &str,
     tier: &str,
     mode: &str,
     overlay: &str,
     geometry: MemoryGeometry,
 ) -> WorkerResult<Vec<MemoryEvidence>> {
+    let evidence_provider = evidence_provider(runtime_provider);
     let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "packaged memory-calibration evidence is invalid: {error}"
@@ -348,6 +348,7 @@ pub(crate) fn evaluate_z_image(
     engine_id: &'static str,
     model_id: &str,
     spec: &LoadSpec,
+    artifact_is_certified: bool,
     manifest: &JsonObject<String, Value>,
     tier_key: &str,
     request_mode_value: &str,
@@ -434,17 +435,19 @@ pub(crate) fn evaluate_z_image(
     // `z_image_turbo`), while the runtime registers the strict-control implementation under a
     // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
     // returned candidate to the exact runtime route expected by the provider contract.
-    let evidence_provider = evidence_provider(engine_id);
-    let mut verified = verified_candidates(
-        manifest,
-        model_id,
-        evidence_provider,
-        engine_id,
-        tier_key,
-        mode_key,
-        exact_overlay,
-        geometry,
-    )?;
+    let mut verified = if artifact_is_certified {
+        verified_candidates(
+            manifest,
+            model_id,
+            engine_id,
+            tier_key,
+            mode_key,
+            exact_overlay,
+            geometry,
+        )?
+    } else {
+        Vec::new()
+    };
     // Calibration records describe the certified overlay fixture. User-provided adapters can be
     // larger, so every optimized candidate must reserve the bytes for the actual request before
     // the common selector performs its fit check. The resident estimate already includes these
@@ -587,6 +590,7 @@ mod tests {
             "z_image_turbo",
             "z_image_edit",
             &spec,
+            true,
             &manifest,
             "q4",
             "edit_image",
@@ -631,6 +635,7 @@ mod tests {
             "z_image",
             "z_image",
             &spec,
+            true,
             &manifest,
             "q4",
             "text_to_image",
@@ -662,7 +667,7 @@ mod tests {
             key: MemoryEvidenceKey {
                 resolved_route: "z_image".to_owned(),
                 backend: "candle".to_owned(),
-                tier: NumericTier::Q4,
+                tier: numeric_tier("q4").expect("q4 is a supported numeric tier"),
                 mode: "text_to_image".to_owned(),
                 overlay: Some("lora".to_owned()),
                 geometry: MemoryGeometry {

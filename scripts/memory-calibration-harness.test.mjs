@@ -546,6 +546,133 @@ test("runtime bundle validation matches schema closure for malformed gated and n
   }
 });
 
+test("authoritative Z-Image evidence requires dimension-specific source sessions", () => {
+  const source = {
+    id: `ims-${"1".repeat(20)}`,
+    kind: "physical_cuda",
+    command: "fixture CUDA probe",
+    sourcePath: "docs/calibration/fixture.log",
+    capturedAt: "2026-08-01T12:00:00Z",
+    repositories: {
+      sceneWorks: { revision: "a".repeat(40), dirty: true },
+      inference: { revision: "b".repeat(40), dirty: false },
+    },
+    hardware: { probe: "nvidia-smi", memoryBytes: 1024 },
+    target: {
+      tier: "q4", mode: "text_to_image", overlay: "control", rung: "bounded_decode",
+    },
+    stdoutSha256: "2".repeat(64),
+    inputs: [{
+      role: "base", path: "fixture/q4", bytes: 1024, sha256: "4".repeat(64),
+      repository: "SceneWorks/fixture", resolvedRevision: "c".repeat(40), variant: "q4",
+    }, {
+      role: "control", path: "fixture/control.safetensors", bytes: 512, sha256: "5".repeat(64),
+      repository: "SceneWorks/control", resolvedRevision: "d".repeat(40), variant: "union",
+    }],
+    outputs: [{ path: "fixture.png", sha256: "3".repeat(64) }],
+    claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+    result: "passed",
+  };
+  const inventory = structuredClone(source);
+  inventory.id = `ims-${"6".repeat(20)}`;
+  inventory.kind = "static_analysis";
+  inventory.command = "fixture exact artifact inventory";
+  inventory.sourcePath = "docs/calibration/fixture-inventory.log";
+  delete inventory.target;
+  inventory.outputs = [];
+  inventory.claims = ["loadability", "overlay"];
+  const reference = (kind) => ({ kind, sourceSessionIds: [source.id] });
+  const record = complete({
+    evidenceScope: "authoritative",
+    target: {
+      modelId: "z_image", provider: "z_image", tier: "q4", mode: "text_to_image",
+      overlay: "control", geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
+    },
+    loadability: {
+      result: "passed",
+      resolvedPathFingerprint: `SceneWorks/fixture@${"c".repeat(40)}:q4+SceneWorks/control@${"d".repeat(40)}`,
+    },
+    derivation: {
+      memory: reference("direct"), quality: reference("direct"),
+      negativeMutation: reference("shared_implementation"), lifecycle: reference("shared_implementation"),
+      loadability: { kind: "direct", sourceSessionIds: [source.id, inventory.id] },
+      overlay: { kind: "direct", sourceSessionIds: [source.id, inventory.id] }, justification: "fixture",
+    },
+  });
+  const bundleWith = (candidate) => ({
+    schemaVersion: 3, harnessVersion: HARNESS_VERSION,
+    sourceSessions: [candidate, inventory], records: [record],
+  });
+  validateBundle(bundleWith(source));
+
+  const wrongArtifactIdentity = structuredClone(source);
+  wrongArtifactIdentity.inputs[0] = {
+    ...wrongArtifactIdentity.inputs[0], repository: "attacker/wrong-model",
+    resolvedRevision: "deadbeef", sha256: "0".repeat(64), bytes: 1,
+  };
+  assert.throws(
+    () => validateBundle(bundleWith(wrongArtifactIdentity)),
+    /input differs from its exact inventory identity/,
+  );
+
+  const wrongQualityBytes = structuredClone(source);
+  wrongQualityBytes.inputs[0] = {
+    ...wrongQualityBytes.inputs[0], path: "D:\\attacker\\different-q4",
+    sha256: "0".repeat(64), bytes: 1,
+  };
+  assert.throws(
+    () => validateBundle(bundleWith(wrongQualityBytes)),
+    /input differs from its exact inventory identity/,
+  );
+
+  const missingInputs = structuredClone(source);
+  missingInputs.inputs = [];
+  assert.throws(
+    () => validateBundle(bundleWith(missingInputs)),
+    /artifact claims require exact inputs|schema validation failed/,
+  );
+
+  const wrongOverlayInput = structuredClone(source);
+  wrongOverlayInput.inputs = wrongOverlayInput.inputs.filter((input) => input.role !== "control");
+  assert.throws(
+    () => validateBundle(bundleWith(wrongOverlayInput)),
+    /artifact claim is missing its exact tier\/overlay inputs/,
+  );
+
+  const qualityWithoutInputs = structuredClone(source);
+  qualityWithoutInputs.claims = ["quality"];
+  qualityWithoutInputs.inputs = [];
+  assert.throws(
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [qualityWithoutInputs], records: [] }),
+    /artifact claims require exact inputs|schema validation failed/,
+  );
+
+  const negativeWithoutControl = structuredClone(source);
+  negativeWithoutControl.claims = ["negative_mutation"];
+  negativeWithoutControl.inputs = negativeWithoutControl.inputs.filter((input) => input.role !== "control");
+  assert.throws(
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [negativeWithoutControl], records: [] }),
+    /artifact claim is missing its exact tier\/overlay inputs/,
+  );
+
+  const missing = structuredClone(record);
+  delete missing.derivation;
+  missing.logicalCaseId = logicalCaseId(missing);
+  missing.id = recordId(missing);
+  assert.throws(
+    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [source], records: [missing] }),
+    /missing source-session derivation/,
+  );
+
+  const crossTier = structuredClone(source);
+  crossTier.target.tier = "q8";
+  crossTier.inputs.find((input) => input.role === "base").variant = "q8";
+  assert.throws(
+    () => validateBundle(bundleWith(crossTier)),
+    /cannot cross precision tiers|has no canonical base\/q8 inventory/,
+  );
+});
+
 test("gated real-adapter diagnostics are closed, typed, and never promote evidence", () => {
   const record = complete({
     status: "gated",

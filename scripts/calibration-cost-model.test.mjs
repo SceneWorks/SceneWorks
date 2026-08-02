@@ -507,17 +507,17 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
-  assert.equal(model.completedBaseline.completeRecords, 24);
+  assert.equal(model.completedBaseline.completeRecords, 114);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    5,
-    "only the five exact Qwen ladder selectors are current and matrix-eligible",
+    90,
+    "the complete SC-16170 Z-Image matrix is current and matrix-eligible",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /24 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /114 complete record\(s\) exist/);
+  assert.match(model.completedBaseline.note, /90 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
-  assert.match(model.biggestUncertainties[0].why, /Only 3 of 53 catalog entries/);
+  assert.match(model.biggestUncertainties[0].why, /Only 4 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
   assert.doesNotMatch(
     allProse,
