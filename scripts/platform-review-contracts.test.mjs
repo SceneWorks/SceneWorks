@@ -418,3 +418,102 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
   // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
+
+test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
+  // sc-17026. `d26d818b` added a Candle-only helper with no `cfg`; on macOS every call
+  // site compiled out and `-D warnings` promoted the dead code to a hard error, so
+  // `origin/main` would not build on Apple Silicon.
+  //
+  // The Linux `parity` lane CANNOT catch that class of bug: image_jobs.rs gates
+  // `include!("image_jobs/base.rs")` on `any(macos, all(not(macos), backend-candle))`,
+  // so on Linux without candle the file is not compiled at all. Verified by reverting
+  // the sc-17007 `cfg` and running each lane's own command — macOS exits 101, the
+  // Linux target exits 0. macOS+default is the ONLY configuration in the fleet that
+  // compiles it bare, which makes these lanes the sole coverage for it.
+  //
+  // macos-mlx.yml did catch it. But it was scoped to `-p sceneworks-worker`, so the
+  // other crates a Mac ships were dark. Both halves are pinned here.
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  assert.match(mlx, /^\s+run: cargo clippy --all-targets -- -D warnings$/m);
+  // `npm run rust:check` runs a bare `cargo test` too, so the lane must not narrow
+  // either half back to the single crate.
+  assert.match(mlx, /^\s+run: cargo test$/m);
+  assert.doesNotMatch(mlx, /cargo test -p sceneworks-worker/);
+  // Running the command is only half of it — the lane must actually TRIGGER for the
+  // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
+  // outside the worker and is NOT under `crates/**`, so without this path entry the
+  // widened lint is declared but unreachable for rust-api-only PRs. That is the same
+  // declaration-without-reachability trap as the bug this story came from.
+  // Lint must come BEFORE test. A failed step aborts the job, so with the tests first
+  // any unrelated red test skips the lint entirely — observed on PR #2078's first run,
+  // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
+  // executed. Lint coverage gated behind a fully green test suite is not coverage.
+  const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
+  const testAt = mlx.indexOf("run: cargo test\n");
+  assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
+  assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
+  assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
+
+  const mlxPaths = mlx.slice(mlx.indexOf("paths: &mlx_paths"), mlx.indexOf("pull_request:"));
+  assert.ok(mlxPaths.length > 0, "macos-mlx.yml must declare an &mlx_paths anchor");
+  for (const watched of ['- "crates/**"', '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
+    assert.ok(mlxPaths.includes(watched), `&mlx_paths must watch ${watched}`);
+  }
+  // The narrow spelling this replaced. `--all-targets` on one crate is not coverage of
+  // the default-member set, and re-scoping it would silently re-dark the other crates.
+  assert.doesNotMatch(mlx, /cargo clippy -p sceneworks-worker/);
+
+  // apps/desktop is excluded from default-members, so the step above cannot reach it.
+  const desktop = await source(".github/workflows/desktop-macos-check.yml");
+  assert.match(desktop, /^\s+run: npm run desktop:check$/m);
+  assert.match(desktop, /^\s+run: node apps\/desktop\/scripts\/stage-test-sidecars\.mjs$/m);
+  assert.match(desktop, /^\s+runs-on: macos-/m);
+  // A `pull_request:` trigger, or this lane is decoration. Match the key wherever it
+  // sits under `on:` — pinning it to the FIRST key would fail on a harmless reorder.
+  assert.match(desktop, /^ {2}pull_request:$/m);
+});
+
+test("the macOS desktop typecheck lane overrides the MLX deployment-target pin", async () => {
+  // sc-17026. /.cargo/config.toml pins MACOSX_DEPLOYMENT_TARGET=26.2 for MLX's NAX
+  // Metal kernels. apps/desktop links neither, and a hosted macOS image tops out below
+  // 26.2 — without the documented 15.0 override this lane cannot build at all. Cargo
+  // only applies its `[env]` value when the variable is unset, so the override must be
+  // an actual export, and the lane must watch the file carrying the pin.
+  const desktop = await source(".github/workflows/desktop-macos-check.yml");
+  assert.match(desktop, /^\s+MACOSX_DEPLOYMENT_TARGET: "15\.0"$/m);
+  assert.match(desktop, /^\s+- "\.cargo\/config\.toml"$/m);
+  assert.match(await source(".cargo/config.toml"), /MACOSX_DEPLOYMENT_TARGET = "26\.2"/);
+});
+
+test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", async () => {
+  // sc-17026. sceneworks-memory-adapter is excluded from `default-members`, so the
+  // workspace clippy step cannot reach it. Its Candle bin is compile-guarded on a real
+  // PR lane (windows-candle.yml); the MLX bin was built ONLY inside macos-mlx.yml's
+  // `workflow_dispatch` calibration path, so a break in the authoritative MLX
+  // calibration adapter was invisible until someone dispatched a run.
+  //
+  // `clippy ... -D warnings`, not `cargo check`: the defect class here is a WARNING
+  // (a symbol whose cfg'd call sites compiled out), which `check` cannot fail on. This
+  // is the only place -D warnings reaches this crate on any platform/feature set, so
+  // a downgrade back to `check` would silently reopen the hole.
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  assert.match(
+    mlx,
+    /run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings/,
+  );
+  // windows-candle.yml is the Candle twin's PR guard. server-candle-linux.yml also
+  // checks that bin but is `workflow_dispatch`-only, so it is deliberately NOT cited
+  // as PR coverage — asserting that keeps a future reader from repeating the mistake.
+  assert.match(
+    await source(".github/workflows/windows-candle.yml"),
+    /cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter/,
+  );
+  assert.match(await source(".github/workflows/server-candle-linux.yml"), /^on:\n {2}workflow_dispatch:/m);
+  // The guard must sit on the unconditional PR path, not behind the dispatch-only
+  // calibration steps — that placement is exactly the hole this closes.
+  const guard = mlx.indexOf("cargo clippy -p sceneworks-memory-adapter");
+  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'");
+  assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
+  assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
+  assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
+});

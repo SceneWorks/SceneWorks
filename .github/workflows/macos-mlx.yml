@@ -32,6 +32,12 @@ on:
     paths: &mlx_paths
       - "crates/**"
       - "apps/rust-worker/**"
+      # This lane lints the whole default-member set (see the clippy step), and
+      # apps/rust-api carries the largest macOS-conditional surface outside the
+      # worker. Without this entry a rust-api-only PR would not trigger the lane at
+      # all, so the widened lint would be declared but unreachable for exactly the
+      # PRs that need it. windows-candle.yml already watches this path. sc-17026.
+      - "apps/rust-api/**"
       # The builtin model catalog is include_str!'d into the worker (via
       # sceneworks-core/builtin_manifests.rs) and read by the worker's
       # `engines::tests::manifest_menu_is_subset_of_descriptor` drift guard, so a
@@ -145,10 +151,58 @@ jobs:
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
         run: cargo build -p sceneworks-worker
-      - name: Worker tests incl. the NAX 16-bit SDPA guard
-        run: cargo test -p sceneworks-worker
-      - name: Clippy (MLX worker)
-        run: cargo clippy -p sceneworks-worker --all-targets -- -D warnings
+      # Lint EVERY default member on macOS, not just the worker (sc-17026).
+      #
+      # LINT BEFORE TEST, deliberately. A step failure aborts the job, so with the tests
+      # first an unrelated red test means the lint below never executes — which is
+      # exactly what happened on the first run of this PR: an inherited `mlx_fit_gate`
+      # failure from main (sc-17037) aborted the job and the widened lint, the whole
+      # point of this change, never ran. Lint coverage that only runs when every test
+      # already passes is not coverage. Clippy is also the cheaper, faster signal.
+      #
+      # `npm run rust:lint` — what a Mac developer runs before pushing, and what the
+      # Linux `parity` lane runs — covers every default member. This step was scoped to
+      # `-p sceneworks-worker`, so macOS-conditional code outside the worker was linted
+      # by NO lane in the configuration it actually ships in — `parity` lints these
+      # crates on Linux, and nothing linted them on a Mac. Lines naming
+      # `target_os = "macos"` today: sceneworks-core 15, apps/rust-api 22,
+      # sceneworks-image-quality 1. apps/rust-worker and sceneworks-mcp have none yet —
+      # covering them now is what stops the first one from arriving unlinted. A
+      # macOS-only unused import or dead symbol in any of them lands on a developer's
+      # `rust:check` instead of in review — the sc-17007 failure class, one crate over.
+      #
+      # Cheap: the two steps above already built the heavy mlx-gen/MLX graph, so the
+      # marginal cost is the small non-worker crates. Deliberately NOT `--workspace` —
+      # default-members excludes apps/desktop (it needs the Tauri stack and staged
+      # sidecar placeholders), which desktop-macos-check.yml owns instead.
+      - name: Clippy (macOS default feature set, every default member)
+        run: cargo clippy --all-targets -- -D warnings
+      # sceneworks-memory-adapter is NOT a workspace default member, so the step above
+      # cannot reach it — and this lane otherwise compiles it only inside the
+      # `workflow_dispatch` calibration path below. Its Candle twin is guarded on a real
+      # PR lane (windows-candle.yml:200-201, `cargo check` + `cargo test`); the MLX twin
+      # was guarded on none, so a break in the authoritative MLX calibration adapter
+      # surfaced only when someone dispatched a calibration run. (server-candle-linux.yml
+      # also checks the Candle bin, but it is `workflow_dispatch`-only, so it is not a
+      # PR guard.)
+      #
+      # `clippy --all-targets -- -D warnings`, not `cargo check`: the defect class this
+      # story is about — a symbol left behind when its cfg'd call sites compile out — is
+      # a WARNING, so a bare `check` cannot see it. This is the only place `-D warnings`
+      # is ever applied to this crate on any platform or feature set. `--all-targets`
+      # rather than `--bin`, so its tests are linted too; the Candle bin is skipped
+      # automatically here via its `required-features`. sc-17026.
+      - name: Clippy the MLX memory adapter (memory-mlx-adapter)
+        run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
+      # Every default member, not just the worker — the same widening as the clippy
+      # steps above and for the same reason: `npm run rust:check` runs a bare
+      # `cargo test` (whole default-member set), so macOS-conditional test code in
+      # sceneworks-core / rust-api / image-quality ran on NO lane. Measured on an
+      # M-series Mac with the graph already built for `-p sceneworks-worker`: the added
+      # members are 24 suites in ~26 s of actual test time. Still runs the NAX 16-bit
+      # SDPA guard, which is this lane's original reason to exist. sc-17026.
+      - name: Workspace tests incl. the NAX 16-bit SDPA guard
+        run: cargo test
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
