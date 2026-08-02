@@ -88,7 +88,6 @@ impl HiresProbeGenerator {
                 capabilities: Default::default(),
                 control_kinds: None,
                 required_components: &[],
-                control_kinds: None,
             },
             requests: Default::default(),
         }

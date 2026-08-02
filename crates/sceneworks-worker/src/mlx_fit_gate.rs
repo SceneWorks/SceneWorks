@@ -4972,24 +4972,18 @@ mod tests {
     }
 
     #[test]
-    fn packaged_bundle_without_an_exact_record_is_a_normal_legacy_reason_not_drift() {
-        // The packaged evidence is still the schema-v3 / ABI-1 collection, which schema v4
-        // deliberately classifies as a stale bundle (sc-16583's typed load-shape axis): the route
-        // degrades to legacy with `StaleBundle`, not a hard error and not drift. Once the bundle is
-        // re-collected under the v4 harness this reverts to the `NoRecord` distinction for an
-        // uncovered fixture.
+    fn packaged_bundle_without_an_exact_record_is_a_normal_no_record_reason() {
+        // The packaged evidence is current for schema v4 / ABI 3. An uncovered fixture therefore
+        // degrades to the legacy path with the precise `NoRecord` reason, not bundle drift.
         let route = packaged_admission_route(
             &fixture_plan(),
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
         )
-        .expect("a stale promoted bundle degrades, never errors");
+        .expect("a current promoted bundle with no exact record degrades, never errors");
         assert_eq!(route.path, AdmissionPath::Legacy);
-        assert_eq!(
-            route.fallback_reason,
-            Some(LegacyAdmissionReason::StaleBundle)
-        );
+        assert_eq!(route.fallback_reason, Some(LegacyAdmissionReason::NoRecord));
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the

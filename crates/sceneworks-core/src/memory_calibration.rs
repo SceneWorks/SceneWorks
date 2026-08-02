@@ -23,11 +23,12 @@ pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// remain captured provenance; the ABI/fingerprint pair owns SceneWorks invalidation without
 /// rewriting the already-promoted producer contract.
 ///
-/// ABI 2 tracks `gen_core::MEMORY_CALIBRATION_ABI` (sc-16583): calibration identities, run
+/// ABI 3 tracks `gen_core::MEMORY_CALIBRATION_ABI`: calibration identities, run
 /// contexts, evidence keys, and therefore these receipts are keyed by the typed materialization
-/// [`LoadShapeKey`]. ABI-1 records are intentionally stale — eager and deferred measurements are
-/// not interchangeable. A worker-side lockstep test asserts this constant equals gen-core's.
-pub const MEMORY_CALIBRATION_ABI: u32 = 2;
+/// [`LoadShapeKey`] plus exact request reference cardinality. Older records are intentionally
+/// stale because neither edit cardinality nor eager/deferred materialization is interchangeable.
+/// A worker-side lockstep test asserts this constant equals gen-core's.
+pub const MEMORY_CALIBRATION_ABI: u32 = 3;
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
 
