@@ -2151,6 +2151,7 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
+            control_kinds: None,
             required_components: &[],
         }
     }
@@ -2226,6 +2227,7 @@ mod tests {
                 supports_streaming: true,
                 ..Default::default()
             },
+            control_kinds: None,
             required_components: &[],
         }
     }
@@ -2882,6 +2884,7 @@ mod tests {
                 max_speakers: Some(2),
                 ..Default::default()
             },
+            control_kinds: None,
             required_components: &[],
         }
     }

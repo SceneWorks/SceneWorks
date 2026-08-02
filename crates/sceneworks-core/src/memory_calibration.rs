@@ -11,14 +11,16 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 3;
+/// Schema v4 adds the required per-record `loadShape` axis. Older packaged evidence remains
+/// parseable but stale, so consumers fall back until it is recollected under the typed shape ABI.
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 4;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v4";
 /// ABI paired by the manifest/query side of the reader.
 ///
 /// The evidence schema deliberately stays at v2: callers must supply the manifest's ABI together
 /// with its fingerprint. Exact source revisions remain captured provenance; the ABI/fingerprint
 /// pair owns SceneWorks invalidation without rewriting the already-promoted producer contract.
-pub const MEMORY_CALIBRATION_ABI: u32 = 1;
+pub const MEMORY_CALIBRATION_ABI: u32 = 2;
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
 
@@ -44,6 +46,7 @@ pub struct EvidenceRecord {
     pub target: Target,
     pub fixture: String,
     pub strategy: Strategy,
+    pub load_shape: LoadShapeKey,
     pub sweep: Sweep,
     pub scenarios: Vec<Scenario>,
     pub predicted_peak_bytes: RequiredNullable<PredictedPeakBytes>,
@@ -55,6 +58,13 @@ pub struct EvidenceRecord {
     pub calibration_fingerprint: String,
     pub captured_at: String,
     pub harness_version: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadShapeKey {
+    EagerMaterialization,
+    DeferredMaterialization,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -466,6 +476,7 @@ pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalibrationBinding {
     pub abi: u32,
+    pub load_shape: LoadShapeKey,
     pub fingerprint: String,
     pub scene_works_revision: String,
     pub matrix_source_revision: String,
@@ -493,6 +504,7 @@ pub struct EvidenceQuery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleEvidenceReason {
     CalibrationAbi,
+    LoadShape,
     CalibrationFingerprint,
     InferenceRevision,
     ArtifactRepository,
@@ -541,7 +553,9 @@ impl EvidenceBundle {
         let mut saw_current_identity = false;
         let mut stale = None;
         for record in candidates {
-            let mismatch = if record.calibration_fingerprint != query.calibration.fingerprint {
+            let mismatch = if record.load_shape != query.calibration.load_shape {
+                Some(StaleEvidenceReason::LoadShape)
+            } else if record.calibration_fingerprint != query.calibration.fingerprint {
                 Some(StaleEvidenceReason::CalibrationFingerprint)
             } else if record.repositories.inference.revision != query.calibration.inference_revision
             {
@@ -1322,7 +1336,7 @@ mod tests {
 
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
-        CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry,
+        CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
         StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
     };
 
@@ -1382,6 +1396,7 @@ mod tests {
                 "engagedRungs": ["resident", "bounded_decode"],
                 "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }
             },
+            "loadShape": "eager_materialization",
             "sweep": {
                 "axes": [{ "parameter": "decodeTileEdge", "testedValues": [384, 512] }],
                 "cases": [
@@ -1462,7 +1477,7 @@ mod tests {
 
     fn bundle(record: Value) -> String {
         json!({
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "harnessVersion": "sceneworks-memory-v4",
             "records": [record]
         })
@@ -1553,6 +1568,7 @@ mod tests {
             ]),
             calibration: CalibrationBinding {
                 abi: MEMORY_CALIBRATION_ABI,
+                load_shape: LoadShapeKey::EagerMaterialization,
                 fingerprint: "fixture-formula-v2".to_owned(),
                 scene_works_revision: "a".repeat(40),
                 matrix_source_revision: "source-tree:1111111".to_owned(),
@@ -1567,41 +1583,9 @@ mod tests {
 
     #[test]
     fn real_packaged_bundle_loads_promoted_records_and_unrelated_target_stays_unknown() {
-        let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => panic!("packaged bundle is stale: {reason:?}"),
-        };
-        assert_eq!(bundle.records.len(), 24);
         assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.target.provider == "qwen_image")
-                .count(),
-            22
-        );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.target.provider == "krea_2_turbo_control")
-                .count(),
-            2
-        );
-        assert!(bundle.records.iter().any(|record| {
-            record.quality.identical_inputs == Some(true)
-                && record.quality.identical_latents == Some(false)
-        }));
-        assert_eq!(
-            bundle.evidence_for(&exact_query()),
-            EvidenceVerdict::Unknown
-        );
-        let mut unsupported_abi = exact_query();
-        unsupported_abi.calibration.abi += 1;
-        assert_eq!(
-            bundle.evidence_for(&unsupported_abi),
-            EvidenceVerdict::Unknown,
-            "an unrelated target has no evidence to classify as stale"
+            load_packaged_bundle().expect("compiled bundle must parse"),
+            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(3) })
         );
     }
 
@@ -1615,12 +1599,21 @@ mod tests {
             BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
         );
         assert_eq!(
-            load_bundle(r#"{"schemaVersion":3,"harnessVersion":"old","records":[]}"#)
+            load_bundle(r#"{"schemaVersion":4,"harnessVersion":"old","records":[]}"#)
                 .expect("harness drift is not a parse failure"),
             BundleLoad::Stale(StaleBundleReason::HarnessVersion {
                 found: Some("old".to_owned())
             })
         );
+        let mut missing_load_shape = complete_record();
+        missing_load_shape
+            .as_object_mut()
+            .expect("fixture object")
+            .remove("loadShape");
+        assert!(matches!(
+            load_bundle(&bundle(missing_load_shape)),
+            Err(BundleLoadError::Json(_))
+        ));
         let mut record_stale = complete_record();
         record_stale["harnessVersion"] = json!("old-record");
         assert_eq!(

@@ -86,6 +86,7 @@ impl HiresProbeGenerator {
                 backend: "test",
                 modality: gen_core::Modality::Image,
                 capabilities: Default::default(),
+                control_kinds: None,
                 required_components: &[],
             },
             requests: Default::default(),

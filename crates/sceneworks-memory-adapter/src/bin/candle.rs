@@ -257,7 +257,9 @@ fn execute_lifecycle_request(
         .memory
         .as_mut()
         .ok_or_else(|| "optimized lifecycle request did not receive GenerationMemory".to_owned())?;
-    memory.calibration_error_phase = fault_phase;
+    if let Some(phase) = fault_phase {
+        memory.authorize_calibration_fault(phase);
+    }
     scope
         .enter_phase(MemoryPhase::Conditioning)
         .map_err(|error| format!("enter lifecycle conditioning phase: {error}"))?;
@@ -652,6 +654,7 @@ fn run_five_rung_reference_loaded(
         selection,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1080,6 +1083,7 @@ fn run(request: &Value) -> Result<Value, String> {
         selection,
         calibration_abi: actual_calibration.abi,
         calibration_fingerprint: actual_calibration.fingerprint.clone(),
+        load_shape: actual_calibration.load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,

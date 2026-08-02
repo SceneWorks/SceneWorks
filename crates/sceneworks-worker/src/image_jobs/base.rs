@@ -3040,6 +3040,71 @@ fn load_spec(
     spec
 }
 
+/// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
+/// base/edit transformer trunk can be reopened one window at a time: control/IP/PiD and adapter
+/// overlays keep the established eager shape and therefore make rung 4 explicitly unavailable.
+fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let qwen_native = matches!(engine_id, "qwen_image" | "qwen_image_edit")
+        && matches!(&spec.weights, WeightsSource::Dir(_))
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    if qwen_native {
+        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    } else {
+        spec
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_qwen_load_shape_tests {
+    use super::*;
+
+    fn fixture_spec() -> LoadSpec {
+        LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+            "qwen-image-fixture",
+        )))
+    }
+
+    #[test]
+    fn native_base_and_edit_use_deferred_materialization() {
+        for engine_id in ["qwen_image", "qwen_image_edit"] {
+            assert_eq!(
+                apply_candle_qwen_load_shape(engine_id, fixture_spec()).load_shape,
+                gen_core::LoadShape::DeferredMaterialization
+            );
+        }
+    }
+
+    #[test]
+    fn overlays_and_non_qwen_routes_remain_eager() {
+        let adapter = gen_core::AdapterSpec::new(
+            std::path::PathBuf::from("adapter.safetensors"),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        );
+        let cases = [
+            ("qwen_image", fixture_spec().with_adapters(vec![adapter])),
+            (
+                "qwen_image_edit",
+                fixture_spec().with_pid(
+                    WeightsSource::File(std::path::PathBuf::from("pid.safetensors")),
+                    WeightsSource::Dir(std::path::PathBuf::from("gemma")),
+                ),
+            ),
+            ("z_image", fixture_spec()),
+        ];
+        for (engine_id, spec) in cases {
+            assert_eq!(
+                apply_candle_qwen_load_shape(engine_id, spec).load_shape,
+                gen_core::LoadShape::EagerMaterialization
+            );
+        }
+    }
+}
+
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
 /// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
 /// and can then select the provider's bounded transformer rung. Qwen base/edit also cover Q4/Q8 and
@@ -3081,7 +3146,11 @@ mod measured_mlx_load_shape_tests {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("model.safetensors"), [0_u8; 8]).unwrap();
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0f32.to_le_bytes());
+            std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
         std::fs::write(
             root.join("text_encoder/config.json"),
@@ -7177,8 +7246,11 @@ async fn generate_candle_stream(
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
     let mut adapted_peak_gb: Option<f64> = None;
-    let zimage_memory_contract_route = matches!(engine_id, "z_image" | "z_image_turbo");
-    // Z-Image uses the same worker-owned selector as every adopting provider. Static
+    let shared_candle_memory_contract_route = matches!(
+        engine_id,
+        "z_image" | "z_image_turbo" | "qwen_image" | "qwen_image_edit"
+    );
+    // Z-Image and Qwen-Image use the same worker-owned selector as every adopting provider. Static
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
     // submits the conservative resident estimate and adds deeper candidates only when an exact
     // authoritative record exists in the packaged evidence bundle.
@@ -7186,7 +7258,8 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights.as_ref() {
         zimage_contract_spec = zimage_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    let zimage_memory = crate::candle_memory_strategy::evaluate_z_image(
+    zimage_contract_spec = apply_candle_qwen_load_shape(engine_id, zimage_contract_spec);
+    let zimage_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
         &zimage_contract_spec,
@@ -7460,7 +7533,7 @@ async fn generate_candle_stream(
                 let zimage_selected = memory_strategy_selection
                     .is_some_and(|selection| selection.strategy.is_optimized());
                 if rejects_unverified_zimage_optimized_fallback(
-                    zimage_memory_contract_route,
+                    shared_candle_memory_contract_route,
                     zimage_selected,
                 ) {
                     return Err(WorkerError::InvalidPayload(format!(
@@ -7598,11 +7671,25 @@ async fn generate_candle_stream(
             strategy = ?selection.strategy,
             "shared memory-strategy selection admitted"
         );
+        let load_shape = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
+            )
+            .ok()
+            .flatten()
+            .map(|contract| {
+                contract
+                    .calibration
+                    .as_ref()
+                    .map_or(contract.load_shape, |identity| identity.load_shape)
+            })?;
         Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
             calibration_fingerprint,
             mode: gen_core::MemoryMode::TextToImage,
+            load_shape,
             has_reference: false,
             use_pid: false,
             has_phases: false,
@@ -7638,6 +7725,7 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    spec = apply_candle_qwen_load_shape(engine_id, spec);
     // Named model components (epic 13657, sc-13682): the candle twin of the mlx attach above — stages
     // SDXL's three caller-provided components on the Windows/CUDA candle `sdxl` engine. Keyed on the
     // resolved `engine_id` (the DESCRIPTOR id), NOT `request.model`, so the finetune siblings that share

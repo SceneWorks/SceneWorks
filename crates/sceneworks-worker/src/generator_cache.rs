@@ -1115,6 +1115,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
 

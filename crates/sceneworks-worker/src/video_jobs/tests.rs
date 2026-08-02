@@ -1795,6 +1795,7 @@ impl ArmProbe {
                     backend: "probe",
                     modality: gen_core::Modality::Video,
                     capabilities: gen_core::Capabilities::default(),
+                    control_kinds: None,
                     required_components: &[],
                 },
                 request: seen_request,

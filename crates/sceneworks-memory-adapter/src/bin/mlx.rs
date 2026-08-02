@@ -523,6 +523,7 @@ fn krea_context(
         },
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -586,7 +587,7 @@ fn scoped_generate(
         request
             .memory
             .get_or_insert_with(Default::default)
-            .calibration_error_phase = Some(phase);
+            .authorize_calibration_fault(phase);
     }
     scope
         .enter_phase(MemoryPhase::Conditioning)
@@ -854,6 +855,7 @@ fn run_z_image_reference_loaded(
         selection,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1714,6 +1716,7 @@ fn qwen_provider_request(width: u32, height: u32) -> GenerationRequest {
 fn qwen_provider_context(
     selection: MemorySelection,
     fingerprint: &str,
+    load_shape: LoadShape,
     width: u32,
     height: u32,
     total_bytes: u64,
@@ -1723,6 +1726,7 @@ fn qwen_provider_context(
         selection,
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
+        load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1830,6 +1834,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     let context = qwen_provider_context(
         selection,
         calibration.fingerprint.as_str(),
+        calibration.load_shape,
         width,
         height,
         hardware_bytes,

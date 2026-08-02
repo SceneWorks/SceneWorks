@@ -880,9 +880,10 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: "krea_2_turbo".to_owned(),
-                backend: "candle".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
-                mode: "text_to_image".to_owned(),
+                mode: gen_core::MemoryMode::TextToImage,
+                load_shape: provider_contract.load_shape,
                 // The existing measurements cover ordinary T2I only.
                 overlay: None,
                 geometry,

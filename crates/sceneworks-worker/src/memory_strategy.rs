@@ -183,7 +183,7 @@ fn candidate_exclusion(
         || request.backend != contract.backend.backend_id()
         || candidate.evidence.key.resolved_route != request.resolved_route
         || candidate.evidence.key.resolved_route != contract.provider_id
-        || candidate.evidence.key.backend != contract.backend.backend_id()
+        || candidate.evidence.key.backend.as_key() != contract.backend.backend_id()
         || candidate.selection.tier != request.tier
         || candidate.evidence.key.tier != request.tier
         || candidate.evidence.key.strategy != candidate.selection.strategy
@@ -192,8 +192,9 @@ fn candidate_exclusion(
         return Some(MemoryEvidenceVerdict::Invalid);
     }
     let key = &candidate.evidence.key;
-    if key.backend != request.backend
-        || key.mode != request.mode
+    if key.backend.as_key() != request.backend
+        || key.load_shape != contract.load_shape
+        || key.mode.as_key() != request.mode
         || key.overlay.as_deref() != request.overlay
         || key.geometry != request.geometry
     {
@@ -424,7 +425,10 @@ mod tests {
         // `additional_prerequisites`.
         contract.load_shape = LoadShape::DeferredMaterialization;
         contract.formula = MemoryFormulaKind::AssetBytesPlusHeadroom;
-        contract.calibration = Some(MemoryCalibrationIdentity::new(FP));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            FP,
+            LoadShape::DeferredMaterialization,
+        ));
         contract
     }
 
@@ -451,9 +455,10 @@ mod tests {
         MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: "test".into(),
-                backend: "candle".into(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: tier(),
-                mode: "text_to_image".into(),
+                load_shape: LoadShape::DeferredMaterialization,
+                mode: MemoryMode::TextToImage,
                 overlay: None,
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -498,6 +503,14 @@ mod tests {
             },
             expected_inference_revision: INF,
         }
+    }
+
+    #[test]
+    fn receipt_layer_calibration_abi_tracks_gen_core() {
+        assert_eq!(
+            sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+            gen_core::MEMORY_CALIBRATION_ABI
+        );
     }
 
     #[test]
@@ -1035,7 +1048,7 @@ mod tests {
         );
 
         let mut wrong_backend = staged.clone();
-        wrong_backend.key.backend = "mlx".into();
+        wrong_backend.key.backend = gen_core::MemoryBackend::Mlx;
         assert_eq!(
             select_strategy(
                 request(),
@@ -1155,7 +1168,7 @@ mod tests {
         ));
 
         let mut invalid = high.clone();
-        invalid.key.backend = "mlx".into();
+        invalid.key.backend = gen_core::MemoryBackend::Mlx;
         assert!(matches!(
             select_strategy(
                 request(),
@@ -1257,6 +1270,7 @@ mod tests {
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
                     required_components: &[],
+                    control_kinds: None,
                 },
                 contract: contract(),
                 record: Default::default(),
@@ -1311,8 +1325,9 @@ mod tests {
                 parameters: Default::default(),
                 tier: tier(),
             },
-            calibration_abi: 0,
-            calibration_fingerprint: String::new(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: FP.to_owned(),
+            load_shape: LoadShape::DeferredMaterialization,
             mode: MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,

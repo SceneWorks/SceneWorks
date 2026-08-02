@@ -378,6 +378,135 @@
         { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" },
         { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 128, "attentionChunkSize": 134217728, "transformerWindowSize": 2 }, "expectedResult": "passed" }
       ]
+    },
+    {
+      "name": "candle-qwen-image-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        { "parameters": { "decodeTileEdge": 768, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 448, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 320, "decodeOverlap": 64 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 256, "decodeOverlap": 64 }, "expectedResult": "passed" }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-image-q4-transformer-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image", "modelId": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 2 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 4 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 8 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 15 }, "expectedResult": "passed" },
+        { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 30 }, "expectedResult": "passed" }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-q4-transformer-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511", "tier": "q4", "mode": "edit", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-resident-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-staged-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-decode-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-attention-sc15817",
+      "evidenceScope": "candidate", "backend": "candle",
+      "target": { "provider": "qwen_image_edit", "modelId": "qwen_image_edit_2511_lightning", "tier": "q4", "mode": "edit", "overlay": "lora", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2", "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
     }
   ]
 }
