@@ -287,6 +287,78 @@
       "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
     },
     {
+      "name": "mlx-qwen-q4-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-q4-seed16353-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-q4-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "fixture": "qwen-image-q4-seed16353-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-q8-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "fixture": "qwen-image-q8-seed16353-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-qwen-q8-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "fixture": "qwen-image-q8-seed16353-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
       "name": "mlx-krea-pose-control-q4-768",
       "evidenceScope": "authoritative",
       "backend": "mlx",

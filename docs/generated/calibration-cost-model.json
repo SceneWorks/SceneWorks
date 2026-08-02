@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a0804094d4d77dc812648fab525a9b031c744801b8ca21f3c333aff396a00bf6",
-    "matrixRevision": "source-tree:205cd89e3cadbad629caf93b598d3afaa0e417502a184a9a528a113eb857f321",
+    "sceneWorksRevision": "source-tree:7d92f0594365aa5e492e69bdf8ac2b978f634e54ddb0489b03d89ce841f80b70",
+    "matrixRevision": "source-tree:e64a006f5f87a8ac9ff9819c0e75e7703f1eda9682a7ad3b70ce1c2a88d707bc",
     "inferenceRevision": "12626a6c1d69d94f6505f3f9e8b9f601adc1dc63",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "0b5ec3bc7fb46fae0edc1ac9cd814dfa437e6f6ee9cdbb044b3feb7f18e5e861"
+        "sha256": "2fdad02f5bee5f82fa8eae9c4642997e6468c31e88f5cf29ef5cbb9bc5342337"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -31,7 +31,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "fdab0d8a72fbb296181f6cd648af97693f2c9b8b3bec80bdda90bdec6250b931"
+        "sha256": "0298908c6a298311eb9790ab1fa5a79136c3e630c584aa624d13dd9a4859b278"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -47,7 +47,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "fb05d042796d8c13acca0dd113f09aab2a4f5212fbda05aed6a25d9886c5fdd7"
+        "sha256": "5c9bd7f3fd60ece760108ed1b9f22965518a11b4d678adba05dc07ea620151bd"
       }
     }
   },
@@ -681,6 +681,46 @@
       },
       {
         "name": "mlx-qwen-bf16-bounded-transformer",
+        "backend": "mlx",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q4-bounded-attention",
+        "backend": "mlx",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q4-bounded-transformer",
+        "backend": "mlx",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q8-bounded-attention",
+        "backend": "mlx",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "mlx-qwen-q8-bounded-transformer",
         "backend": "mlx",
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",

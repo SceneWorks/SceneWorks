@@ -362,11 +362,11 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
   assert.ok(calibrationBinding(composition, cell).reasons.includes("composition-mismatch"));
 });
 
-test("Qwen plan covers every ladder rung and all seven production decode edges", async () => {
+test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
   const qwen = cases.filter((item) => item.target.provider === "qwen_image");
-  assert.equal(qwen.length, 11);
+  assert.equal(qwen.length, 15);
   assert.ok(qwen.every((item) => item.expectedResult === "passed" && !item.negative));
   assert.deepEqual(
     [...new Set(qwen.map((item) => item.strategy.rung))].sort(),
@@ -379,6 +379,15 @@ test("Qwen plan covers every ladder rung and all seven production decode edges",
       .sort((left, right) => right - left),
     [768, 640, 512, 448, 384, 320, 256],
   );
+  for (const tier of ["q4", "q8"]) {
+    const packed = qwen.filter((item) => item.target.tier === tier);
+    assert.equal(packed.length, 2);
+    assert.deepEqual(
+      packed.map((item) => item.strategy.rung).sort(),
+      ["bounded_attention", "bounded_transformer_residency"],
+    );
+    assert.ok(packed.every((item) => item.fixture === `qwen-image-${tier}-seed16353-step2`));
+  }
 });
 
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
@@ -515,7 +524,7 @@ test("one exact Qwen completion suppresses only its own ladder case", async () =
   const qwenRemaining = expandPlan(config, [record]).filter(
     (item) => item.target.provider === "qwen_image",
   );
-  assert.equal(qwenRemaining.length, 10);
+  assert.equal(qwenRemaining.length, 14);
   assert.equal(
     qwenRemaining.some(
       (item) =>
